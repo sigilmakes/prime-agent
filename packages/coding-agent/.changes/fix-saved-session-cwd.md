@@ -1,0 +1,1 @@
+- Fixed saved-session workers starting in the daemon’s working directory instead of the saved project, while preserving explicit working-directory overrides.

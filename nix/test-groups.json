@@ -18,7 +18,8 @@
 		"package": "tui",
 		"runner": "node",
 		"files": [
-			"test/wrap-ansi.test.ts"
+			"test/wrap-ansi.test.ts",
+			"test/fullscreen.test.ts"
 		]
 	},
 	"session": {
@@ -26,7 +27,8 @@
 		"runner": "vitest",
 		"files": [
 			"test/daemon-protocol.test.ts",
-			"test/session-manager/build-context.test.ts"
+			"test/session-manager/build-context.test.ts",
+			"test/daemon-supervisor-lazy-subagents.test.ts"
 		]
 	},
 	"mcp": {

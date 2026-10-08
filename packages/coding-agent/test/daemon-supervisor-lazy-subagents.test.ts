@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AgentFamilyCatalogEntry,
@@ -13,6 +13,8 @@ import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import type { DaemonCreateCommand } from "../src/modes/daemon/daemon-worker-protocol.js";
+import * as childProcesses from "../src/utils/child-process.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface SupervisorInternals {
@@ -21,10 +23,7 @@ interface SupervisorInternals {
 	cleanupSupervisorResources(): Promise<void>;
 	refreshWorkerSummaries(worker: WorkerFixture): Promise<void>;
 	findSummaryInWorker(worker: WorkerFixture, selector: string): SessionSummary | undefined;
-	createOrReuseWorker(
-		clientId: string,
-		command: { type: "create"; name?: string; sessionPath?: string; lifecycle?: "client_owned" },
-	): Promise<WorkerFixture>;
+	createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<WorkerFixture>;
 	assertSupervisorSavedSessionNameAvailable(sessionPath: string, name: string): Promise<void>;
 	assertSavedSiblingNameAvailable(
 		siblings: Array<Record<string, unknown>>,
@@ -95,6 +94,60 @@ function worker(workerId: string, summaries: SessionSummary[] = []): WorkerFixtu
 }
 
 describe("daemon supervisor passive subagent topology", () => {
+	it.each([
+		["saved cwd", "saved", undefined],
+		["relative session path", "relative-session", undefined],
+		["explicit absolute cwd", "saved", "absolute"],
+		["explicit relative cwd", "saved", "relative"],
+		["new session", "new", undefined],
+		["unreadable session", "missing", undefined],
+	] as const)("#1 selects worker bootstrap cwd for %s", async (_label, mode, override) => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-saved-cwd-"));
+		tempDirs.push(directory);
+		const savedCwd = join(directory, "saved-project");
+		const defaultCwd = join(directory, "daemon-project");
+		const manager = SessionManager.create(savedCwd, join(directory, "sessions"));
+		manager.appendMessage({ role: "user", content: "saved cwd fixture", timestamp: 1 });
+		manager.flushNow();
+		const savedPath = manager.getSessionFile();
+		if (!savedPath) throw new Error("Missing saved session fixture");
+		const sessionPath =
+			mode === "new"
+				? undefined
+				: mode === "missing"
+					? join(directory, "missing.jsonl")
+					: mode === "relative-session"
+						? relative(process.cwd(), savedPath)
+						: savedPath;
+		const cwd =
+			override === "absolute"
+				? join(directory, "override-project")
+				: override === "relative"
+					? "./override-project"
+					: undefined;
+		const command: DaemonCreateCommand = { type: "create", sessionPath, config: { cwd, noExtensions: true } };
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: defaultCwd },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		// Stop at the OS spawn boundary: no worker, daemon, provider, or bootstrap discovery runs.
+		Object.assign(supervisor, { assertRecoveryAllowed: async () => {} });
+		const stopped = new Error("worker spawn boundary");
+		const spawn = vi.spyOn(childProcesses, "spawnHidden").mockImplementation(() => {
+			throw stopped;
+		});
+		try {
+			await expect(supervisor.createOrReuseWorker("client", command)).rejects.toBe(stopped);
+			expect(spawn).toHaveBeenCalledOnce();
+			expect(spawn.mock.calls[0]![2]?.cwd).toBe(
+				cwd ?? (mode === "new" || mode === "missing" ? defaultCwd : savedCwd),
+			);
+			expect(command.config).toEqual({ cwd, noExtensions: true });
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
 	it("finds a child summary by its displayed session ID suffix", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-child-suffix-"));
 		tempDirs.push(directory);
@@ -837,6 +890,7 @@ describe("daemon supervisor passive subagent topology", () => {
 				},
 			});
 		} finally {
+			catalogStart.mockRestore();
 			client.close();
 			supervisor.workers.clear();
 			await supervisor.cleanupSupervisorResources();

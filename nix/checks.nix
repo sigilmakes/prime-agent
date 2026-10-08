@@ -1,4 +1,4 @@
-{ lib, stdenvNoCC, compiled, nodejs, git }:
+{ lib, stdenvNoCC, compiled, nodejs, git, python3 }:
 
 let
     groups = builtins.fromJSON (builtins.readFile ./test-groups.json);
@@ -17,7 +17,7 @@ let
         pname = "prime-agent-check-${group}";
         inherit (compiled) version;
         src = compiled;
-        nativeBuildInputs = [ nodejs ] ++ lib.optional (group == "static") git;
+        nativeBuildInputs = [ nodejs ] ++ lib.optionals (group == "static") [ git python3 ];
         dontConfigure = true;
         strictDeps = true;
         buildPhase = ''

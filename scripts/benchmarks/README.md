@@ -1,4 +1,14 @@
-# PR performance benchmarks
+# Performance benchmarks
+
+This fork runs CI only on Gaia through Forgejo. GitHub Actions and the inherited
+remote benchmark workflows are disabled. Do not add sandbox credentials or enable
+them here. Use the [manual local benchmark](#manual-inline-subagent-resource-benchmark-9)
+for the supported isolated resource measurements.
+
+## Legacy upstream PR benchmarks (inactive)
+
+The following remote workflow description is retained as upstream reference, not
+as setup instructions for this fork.
 
 Each push to an open, vouched PR starts an informational Prime Agent benchmark, including PRs targeting
 another branch in a stack. Multiple commits in one push produce one run for the final head. Draft PRs
@@ -273,3 +283,67 @@ Use identical SHAs to calibrate main against itself. `--config /path/to/config.j
 for a smoke run; the report records the effective configuration. Local mode never posts GitHub
 comments. `results/`, `.venv/`, and `.ruff_cache/` are ignored. Run the repository's `npm run check`
 after code changes as well.
+
+## Manual inline subagent resource benchmark (#9)
+
+This is an opt-in, Linux-only local probe. It is **not** run by the PR benchmark or CI.
+It calls real `AgentSession.runRlmChild` sessions through the existing faux provider.
+It does not create fake child processes or call a paid model. No production behavior changes.
+
+From the repository root, with project Node dependencies available:
+
+```sh
+UV_PROJECT_ENVIRONMENT=/tmp/prime-benchmark-venv nix develop -c uv run --project scripts/benchmarks --locked python scripts/benchmarks/subagent_resources.py --counts 1,2,4 --output /tmp/subagent-resources.json
+```
+
+Use a new output path for each run. Default windows are one second, sampled every 100 ms.
+Start at 1/2/4 before trying larger counts. There is no fixed child-count or trial-count
+ceiling; counts must be positive integers representable safely by Node. Each trial defaults
+to a 90-second deadline and a 2 GiB sampled summed RSS limit. Explicit overrides permit up
+to 600 seconds and 8 GiB. These are measurement safeguards, not concurrency caps or an
+OS-enforced memory quota. The sampled watchdog runs during protocol waits, construction,
+measurement windows, deletion, and the final exit wait. Timer ticks only schedule resource
+checks; readiness still requires protocol events. Sampling can miss brief memory spikes.
+Each count uses a fresh process and temporary home. Source revision, dirty state, parameters, raw process samples,
+and child roster states are recorded. Completed trials survive a later failure; incomplete
+trials fail the command and are not counted as successful measurements.
+
+Four event-gated phases are measured:
+
+1. Parent baseline, before child admission.
+2. Active child sessions held at an asynchronous faux-provider response gate. No kernel
+   has started. This is **provider wait**, not CPU-intensive model or tool execution.
+3. Completed children retained by the parent. The command verifies terminal settlement,
+   retained session identity, and idle activity. Kernels still have never started.
+4. Children explicitly deleted and the parent quiescent. This is **not passivation**.
+
+The Linux process tree includes the inline Node host and its source-loader helpers
+(e.g. esbuild), not a process per child. Python orchestration is outside that tree.
+RSS sums can double-count shared pages; PSS is null if any observed process denies access.
+CPU is the difference in observed user/system ticks, keyed by PID and birth time. It is
+not complete accounting for short-lived processes between samples. Sampling reads only
+selected processes' memory maps. Record the effective sample count and elapsed interval;
+`/proc` scanning can exceed the requested cadence.
+
+Node event-loop delay uses a 10 ms histogram in the inline host. It is not daemon loop
+latency, and its window includes the observer's protocol overhead. Roster snapshot time
+and bytes measure one `getRlmChildSnapshots` call plus JSON serialization at each phase.
+They do **not** measure Python state snapshots or daemon transport. Do not infer a leak
+from retained RSS alone: garbage collection is not forced and allocators may retain pages.
+Repeat runs before drawing a scaling conclusion.
+
+**Not implemented:** active/idle Python kernels, kernel snapshot/restore cost, daemon
+workers, TUI, and true passivation. These appear explicitly in the result's `unmeasured`
+list. This is a baseline for issue #9, not a diagnosis or full coverage of its phase matrix.
+
+The launcher allowlists its environment and isolates HOME, XDG, TMPDIR, and Prime paths.
+It never attaches to the live daemon or reads live credentials. Each runner starts in a
+new process group; `finally` terminates and then kills that group, including on protocol
+failure, deadline, Ctrl-C, or SIGTERM. As with other local harnesses, SIGKILL of the
+launcher itself cannot run cleanup. Do not use this probe to launch detached workloads.
+
+Deterministic harness checks do not run the load benchmark:
+
+```sh
+UV_PROJECT_ENVIRONMENT=/tmp/prime-benchmark-venv nix develop -c uv run --project scripts/benchmarks --locked python -m unittest discover -s scripts/benchmarks/tests -p test_subagent_resources.py -v
+```

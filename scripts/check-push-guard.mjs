@@ -1,78 +1,81 @@
 #!/usr/bin/env node
-// Table-driven check for the pre-push guard (scripts/pre-push-guard.sh via the
-// .husky/pre-push wrapper), run by `npm run check`. Cases drive the hook with
-// pre-push stdin fixtures: "<local ref> <local oid> <remote ref> <remote oid>"
-// per line, deletions as "(delete) <zero oid> <remote ref> <remote oid>".
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitFixtureEnv } from "./git-fixture-env.mjs";
 
 const hook = join(dirname(fileURLToPath(import.meta.url)), "..", ".husky", "pre-push");
-const github = "https://github.com/PrimeIntellect-ai/prime-agent.git";
-const zero = "0000000000000000000000000000000000000000";
-const update = (ref) => `${ref} abc123 ${ref} ${zero}`;
-const del = (ref) => `(delete) ${zero} ${ref} abc123`;
+const primary = "ssh://git@mnemosyne.sigilzero.dev/sigilzero/prime-agent.git";
+const zero = "0".repeat(40);
+const oid = "a".repeat(40);
+const update = (ref) => `${ref} ${oid} ${ref} ${zero}`;
+const deletion = `(delete) ${zero} refs/heads/old ${oid}`;
 const refs = (n) => Array.from({ length: n }, (_, i) => update(`refs/heads/b${i}`)).join("\n");
-const mirror = `${refs(12)}\n${del("refs/heads/victim")}`;
 const cases = [
-	["refuses a mirror push to github", github, mirror, 1],
-	["allows a single-branch push to github", github, update("refs/heads/main"), 0],
-	["refuses a branch deletion to github", github, del("refs/heads/feature"), 1],
-	["refuses a leading-space delete line", github, ` ${del("refs/heads/victim")}`, 1],
-	["fails closed on (delete) spelling drift", github, `( delete) ${zero} refs/heads/b abc123`, 1],
-	["fails closed on a CRLF delete line", github, `${del("refs/heads/victim")}\r`, 1],
-	["allows mirror-like pushes to a file:// remote", "file:///tmp/scratch.git", mirror, 0],
-	["the escape hatch allows the mirror push", github, mirror, 0, { PRIME_AGENT_ALLOW_MIRROR_PUSH: "1" }],
-	["an empty escape value does not bypass", github, mirror, 1, { PRIME_AGENT_ALLOW_MIRROR_PUSH: "" }],
-	["an escape value of 0 does not bypass", github, mirror, 1, { PRIME_AGENT_ALLOW_MIRROR_PUSH: "0" }],
-	["an escape value of true does not bypass", github, mirror, 1, { PRIME_AGENT_ALLOW_MIRROR_PUSH: "true" }],
-	["refuses a refs/remotes destination", github, update("refs/remotes/origin/main"), 1],
-	["allows exactly 10 refs to github", github, refs(10), 0],
-	["skips blank lines in the count", github, `\n\n${refs(10)}\n\n`, 0],
-	["refuses 11 refs to github", github, refs(11), 1],
-	["handles a line without trailing newline", github, update("refs/heads/main"), 0],
-	["refuses a mirror push to git@github.com", "git@github.com:PrimeIntellect-ai/prime-agent.git", mirror, 1],
-	["refuses an scp URL without a user", "github.com:o/r.git", mirror, 1],
-	["refuses a token-userinfo https URL", "https://token@github.com/o/r.git", mirror, 1],
-	["refuses an https URL with a port", "https://github.com:443/o/r.git", mirror, 1],
-	["refuses ssh://github.com:22 without a user", "ssh://github.com:22/o/r.git", mirror, 1],
-	["refuses ssh://git@github.com:22", "ssh://git@github.com:22/o/r.git", mirror, 1],
-	["refuses git@ssh.github.com", "git@ssh.github.com:o/r.git", mirror, 1],
-	["allows a lookalike phishing host", "https://github.com.evil.com/o/r.git", mirror, 0],
-	["allows an ssh alias remote", "git@gh:o/r.git", mirror, 0],
-	["refuses an http://github.com URL", "http://github.com/o/r.git", mirror, 1],
-	["refuses a www.github.com URL", "https://www.github.com/o/r.git", mirror, 1],
-	["refuses a trailing-dot host", "https://github.com./o/r.git", mirror, 1],
-	["refuses a trailing-dot scp host", "git@github.com.:o/r.git", mirror, 1],
-	["fails closed on malformed stdin", github, "refs/heads/main refs/heads/main", 1],
-	["allows an empty up-to-date push", github, "", 0],
+    ["primary branch", "origin", primary, update("refs/heads/main"), 0],
+    ["primary tag", "origin", primary, update("refs/tags/v1"), 0],
+    ["up-to-date", "origin", primary, "", 0],
+    ["ten refs", "origin", primary, refs(10), 0],
+    ["eleven refs", "origin", primary, refs(11), 1],
+    ["deletion", "origin", primary, deletion, 1],
+    ["tracking refs", "origin", primary, update("refs/remotes/origin/main"), 1],
+    ["malformed", "origin", primary, "bad input", 1],
+    ["origin renamed transport", "origin", "git@private-alias:repo.git", deletion, 1],
+    ["primary by URL", primary, primary, deletion, 1],
+    ["primary different name", "backup", primary, deletion, 1],
+    ["scratch mirror", "scratch", "file:///tmp/scratch.git", refs(11), 0],
+    ["scratch deletion", "scratch", "/tmp/scratch.git", deletion, 0],
+    ["lookalike host", "scratch", "https://github.com.example/repo.git", refs(11), 0],
+    ["github remote alias", "github", "git@alias:repo.git", "", 1],
+    ["upstream remote alias", "upstream", "/tmp/upstream.git", "", 1],
 ];
-
-let failures = 0;
-for (const [name, url, input, code, env] of cases) {
-	const result = spawnSync("sh", [hook, "origin", url], {
-		input,
-		encoding: "utf8",
-		timeout: 9000,
-		env: { ...process.env, PRIME_AGENT_ALLOW_MIRROR_PUSH: "", ...env },
-	});
-	const stderr = result.stderr ?? "";
-	// Behavioral refusal signature, not message copy: the refusal line, the
-	// reason detail the hook always emits (rule refusal with its ref and
-	// deletion counts, or the malformed-stdin failure), and the escape hatch.
-	const refusedWell =
-		stderr.includes("refusing push to") &&
-		(/\d+ refs \(mirror-like\), including \d+ deletion\(s\)/.test(stderr) ||
-			stderr.includes("malformed ref line")) &&
-		stderr.includes("PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push origin ...");
-	if (result.status !== code || (code === 1 && !refusedWell)) {
-		failures += 1;
-		console.error(`FAIL ${name}: exit=${result.status} expected=${code}`);
-		console.error(stderr);
-	}
+for (const url of ["git@github.com:a/b", "github.com:a/b", "https://token@github.com:443/a/b", "ssh://git@ssh.github.com:443/a/b", "https://WWW.GITHUB.COM./a/b", "git@GITHUB.COM.:a/b"]) {
+    cases.push([`github ${url}`, "other", url, update("refs/heads/main"), 1]);
+    cases.push([`github override ${url}`, "other", url, "", 1, "1"]);
 }
-if (failures > 0) {
-	console.error(`pre-push guard check: ${failures} failing case(s)`);
-	process.exit(1);
+for (const value of ["", "0", "true", "1"]) {
+    cases.push([`override ${value}`, "origin", primary, deletion, value === "1" ? 0 : 1, value]);
 }
-console.log(`pre-push guard check: ${cases.length} cases passed.`);
+cases.push(["override malformed", "origin", primary, "bad", 1, "1"]);
+const cwd = mkdtempSync(join(tmpdir(), "prime-push-guard-"));
+const env = gitFixtureEnv(cwd);
+try {
+    assert.equal(spawnSync("git", ["init", cwd], { encoding: "utf8", env }).status, 0);
+    for (const [name, remote, url, input, expected, override = ""] of cases) {
+        const result = spawnSync("sh", [hook, remote, url], {
+            cwd, input, encoding: "utf8", timeout: 9000,
+            env: { ...env, PRIME_AGENT_ALLOW_MIRROR_PUSH: override },
+        });
+        assert.equal(result.status, expected, `${name}: ${result.stderr}`);
+    }
+    const git = (...args) => spawnSync("git", args, {
+        cwd, encoding: "utf8", timeout: 9000,
+        env,
+    });
+    const ok = (...args) => {
+        const result = git(...args);
+        assert.equal(result.status, 0, result.stderr);
+    };
+    ok("init", "--bare", "remote.git");
+    ok("config", "user.name", "Hook Test");
+    ok("config", "user.email", "hook@example.invalid");
+    mkdirSync(join(cwd, ".husky"));
+    mkdirSync(join(cwd, "scripts"));
+    copyFileSync(hook, join(cwd, ".husky", "pre-push"));
+    copyFileSync(join(dirname(hook), "..", "scripts", "pre-push-guard.sh"), join(cwd, "scripts", "pre-push-guard.sh"));
+    ok("config", "core.hooksPath", ".husky");
+    writeFileSync(join(cwd, "file"), "test\n");
+    ok("add", "file");
+    ok("commit", "-m", "fixture");
+    ok("remote", "add", "origin", join(cwd, "remote.git"));
+    ok("push", "origin", "HEAD:refs/heads/topic");
+    assert.notEqual(git("push", "origin", "--delete", "topic").status, 0);
+    ok("remote", "add", "scratch", join(cwd, "remote.git"));
+    ok("push", "scratch", "--delete", "topic");
+} finally {
+    rmSync(cwd, { recursive: true, force: true });
+}
+console.log(`pre-push guard: ${cases.length} cases passed`);

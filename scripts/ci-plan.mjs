@@ -27,7 +27,8 @@ export function planChanges(paths, full = false, manifest = {}) {
 }
 
 export function unauditedTests(paths, manifest) {
-	const covered = new Set(["scripts/ci.test.mjs"]);
+	// These infrastructure tests run in check:static, never as load benchmarks.
+	const covered = new Set(["scripts/ci.test.mjs", "scripts/benchmarks/tests/test_subagent_resources.py"]);
 	for (const group of Object.values(manifest)) {
 		for (const file of group.files) covered.add(`packages/${group.package}/${file}`);
 	}

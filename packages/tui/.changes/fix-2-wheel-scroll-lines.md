@@ -1,0 +1,1 @@
+- Fixed fullscreen mouse wheel scrolling to move one line per wheel event.

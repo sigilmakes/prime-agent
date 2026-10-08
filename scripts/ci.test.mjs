@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gitFixtureEnv } from "./git-fixture-env.mjs";
 import { groups, planChanges, unauditedTests } from "./ci-plan.mjs";
 import { isBlockingViolation, scan } from "./check-test-policy.mjs";
 
@@ -40,7 +45,7 @@ for (const source of ['test("case", async () => { await sleep(10); });', 'test("
 
 test("changed tests cannot silently escape the audited manifest", () => {
 	const manifest = { ai: { package: "ai", files: ["test/known.test.ts"] } };
-	assert.deepEqual(unauditedTests(["packages/ai/test/known.test.ts", "scripts/ci.test.mjs", "packages/ai/test/new.test.ts", "prime-agent-runtime/test/test_new.py"], manifest), ["packages/ai/test/new.test.ts", "prime-agent-runtime/test/test_new.py"]);
+	assert.deepEqual(unauditedTests(["packages/ai/test/known.test.ts", "scripts/ci.test.mjs", "scripts/benchmarks/tests/test_subagent_resources.py", "scripts/benchmarks/tests/test_unaudited.py", "packages/ai/test/new.test.ts", "prime-agent-runtime/test/test_new.py"], manifest), ["scripts/benchmarks/tests/test_unaudited.py", "packages/ai/test/new.test.ts", "prime-agent-runtime/test/test_new.py"]);
 });
 
 test("manifest membership always selects the changed test's actual group", () => {
@@ -50,3 +55,36 @@ test("manifest membership always selects the changed test's actual group", () =>
 test("test helpers are not incorrectly required as runnable test entries", () => {
 	assert.deepEqual(unauditedTests(["packages/ai/test/helpers.ts", "prime-agent-runtime/test/helpers.py"], {}), []);
 });
+
+for (const script of ["check-commit-hook.mjs", "check-push-guard.mjs"]) {
+    test(`hook fixture preserves the caller's alternate index: ${script}`, () => {
+        const cwd = mkdtempSync(join(tmpdir(), "prime-outer-index-"));
+        const env = gitFixtureEnv(cwd);
+        const git = (...args) => {
+            const result = spawnSync("git", args, { cwd, env, encoding: "utf8" });
+            assert.equal(result.status, 0, result.stderr);
+        };
+        try {
+            git("init");
+            writeFileSync(join(cwd, "outer.txt"), "preserve my staged content\n");
+            git("add", "outer.txt");
+            const index = join(cwd, ".git", "index");
+            const before = readFileSync(index);
+            const overrides = [
+                { GIT_INDEX_FILE: index },
+                { GIT_INDEX_FILE: index, GIT_DIR: join(cwd, ".git"), GIT_WORK_TREE: cwd,
+                    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.bare", GIT_CONFIG_VALUE_0: "true" },
+            ];
+            for (const override of overrides) {
+                const result = spawnSync(process.execPath, [join(import.meta.dirname, script)], {
+                    cwd, env: { ...env, ...override }, encoding: "utf8", timeout: 30000,
+                });
+                assert.equal(result.status, 0, result.stderr);
+                assert.deepEqual(readFileSync(index), before, "fixture changed the caller's index");
+                assert.equal(readFileSync(join(cwd, "outer.txt"), "utf8"), "preserve my staged content\n");
+            }
+        } finally {
+            rmSync(cwd, { recursive: true, force: true });
+        }
+    });
+}

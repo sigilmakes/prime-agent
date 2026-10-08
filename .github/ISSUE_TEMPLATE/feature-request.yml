@@ -1,12 +1,12 @@
 ---
-name: Accepted feature (maintainers)
-description: Track a feature accepted from GitHub Discussions
+name: Feature request
+description: Propose a feature for this fork
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use the Feature request form in GitHub Discussions instead.
+        Use Mnemosyne issues for this fork: https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues. No upstream Discussion or vouch is required.
   - type: textarea
     id: problem
     attributes:

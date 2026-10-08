@@ -1,12 +1,12 @@
 ---
-name: Accepted bug (maintainers)
-description: Track a bug accepted from GitHub Discussions
+name: Bug report
+description: Report a bug in this fork
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use the Bug report form in GitHub Discussions instead.
+        Use Mnemosyne issues for this fork: https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues. No upstream Discussion or vouch is required.
   - type: textarea
     id: description
     attributes:
@@ -53,6 +53,7 @@ body:
       label: Installation method
       description: How was this Prime Agent version installed?
       options:
+        - Nix package
         - Stable release installer
         - Beta release installer
         - npm package

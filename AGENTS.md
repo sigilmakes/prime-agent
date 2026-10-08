@@ -77,27 +77,13 @@
 - Enforcement requires npm >= 11.10; older npm silently ignores the setting, so use a current npm when updating dependencies.
 - For an urgent security patch younger than 7 days, override explicitly: `npm install --min-release-age=0 <pkg>`.
 
-## GitHub Workflow
+## Forgejo Workflow
 
-When creating issues:
-
-- Add `pkg:*` labels to indicate which package(s) the issue affects
-  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`
-- If an issue spans multiple packages, add all relevant labels
-
-When posting issue/PR comments:
-
-- Write the full comment to a temp file and use `gh issue comment --body-file` or `gh pr comment --body-file`
-- Never pass multi-line markdown directly via `--body` in shell commands
-- Preview the exact comment text before posting
-- Post exactly one final comment unless the user explicitly asks for multiple comments
-- If a comment is malformed, delete it immediately, then post one corrected comment
-- Keep comments concise, technical, and in the user's tone
-
-When closing issues via commit:
-
-- Include `fixes #<number>` or `closes #<number>` in the commit message
-- This automatically closes the issue when the commit is merged
+- Track this fork's work in Mnemosyne issues. GitHub is an automatic mirror; no upstream Discussion or vouch is required.
+- Use applicable `pkg:*` labels when available: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`.
+- Use the Forgejo `fj` CLI for issues and PRs, not GitHub's `gh` CLI.
+- Preview exact comment text before posting. Keep comments concise and post one final comment unless asked for more.
+- Include `fixes #<number>` or `closes #<number>` in related commit messages so Forgejo closes the issue on the default branch.
 
 ## PR Workflow
 

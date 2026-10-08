@@ -45,6 +45,7 @@ class LoggingVirtualTerminal extends VirtualTerminal {
 const WHEEL_UP = "\x1b[<64;5;5M";
 const WHEEL_DOWN = "\x1b[<65;5;5M";
 const PAGE_UP = "\x1b[5~";
+const PAGE_DOWN = "\x1b[6~";
 const VIEWPORT_TOP = "\x1b[1;4A"; // shift+alt+up
 const FOLLOW = "\x1b[1;6B"; // ctrl+shift+down
 
@@ -109,7 +110,41 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
-	it("wheel up unfollows and freezes the window while content appends", async () => {
+	it("#2 wheel reports scroll one line and clamp at both bounds", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20));
+		const render = async (): Promise<void> => {
+			// Bypass render throttling, then wait for headless xterm to consume the frame.
+			tui.requestRender(true);
+			await new Promise<void>((resolve) => process.nextTick(resolve));
+			await terminal.flush();
+		};
+		try {
+			tui.enterFullscreen({ scroll: [chat], dock });
+			await render();
+			for (const [input, top] of [
+				[WHEEL_UP, 11],
+				[WHEEL_UP, 10],
+				[WHEEL_DOWN, 11],
+				[WHEEL_DOWN, 12],
+				[WHEEL_DOWN, 12],
+				[VIEWPORT_TOP, 0],
+				[WHEEL_UP, 0],
+				[WHEEL_DOWN, 1],
+			] as const) {
+				terminal.sendInput(input);
+				await render();
+				assert.strictEqual(terminal.getViewport()[0], `Line ${top}`);
+				assert.strictEqual(tui.getScrollInfo()?.following, top === 12);
+				assert.strictEqual(tui.getScrollInfo()?.linesBelow, 12 - top);
+				assert.deepStrictEqual(terminal.getViewport().slice(8), ["> prompt", "footer"]);
+			}
+		} finally {
+			tui.stop();
+			await terminal.flush();
+		}
+	});
+
+	it("#2 wheel up unfollows and freezes the window while content appends", async () => {
 		const { terminal, tui, chat, dock } = setup(lines(20));
 		tui.enterFullscreen({ scroll: [chat], dock });
 		await terminal.waitForRender();
@@ -118,7 +153,7 @@ describe("TUI fullscreen mode", () => {
 		await terminal.waitForRender();
 
 		let viewport = terminal.getViewport();
-		assert.strictEqual(viewport[0], "Line 9", "wheel scrolls up 3 lines");
+		assert.strictEqual(viewport[0], "Line 11", "wheel scrolls up one line");
 		assert.strictEqual(tui.getScrollInfo()?.following, false);
 
 		chat.lines = lines(40);
@@ -126,9 +161,9 @@ describe("TUI fullscreen mode", () => {
 		await terminal.waitForRender();
 
 		viewport = terminal.getViewport();
-		assert.strictEqual(viewport[0], "Line 9", "appended content does not move the window");
+		assert.strictEqual(viewport[0], "Line 11", "appended content does not move the window");
 		assert.strictEqual(viewport[8], "> prompt", "dock still visible");
-		assert.strictEqual(tui.getScrollInfo()?.linesBelow, 23);
+		assert.strictEqual(tui.getScrollInfo()?.linesBelow, 21);
 
 		tui.stop();
 	});
@@ -164,6 +199,10 @@ describe("TUI fullscreen mode", () => {
 		terminal.sendInput(PAGE_UP);
 		await terminal.waitForRender();
 		assert.strictEqual(terminal.getViewport()[0], "Line 15");
+
+		terminal.sendInput(PAGE_DOWN);
+		await terminal.waitForRender();
+		assert.strictEqual(terminal.getViewport()[0], "Line 22");
 
 		terminal.sendInput(VIEWPORT_TOP);
 		await terminal.waitForRender();

@@ -3157,6 +3157,12 @@ export class DaemonSupervisor {
 			}
 		}
 		const opening = (async () => {
+			if (createCommand.sessionPath && command.config?.cwd === undefined) {
+				const saved = await readSessionInfo(createCommand.sessionPath);
+				if (saved?.cwd) {
+					createCommand = { ...createCommand, config: { ...createCommand.config, cwd: saved.cwd } };
+				}
+			}
 			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);
 			const savedSiblings = createCommand.sessionPath ? await this.rlmLedgerSiblings(createCommand.sessionPath) : [];
 			const target = savedSiblings.find(

@@ -1,12 +1,12 @@
 ---
-name: Accepted documentation work (maintainers)
-description: Track documentation work accepted from GitHub Discussions
+name: Documentation improvement
+description: Track a documentation gap in this fork
 labels: ["documentation"]
 body:
   - type: markdown
     attributes:
       value: |
-        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use GitHub Discussions instead.
+        Use Mnemosyne issues for this fork: https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues. No upstream Discussion or vouch is required.
   - type: textarea
     id: summary
     attributes:

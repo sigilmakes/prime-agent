@@ -23,13 +23,13 @@
                 default = app;
             };
             checks.${system} = import ./nix/checks.nix {
-                inherit (pkgs) lib stdenvNoCC nodejs git;
+                inherit (pkgs) lib stdenvNoCC nodejs git python3;
                 inherit compiled;
             } // {
                 inherit prime-agent;
             };
             devShells.${system}.default = pkgs.mkShell {
-                packages = with pkgs; [ nodejs git uv fd ripgrep ];
+                packages = with pkgs; [ nodejs git uv fd ripgrep python3 ];
             };
         };
 }
