@@ -7,7 +7,8 @@
         let
             system = "x86_64-linux";
             pkgs = import nixpkgs { inherit system; };
-            prime-agent = pkgs.callPackage ./nix/package.nix { };
+            compiled = pkgs.callPackage ./nix/build.nix { };
+            prime-agent = pkgs.callPackage ./nix/package.nix { inherit compiled; };
             app = {
                 type = "app";
                 program = pkgs.lib.getExe prime-agent;
@@ -21,9 +22,11 @@
                 prime-agent = app;
                 default = app;
             };
-            checks.${system} = {
+            checks.${system} = import ./nix/checks.nix {
+                inherit (pkgs) lib stdenvNoCC nodejs git;
+                inherit compiled;
+            } // {
                 inherit prime-agent;
-                source = pkgs.callPackage ./nix/checks.nix { inherit prime-agent; };
             };
             devShells.${system}.default = pkgs.mkShell {
                 packages = with pkgs; [ nodejs git uv fd ripgrep ];

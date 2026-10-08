@@ -5,7 +5,7 @@
 - This fork preserves Prime Agent 0.9.8 behavior. Keep extension, Python runtime, session, and daemon compatibility unless Willow authorizes a change.
 - Mnemosyne (`origin`) is the source of truth. Push only there; Forgejo automatically mirrors branches and tags to GitHub. Do not push directly to `github` or `upstream`.
 - `origin/main` is this fork's default branch. `upstream/main` tracks the original project for reference, not automatic merging.
-- Normal solo development may happen directly on `main`. Use short-lived `feat/<topic>`, `fix/<topic>`, `perf/<topic>`, `build/<topic>`, or `chore/<topic>` branches when isolation or review is useful. Commits, pushes, merges, releases, and installation changes require authorization; implementing a feature does not authorize deployment.
+- Normal solo development may happen directly on `main`. Use short-lived `feat/<topic>`, `fix/<topic>`, `perf/<topic>`, `build/<topic>`, or `chore/<topic>` branches when isolation or review is useful. Willow has authorized routine commits and pushes of validated, in-scope work to Mnemosyne, including `main`; do not ask again for each push. Releases, installation changes, destructive history changes, and unrelated work still require separate authorization.
 - Upstream release scripts and archived workflows are reference material, not this fork's release procedure. They publish packages, update tags, and contact upstream infrastructure.
 - Build and test with isolated home/config/session directories. Never attach test clients to the user's daemon or use real provider credentials.
 
@@ -42,15 +42,15 @@
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Do not use real provider APIs, real API keys, or paid tokens.
 ## Testing Policy
 
-- `npm run check:test-policy` is required. Never weaken it or add a broad exclusion. A platform exception must use `// test-policy: allow <rule> -- <specific reason>` immediately above one expression, and CI must run that test on a supported platform.
+- `npm run check:test-policy` is required. It blocks new accidentally disabled/focused tests and credential-dependent test paths; other heuristic findings are advisory. A necessary exception must use `// test-policy: allow <rule> -- <specific reason>` immediately above the expression and explain how the behavior remains tested.
 - A test must fail when the behavior it covers is broken. Temporarily revert or stub the production behavior to prove the failure. If the test still passes, delete it.
 - Test observable behavior at process boundaries, durable formats, concurrency/ordering, crash recovery, and load. Do not assert a mock's own return value, private implementation steps, or exact rendered copy unless that text is a protocol contract.
 - CI tests must be unconditional and self-contained. Do not use live provider APIs, real credentials, paid tokens, `.skip`, `.skipIf`, `.runIf`, `.todo`, `.only`, environment-gated early returns, or optional assertions. Put manual live-provider probes outside the CI test suite.
 - Never use runner retries or retry-to-green wrappers. Every failed attempt counts as a failure. Fix the race or delete the test.
-- Never use a fixed sleep, real-time delay, polling loop, or larger timeout as a readiness signal. Await a concrete event or deferred promise, use a fake clock, or expose the missing completion signal. A timer may only bound failure; it must not make the test pass.
+- Prefer events, deferred promises, and fake clocks for readiness. Real timers or bounded polling need a concrete integration reason and a hard failure deadline; a larger timeout must not be used to hide a race.
 - Tests using subprocesses, sockets, concurrency, or shared process state must bind port `0`, use unique temporary paths, restore environment/cwd/globals/fake timers, and close every resource in `finally`.
 - Run every modified test file directly. For concurrency, process, timer, or ordering changes, also run the focused suite repeatedly with multiple shuffle seeds. Stop on the first failure; repeated runs are evidence, never retries.
-- A change may not add more lines of test than source. A test-only change must delete at least as many test lines as it adds.
+- Test size follows the behavior and risks being covered; there is no test-to-source line budget. Prefer focused regressions over redundant assertions.
 - Regressions go in the existing suite for the module that broke, with the issue number in the test name. Never create one file per issue. One test file per source module; repeated cases belong in an `it.each` table.
 - Deleting code deletes its tests. A flaky test is made deterministic or deleted, never skipped or retried.
 

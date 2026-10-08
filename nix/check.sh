@@ -5,6 +5,7 @@ package=$1
 version=$2
 verifier=$3
 state=$4
+smoke=$5
 
 export HOME="$state/home"
 export TMPDIR="$state/tmp"
@@ -40,6 +41,20 @@ if [ -e "$PRIME_AGENT_CODING_AGENT_DIR/auth.json" ] || [ -e "$PRIME_AGENT_SESSIO
     exit 1
 fi
 node "$verifier" verify --out "$package/lib/prime-agent/packages/coding-agent/dist"
+# Resolve the public SDK from the installed tree, never the source checkout.
+cp "$smoke" "$state/runtime-smoke.mjs"
+ln -s "$package/lib/prime-agent/node_modules" "$state/node_modules"
+node "$state/runtime-smoke.mjs" create "$state"
+node "$state/runtime-smoke.mjs" branch "$state"
+node "$state/runtime-smoke.mjs" verify "$state"
+if find "$state" -type s -print -quit | grep -q .; then
+    echo "Session smoke created a socket" >&2
+    exit 1
+fi
+if [ -e "$PRIME_AGENT_CODING_AGENT_DIR/auth.json" ] || [ -e "$PRIME_AGENT_CODING_AGENT_DIR/kernel-venv" ]; then
+    echo "Session smoke created authentication or Python bootstrap state" >&2
+    exit 1
+fi
 cd "$package/lib/prime-agent"
 node --input-type=module <<'JS'
 import { createRequire } from "node:module";

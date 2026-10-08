@@ -72,7 +72,13 @@ Building does not install or restart Prime Agent. Normal execution still uses `~
 
 ### CI
 
-The Forgejo workflow uses Gaia's `nix-host` runner and `nix-runner:latest` container. It builds the package and runs flake checks on trusted branch pushes or manual dispatch. It does not deploy, publish releases, or need deployment credentials. External pull-request execution is intentionally not enabled: this runner's local Nix store has sandboxing disabled, so isolated test directories are not a network or security sandbox.
+The Forgejo workflow uses Gaia's `nix-host` runner and `nix-runner:latest` container. Pushes run CI-rule tests, workflow validation and history-based test policy first. Documentation-only changes skip compilation. Code changes build one shared workspace tree, then package it and run static checks plus affected test groups; unknown paths and shared build/dependency changes select every group. Obsolete runs are cancelled per branch. Nix is limited to two builds with four cores each.
+
+`nix/test-groups.json` is the explicit offline test inventory. The groups cover provider conversion/faux streams, agent proxy behavior, TUI wrapping, session reconstruction/daemon wire helpers, MCP catalog parsing, and CLI/catalog handling. Changed tests outside that inventory fail planning until reviewed and added; they are not silently skipped. The installed-package smoke additionally checks durable session creation, resume and branching in separate processes. These are not full daemon, Python-kernel, MCP connection, or live-provider end-to-end tests.
+
+Nightly (03:23 UTC) and manual runs execute all reviewed groups. Paid-provider probes and long-running performance/stress tests are not enabled. Test policy blocks newly disabled/focused cases and credential-dependent paths; timer, polling and other style heuristics are advisory, not automatic failures.
+
+Steps share the same container-local Nix store and use Gaia's existing signed NixOS/homelab caches. This workflow does not upload new cache entries or retain a writable store between jobs. It does not deploy, publish releases, or need deployment credentials. GitHub has no runner attached. The Gaia container's local Nix store has sandboxing disabled, so private test directories are not a network or security sandbox.
 
 Inherited upstream workflows are archived under `.github/upstream-workflows/`. They are not active CI and must not be enabled as this fork's release pipeline. GitHub Actions stays disabled.
 

@@ -1,0 +1,47 @@
+{
+	"ai": {
+		"package": "ai",
+		"runner": "vitest",
+		"files": [
+			"test/transform-messages-interrupted-tools.test.ts",
+			"test/faux-provider.test.ts"
+		]
+	},
+	"agent": {
+		"package": "agent",
+		"runner": "vitest",
+		"files": [
+			"test/proxy.test.ts"
+		]
+	},
+	"tui": {
+		"package": "tui",
+		"runner": "node",
+		"files": [
+			"test/wrap-ansi.test.ts"
+		]
+	},
+	"session": {
+		"package": "coding-agent",
+		"runner": "vitest",
+		"files": [
+			"test/daemon-protocol.test.ts",
+			"test/session-manager/build-context.test.ts"
+		]
+	},
+	"mcp": {
+		"package": "ai",
+		"runner": "vitest",
+		"files": [
+			"test/mcp-catalog.test.ts"
+		]
+	},
+	"catalog": {
+		"package": "coding-agent",
+		"runner": "vitest",
+		"files": [
+			"test/args.test.ts",
+			"test/catalog-assets.test.ts"
+		]
+	}
+}

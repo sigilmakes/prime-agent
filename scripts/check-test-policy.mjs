@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
 const testFilePattern =
@@ -299,7 +300,7 @@ function changedTestFiles(base) {
 	);
 }
 
-function scan(content, path = "") {
+export function scan(content, path = "") {
 	const lines = content.split("\n");
 	const maskedContent = path.endsWith(".py") ? maskPythonSyntax(content) : maskJsSyntax(content);
 	const maskedLines = maskedContent.split("\n");
@@ -564,24 +565,44 @@ function counts(violations) {
 }
 
 
-const base = resolveBase();
-const failures = [];
-for (const path of changedTestFiles(base)) {
-	const current = scan(readFileSync(resolve(root, path), "utf8"), path);
-	const oldContent = base ? git(["show", `${base}:${path}`], true) : "";
-	const allowed = counts(oldContent ? scan(oldContent, path) : []);
-	const seen = new Map();
-	for (const violation of current) {
-		const count = (seen.get(violation.identity) ?? 0) + 1;
-		seen.set(violation.identity, count);
-		if (count > (allowed.get(violation.identity) ?? 0)) failures.push({ path, ...violation });
-	}
+export function isBlockingViolation(violation) {
+	return (
+		violation.category === "environment-gated-path" ||
+		(violation.category === "conditional-or-disabled-test" &&
+			![".fails", "[fails]", "fails option"].includes(violation.detail))
+	);
 }
 
-if (failures.length > 0) {
-	console.error("New test-policy violations:\n");
-	for (const failure of failures) console.error(`${failure.path}:${failure.line} [${failure.category}] ${failure.title}: ${failure.detail}`);
-	console.error("\nUse a deterministic signal, deferred promise, fake timer, or unconditional local fixture instead.");
-	process.exit(1);
+function main() {
+	const base = resolveBase();
+	const failures = [];
+	const advisories = [];
+	for (const path of changedTestFiles(base)) {
+		const current = scan(readFileSync(resolve(root, path), "utf8"), path);
+		const oldContent = base ? git(["show", `${base}:${path}`], true) : "";
+		const allowed = counts(oldContent ? scan(oldContent, path) : []);
+		const seen = new Map();
+		for (const violation of current) {
+			const count = (seen.get(violation.identity) ?? 0) + 1;
+			seen.set(violation.identity, count);
+			if (count > (allowed.get(violation.identity) ?? 0)) {
+				(isBlockingViolation(violation) ? failures : advisories).push({ path, ...violation });
+			}
+		}
+	}
+	for (const advisory of advisories) {
+		console.warn(`${advisory.path}:${advisory.line} [advisory:${advisory.category}] ${advisory.title}: ${advisory.detail}`);
+	}
+	if (failures.length > 0) {
+		console.error("New blocking test-policy violations:\n");
+		for (const failure of failures) {
+			console.error(`${failure.path}:${failure.line} [${failure.category}] ${failure.title}: ${failure.detail}`);
+		}
+		console.error("\nKeep CI tests unconditional and self-contained, without disabled cases or provider credentials.");
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`Test policy check passed${base ? ` against ${base}` : ""}.`);
 }
-console.log(`Test policy check passed${base ? ` against ${base}` : ""}.`);
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

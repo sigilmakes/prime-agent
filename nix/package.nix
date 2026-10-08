@@ -1,57 +1,31 @@
 { lib
 , stdenv
-, buildNpmPackage
-, fetchurl
+, compiled
 , nodejs
 , makeWrapper
-, autoPatchelfHook
 , fd
 , ripgrep
 , uv
 }:
 
-let
-    version = (builtins.fromJSON (builtins.readFile ../package.json)).version;
-    catalogRelease = fetchurl {
-        url = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.8/prime-agent-0.9.8.tgz";
-        hash = "sha256-17cnhRGe/Ci/vKjsSn9Hofzc9H/NjOvbYL/6p54+EnQ=";
-    };
-in
-buildNpmPackage {
+stdenv.mkDerivation {
     pname = "prime-agent";
-    inherit version;
-    src = lib.cleanSourceWith {
-        src = ../.;
-        filter = path: type:
-            let name = baseNameOf path;
-            in lib.cleanSourceFilter path type
-                && !(builtins.elem name [ "node_modules" "dist" "result" ".prime" ".env" ])
-                && !(lib.hasSuffix ".bundled.json" name);
-    };
-
-    npmDepsHash = "sha256-7Oh9oLB/c/gwxJbD14rbU12O+s05AIsgGjTlA9/4Y7E=";
-    npmDepsFetcherVersion = 2;
-    # Native runtime modules ship platform binaries. Do not run canvas's
-    # development-only downloader or the workspace's bootstrap lifecycle.
-    npmFlags = [ "--ignore-scripts" ];
-    HUSKY = "0";
-    nativeBuildInputs = [ makeWrapper autoPatchelfHook ];
-    buildInputs = [ stdenv.cc.cc.lib ];
-    dontAutoPatchelf = true;
-
-    preBuild = ''
-        mkdir -p packages/coding-agent/catalog
-        tar -xOf ${catalogRelease} package/dist/models.bundled.json \
-            > packages/coding-agent/catalog/models.bundled.json
-        tar -xOf ${catalogRelease} package/dist/mcp-services.bundled.json \
-            > packages/coding-agent/catalog/mcp-services.bundled.json
-        node packages/coding-agent/scripts/catalog-assets.mjs verify \
-            --out packages/coding-agent/catalog
-        autoPatchelf node_modules/@esbuild/linux-x64 node_modules/@typescript/native-preview-linux-x64
-    '';
+    inherit (compiled) version;
+    src = compiled;
+    nativeBuildInputs = [ nodejs makeWrapper ];
+    dontConfigure = true;
+    dontBuild = true;
+    dontStrip = true;
+    dontPatchELF = true;
+    strictDeps = true;
 
     installPhase = ''
         runHook preInstall
+        export HOME="$TMPDIR/npm-home"
+        export npm_config_cache="$TMPDIR/npm-cache"
+        mkdir -p "$HOME"
+        cp -r ${compiled.npmDeps}/. "$npm_config_cache"
+        chmod -R u+w "$npm_config_cache"
         npm prune --offline --omit=dev --ignore-scripts
         target="$out/lib/prime-agent"
         mkdir -p "$target/packages" "$out/bin"
@@ -65,9 +39,6 @@ buildNpmPackage {
                 fi
             done
         done
-        autoPatchelf \
-            "$target/node_modules/koffi/build/koffi/linux_x64" \
-            "$target/node_modules/@mariozechner/clipboard-linux-x64-gnu"
         makeWrapper ${lib.getExe nodejs} "$out/bin/prime-agent" \
             --set PI_SKIP_VERSION_CHECK 1 \
             --prefix PATH : ${lib.makeBinPath [ fd ripgrep uv ]} \
@@ -79,9 +50,9 @@ buildNpmPackage {
     installCheckPhase = ''
         runHook preInstallCheck
         env -i PATH="$PATH" ${stdenv.shell} ${./check.sh} \
-            "$out" '${version}' \
+            "$out" '${compiled.version}' \
             "$PWD/packages/coding-agent/scripts/catalog-assets.mjs" \
-            "$TMPDIR/install-check"
+            "$TMPDIR/install-check" ${./runtime-smoke.mjs}
         runHook postInstallCheck
     '';
 

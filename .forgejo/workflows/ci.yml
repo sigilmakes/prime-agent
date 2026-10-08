@@ -1,20 +1,27 @@
-name: Source build
+name: CI
 
 on:
     push:
         branches:
             - "**"
     workflow_dispatch:
+    schedule:
+        - cron: "23 3 * * *"
 
 concurrency:
-    group: source-build-${{ github.ref }}
+    group: ci-${{ github.ref }}
     cancel-in-progress: true
 
 permissions:
     contents: read
 
+env:
+    NIX_CONFIG: |
+        max-jobs = 2
+        cores = 4
+
 jobs:
-    source-build:
+    check:
         runs-on: nix-host
         timeout-minutes: 60
         container:
@@ -25,21 +32,32 @@ jobs:
               with:
                   persist-credentials: false
                   fetch-depth: 0
-            - name: Check test policy against Git history
+            - name: Check CI rules and workflow syntax
+              run: |
+                  nix develop --no-update-lock-file -c node --test scripts/ci.test.mjs
+                  actionlint -shellcheck='' -ignore '^label "nix-host" is unknown' -ignore '^specifying action "https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in invalid format' .forgejo/workflows/ci.yml
+            - name: Select checks
+              id: plan
               env:
                   BEFORE_SHA: ${{ github.event.before }}
-                  BRANCH_NAME: ${{ github.ref_name }}
+              run: nix develop --no-update-lock-file -c node scripts/ci-plan.mjs
+            - name: Check test policy
+              env:
+                  TEST_POLICY_BASE: ${{ steps.plan.outputs.base }}
+              run: nix develop --no-update-lock-file -c npm run check:test-policy
+            - name: Build, test and package
+              if: steps.plan.outputs.build == 'true'
+              env:
+                  TEST_GROUPS: ${{ steps.plan.outputs.groups }}
               run: |
-                  if [ "$BRANCH_NAME" != main ]; then
-                      TEST_POLICY_BASE=$(git merge-base HEAD origin/main)
-                  elif [ -n "$BEFORE_SHA" ] && git rev-parse --verify "$BEFORE_SHA^{commit}" >/dev/null 2>&1; then
-                      TEST_POLICY_BASE=$BEFORE_SHA
-                  else
-                      TEST_POLICY_BASE=$(git rev-parse HEAD^)
-                  fi
-                  export TEST_POLICY_BASE
-                  nix develop --no-update-lock-file -c npm run check:test-policy
-            - name: Check source build and isolated tests
-              run: nix flake check --no-update-lock-file --print-build-logs
-            - name: Build the consumable package
-              run: nix build --no-update-lock-file --print-build-logs .#prime-agent
+                  targets=(.#prime-agent .#checks.x86_64-linux.static)
+                  for group in $TEST_GROUPS; do
+                      case "$group" in
+                          ai|agent|tui|session|mcp|catalog) targets+=(".#checks.x86_64-linux.$group") ;;
+                          *) echo "Unknown test group: $group" >&2; exit 1 ;;
+                      esac
+                  done
+                  nix build --no-update-lock-file --print-build-logs --keep-going "${targets[@]}"
+            - name: Documentation-only result
+              if: steps.plan.outputs.build != 'true'
+              run: echo "CI rules, workflow syntax and test policy passed; no executable inputs changed."
