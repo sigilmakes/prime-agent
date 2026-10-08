@@ -5,9 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-	checkPrimeAgentTracesAccess,
 	checkPrimeInferenceAccess,
-	loginPrimeAgentTraces,
 	loginPrimeInference,
 	resolvePrimeInferenceAuthConfig,
 } from "../src/core/prime-inference-auth.js";
@@ -59,7 +57,6 @@ type BrowserChallengeCase = {
 	authUrl: string;
 	/** An already-present CLI key that lacks the required permission. */
 	staleKey?: string;
-	traceBaseUrl?: string;
 };
 
 function encryptChallengeResult(publicKey: string, value: string): string {
@@ -76,7 +73,6 @@ function encryptChallengeResult(publicKey: string, value: string): string {
 describe("Prime Inference auth", () => {
 	let tempDir: string;
 	let configPath: string;
-	let originalTraceBaseUrl: string | undefined;
 
 	beforeEach(() => {
 		vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", "");
@@ -84,17 +80,10 @@ describe("Prime Inference auth", () => {
 		tempDir = join(tmpdir(), `pi-prime-auth-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		configPath = join(tempDir, "config.json");
-		originalTraceBaseUrl = process.env.PRIME_AGENT_TRACES_BASE_URL;
-		delete process.env.PRIME_AGENT_TRACES_BASE_URL;
 	});
 
 	afterEach(() => {
 		vi.unstubAllEnvs();
-		if (originalTraceBaseUrl === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_BASE_URL;
-		} else {
-			process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
-		}
 		if (existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
@@ -137,12 +126,6 @@ describe("Prime Inference auth", () => {
 			{ inference: { write: true } },
 			{ apiKey: "prime-cli-key", source: "prime-cli", primeTeam: null },
 		],
-		[
-			"agent traces",
-			loginPrimeAgentTraces,
-			{ agent_traces: { write: true } },
-			{ apiKey: "prime-cli-key", source: "prime-cli" },
-		],
 	] as const)(
 		"imports a valid Prime CLI key for %s against the production API",
 		async (_label, login, scope, expected) => {
@@ -165,22 +148,22 @@ describe("Prime Inference auth", () => {
 		},
 	);
 
-	it.each([
-		["inference", checkPrimeInferenceAccess, { inference: { read: true, write: true } }],
-		["agent traces", checkPrimeAgentTracesAccess, { agent_traces: { read: true, write: true } }],
-	] as const)("checks %s access with Prime whoami permissions", async (_label, check, scope) => {
-		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			expect(getUrl(input)).toBe("https://prime-api.example/api/v1/user/whoami");
-			expect(init?.method).toBe("GET");
-			expect(getAuthorization(init)).toBe("Bearer prime-key");
-			return jsonResponse({ data: { scope } });
-		});
+	it.each([["inference", checkPrimeInferenceAccess, { inference: { read: true, write: true } }]] as const)(
+		"checks %s access with Prime whoami permissions",
+		async (_label, check, scope) => {
+			const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				expect(getUrl(input)).toBe("https://prime-api.example/api/v1/user/whoami");
+				expect(init?.method).toBe("GET");
+				expect(getAuthorization(init)).toBe("Bearer prime-key");
+				return jsonResponse({ data: { scope } });
+			});
 
-		await expect(check("prime-key", "https://prime-api.example", { fetchFn: fetchMock })).resolves.toEqual({
-			ok: true,
-		});
-		expect(fetchMock).toHaveBeenCalledOnce();
-	});
+			await expect(check("prime-key", "https://prime-api.example", { fetchFn: fetchMock })).resolves.toEqual({
+				ok: true,
+			});
+			expect(fetchMock).toHaveBeenCalledOnce();
+		},
+	);
 
 	it.each([
 		[
@@ -194,12 +177,6 @@ describe("Prime Inference auth", () => {
 			"https://custom.example/",
 			loginPrimeInference,
 			"https://api.primeintellect.ai",
-		],
-		[
-			"PRIME_AGENT_TRACES_BASE_URL",
-			"https://custom.example/api/v1/",
-			loginPrimeAgentTraces,
-			"https://custom.example",
 		],
 	] as const)("does not import CLI credentials with %s", async (env, value, login, baseUrl) => {
 		vi.stubEnv(env, value);
@@ -272,7 +249,7 @@ describe("Prime Inference auth", () => {
 		).rejects.toThrow("Login cancelled");
 	});
 
-	it.each<[string, typeof loginPrimeInference | typeof loginPrimeAgentTraces, BrowserChallengeCase]>([
+	it.each<[string, typeof loginPrimeInference, BrowserChallengeCase]>([
 		[
 			"inference",
 			loginPrimeInference,
@@ -290,22 +267,7 @@ describe("Prime Inference auth", () => {
 				authUrl: "https://app.primeintellect.ai/dashboard/tokens/challenge?code=challenge-code",
 			},
 		],
-		[
-			"agent traces",
-			loginPrimeAgentTraces,
-			{
-				config: { base_url: "https://prime-api.example", frontend_url: "https://prime-app.example" },
-				apiBase: "https://prime-api.example",
-				traceBaseUrl: "https://prime-api.example/api/v1",
-				key: "trace-key",
-				scope: { agent_traces: { read: true, write: true } },
-				authUrl: "https://app.primeintellect.ai/dashboard/tokens/challenge?code=challenge-code&scope=agent_traces",
-			},
-		],
 	])("runs the %s browser challenge when the CLI key cannot be used", async (_label, login, options) => {
-		if (options.traceBaseUrl) {
-			process.env.PRIME_AGENT_TRACES_BASE_URL = options.traceBaseUrl;
-		}
 		writeFileSync(configPath, JSON.stringify(options.config));
 		let challengePublicKey = "";
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {

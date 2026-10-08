@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, getApiProvider, registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
 import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "../src/core/agent-messages.js";
@@ -20,6 +21,7 @@ describe("createAgentSessionFromServices", () => {
 	const unregisters: Array<() => void> = [];
 
 	afterEach(() => {
+		vi.unstubAllGlobals();
 		vi.unstubAllEnvs();
 		while (unregisters.length > 0) {
 			unregisters.pop()?.();
@@ -60,130 +62,118 @@ describe("createAgentSessionFromServices", () => {
 		}
 	});
 
-	it("shows the telemetry disclosure independently of the Herdr reporter", async () => {
+	it("issue #4: legacy reporting opt-ins cannot upload persisted sessions or create reporting state", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-reporting-removal-"));
+		cleanupPaths.push(tempDir);
+		vi.stubEnv("HOME", tempDir);
+		vi.stubEnv(ENV_AGENT_DIR, tempDir);
+		vi.stubEnv("PI_OFFLINE", "");
 		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-telemetry-notice-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-		cleanupPaths.push(tempDir);
-		const settingsManager = SettingsManager.inMemory();
-		settingsManager.setOnboardingShown(true);
-
+		vi.stubEnv("PRIME_AGENT_TRACES_BASE_URL", "https://reports.invalid");
+		const fetchSpy = vi.fn(
+			async (_input: string | URL | Request, _init?: RequestInit) => new Response("{}", { status: 200 }),
+		);
+		vi.stubGlobal("fetch", fetchSpy);
+		writeFileSync(
+			join(tempDir, "settings.json"),
+			JSON.stringify({
+				agentTraces: { enabled: true },
+				telemetry: { enabled: true, noticeShown: true },
+			}),
+		);
+		// Seed a real old transcript and pending cursor before any service starts.
+		const legacyManager = SessionManager.create(tempDir, join(tempDir, "legacy-sessions"));
+		legacyManager.appendMessage({ role: "user", content: "legacy private content", timestamp: Date.now() });
+		legacyManager.flushNow();
+		const legacySessionFile = legacyManager.getSessionFile()!;
+		const legacyTranscript = readFileSync(legacySessionFile, "utf8");
+		const outboxDir = join(tempDir, "agent-traces-outbox");
+		mkdirSync(outboxDir);
+		const entryName = `${createHash("sha256").update(legacySessionFile).digest("hex").slice(0, 32)}.json`;
+		const pending = JSON.stringify({ sessionFile: legacySessionFile });
+		writeFileSync(join(outboxDir, entryName), pending);
+		const expectLegacyUntouched = () => {
+			expect(readdirSync(outboxDir)).toEqual([entryName]);
+			expect(readFileSync(join(outboxDir, entryName), "utf8")).toBe(pending);
+			expect(readFileSync(legacySessionFile, "utf8")).toBe(legacyTranscript);
+		};
+		const authStorage = AuthStorage.inMemory();
+		const faux = registerFauxProvider({ provider: "faux-reporting-removal" });
+		unregisters.push(() => faux.unregister());
+		const fauxApi = getApiProvider(faux.api)!;
+		const model = faux.getModel();
+		faux.setResponses([fauxAssistantMessage("local response"), fauxAssistantMessage("resumed response")]);
+		authStorage.set("prime-agent-traces", { type: "api_key", key: "test-key" });
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 		const services = await createAgentSessionServices({
 			cwd: tempDir,
 			agentDir: tempDir,
-			settingsManager,
-			noBuiltinHerdrReporter: true,
-			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+			authStorage,
+			modelRegistry: ModelRegistry.inMemory(authStorage),
+			mcpManager: new McpManager({ authStorage, getServiceCatalog: () => [], noBackgroundVerification: true }),
+			resourceLoaderOptions: {
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+			},
 		});
-
-		expect(services.diagnostics).toContainEqual(
-			expect.objectContaining({ type: "info", message: expect.stringContaining("pseudonymous usage") }),
-		);
-		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
-	});
-
-	it("defers the telemetry disclosure on a first interactive launch", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-telemetry-first-run-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-		cleanupPaths.push(tempDir);
-		// A settings profile that has never seen onboarding: the notice would land
-		// on the welcome screen, so it waits for the next launch.
-		const settingsManager = SettingsManager.inMemory();
-
-		const services = await createAgentSessionServices({
-			cwd: tempDir,
-			agentDir: tempDir,
-			settingsManager,
-			noBuiltinHerdrReporter: true,
-			deferTelemetryNoticeForOnboarding: true,
-			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		services.modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			streamSimple: fauxApi.streamSimple,
+			models: faux.models,
 		});
-
-		expect(services.diagnostics).not.toContainEqual(
-			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
-		);
-		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
-	});
-
-	it("discloses telemetry immediately for sessions that never onboard", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-telemetry-headless-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-		cleanupPaths.push(tempDir);
-		// No onboarding will run here, so holding the notice back would hide it forever.
-		const settingsManager = SettingsManager.inMemory();
-
-		const services = await createAgentSessionServices({
-			cwd: tempDir,
-			agentDir: tempDir,
-			settingsManager,
-			noBuiltinHerdrReporter: true,
-			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
-		});
-
-		expect(services.diagnostics).toContainEqual(
-			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
-		);
-		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
-	});
-
-	it("honors an explicit daemon-carried telemetry opt-out", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-		cleanupPaths.push(tempDir);
-		const settingsManager = SettingsManager.inMemory();
-		const services = await createAgentSessionServices({
-			cwd: tempDir,
-			agentDir: tempDir,
-			settingsManager,
-			telemetryDisabled: true,
-			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
-		});
-
-		expect(services.diagnostics).not.toContainEqual(
-			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
-		);
-		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
-
+		const manager = SessionManager.create(tempDir, join(tempDir, "sessions"));
 		const { session } = await createAgentSessionFromServices({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
-			telemetryDisabled: true,
+			sessionManager: manager,
+			model,
+			noTools: "all",
+			prewarmIpythonKernel: false,
 		});
 		try {
+			await session.prompt("local private content");
+			expect(faux.state.callCount).toBe(1);
+			await session.disposeAsync();
+			expect(readFileSync(manager.getSessionFile()!, "utf8")).toContain("local private content");
+			expect(readFileSync(manager.getSessionFile()!, "utf8")).toContain("local response");
+			expectLegacyUntouched();
 			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
+			// An old outbox is user data: do not replay, rewrite, or prune it on resume.
+			const resumedManager = SessionManager.open(manager.getSessionFile()!);
+			const resumed = await createAgentSessionFromServices({
+				services,
+				sessionManager: resumedManager,
+				model,
+				noTools: "all",
+				prewarmIpythonKernel: false,
+			});
+			try {
+				await resumed.session.prompt("private resumed content");
+				expect(faux.state.callCount).toBe(2);
+				await resumed.session.disposeAsync();
+				expect(readFileSync(manager.getSessionFile()!, "utf8")).toContain("private resumed content");
+				expect(readFileSync(manager.getSessionFile()!, "utf8")).toContain("resumed response");
+				expectLegacyUntouched();
+				expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
+			} finally {
+				await resumed.session.disposeAsync();
+				services.mcpManager.dispose();
+			}
+			// Catalog refreshes are separate from reporting and remain supported.
+			for (const [input, init] of fetchSpy.mock.calls) {
+				expect(init?.method ?? "GET").toBe("GET");
+				expect(String(input)).toMatch(
+					/^https:\/\/(raw\.githubusercontent\.com\/PrimeIntellect-ai\/prime-agent-catalog\/main\/|api\.pinference\.ai\/api\/v1\/models$)/,
+				);
+			}
 		} finally {
-			session.dispose();
-		}
-	});
-
-	it("does not install top-level telemetry for a resumed child session", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-child-telemetry-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-		cleanupPaths.push(tempDir);
-		const services = await createAgentSessionServices({
-			cwd: tempDir,
-			agentDir: tempDir,
-			settingsManager: SettingsManager.inMemory({ telemetry: { noticeShown: true } }),
-			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
-		});
-		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		sessionManager.newSession({ rlmDepth: 1 });
-
-		const { session } = await createAgentSessionFromServices({ services, sessionManager });
-		try {
-			expect(session.rlmDepth).toBe(1);
-			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
-		} finally {
-			session.dispose();
+			await session.disposeAsync();
+			vi.unstubAllGlobals();
 		}
 	});
 

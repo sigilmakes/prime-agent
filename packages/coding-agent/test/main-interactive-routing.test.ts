@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { parseArgs } from "../src/cli/args.js";
 import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
 import {
@@ -13,6 +14,7 @@ import {
 	parseAgentsViewCommand,
 	resolveActiveSessionLookupFailure,
 	resolveRuntimeSessionOptions,
+	runtimeConfigFromArgs,
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
 	shouldOpenAgentsViewForDaemonInteractive,
@@ -218,6 +220,20 @@ describe("agents view command parsing", () => {
 });
 
 describe("runtime session option resolution", () => {
+	test.each(["interactive", "print", "json", "rpc", "acp", "daemon"] as const)(
+		"issue #4 always sends the legacy daemon opt-out in %s mode, even with analytics opt-in env",
+		(appMode) => {
+			vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+			vi.stubEnv("DO_NOT_TRACK", "0");
+			try {
+				const config = runtimeConfigFromArgs(parseArgs([]), "/repo", "/agent", undefined, appMode);
+				expect(JSON.parse(JSON.stringify(config)).telemetryDisabled).toBe(true);
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		},
+	);
+
 	test("keeps verifier goals per session instead of in the daemon fallback", () => {
 		const headlessCreateConfig = {
 			cwd: "/repo",

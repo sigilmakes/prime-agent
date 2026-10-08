@@ -29,7 +29,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js && npm run copy-assets && npm run bundle",
+		"build": "npm run clean && tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js && npm run copy-assets && npm run bundle",
 		"build:binary": "node scripts/build-binary.mjs",
 		"copy-assets": "node scripts/catalog-assets.mjs copy-source --out dist --optional && shx mkdir -p dist/modes/interactive/theme && shx cp src/modes/interactive/theme/*.json dist/modes/interactive/theme/ && shx mkdir -p dist/modes/interactive/assets && shx cp src/modes/interactive/assets/*.png dist/modes/interactive/assets/ && shx mkdir -p dist/core/export-html/vendor && shx cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html/ && shx cp src/core/export-html/vendor/*.js dist/core/export-html/vendor/ && shx rm -rf dist/prime-agent-runtime && shx cp -r ../../prime-agent-runtime dist/prime-agent-runtime && shx rm -rf dist/skills && shx cp -r skills dist/skills",
 		"copy-binary-assets": "node scripts/copy-binary-assets.mjs",

@@ -1,9 +1,31 @@
 // Installed public SDK smoke: no model call, daemon, or Python kernel.
 // check.sh runs each phase in a fresh Node process to rule out in-memory resume.
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+
+// Reject stale reporting artifacts as well as removed endpoints in emitted bundles.
+const sdkRoot = new URL("./", import.meta.resolve("@earendil-works/pi-coding-agent"));
+for (const name of ["telemetry", "agent-traces", "platform-fidelity"]) {
+    for (const extension of ["js", "js.map", "d.ts", "d.ts.map"]) {
+        assert.equal(existsSync(new URL(`core/${name}.${extension}`, sdkRoot)), false,
+            `obsolete reporting artifact: ${name}.${extension}`);
+    }
+}
+function checkReportingArtifacts(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const child = new URL(entry.name + (entry.isDirectory() ? "/" : ""), directory);
+        if (entry.isDirectory()) checkReportingArtifacts(child);
+        else if (entry.name.endsWith(".js")) {
+            const source = readFileSync(child, "utf8");
+            for (const endpoint of ["agent-analytics/events", "agent-traces/sessions"]) {
+                assert.equal(source.includes(endpoint), false, `removed reporting endpoint in ${child}`);
+            }
+        }
+    }
+}
+checkReportingArtifacts(sdkRoot);
 
 const [phase, state] = process.argv.slice(2);
 assert.ok(state, "private state directory is required");

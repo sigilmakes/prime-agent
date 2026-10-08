@@ -75,7 +75,6 @@ import {
 	SessionManager,
 } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
-import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
@@ -638,13 +637,12 @@ function runtimeAutonomousConfigFromArgs(parsed: Args): AgentSessionRuntimeConfi
 	};
 }
 
-function runtimeConfigFromArgs(
+export function runtimeConfigFromArgs(
 	parsed: Args,
 	cwd: string,
 	agentDir: string,
 	sessionDir: string | undefined,
 	appMode: AppMode,
-	telemetryDisabled?: true,
 ): AgentSessionRuntimeConfig {
 	return {
 		cwd,
@@ -672,7 +670,8 @@ function runtimeConfigFromArgs(
 		autonomous: runtimeAutonomousConfigFromArgs(parsed),
 		extensionFlagValues: parsed.unknownFlags.size > 0 ? Object.fromEntries(parsed.unknownFlags.entries()) : undefined,
 		executionMode: appMode === "daemon" ? undefined : appMode,
-		telemetryDisabled,
+		// Compatibility-only: older daemons must never enable their analytics for this client.
+		telemetryDisabled: true,
 		// Serialized refine for print/json/rpc: the client's appMode is NOT
 		// "daemon" here — it's "print", "json", or "rpc". The daemon worker
 		// receives this flag via AgentSessionRuntimeConfig and uses it
@@ -805,11 +804,6 @@ async function prepareRuntimeServices(options: {
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
 		telemetryDisabled: config.telemetryDisabled,
-		// Interactive launches hold the notice back for onboarding, which marks
-		// itself shown; every other mode discloses immediately. Deriving it from
-		// the session config covers the daemon-hosted path too, which creates the
-		// session the TUI actually talks to.
-		deferTelemetryNoticeForOnboarding: config.executionMode === "interactive",
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
 			additionalSkillPaths: config.skills,
@@ -1339,19 +1333,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const telemetrySettingsManager =
-		sessionManager.getCwd() === cwd
-			? startupSettingsManager
-			: SettingsManager.create(sessionManager.getCwd(), agentDir);
-	const telemetryDisabled = isTelemetryEnabled(telemetrySettingsManager) ? undefined : true;
-	const defaultSessionConfig = runtimeConfigFromArgs(
-		parsed,
-		sessionManager.getCwd(),
-		agentDir,
-		sessionDir,
-		appMode,
-		telemetryDisabled,
-	);
+	const defaultSessionConfig = runtimeConfigFromArgs(parsed, sessionManager.getCwd(), agentDir, sessionDir, appMode);
 	// Verifier/headless clients pass initialGoal in each create request. The long-lived
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);

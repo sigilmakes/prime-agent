@@ -5,7 +5,6 @@ import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
 import type { AgentExecutionMode } from "./agent-session-config.js";
-import { installAgentTraceUpload } from "./agent-traces.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
@@ -16,10 +15,8 @@ import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
-import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
-import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
 
 export interface AgentSessionRuntimeDiagnostic {
 	type: "info" | "warning" | "error";
@@ -43,13 +40,8 @@ export interface CreateAgentSessionServicesOptions {
 	 * would release the pane while the parent is still running.
 	 */
 	noBuiltinHerdrReporter?: boolean;
+	/** Compatibility-only option; this fork has no reporting service. */
 	telemetryDisabled?: true;
-	/**
-	 * Hold the telemetry disclosure back on a first interactive launch, where it
-	 * would land on the onboarding screen. Onboarding marks itself shown, so the
-	 * notice appears on the next launch; sessions that never onboard disclose now.
-	 */
-	deferTelemetryNoticeForOnboarding?: boolean;
 }
 
 export interface AgentSessionCreationOptions {
@@ -79,6 +71,7 @@ export interface AgentSessionCreationOptions {
 	autonomous?: AgentAutonomousConfig;
 	serializedRefine?: boolean;
 	executionMode?: AgentExecutionMode;
+	/** Compatibility-only option; this fork has no reporting service. */
 	telemetryDisabled?: true;
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
@@ -201,22 +194,6 @@ export async function createAgentSessionServices(
 	await resourceLoader.reload();
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
-	if (
-		!options.telemetryDisabled &&
-		isTelemetryEnabled(settingsManager) &&
-		// A first interactive launch belongs to onboarding, where the notice would
-		// land on the welcome screen; it surfaces on the next launch once
-		// onboarding marks itself shown. Sessions that never onboard disclose now.
-		(settingsManager.getOnboardingShown() || !options.deferTelemetryNoticeForOnboarding) &&
-		!settingsManager.getTelemetryNoticeShown()
-	) {
-		diagnostics.push({
-			type: "info",
-			message:
-				"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
-		});
-		settingsManager.setTelemetryNoticeShown(true);
-	}
 	const extensionsResult = resourceLoader.getExtensions();
 	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
 		try {
@@ -248,14 +225,6 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
-	installAgentTraceUpload(options.sessionManager, {
-		authStorage: options.services.authStorage,
-		settingsManager: options.services.settingsManager,
-		semanticEdgesLedgerPath: semanticEdgeLedgerPath({
-			rlmSessionDir: options.rlmSessionDir,
-			sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
-		}),
-	});
 	const result = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
@@ -295,13 +264,6 @@ export async function createAgentSessionFromServices(
 	});
 	if (options.services.ownsMcpManager) {
 		result.session.registerDisposeCallback(() => options.services.mcpManager.dispose());
-	}
-	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
-		installAgentTelemetry(result.session, {
-			agentDir: options.services.agentDir,
-			settingsManager: options.services.settingsManager,
-			executionMode: options.executionMode,
-		});
 	}
 	return result;
 }

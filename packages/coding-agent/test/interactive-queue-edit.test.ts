@@ -572,7 +572,6 @@ describe("interactive interrupt preserves the queue", () => {
 
 	function createInterruptHarness(draft: string): InterruptHarness {
 		const harness = {
-			traceUploadAllAbortController: undefined,
 			sideQuestionEvent: undefined,
 			ctrlCExitHintExpiresAt: 0,
 			ctrlCExitHintTimer: undefined,

@@ -144,10 +144,6 @@ An imported key and its CLI-file team selection are saved as an Agent-owned snap
 
 For deliberate development or test use, `PRIME_AGENT_INFERENCE_API_BASE_URL` overrides the Agent authentication and team API (default `https://api.primeintellect.ai/api/v1`). `PRIME_AGENT_INFERENCE_FRONTEND_URL` overrides the login browser frontend (default `https://app.primeintellect.ai`). These Agent-specific settings apply to browser login, manual-key validation, and team lookup. They do not change model inference URLs. CLI credential reuse is disabled when either resolved login destination is nonproduction. Legacy `PRIME_API_BASE_URL` and CLI-file URLs do not control Agent authentication.
 
-### Trace sharing credentials
-
-Trace sharing remains opt-in. Normal uploads use explicit environment or Agent-owned credentials, never a live CLI credential fallback. `/traces login` can reuse a CLI key only after the same production URL checks and production validation, including the required `agent_traces` scope. The trace API defaults to `https://api.primeintellect.ai`; only the trace-specific `PRIME_AGENT_TRACES_BASE_URL` overrides that default, not CLI URLs or `PRIME_API_BASE_URL`. Explicit trace login does not reuse CLI credentials when its resolved trace API destination is nonproduction.
-
 ## Cloud Providers
 
 ### Azure OpenAI

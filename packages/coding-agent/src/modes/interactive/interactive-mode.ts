@@ -61,7 +61,6 @@ import {
 	APP_NAME,
 	APP_TITLE,
 	getAgentDir,
-	getAgentTracesLogPath,
 	getDebugLogPath,
 	getLogsDir,
 	getMcpCacheDir,
@@ -75,15 +74,6 @@ import {
 	isAgentSessionMessage,
 	startsAgentRun,
 } from "../../core/agent-messages.js";
-import {
-	type AgentTracePreviewResult,
-	type AgentTraceUploadAllResult,
-	type AgentTraceUploadResult,
-	getPrimeAgentTraceCredential,
-	previewAgentTraceFile,
-	uploadAgentTraceFile,
-	uploadAllAgentTraces,
-} from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
 import type { AuthCredential } from "../../core/auth-storage.js";
 import {
@@ -157,7 +147,7 @@ import {
 } from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
-import { PRIME_INFERENCE_PROVIDER_ID, resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
+import { PRIME_INFERENCE_PROVIDER_ID } from "../../core/prime-inference-auth.js";
 import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
@@ -172,11 +162,6 @@ import {
 	parseSlashCommand,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
-import {
-	captureAgentCommandUsed,
-	captureOnboardingCompleted,
-	type TelemetryOnboardingOutcome,
-} from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
@@ -264,7 +249,6 @@ import {
 import { McpTokenPastePanelComponent } from "./components/mcp-token-paste-panel.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
-import { OnboardingChoiceComponent } from "./components/onboarding-choice.js";
 import { OnboardingPickerComponent } from "./components/onboarding-picker.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import { PromptContextLine } from "./components/prompt-context-line.js";
@@ -719,17 +703,6 @@ const HEARTBEAT_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
 		label: "--follow-up <instruction>",
 		description: "Deliver as a follow-up after the current turn finishes",
 	},
-];
-
-const TRACES_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
-	{ value: "status", label: "status", description: "Show trace sharing status" },
-	{ value: "on", label: "on", description: "Enable automatic trace uploads" },
-	{ value: "off", label: "off", description: "Disable automatic trace uploads" },
-	{ value: "preview", label: "preview", description: "Preview the current session trace" },
-	{ value: "upload", label: "upload", description: "Alias of upload-current" },
-	{ value: "upload-current", label: "upload-current", description: "Upload the current session trace" },
-	{ value: "upload-all", label: "upload-all", description: "Upload all persisted traces" },
-	{ value: "login", label: "login", description: "Configure the Prime API key for trace uploads" },
 ];
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -1407,7 +1380,6 @@ export class InteractiveMode {
 
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
-	private traceUploadAllAbortController: AbortController | undefined = undefined;
 
 	private readonly queueSelection = new QueueSelection();
 	private isApplyingQueueSelectionText = false;
@@ -1717,12 +1689,6 @@ export class InteractiveMode {
 		if (heartbeatCommand) {
 			heartbeatCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
 				this.getHeartbeatArgumentCompletions(prefix);
-		}
-
-		const tracesCommand = slashCommands.find((command) => command.name === "traces");
-		if (tracesCommand) {
-			tracesCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
-				this.getTracesArgumentCompletions(prefix);
 		}
 
 		const connectionCommands = this.connectionCommands;
@@ -2188,62 +2154,20 @@ export class InteractiveMode {
 			return false;
 		}
 
-		const startedAt = Date.now();
-		let outcome: TelemetryOnboardingOutcome = "aborted";
-		try {
-			// The flow reports completion itself: a user who already had a working
-			// model would otherwise look "ready" straight after cancelling it, and
-			// the questions they never saw would be skipped for good.
-			const completed = await this.runOnboardingFlow();
-			outcome = completed && isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
-			if (outcome === "success") {
-				// Only a completed onboarding counts as seen: a cancelled sign-in
-				// leaves the flag unset so the next launch retries the flow.
-				this.markOnboardingShown();
-				await this.settingsManager.flush();
-			}
-			return true;
-		} catch (error) {
-			outcome = "error";
-			throw error;
-		} finally {
-			const model = this.getCurrentModel();
-			const authStatus = model ? this.modelRegistry.getProviderAuthStatus(model.provider) : undefined;
-			const storedCredential = model ? this.modelRegistry.authStorage.get(model.provider) : undefined;
-			void captureOnboardingCompleted({
-				agentDir: getAgentDir(),
-				settingsManager: this.settingsManager,
-				durationMs: Date.now() - startedAt,
-				outcome,
-				provider: model?.provider,
-				authSource: authStatus?.source,
-				storedCredentialType: storedCredential?.type,
-			}).catch(() => {});
+		const completed = await this.runOnboardingFlow();
+		if (completed && isOnboardingModelReady(this.getOnboardingState())) {
+			this.markOnboardingShown();
+			await this.settingsManager.flush();
 		}
+		return true;
 	}
 
 	/** Runs the first-launch sequence. Resolves true only when every step ran. */
 	private async runOnboardingFlow(): Promise<boolean> {
 		this.modelRegistry.refresh();
 
-		// Existing users (working model with configured auth) skip login and
-		// the provider picker entirely. They see only the trace question, or
-		// nothing at all when traces are already enabled.
+		// A configured model needs no first-launch authentication.
 		if (isOnboardingModelReady(this.getOnboardingState())) {
-			if (this.settingsManager.getAgentTracesEnabled()) {
-				return true;
-			}
-			const abort = new AbortController();
-			this.onboardingFlowAbort = abort;
-			const splash = await this.showOnboardingSplash({ immediate: true });
-			if (!splash) {
-				return false;
-			}
-			await this.askOnboardingTraceOptIn();
-			if (abort.signal.aborted) {
-				return false;
-			}
-			splash.dismiss();
 			return true;
 		}
 
@@ -2256,7 +2180,7 @@ export class InteractiveMode {
 
 		// One sequence for every first launch. Signing in is instant when a Prime
 		// CLI token is already on disk, so users who arrive with credentials still
-		// reach the same account, provider and trace questions.
+		// reach the same account and provider questions.
 		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
 		if (abort.signal.aborted || authResult.status !== "success") {
 			splash.dismiss();
@@ -2268,10 +2192,6 @@ export class InteractiveMode {
 			return false;
 		}
 		await this.askOnboardingProviders(abort.signal);
-		if (abort.signal.aborted) {
-			return false;
-		}
-		await this.askOnboardingTraceOptIn();
 		if (abort.signal.aborted) {
 			return false;
 		}
@@ -2348,45 +2268,6 @@ export class InteractiveMode {
 				await authFlows.loginProvider(option);
 			}
 		}
-	}
-
-	/** Final onboarding question: trace collection, with a reminder it is reversible. */
-	private askOnboardingTraceOptIn(): Promise<void> {
-		const splash = this.onboardingSplash;
-		if (!splash) {
-			return Promise.resolve();
-		}
-		return new Promise<void>((resolve) => {
-			let closed = false;
-			let close: (() => void) | undefined;
-			const finish = (enabled?: boolean) => {
-				if (closed) {
-					return;
-				}
-				closed = true;
-				if (enabled !== undefined) {
-					this.settingsManager.setAgentTracesEnabled(enabled);
-					void this.settingsManager.flush();
-				}
-				close?.();
-				resolve();
-			};
-			const choice = new OnboardingChoiceComponent(
-				[{ label: "Share" }, { label: "Not now" }],
-				(index) => finish(index === 0),
-				() => finish(undefined),
-				{
-					onExit: () => void this.shutdown(),
-					prompt: "Share agent traces with Prime Intellect?",
-					description:
-						"Trace sharing helps us train better open-source models and improve the open agent ecosystem for everyone.",
-					note: "You can change this anytime with /traces.",
-					requestRender: () => this.ui.requestRender(),
-				},
-			);
-			close = this.showInlineAuthPanel(choice, { onReset: () => finish(undefined) });
-			this.ui.requestRender();
-		});
 	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
@@ -3365,7 +3246,6 @@ export class InteractiveMode {
 			this.isBashRunning() ||
 			this.getRetryAttempt() > 0 ||
 			this.connectionState?.sessionActions.active !== undefined ||
-			this.traceUploadAllAbortController !== undefined ||
 			this.sideQuestionEvent?.status === "running"
 		);
 	}
@@ -5204,14 +5084,6 @@ export class InteractiveMode {
 					this.ui.requestRender();
 					return;
 				}
-				if (commandName) {
-					void captureAgentCommandUsed({
-						agentDir: getAgentDir(),
-						settingsManager: this.settingsManager,
-						commandName,
-					}).catch(() => {});
-				}
-
 				if (commandName === "btw") {
 					this.editor.setText("");
 					await this.handleSideQuestion(commandArgs);
@@ -5321,11 +5193,6 @@ export class InteractiveMode {
 					}
 					this.echoLocalCommand(text);
 					await this.handleSystemPromptCommand();
-					this.editor.setText("");
-					return;
-				}
-				if (commandName === "traces") {
-					await this.handleTracesCommand(canonicalCommandText);
 					this.editor.setText("");
 					return;
 				}
@@ -7497,7 +7364,6 @@ export class InteractiveMode {
 	}
 
 	private interruptOrClearInput(): void {
-		this.traceUploadAllAbortController?.abort(new Error("Trace upload cancelled"));
 		if (this.sideQuestionEvent?.status === "running") {
 			this.abortSideQuestion(this.sideQuestionEvent.id, true);
 		}
@@ -8786,14 +8652,6 @@ export class InteractiveMode {
 					(item) => item.value.toLowerCase().startsWith(term) || item.label.toLowerCase().startsWith(term),
 				)
 			: HEARTBEAT_ARGUMENT_COMPLETIONS;
-		return filtered.length === 0 ? null : filtered;
-	}
-
-	private getTracesArgumentCompletions(prefix: string): AutocompleteItem[] | null {
-		const term = prefix.trim().toLowerCase();
-		const filtered = term
-			? TRACES_ARGUMENT_COMPLETIONS.filter((item) => item.value.toLowerCase().startsWith(term))
-			: TRACES_ARGUMENT_COMPLETIONS;
 		return filtered.length === 0 ? null : filtered;
 	}
 
@@ -11757,254 +11615,6 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(prompt, 1, 0));
 		this.ui.requestRender();
-	}
-
-	private formatTraceUploadResult(result: AgentTraceUploadResult): string {
-		switch (result.status) {
-			case "uploaded":
-				return `Trace uploaded (${result.bytesStored.toLocaleString()} bytes).`;
-			case "disabled":
-				return "Trace sharing is disabled.";
-			case "unchanged":
-				return "Trace is already uploaded; no new content since the last upload.";
-			case "missing_credentials":
-				return "Trace sharing needs a Prime API key. Run /traces login.";
-			case "no_session_file":
-				return "Current session has no persisted trace yet.";
-			case "empty_session":
-				return "Current session trace is empty.";
-			case "invalid_session":
-				return `Trace upload skipped: ${result.message}.`;
-			case "too_large":
-				return `Trace upload skipped: session file is ${result.size.toLocaleString()} bytes; limit is ${result.maxBytes.toLocaleString()} bytes.`;
-			case "failed":
-				if (result.statusCode === 404) {
-					return "Trace upload endpoint was not found. The platform API may not be deployed yet, or PRIME_AGENT_TRACES_BASE_URL points at the wrong API.";
-				}
-				return `Trace upload failed: ${result.statusCode ? `HTTP ${result.statusCode}: ` : ""}${result.message}. See ${getAgentTracesLogPath()} for details.`;
-		}
-	}
-
-	private async uploadCurrentTraceOnce(): Promise<AgentTraceUploadResult> {
-		const state = await this.agentConnection.getState();
-		return uploadAgentTraceFile({
-			sessionFile: state.sessionFile,
-			authStorage: this.modelRegistry.authStorage,
-			settingsManager: this.settingsManager,
-			requireEnabled: false,
-			reloadConfig: false,
-		});
-	}
-
-	private async previewCurrentTrace(): Promise<void> {
-		const state = await this.agentConnection.getState();
-		const result = await previewAgentTraceFile({ sessionFile: state.sessionFile });
-		let info: string;
-		switch (result.status) {
-			case "no_session_file":
-				info = "Trace preview is unavailable until the current session has a persisted assistant response.";
-				break;
-			case "empty_session":
-				info = "The current trace is empty.";
-				break;
-			case "invalid_session":
-			case "failed":
-				info = `Trace preview failed: ${result.message}.`;
-				break;
-			case "ready":
-				info = this.formatTracePreview(result);
-				break;
-		}
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(info, 1, 0));
-		this.ui.requestRender();
-	}
-
-	private formatTracePreview(result: Extract<AgentTracePreviewResult, { status: "ready" }>): string {
-		const lines = [
-			"Trace Preview",
-			theme.fg("dim", "Nothing has been uploaded by this command."),
-			"",
-			`${theme.fg("dim", "File:")} ${result.sessionFile}`,
-			`${theme.fg("dim", "Size:")} ${result.size.toLocaleString()} bytes`,
-			`${theme.fg("dim", "Uploadable:")} ${result.uploadable ? "Yes" : `No (limit ${result.maxBytes.toLocaleString()} bytes)`}`,
-			`${theme.fg("dim", "Endpoint:")} ${result.endpoint}`,
-			`${theme.fg("dim", "Session ID:")} ${result.sessionId}`,
-			`${theme.fg("dim", "Trace ID:")} ${result.traceId}`,
-		];
-		if (result.parentSessionId) {
-			lines.push(`${theme.fg("dim", "Parent session:")} ${result.parentSessionId}`);
-		}
-		if (result.gitRepo) {
-			lines.push(`${theme.fg("dim", "Git repository:")} ${result.gitRepo}`);
-		}
-		if (result.gitCommit) {
-			lines.push(`${theme.fg("dim", "Git commit:")} ${result.gitCommit}`);
-		}
-		lines.push("", "Raw JSONL payload preview");
-		if (result.contentPreview) {
-			lines.push(result.contentPreview);
-			if (result.truncated) {
-				lines.push("", theme.fg("dim", "Preview truncated; upload sends the complete file."));
-			}
-		} else {
-			lines.push(theme.fg("dim", "Payload omitted because the trace exceeds the upload limit."));
-		}
-		return lines.join("\n");
-	}
-
-	private async uploadAllTraces(sessionDir?: string, signal?: AbortSignal): Promise<AgentTraceUploadAllResult> {
-		return uploadAllAgentTraces({
-			authStorage: this.modelRegistry.authStorage,
-			settingsManager: this.settingsManager,
-			sessionDir,
-			requireEnabled: false,
-			reloadConfig: false,
-			signal,
-			onProgress: ({ completed, total }) => {
-				if (total > 0 && (completed === 0 || completed === total || completed % 10 === 0)) {
-					this.showStatus(
-						`Uploading traces: ${completed.toLocaleString()}/${total.toLocaleString()} (${keyText("app.clear")} to cancel)`,
-					);
-				}
-			},
-		});
-	}
-
-	private async handleTracesCommand(text: string): Promise<void> {
-		const command =
-			text
-				.replace(/^\/traces\b/, "")
-				.trim()
-				.toLowerCase() || "status";
-
-		if (command === "status") {
-			await this.settingsManager.reload().catch(() => undefined);
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			const state = await this.agentConnection.getState();
-			const info = [
-				"Trace Sharing",
-				"",
-				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
-				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
-				`${theme.fg("dim", "Endpoint:")} ${resolvePrimeAgentTracesBaseUrl()}`,
-				`${theme.fg("dim", "Session file:")} ${state.sessionFile ?? "In-memory"}`,
-				"",
-				theme.fg(
-					"dim",
-					"Commands: /traces on, /traces off, /traces preview, /traces upload-current, /traces upload-all, /traces login",
-				),
-			].join("\n");
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(info, 1, 0));
-			this.ui.requestRender();
-			return;
-		}
-
-		if (command === "off" || command === "disable") {
-			this.settingsManager.setAgentTracesEnabled(false);
-			await this.settingsManager.flush();
-			this.showStatus("Trace sharing disabled.");
-			return;
-		}
-
-		if (command === "login") {
-			await this.createAuthFlows().runPrimeAgentTracesLogin();
-			return;
-		}
-
-		if (command === "preview") {
-			await this.previewCurrentTrace();
-			return;
-		}
-
-		if (command === "on" || command === "enable") {
-			let credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				const authResult = await this.createAuthFlows().runPrimeAgentTracesLogin();
-				if (authResult.status !== "success") {
-					return;
-				}
-				credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			}
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key.");
-				return;
-			}
-
-			this.settingsManager.setAgentTracesEnabled(true);
-			await this.settingsManager.flush();
-			const uploadResult = await this.uploadCurrentTraceOnce();
-			const uploadMessage =
-				uploadResult.status === "no_session_file" || uploadResult.status === "empty_session"
-					? "Current session will upload after the first assistant response."
-					: this.formatTraceUploadResult(uploadResult);
-			this.showStatus(`Trace sharing enabled. ${uploadMessage}`);
-			return;
-		}
-
-		if (command === "upload" || command === "upload-current") {
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
-				return;
-			}
-			const uploadResult = await this.uploadCurrentTraceOnce();
-			const message = this.formatTraceUploadResult(uploadResult);
-			if (uploadResult.status === "failed") {
-				this.showError(message);
-			} else {
-				this.showStatus(message);
-			}
-			return;
-		}
-
-		if (command === "upload-all") {
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
-				return;
-			}
-			if (this.traceUploadAllAbortController) {
-				this.showWarning("A trace upload is already running. Cancel it before starting another.");
-				return;
-			}
-			const state = await this.agentConnection.getState();
-			const abortController = new AbortController();
-			this.traceUploadAllAbortController = abortController;
-			let result: AgentTraceUploadAllResult;
-			try {
-				result = await this.uploadAllTraces(state.sessionDir, abortController.signal);
-			} finally {
-				if (this.traceUploadAllAbortController === abortController) {
-					this.traceUploadAllAbortController = undefined;
-				}
-			}
-			if (abortController.signal.aborted) {
-				this.showStatus("Trace upload cancelled.");
-				return;
-			}
-			if (result.total === 0) {
-				this.showStatus("No persisted traces were found.");
-				return;
-			}
-			const summary = [
-				`Uploaded ${result.uploaded.toLocaleString()} of ${result.total.toLocaleString()} traces`,
-				result.skipped > 0 ? `${result.skipped.toLocaleString()} skipped` : undefined,
-				result.failed > 0 ? `${result.failed.toLocaleString()} failed` : undefined,
-				`${result.bytesStored.toLocaleString()} bytes stored`,
-			]
-				.filter((part): part is string => part !== undefined)
-				.join("; ");
-			if (result.failed > 0) {
-				this.showWarning(`${summary}. See ${getAgentTracesLogPath()} for details.`);
-			} else {
-				this.showStatus(`${summary}.`);
-			}
-			return;
-		}
-
-		this.showWarning("Usage: /traces [status|on|off|preview|upload|upload-current|upload-all|login]");
 	}
 
 	private async handleContextCommand(): Promise<void> {

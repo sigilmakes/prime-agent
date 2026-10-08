@@ -1,0 +1,2 @@
+- Removed product analytics and Prime session trace uploads, including reporting commands, settings, credentials flows, and background upload scheduling. Local sessions and relationship ledgers remain intact.
+- Kept the legacy analytics opt-out for older daemon compatibility; replacing already-running upstream processes is required to remove their reporting code.

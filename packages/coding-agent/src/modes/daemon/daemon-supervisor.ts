@@ -3375,7 +3375,11 @@ export class DaemonSupervisor {
 		const launchEnv = command.launchEnv ?? existing?.launchEnv;
 		const createCommand: DaemonCreateCommand = {
 			...withoutSupervisorCreateFields(command),
-			config: mergeAgentSessionRuntimeConfig(this.defaultSessionConfig, command.config),
+			config: {
+				...mergeAgentSessionRuntimeConfig(this.defaultSessionConfig, command.config),
+				// New fork workers have no analytics. Keep adopted workers' original policy.
+				telemetryDisabled: true,
+			},
 		};
 		const workerId = existing?.descriptor.workerId ?? createActiveSessionId();
 		const rootActiveSessionId = existing?.descriptor.rootActiveSessionId ?? createActiveSessionId();

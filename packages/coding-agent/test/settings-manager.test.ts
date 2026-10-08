@@ -177,40 +177,6 @@ describe("SettingsManager", () => {
 		});
 	});
 
-	// Telemetry may only ever be narrowed: no project file or runtime override can opt a user back in.
-	describe("telemetry privacy controls", () => {
-		it.each<[string, unknown, unknown, boolean]>([
-			[
-				"a global opt-out survives project opt-in",
-				{ enabled: false, noticeShown: false },
-				{ enabled: true, noticeShown: true },
-				false,
-			],
-			["a project opt-out disables globally enabled telemetry", { enabled: true }, { enabled: false }, false],
-			["both enabled keeps telemetry on", { enabled: true }, { enabled: true }, true],
-		])("%s", (_label, global, project, expected) => {
-			writeSettings(globalPath, { telemetry: global });
-			writeSettings(projectPath, { telemetry: project });
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getTelemetryEnabled()).toBe(expected);
-			if (!expected) expect(manager.getTelemetryNoticeShown()).toBe(false);
-		});
-
-		it.each<[string, boolean, boolean, boolean]>([
-			["further disable telemetry", true, false, false],
-			["not re-enable a global opt-out", false, true, false],
-		])("runtime overrides can %s", (_label, globalEnabled, overrideEnabled, expected) => {
-			writeSettings(globalPath, { telemetry: { enabled: globalEnabled, noticeShown: true } });
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.applyOverrides({ telemetry: { enabled: overrideEnabled, noticeShown: overrideEnabled } });
-
-			expect(manager.getTelemetryEnabled()).toBe(expected);
-		});
-	});
-
 	// Park bounds are clamped like the other wait bounds: one week per park at most,
 	// and non-finite park settings fall back to the defaults.
 	describe("provider park bounds", () => {

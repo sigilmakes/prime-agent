@@ -36,6 +36,7 @@ export interface AgentSessionRuntimeConfig {
 	 */
 	serializedRefine?: boolean;
 	executionMode?: AgentExecutionMode;
+	/** Compatibility-only opt-out for older daemons; this fork has no analytics reporter. */
 	telemetryDisabled?: true;
 	/**
 	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).

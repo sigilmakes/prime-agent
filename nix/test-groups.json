@@ -28,7 +28,16 @@
 		"files": [
 			"test/daemon-protocol.test.ts",
 			"test/session-manager/build-context.test.ts",
-			"test/daemon-supervisor-lazy-subagents.test.ts"
+			"test/daemon-supervisor-lazy-subagents.test.ts",
+			"test/main-interactive-routing.test.ts",
+			"test/interactive-mode-prompt-stash.test.ts",
+			"test/interactive-queue-edit.test.ts",
+			"test/daemon-supervisor-monitor.test.ts",
+			"test/agent-session-services.test.ts",
+			"test/prime-inference-auth.test.ts",
+			"test/settings-manager.test.ts",
+			"test/daemon-mode.test.ts",
+			"test/suite/regressions/existing-user-onboarding-trace-only.test.ts"
 		]
 	},
 	"mcp": {

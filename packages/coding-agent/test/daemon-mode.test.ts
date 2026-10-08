@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
 	appendFileSync,
@@ -20,14 +19,10 @@ import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ENV_AGENT_DIR } from "../src/config.js";
 import { AGENT_FAMILY_REACH_ERROR, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import { type CreateAgentSessionRuntimeFactory, rlmSubagentRuntimeSpec } from "../src/core/agent-session-runtime.js";
-import { installAgentTraceUpload } from "../src/core/agent-traces.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
-import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import {
@@ -36,7 +31,6 @@ import {
 	type SessionInfo,
 	SessionManager,
 } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { bindActiveSessionState } from "../src/modes/daemon/daemon-extension-binding.js";
 import {
@@ -2997,52 +2991,6 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("resolves delete_subagent while the child's trace upload is still in flight, then the transcript upload completes", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-trace-outbox-"));
-		const originalAgentDir = process.env[ENV_AGENT_DIR];
-		process.env[ENV_AGENT_DIR] = tempDir;
-		try {
-			const fixture = makePersistedRlmDaemonFixture(tempDir);
-			const internals = fixture.daemon as unknown as {
-				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
-			};
-			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
-			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
-			const childManager = childState.runtime.session.sessionManager as SessionManager;
-			const { calls, releaseFetch } = installGatedTraceUpload(childManager);
-			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
-			childManager.flushNow();
-			await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5_000 });
-			const transcriptAtUpload = readFileSync(fixture.childSessionFile, "utf8");
-
-			// The fetch gate is still held: the delete must not await the upload.
-			await internals
-				.createSubagentRuntimeHost(parentState)
-				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
-			expect(calls).toHaveLength(1);
-			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: false });
-
-			// The transcript survives deletion and its upload completes independently.
-			releaseFetch();
-			const entryKey = createHash("sha256").update(fixture.childSessionFile).digest("hex").slice(0, 32);
-			await vi.waitFor(() => {
-				const entry = JSON.parse(
-					readFileSync(join(tempDir, "agent-traces-outbox", `${entryKey}.json`), "utf8"),
-				) as { sessionFile: string; size?: number };
-				expect(entry.size).toBeGreaterThan(0);
-			});
-			expect(calls[0]?.body).toBe(transcriptAtUpload);
-		} finally {
-			if (originalAgentDir === undefined) {
-				delete process.env[ENV_AGENT_DIR];
-			} else {
-				process.env[ENV_AGENT_DIR] = originalAgentDir;
-			}
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	it("reconciles a stale display status on a tombstoned ledger edge (idempotent delete)", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-reconcile-"));
 		try {
@@ -3159,34 +3107,6 @@ describe("daemon mode helpers", () => {
 		}
 	});
 });
-
-/** Gated fetch stub on a session's trace-upload controller: observes whether a close awaits the upload. */
-function installGatedTraceUpload(sessionManager: SessionManager): {
-	calls: Array<{ url: string; body: string }>;
-	releaseFetch: () => void;
-} {
-	const calls: Array<{ url: string; body: string }> = [];
-	let releaseFetch: () => void = () => {};
-	const gate = new Promise<void>((resolveGate) => {
-		releaseFetch = resolveGate;
-	});
-	installAgentTraceUpload(sessionManager, {
-		authStorage: AuthStorage.inMemory({
-			[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
-		}),
-		settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
-		baseUrl: "https://api.example.test",
-		fetchFn: (async (input: unknown, init?: RequestInit) => {
-			calls.push({ url: String(input), body: String(init?.body ?? "") });
-			await gate;
-			return new Response(JSON.stringify({ bytes_stored: 1 }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
-		}) as typeof fetch,
-	});
-	return { calls, releaseFetch };
-}
 
 function makePersistedRlmDaemonFixture(
 	tempDir: string,

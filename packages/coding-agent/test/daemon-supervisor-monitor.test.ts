@@ -731,65 +731,80 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(enoentFailure?.message).not.toContain("ulimit");
 	});
 
-	it("commits the startup marker after durable worker publication", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-committed-gate-test-"));
-		const descriptorDir = join(root, "descriptors");
-		const markerPath = join(root, "startup-marker");
-		mkdirSync(descriptorDir, { recursive: true });
-		supervisorRegistryDirs.add(root);
-		workerLaunchTestState.capture = true;
-		workerLaunchTestState.forceMissingProcessStartId = true;
-		workerLaunchTestState.fixtureMode = "successful-gate";
-		workerLaunchTestState.gateMarkerPath = markerPath;
-		const workers = new Map<string, unknown>();
-		const connectWorker = vi.fn(async (worker: { descriptor: { rootActiveSessionId: string } }) => {
-			await waitForFile(markerPath);
-			return {
-				request: vi.fn(async () => ({
-					success: true,
-					data: {
-						id: worker.descriptor.rootActiveSessionId,
-						activeSessionId: worker.descriptor.rootActiveSessionId,
-						sessionId: "session-committed-gate",
-						cwd: root,
-					},
-				})),
+	it.each([undefined, false, true])(
+		"issue #4 publishes new workers without analytics despite legacy policy %s",
+		async (legacyPolicy) => {
+			const root = mkdtempSync(join(tmpdir(), "prime-supervisor-committed-gate-test-"));
+			const descriptorDir = join(root, "descriptors");
+			const markerPath = join(root, "startup-marker");
+			mkdirSync(descriptorDir, { recursive: true });
+			supervisorRegistryDirs.add(root);
+			workerLaunchTestState.capture = true;
+			workerLaunchTestState.forceMissingProcessStartId = true;
+			workerLaunchTestState.fixtureMode = "successful-gate";
+			workerLaunchTestState.gateMarkerPath = markerPath;
+			const workers = new Map<string, unknown>();
+			const receivedConfigs: unknown[] = [];
+			const connectWorker = vi.fn(async (worker: { descriptor: { rootActiveSessionId: string } }) => {
+				await waitForFile(markerPath);
+				return {
+					request: vi.fn(async (command: { config?: unknown }) => {
+						receivedConfigs.push(command.config);
+						return {
+							success: true,
+							data: {
+								id: worker.descriptor.rootActiveSessionId,
+								activeSessionId: worker.descriptor.rootActiveSessionId,
+								sessionId: "session-committed-gate",
+								cwd: root,
+							},
+						};
+					}),
+				};
+			});
+			const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+				...createSupervisorSnapshotState(),
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
+				socketPath: join(root, "supervisor.sock"),
+				workers,
+				shuttingDown: false,
+				assertRecoveryAllowed: vi.fn(async () => undefined),
+				connectWorker,
+				subscribeWorker: vi.fn(async () => undefined),
+				refreshWorkerSummaries: vi.fn(async () => undefined),
+				log: vi.fn(),
+			}) as {
+				launchWorker(command: {
+					type: "create";
+					config: { cwd: string; agentDir: string; telemetryDisabled?: boolean };
+				}): Promise<{ descriptor: { lifecycle: string; telemetryDisabled?: boolean } }>;
 			};
-		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			...createSupervisorSnapshotState(),
-			defaultSessionConfig: { cwd: root, agentDir: root },
-			descriptorDir,
-			socketPath: join(root, "supervisor.sock"),
-			workers,
-			shuttingDown: false,
-			assertRecoveryAllowed: vi.fn(async () => undefined),
-			connectWorker,
-			subscribeWorker: vi.fn(async () => undefined),
-			refreshWorkerSummaries: vi.fn(async () => undefined),
-			log: vi.fn(),
-		}) as {
-			launchWorker(command: {
-				type: "create";
-				config: { cwd: string; agentDir: string };
-			}): Promise<{ descriptor: { lifecycle: string } }>;
-		};
 
-		const worker = await supervisor.launchWorker({ type: "create", config: { cwd: root, agentDir: root } });
+			const worker = await supervisor.launchWorker({
+				type: "create",
+				config: { cwd: root, agentDir: root, telemetryDisabled: legacyPolicy },
+			});
 
-		expect(readFileSync(markerPath, "utf8")).toBe("start\n");
-		expect(connectWorker).toHaveBeenCalledOnce();
-		expect(worker.descriptor.lifecycle).toBe("ready");
-		expect(workers.size).toBe(1);
-		expect(readdirSync(descriptorDir).filter((name) => name.endsWith(".json"))).toHaveLength(1);
-		const child = workerLaunchTestState.spawned.at(-1)?.child;
-		if (!child) {
-			throw new Error("Worker child was not captured");
-		}
-		const closed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
-		child.kill("SIGKILL");
-		await closed;
-	});
+			expect(worker.descriptor.telemetryDisabled).toBe(true);
+			expect(receivedConfigs).toEqual([expect.objectContaining({ telemetryDisabled: true })]);
+			const persistedPath = join(descriptorDir, readdirSync(descriptorDir).find((name) => name.endsWith(".json"))!);
+			expect(JSON.parse(readFileSync(persistedPath, "utf8")).telemetryDisabled).toBe(true);
+
+			expect(readFileSync(markerPath, "utf8")).toBe("start\n");
+			expect(connectWorker).toHaveBeenCalledOnce();
+			expect(worker.descriptor.lifecycle).toBe("ready");
+			expect(workers.size).toBe(1);
+			expect(readdirSync(descriptorDir).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+			const child = workerLaunchTestState.spawned.at(-1)?.child;
+			if (!child) {
+				throw new Error("Worker child was not captured");
+			}
+			const closed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
+			child.kill("SIGKILL");
+			await closed;
+		},
+	);
 
 	it("rolls back a published worker when shutdown admission and rollback persistence fail", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-cancelled-launch-test-"));
@@ -3951,7 +3966,7 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(recoverWorker).toHaveBeenCalledWith(worker);
 	});
 
-	it("rejects an opted-out attach to a telemetry-enabled worker", async () => {
+	it("issue #4 still rejects an opted-out attach to a resident legacy worker without an opt-out", async () => {
 		const activeSessionId = "active-telemetry-enabled";
 		const summary = {
 			id: activeSessionId,

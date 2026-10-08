@@ -22,7 +22,6 @@ interface ExistingUserOnboardingHarness {
 	connectionState: { model: AgentConnectionModel } | undefined;
 	onboardingFlowAbort: AbortController | undefined;
 	showOnboardingSplash(options?: { immediate?: boolean }): Promise<OnboardingSplashHandle | undefined>;
-	askOnboardingTraceOptIn(): Promise<void>;
 	createAuthFlows(): {
 		runPrimeInferenceLogin(): Promise<AuthenticationResult>;
 	};
@@ -30,7 +29,7 @@ interface ExistingUserOnboardingHarness {
 	askOnboardingProviders(signal: AbortSignal): Promise<void>;
 }
 
-describe("existing user onboarding shows only trace question", () => {
+describe("onboarding without vendor reporting", () => {
 	const harnesses: Harness[] = [];
 
 	beforeEach(() => {
@@ -44,7 +43,7 @@ describe("existing user onboarding shows only trace question", () => {
 		}
 	});
 
-	test("existing user sees only the trace question, not login or provider picker", async () => {
+	test("issue #4: existing user completes without reporting prompts or login", async () => {
 		const harness = await createHarness({ provider: "prime-inference", withConfiguredAuth: true });
 		harnesses.push(harness);
 		const order: string[] = [];
@@ -61,9 +60,6 @@ describe("existing user onboarding shows only trace question", () => {
 		fakeThis.showOnboardingSplash = vi.fn(async () => {
 			order.push("splash");
 			return splash;
-		});
-		fakeThis.askOnboardingTraceOptIn = vi.fn(async () => {
-			order.push("trace");
 		});
 		fakeThis.createAuthFlows = vi.fn(() => ({
 			runPrimeInferenceLogin: vi.fn(async (): Promise<AuthenticationResult> => {
@@ -88,37 +84,11 @@ describe("existing user onboarding shows only trace question", () => {
 		const result = await fakeThis.runOnboardingFlow();
 
 		expect(result).toBe(true);
-		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith({ immediate: true });
+		expect(fakeThis.showOnboardingSplash).not.toHaveBeenCalled();
 		expect(fakeThis.createAuthFlows).not.toHaveBeenCalled();
 		expect(fakeThis.prepareForModelSelectionAfterLogin).not.toHaveBeenCalled();
 		expect(fakeThis.askOnboardingProviders).not.toHaveBeenCalled();
-		expect(fakeThis.askOnboardingTraceOptIn).toHaveBeenCalled();
-		expect(order).toEqual(["splash", "trace", "dismiss"]);
-	});
-
-	test("existing user with traces already enabled completes silently", async () => {
-		const harness = await createHarness({ provider: "prime-inference", withConfiguredAuth: true });
-		harnesses.push(harness);
-		harness.settingsManager.setAgentTracesEnabled(true);
-		const fakeThis = Object.create(InteractiveMode.prototype) as ExistingUserOnboardingHarness;
-		fakeThis.uiServices = {
-			modelRegistry: harness.session.modelRegistry,
-			settingsManager: harness.settingsManager,
-		};
-		fakeThis.connectionState = { model: harness.getModel() as AgentConnectionModel };
-		fakeThis.onboardingFlowAbort = undefined;
-		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss: vi.fn() }));
-		fakeThis.askOnboardingTraceOptIn = vi.fn();
-		fakeThis.createAuthFlows = vi.fn(() => ({
-			runPrimeInferenceLogin: vi.fn(),
-		}));
-
-		const result = await fakeThis.runOnboardingFlow();
-
-		expect(result).toBe(true);
-		expect(fakeThis.showOnboardingSplash).not.toHaveBeenCalled();
-		expect(fakeThis.askOnboardingTraceOptIn).not.toHaveBeenCalled();
-		expect(fakeThis.createAuthFlows).not.toHaveBeenCalled();
+		expect(order).toEqual([]);
 	});
 
 	test("new user without configured auth runs the full flow unchanged", async () => {
@@ -138,9 +108,6 @@ describe("existing user onboarding shows only trace question", () => {
 		fakeThis.showOnboardingSplash = vi.fn(async () => {
 			order.push("splash");
 			return splash;
-		});
-		fakeThis.askOnboardingTraceOptIn = vi.fn(async () => {
-			order.push("trace");
 		});
 		fakeThis.createAuthFlows = vi.fn(() => ({
 			runPrimeInferenceLogin: async (): Promise<AuthenticationResult> => {
@@ -170,7 +137,6 @@ describe("existing user onboarding shows only trace question", () => {
 		expect(fakeThis.createAuthFlows).toHaveBeenCalled();
 		expect(fakeThis.prepareForModelSelectionAfterLogin).toHaveBeenCalled();
 		expect(fakeThis.askOnboardingProviders).toHaveBeenCalled();
-		expect(fakeThis.askOnboardingTraceOptIn).toHaveBeenCalled();
-		expect(order).toEqual(["splash", "login", "prepare", "providers", "trace", "dismiss"]);
+		expect(order).toEqual(["splash", "login", "prepare", "providers", "dismiss"]);
 	});
 });
