@@ -41,13 +41,40 @@ Prime Agent is an open-source coding and research agent for general and long-run
 - The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
 - The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
 
-## Install
+## Downstream source build
 
-Install the latest stable release on macOS or Linux:
+This fork starts from Prime Agent 0.9.8. [Mnemosyne](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent) is the source of truth; GitHub is an automatic push mirror. Push branches and tags only to Mnemosyne.
+
+The Nix flake currently supports `x86_64-linux`:
 
 ```bash
-curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+nix build .#prime-agent
+nix flake check --print-build-logs
+nix develop
 ```
+
+The package compiles the TypeScript workspaces from this checkout. Dependencies are locked and hash-checked. Initial full model and MCP catalogs come from the hash-pinned public 0.9.8 release; only the two catalog files are extracted, not the upstream executable. No private catalog repository or access token is required. Generated catalogs stay out of Git.
+
+The package exposes `packages.x86_64-linux.prime-agent` (also `default`) and `apps.x86_64-linux.prime-agent` (also `default`). Another flake can consume it:
+
+```nix
+{
+    inputs.prime-agent.url = "git+https://mnemosyne.sigilzero.dev/sigilzero/prime-agent.git?ref=main";
+
+    outputs = { self, prime-agent, ... }: {
+        # In a NixOS or Home Manager module, use:
+        # prime-agent.packages.${pkgs.system}.prime-agent
+    };
+}
+```
+
+Building does not install or restart Prime Agent. Normal execution still uses `~/.prime/agent`; test with a separate `PRIME_AGENT_CODING_AGENT_DIR`, `HOME`, and session directory rather than connecting a development build to a live daemon. Python kernel environments remain user-owned and bootstrap through `uv`; the flake does not yet provide a fully offline Python environment.
+
+### CI
+
+The Forgejo workflow uses Gaia's `nix-host` runner and `nix-runner:latest` container. It builds the package and runs flake checks on trusted branch pushes or manual dispatch. It does not deploy, publish releases, or need deployment credentials. External pull-request execution is intentionally not enabled: this runner's local Nix store has sandboxing disabled, so isolated test directories are not a network or security sandbox.
+
+Inherited upstream workflows are archived under `.github/upstream-workflows/`. They are not active CI and must not be enabled as this fork's release pipeline. GitHub Actions stays disabled.
 
 ## Why Prime Agent
 

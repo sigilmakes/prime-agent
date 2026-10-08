@@ -1,5 +1,14 @@
 # Development Rules
 
+## Downstream fork
+
+- This fork preserves Prime Agent 0.9.8 behavior. Keep extension, Python runtime, session, and daemon compatibility unless Willow authorizes a change.
+- Mnemosyne (`origin`) is the source of truth. Push only there; Forgejo automatically mirrors branches and tags to GitHub. Do not push directly to `github` or `upstream`.
+- `origin/main` is this fork's default branch. `upstream/main` tracks the original project for reference, not automatic merging.
+- Normal solo development may happen directly on `main`. Use short-lived `feat/<topic>`, `fix/<topic>`, `perf/<topic>`, `build/<topic>`, or `chore/<topic>` branches when isolation or review is useful. Commits, pushes, merges, releases, and installation changes require authorization; implementing a feature does not authorize deployment.
+- Upstream release scripts and archived workflows are reference material, not this fork's release procedure. They publish packages, update tags, and contact upstream infrastructure.
+- Build and test with isolated home/config/session directories. Never attach test clients to the user's daemon or use real provider credentials.
+
 ## Conversational Style
 
 - No fluff or cheerful filler text
@@ -22,10 +31,11 @@
 
 ## Commands
 
-- After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
-- Note: `npm run check` does not run tests.
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
-- Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
+- Before committing code or packaging changes, run `nix flake check --print-build-logs` and the history-based `npm run check:test-policy` through `nix develop`, with `TEST_POLICY_BASE` set to the work's actual base commit. Fix failures before committing.
+- Flake checks run nonmutating static checks and selected isolated tests. `npm run check` remains available for intentional formatting; it modifies files and does not run tests.
+- Source builds and focused, isolated tests are allowed for authorized implementation work. Prefer the Nix flake so dependencies and build inputs stay pinned.
+- Do not run `npm run dev`, broad `npm test`, or `test.sh` against the normal user environment. `test.sh` moves the user's auth file; use isolated checks instead.
+- Run selected test files with the repository's Vitest runner and faux providers, without real credentials or paid APIs.
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
@@ -92,8 +102,8 @@ When closing issues via commit:
 ## PR Workflow
 
 - Analyze PRs without pulling locally first
-- If the user approves: create a feature branch, pull PR, rebase on main, apply adjustments, commit, merge into main, push, close PR, and leave a comment in the user's tone
-- We work in feature branches until everything is according to the user's requirements. Never merge PRs by yourself.
+- Feature branches are optional for solo work. Review and validate changes on `main` or a branch before committing and pushing authorized work to Mnemosyne.
+- Never merge a PR, close it, or publish a release without explicit authorization.
 
 ## Testing Prime Agent Interactive Mode with tmux
 
@@ -202,24 +212,7 @@ Create provider file exporting:
 
 ## Releasing
 
-**Lockstep versioning**: All packages always share the same version number. Every release updates all packages together.
-
-**Version semantics** (no major releases):
-
-- `patch`: Bug fixes and new features
-- `minor`: API breaking changes
-
-### Steps
-
-1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/`
-
-2. **Run release script**:
-   ```bash
-   npm run release:patch    # Fixes and additions
-   npm run release:minor    # API breaking changes
-   ```
-
-The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.
+This fork has no automated release or deployment procedure yet. Build and validate with the Nix flake; request explicit approval before publishing artifacts or changing an installation. The inherited `scripts/release.mjs` and `release:*` npm commands are not the downstream release path: they publish upstream-shaped npm packages and push `main` and tags.
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 

@@ -1,0 +1,45 @@
+name: Source build
+
+on:
+    push:
+        branches:
+            - "**"
+    workflow_dispatch:
+
+concurrency:
+    group: source-build-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    source-build:
+        runs-on: nix-host
+        timeout-minutes: 60
+        container:
+            image: nix-runner:latest
+        steps:
+            - name: Checkout
+              uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+              with:
+                  persist-credentials: false
+                  fetch-depth: 0
+            - name: Check test policy against Git history
+              env:
+                  BEFORE_SHA: ${{ github.event.before }}
+                  BRANCH_NAME: ${{ github.ref_name }}
+              run: |
+                  if [ "$BRANCH_NAME" != main ]; then
+                      TEST_POLICY_BASE=$(git merge-base HEAD origin/main)
+                  elif [ -n "$BEFORE_SHA" ] && git rev-parse --verify "$BEFORE_SHA^{commit}" >/dev/null 2>&1; then
+                      TEST_POLICY_BASE=$BEFORE_SHA
+                  else
+                      TEST_POLICY_BASE=$(git rev-parse HEAD^)
+                  fi
+                  export TEST_POLICY_BASE
+                  nix develop --no-update-lock-file -c npm run check:test-policy
+            - name: Check source build and isolated tests
+              run: nix flake check --no-update-lock-file --print-build-logs
+            - name: Build the consumable package
+              run: nix build --no-update-lock-file --print-build-logs .#prime-agent

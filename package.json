@@ -15,6 +15,8 @@
 		"dev": "concurrently --names \"ai,agent,coding-agent,tui\" --prefix-colors \"cyan,yellow,red,magenta\" \"cd packages/ai && npm run dev\" \"cd packages/agent && npm run dev\" \"cd packages/coding-agent && npm run dev\" \"cd packages/tui && npm run dev\"",
 		"dev:tsc": "cd packages/ai && npm run dev:tsc",
 		"check": "biome check --write --error-on-warnings . && npm run check:test-policy && tsgo --noEmit && npm run check:installer && npm run check:push-guard && npm run check:browser-smoke",
+		"check:ci": "npm run check:test-policy && npm run check:static",
+		"check:static": "biome check --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:push-guard && npm run check:browser-smoke",
 		"check:test-policy": "node scripts/check-test-policy.mjs",
 		"check:installer": "node scripts/check-installer.mjs",
 		"check:push-guard": "node scripts/check-push-guard.mjs",
