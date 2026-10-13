@@ -54,7 +54,8 @@ The package exposes `packages.x86_64-linux.prime-agent` (also `default`) and `ap
 
 ```nix
 {
-    inputs.prime-agent.url = "git+https://mnemosyne.sigilzero.dev/sigilzero/prime-agent.git?ref=main";
+    # Replace the placeholder with a reviewed Forgejo Release's full commit SHA.
+    inputs.prime-agent.url = "git+https://mnemosyne.sigilzero.dev/sigilzero/prime-agent.git?rev=<full-release-commit-sha>";
 
     outputs = { self, prime-agent, ... }: {
         # In a NixOS or Home Manager module, use:
@@ -76,6 +77,12 @@ Nightly (03:23 UTC) and manual runs execute all reviewed groups. Paid-provider p
 Steps share the same container-local Nix store and use Gaia's existing signed NixOS/homelab caches. This workflow does not upload new cache entries or retain a writable store between jobs. It does not deploy, publish releases, or need deployment credentials. GitHub has no runner attached. The Gaia container's local Nix store has sandboxing disabled, so private test directories are not a network or security sandbox.
 
 Inherited upstream workflows are archived under `.github/upstream-workflows/`. They are not active CI and must not be enabled as this fork's release pipeline. GitHub Actions stays disabled.
+
+### Fork source releases
+
+For now, a Forgejo Release is a manually approved **source checkpoint**, not an npm, binary, or R2 release. Name tags `fork-YYYY.MM.DD.N`, incrementing `N` for another release on the same date. Tag a reviewed commit on Mnemosyne `main`; put the full commit SHA, successful Forgejo CI run, upstream 0.9.8 baseline, and scope in the release notes. Prepare a draft for review first. Creating or publishing a tag or release requires Willow's approval. The inherited `release:*`, `version:*`, `release:pack`, and `publish` commands are not this fork's release procedure.
+
+The CLI and workspace packages still report `0.9.8`; the fork tag is not a new semantic package version. The Nix build still takes only the hash-pinned model/MCP baseline files from the upstream 0.9.8 tarball, not fork release assets. Do not claim that a source release publishes fresh bundled catalogs. Before publishing, verify the exact commit is on `main`, its Forgejo CI passed, and `nix flake check --print-build-logs` plus the history-based test policy passed for the source change. CI runs on branch pushes, not tags. A consumer pins the release's full commit SHA and Nix lock hash, rather than following `main`; updating or rolling back is a separately reviewed config diff. A release never deploys or restarts a running daemon by itself.
 
 ## Why Prime Agent
 
