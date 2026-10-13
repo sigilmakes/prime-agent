@@ -1,4 +1,5 @@
-import type { Server } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { extractWWWAuthenticateParams, selectClientAuthMethod } from "@modelcontextprotocol/sdk/client/auth.js";
 import {
 	OAuthClientInformationFullSchema,
@@ -27,6 +28,7 @@ const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const REGISTRATION_TIMEOUT_MS = 15_000;
 const TOKEN_TIMEOUT_MS = 15_000;
+const LOGIN_TIMEOUT_MS = 120_000;
 const MAX_METADATA_BYTES = 256 * 1024;
 
 type ClientAuthMethod = "client_secret_basic" | "client_secret_post" | "none";
@@ -242,11 +244,13 @@ async function discoverAuthorizationServer(
 	const candidates = authorizationServerMetadataUrls(issuer);
 	let lastError: unknown;
 	for (const candidate of candidates) {
+		if (signal?.aborted) throw signal.reason;
 		try {
 			const response = await fetchResponse(candidate, undefined, DISCOVERY_TIMEOUT_MS, signal);
 			if (response.status === 404) continue;
 			return authorizationServerMetadata(await jsonMetadata(response, candidate), issuer, requireExactIssuer);
 		} catch (error) {
+			if (signal?.aborted) throw signal.reason;
 			lastError = error;
 		}
 	}
@@ -329,6 +333,7 @@ async function tryProtectedResourceMetadata(
 		headerUrl = extractWWWAuthenticateParams(response).resourceMetadataUrl?.toString();
 		await response.body?.cancel();
 	} catch {
+		if (signal?.aborted) throw signal.reason;
 		// The server need not support a GET probe; use the RFC well-known locations below.
 	}
 	if (headerUrl) {
@@ -344,6 +349,7 @@ async function tryProtectedResourceMetadata(
 			? [resourceMetadataUrl(resource)]
 			: [resourceMetadataUrl(resource), rootResourceMetadataUrl(resource)];
 	for (const candidate of candidates) {
+		if (signal?.aborted) throw signal.reason;
 		const response = await fetchResponse(candidate, undefined, DISCOVERY_TIMEOUT_MS, signal);
 		if (response.status >= 400 && response.status < 500) continue;
 		return resourceMetadata(await jsonMetadata(response, candidate), resource);
@@ -577,13 +583,15 @@ async function registerClient(
 
 type CallbackResult = { code: string; state: string } | null;
 
-async function startCallbackServer(label: string): Promise<{
-	server: Server;
+async function startCallbackServer(
+	label: string,
+	signal: AbortSignal,
+): Promise<{
+	close: () => Promise<void>;
 	redirectUri: string;
 	cancel: () => void;
 	waitForCode: () => Promise<CallbackResult>;
 }> {
-	const { createServer } = await import("node:http");
 	let settle: ((value: CallbackResult) => void) | undefined;
 	const waitPromise = new Promise<CallbackResult>((resolve) => {
 		let settled = false;
@@ -595,7 +603,7 @@ async function startCallbackServer(label: string): Promise<{
 		};
 	});
 
-	const handler = (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => {
+	const handler = (req: IncomingMessage, res: ServerResponse) => {
 		const url = new URL(req.url || "", "http://localhost");
 		if (url.pathname !== CALLBACK_PATH) {
 			res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
@@ -625,20 +633,45 @@ async function startCallbackServer(label: string): Promise<{
 	let lastError: unknown;
 	for (const port of CALLBACK_PORTS) {
 		const server = createServer(handler);
+		const sockets = new Set<Socket>();
+		server.on("connection", (socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
+		});
+		// Reject upgraded connections; the callback only accepts ordinary HTTP GETs.
+		server.on("upgrade", (_request, socket) => socket.destroy());
 		// Persistent handler so a post-bind 'error' is never an unhandled crash.
 		let bindErr: ((err: unknown) => void) | undefined;
 		server.on("error", (err) => bindErr?.(err));
 		try {
-			const bound = await new Promise<boolean>((resolve) => {
-				bindErr = () => resolve(false);
+			const bound = await new Promise<boolean>((resolve, reject) => {
+				const aborted = () => {
+					bindErr = undefined;
+					for (const socket of sockets) socket.destroy();
+					server.close(() => reject(signal.reason));
+				};
+				bindErr = () => {
+					signal.removeEventListener("abort", aborted);
+					resolve(false);
+				};
+				signal.addEventListener("abort", aborted, { once: true });
+				if (signal.aborted) {
+					aborted();
+					return;
+				}
 				server.listen(port, CALLBACK_HOST, () => {
+					if (signal.aborted) return;
+					signal.removeEventListener("abort", aborted);
 					bindErr = undefined;
 					resolve(true);
 				});
 			});
 			if (bound) {
 				return {
-					server,
+					close: async () => {
+						for (const socket of sockets) socket.destroy();
+						await new Promise<void>((resolve) => server.close(() => resolve()));
+					},
 					redirectUri: redirectUriFor(port),
 					cancel: () => settle?.(null),
 					waitForCode: () => waitPromise,
@@ -647,6 +680,7 @@ async function startCallbackServer(label: string): Promise<{
 			lastError = `port ${port} in use`;
 			server.close();
 		} catch (err) {
+			if (signal.aborted) throw signal.reason;
 			lastError = err;
 			server.close();
 		}
@@ -779,31 +813,58 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 	const label = config.label ?? config.server;
 
 	async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-		if (callbacks.signal?.aborted) throw new Error("Login cancelled");
-		// Fail fast on a misconfigured secret before any network request.
-		const configSecret = configuredSecret(config, label);
-		const discovery = await discover(config.url, callbacks.signal);
-		const { metadata: meta } = discovery;
-		if (!meta.response_types_supported.includes("code")) {
-			throw new Error(`${label} does not support the authorization code flow`);
-		}
-		if (meta.code_challenge_methods_supported && !meta.code_challenge_methods_supported.includes("S256")) {
-			throw new Error(`${label} does not support PKCE S256`);
-		}
-		callbacks.onProgress?.(`Discovered ${discovery.issuer ?? meta.issuer}`);
-
-		// SEP-835: configured scopes, then the protected-resource metadata's scopes; never a blind AS-wide join.
-		// SEP-835: configured scopes, then protected-resource scopes; never a blind AS-wide join.
-		const scope = resolveScope(config.scopes, discovery.protectedResource);
-
-		const { verifier, challenge } = await generatePKCE();
-		// `state` must be independent of the PKCE verifier — the verifier is the
-		// secret used at token exchange, while `state` is echoed on the redirect URL.
-		const state = randomState();
-		const cb = await startCallbackServer(label);
-		const abort = () => cb.cancel();
-		callbacks.signal?.addEventListener("abort", abort, { once: true });
+		const timeout = AbortSignal.timeout(LOGIN_TIMEOUT_MS);
+		const signal = callbacks.signal ? AbortSignal.any([callbacks.signal, timeout]) : timeout;
+		const cancelled = () => new Error(callbacks.signal?.aborted ? "Login cancelled" : "Login timed out");
+		const check = () => {
+			if (signal.aborted) throw cancelled();
+		};
+		const wait = <T>(promise: Promise<T>): Promise<T> => {
+			check();
+			return new Promise<T>((resolve, reject) => {
+				const abort = () => {
+					signal.removeEventListener("abort", abort);
+					reject(cancelled());
+				};
+				signal.addEventListener("abort", abort, { once: true });
+				promise.then(
+					(value) => {
+						signal.removeEventListener("abort", abort);
+						resolve(value);
+					},
+					(error: unknown) => {
+						signal.removeEventListener("abort", abort);
+						reject(error);
+					},
+				);
+			});
+		};
+		let cb: Awaited<ReturnType<typeof startCallbackServer>> | undefined;
 		try {
+			check();
+			// Fail fast on a misconfigured secret before any network request.
+			const configSecret = configuredSecret(config, label);
+			const discovery = await wait(discover(config.url, signal));
+			const { metadata: meta } = discovery;
+			if (!meta.response_types_supported.includes("code")) {
+				throw new Error(`${label} does not support the authorization code flow`);
+			}
+			if (meta.code_challenge_methods_supported && !meta.code_challenge_methods_supported.includes("S256")) {
+				throw new Error(`${label} does not support PKCE S256`);
+			}
+			callbacks.onProgress?.(`Discovered ${discovery.issuer ?? meta.issuer}`);
+
+			// SEP-835: configured scopes, then the protected-resource metadata's scopes; never a blind AS-wide join.
+			// SEP-835: configured scopes, then protected-resource scopes; never a blind AS-wide join.
+			const scope = resolveScope(config.scopes, discovery.protectedResource);
+
+			const { verifier, challenge } = await generatePKCE();
+			// `state` must be independent of the PKCE verifier — the verifier is the
+			// secret used at token exchange, while `state` is echoed on the redirect URL.
+			const state = randomState();
+			cb = await startCallbackServer(label, signal);
+			check();
+			const callback = cb;
 			// Client identity: pre-registered id, CIMD (when advertised and configured), then DCR.
 			let clientId = config.clientId;
 			let clientSecret = configSecret;
@@ -822,7 +883,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 					registration = "cimd";
 				} else if (meta.registration_endpoint) {
 					callbacks.onProgress?.("Registering OAuth client…");
-					const registered = await registerClient(meta.registration_endpoint, label, scope, callbacks.signal);
+					const registered = await wait(registerClient(meta.registration_endpoint, label, scope, signal));
 					clientId = registered.clientId;
 					clientSecret = registered.clientSecret ?? clientSecret;
 					secretExpiresAt = registered.secretExpiresAt;
@@ -845,7 +906,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			const authParams = new URLSearchParams({
 				client_id: clientId,
 				response_type: "code",
-				redirect_uri: cb.redirectUri,
+				redirect_uri: callback.redirectUri,
 				code_challenge: challenge,
 				code_challenge_method: "S256",
 				state,
@@ -876,7 +937,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 					.onManualCodeInput()
 					.then((input) => {
 						const parsed = parseRedirectInput(input, state); // may throw a validation error
-						cb.cancel();
+						callback.cancel();
 						return parsed;
 					})
 					.catch(async (err) => {
@@ -889,22 +950,25 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 							manualCancelled = true;
 						}
 						await new Promise((r) => setTimeout(r, 500));
-						cb.cancel();
+						callback.cancel();
 						return null;
 					});
-				const fromCallback = await cb.waitForCode();
-				result = fromCallback ?? (await manual);
+				const fromCallback = await wait(callback.waitForCode());
+				result = fromCallback ?? (await wait(manual));
 				if (!result && manualError) throw manualError;
 			} else {
-				result = await cb.waitForCode();
+				result = await wait(callback.waitForCode());
 				if (!result) {
-					const input = await callbacks.onPrompt({
-						message: "Paste the authorization code or full redirect URL:",
-						placeholder: cb.redirectUri,
-					});
+					const input = await wait(
+						callbacks.onPrompt({
+							message: "Paste the authorization code or full redirect URL:",
+							placeholder: callback.redirectUri,
+						}),
+					);
 					result = parseRedirectInput(input, state);
 				}
 			}
+			check();
 			if (!result) {
 				throw new Error(manualCancelled ? "Login cancelled" : "Missing authorization code");
 			}
@@ -916,21 +980,24 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			const tokenParams = new URLSearchParams({
 				grant_type: "authorization_code",
 				code: result.code,
-				redirect_uri: cb.redirectUri,
+				redirect_uri: callback.redirectUri,
 				code_verifier: verifier,
 			});
 			if (discovery.resource) tokenParams.set("resource", discovery.resource);
-			const token = await exchangeToken(
-				meta.token_endpoint,
-				tokenParams,
-				authMethod,
-				clientId,
-				clientSecret,
-				"Authorization code exchange",
-				label,
-				config.server,
-				callbacks.signal,
+			const token = await wait(
+				exchangeToken(
+					meta.token_endpoint,
+					tokenParams,
+					authMethod,
+					clientId,
+					clientSecret,
+					"Authorization code exchange",
+					label,
+					config.server,
+					signal,
+				),
 			);
+			check();
 			return toCredentials(
 				token,
 				meta.token_endpoint,
@@ -947,11 +1014,15 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				discovery.issuer,
 				discovery.audienceMode,
 			);
+		} catch (error) {
+			if (signal.aborted) throw cancelled();
+			throw error;
 		} finally {
-			callbacks.signal?.removeEventListener("abort", abort);
-			cb.cancel();
-			cb.server.close();
-			cb.server.closeAllConnections?.();
+			const callback = cb;
+			if (callback) {
+				callback.cancel();
+				await callback.close();
+			}
 		}
 	}
 

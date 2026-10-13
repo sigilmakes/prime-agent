@@ -1,0 +1,1 @@
+- Fixed MCP connection reload and shutdown races, and added a bounded retry for read-only tool discovery ([#7](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/7)).

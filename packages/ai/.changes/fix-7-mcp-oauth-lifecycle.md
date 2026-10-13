@@ -1,0 +1,1 @@
+- Fixed MCP OAuth login cancellation and timeout across discovery, callback waiting, and token exchange ([#7](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/7)).

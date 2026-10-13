@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { connect, Server as TcpServer } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createMcpOAuthProvider,
@@ -106,6 +107,18 @@ async function loginWithManualCode(
 		signal,
 	});
 	return { creds, authUrl };
+}
+
+async function expectCallbackPortReleased(redirect: string): Promise<void> {
+	const probe = createServer();
+	try {
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(Number(new URL(redirect).port), "127.0.0.1", resolve);
+		});
+	} finally {
+		if (probe.listening) await new Promise<void>((resolve) => probe.close(() => resolve()));
+	}
 }
 
 /** Notion-shaped offline server: pathful endpoint, PRM at root well-known, DCR, public client. */
@@ -1071,6 +1084,297 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(error.message).toContain("HTTP 400");
 		expect(error.message).not.toContain("<script>");
 		expect(error.message).not.toContain("not-echoed");
+	});
+
+	it("closes the callback listener before an aborted login settles", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+					return jsonResponse(ORIGIN_META);
+				throw new Error(`unexpected fetch: ${urlOf(input)}`);
+			}),
+		);
+		const controller = new AbortController();
+		let redirect = "";
+		let ready!: () => void;
+		const authorized = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		const login = createMcpOAuthProvider({ server: "cancel-wait", url: ORIGIN_URL, clientId: "c" }).login({
+			onAuth: ({ url }) => {
+				redirect = new URL(url).searchParams.get("redirect_uri") ?? "";
+				ready();
+			},
+			onPrompt: async () => new Promise<string>(() => {}),
+			signal: controller.signal,
+		});
+		await authorized;
+		controller.abort();
+		await expect(login).rejects.toThrow("Login cancelled");
+		await expectCallbackPortReleased(redirect);
+	});
+
+	it("cancels token exchange and closes the callback listener before settling", async () => {
+		let exchangeStarted!: () => void;
+		const exchanging = new Promise<void>((resolve) => {
+			exchangeStarted = resolve;
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn((input: unknown, init?: RequestInit): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return Promise.resolve(missing);
+				if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+					return Promise.resolve(jsonResponse(ORIGIN_META));
+				if (urlOf(input) === ORIGIN_CODE_EXCHANGE) {
+					exchangeStarted();
+					return new Promise<Response>((_, reject) =>
+						init?.signal?.addEventListener("abort", () => reject(new Error("aborted exchange")), { once: true }),
+					);
+				}
+				throw new Error(`unexpected fetch: ${urlOf(input)}`);
+			}),
+		);
+		const controller = new AbortController();
+		let redirect = "";
+		let state = "";
+		const login = createMcpOAuthProvider({ server: "cancel-token", url: ORIGIN_URL, clientId: "c" }).login({
+			onAuth: ({ url }) => {
+				redirect = new URL(url).searchParams.get("redirect_uri") ?? "";
+				state = new URL(url).searchParams.get("state") ?? "";
+			},
+			onPrompt: async () => "",
+			onManualCodeInput: async () => `${redirect}?code=code&state=${state}`,
+			signal: controller.signal,
+		});
+		await exchanging;
+		controller.abort();
+		await expect(login).rejects.toThrow("Login cancelled");
+		await expectCallbackPortReleased(redirect);
+	});
+
+	it("settles cancellation with an open callback TCP connection", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+					return jsonResponse(ORIGIN_META);
+				throw new Error(`unexpected fetch: ${urlOf(input)}`);
+			}),
+		);
+		const controller = new AbortController();
+		let redirect = "";
+		let ready!: () => void;
+		const authorized = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		const login = createMcpOAuthProvider({ server: "open-socket", url: ORIGIN_URL, clientId: "c" }).login({
+			onAuth: ({ url }) => {
+				redirect = new URL(url).searchParams.get("redirect_uri") ?? "";
+				ready();
+			},
+			onPrompt: async () => "",
+			signal: controller.signal,
+		});
+		await authorized;
+		const socket = connect(Number(new URL(redirect).port), "127.0.0.1");
+		try {
+			await new Promise<void>((resolve, reject) => {
+				socket.once("connect", resolve);
+				socket.once("error", reject);
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			controller.abort();
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await expect(
+					Promise.race([
+						login,
+						new Promise<never>((_, reject) => {
+							timer = setTimeout(() => reject(new Error("callback teardown hung")), 1000);
+						}),
+					]),
+				).rejects.toThrow("Login cancelled");
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+			await expectCallbackPortReleased(redirect);
+		} finally {
+			socket.destroy();
+			await login.catch(() => {});
+		}
+	});
+
+	it("rejects callback HTTP upgrades and still closes on cancellation", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+					return jsonResponse(ORIGIN_META);
+				throw new Error(`unexpected fetch: ${urlOf(input)}`);
+			}),
+		);
+		const controller = new AbortController();
+		let redirect = "";
+		let ready!: () => void;
+		const authorized = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		const login = createMcpOAuthProvider({ server: "upgrade", url: ORIGIN_URL, clientId: "c" }).login({
+			onAuth: ({ url }) => {
+				redirect = new URL(url).searchParams.get("redirect_uri") ?? "";
+				ready();
+			},
+			onPrompt: async () => new Promise<string>(() => {}),
+			signal: controller.signal,
+		});
+		await authorized;
+		const socket = connect(Number(new URL(redirect).port), "127.0.0.1");
+		try {
+			await new Promise<void>((resolve, reject) => {
+				socket.once("connect", resolve);
+				socket.once("error", reject);
+			});
+			const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+			socket.write("GET /callback HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					closed,
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(() => reject(new Error("upgrade socket remained open")), 1000);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+			controller.abort();
+			await expect(login).rejects.toThrow("Login cancelled");
+			await expectCallbackPortReleased(redirect);
+		} finally {
+			socket.destroy();
+			controller.abort();
+			await login.catch(() => {});
+		}
+	});
+
+	it.each(["abort", "deadline"] as const)(
+		"settles %s with an idle connection while callback listen completion is pending",
+		async (reason) => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: unknown): Promise<Response> => {
+					const missing = absentPrm(input);
+					if (missing) return missing;
+					if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+						return jsonResponse(ORIGIN_META);
+					throw new Error(`unexpected fetch: ${urlOf(input)}`);
+				}),
+			);
+			const controller = new AbortController();
+			const deadline = new AbortController();
+			const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+			const listen = TcpServer.prototype.listen;
+			let listening!: () => void;
+			const bound = new Promise<void>((resolve) => {
+				listening = resolve;
+			});
+			let pendingServer: TcpServer | undefined;
+			const listenSpy = vi.spyOn(TcpServer.prototype, "listen").mockImplementation(function (
+				this: TcpServer,
+				...args: unknown[]
+			): TcpServer {
+				if (args[0] === 53700) {
+					pendingServer = this;
+					return Reflect.apply(listen, this, [args[0], args[1], listening]) as TcpServer;
+				}
+				return Reflect.apply(listen, this, args) as TcpServer;
+			});
+			const login = createMcpOAuthProvider({ server: "pending-bind", url: ORIGIN_URL, clientId: "c" }).login({
+				onAuth: () => {
+					throw new Error("authorized before bind settled");
+				},
+				onPrompt: async () => "",
+				...(reason === "abort" ? { signal: controller.signal } : {}),
+			});
+			let socket: ReturnType<typeof connect> | undefined;
+			try {
+				await bound;
+				socket = connect(53700, "127.0.0.1");
+				const connection = socket;
+				await new Promise<void>((resolve, reject) => {
+					connection.once("connect", resolve);
+					connection.once("error", reject);
+				});
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				if (reason === "abort") controller.abort();
+				else deadline.abort();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					await expect(
+						Promise.race([
+							login,
+							new Promise<never>((_, reject) => {
+								timer = setTimeout(() => reject(new Error("bind cancellation hung")), 1000);
+							}),
+						]),
+					).rejects.toThrow(reason === "abort" ? "Login cancelled" : "Login timed out");
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+				listenSpy.mockRestore();
+				await expectCallbackPortReleased("http://localhost:53700/callback");
+			} finally {
+				socket?.destroy();
+				listenSpy.mockRestore();
+				timeout.mockRestore();
+				pendingServer?.close();
+				void login.catch(() => {});
+			}
+		},
+	);
+
+	it("ends a callback wait at the whole-flow deadline and frees its port", async () => {
+		const deadline = new AbortController();
+		const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: unknown): Promise<Response> => {
+					const missing = absentPrm(input);
+					if (missing) return missing;
+					if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+						return jsonResponse(ORIGIN_META);
+					throw new Error(`unexpected fetch: ${urlOf(input)}`);
+				}),
+			);
+			let redirect = "";
+			let ready!: () => void;
+			const authorized = new Promise<void>((resolve) => {
+				ready = resolve;
+			});
+			const login = createMcpOAuthProvider({ server: "deadline", url: ORIGIN_URL, clientId: "c" }).login({
+				onAuth: ({ url }) => {
+					redirect = new URL(url).searchParams.get("redirect_uri") ?? "";
+					ready();
+				},
+				onPrompt: async () => new Promise<string>(() => {}),
+			});
+			await authorized;
+			expect(timeout).toHaveBeenCalledWith(120_000);
+			deadline.abort();
+			await expect(login).rejects.toThrow("Login timed out");
+			await expectCallbackPortReleased(redirect);
+		} finally {
+			timeout.mockRestore();
+		}
 	});
 
 	// ---- Bounding and cancellation ----
