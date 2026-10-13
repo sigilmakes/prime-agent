@@ -233,8 +233,10 @@ describe("remote catalog compatibility", () => {
 	it("keeps a running session pinned to its active model object across failed and changed catalog refreshes", async () => {
 		const tempDir = makeTempDir();
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		authStorage.setRuntimeApiKey("anthropic", "local-test-key");
 		const modelRegistry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
-		const activeModel = modelRegistry.find("anthropic", "claude-fable-5");
+		const bundledAnthropic = bundledProviderModel("anthropic");
+		const activeModel = modelRegistry.find("anthropic", bundledAnthropic.id);
 		if (!activeModel) throw new Error("missing active model");
 		const sessionResult = await createAgentSession({
 			cwd: tempDir,
@@ -246,25 +248,26 @@ describe("remote catalog compatibility", () => {
 		});
 		const session = sessionResult.session;
 
-		const changedModel = { ...activeModel, name: "Changed catalog name" };
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (input: string | URL | Request) => {
 				const url = input instanceof Request ? input.url : input.toString();
-				if (url === PROVIDER_MODEL_CATALOG_URL) {
-					return new Response(JSON.stringify(modelPayload([changedModel])));
+				if (url === "https://api.anthropic.com/v1/models?limit=1000") {
+					return new Response(
+						JSON.stringify({ data: [{ id: activeModel.id, display_name: "Changed catalog name" }] }),
+					);
 				}
 				if (url === `${PRIME_INFERENCE_BASE_URL}/models`) {
 					return new Response(JSON.stringify(primeInferenceCatalogPayload()));
 				}
-				throw new Error(`unexpected fetch ${url}`);
+				return new Response("not found", { status: 404 });
 			}),
 		);
 
 		try {
 			await modelRegistry.refreshAvailableModels();
 			await modelRegistry.waitForPendingModelRefreshes(2_000);
-			expect(modelRegistry.find("anthropic", "claude-fable-5")?.name).toBe("Changed catalog name");
+			expect(modelRegistry.find("anthropic", activeModel.id)?.name).toBe("Changed catalog name");
 			const modelAfterChangedCatalog = session.model;
 			expect(modelAfterChangedCatalog).toBe(activeModel);
 			expect(modelAfterChangedCatalog?.baseUrl).toBe(activeModel.baseUrl);

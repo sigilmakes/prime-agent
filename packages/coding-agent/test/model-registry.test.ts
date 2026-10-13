@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
@@ -741,6 +742,207 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("issue #5 credential-scoped discovery", () => {
+		test("never loads another credential's cached models after key rotation or logout", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("ANTHROPIC_API_KEY", "");
+			const requests: string[] = [];
+			const knownId = getBundledModels().find((model) => model.provider === "anthropic")!.id;
+			const server = createServer((request, response) => {
+				const token = request.headers["x-api-key"];
+				requests.push(String(token));
+				response.setHeader("Content-Type", "application/json");
+				response.end(JSON.stringify({ data: [{ id: knownId, display_name: String(token) }] }));
+			});
+			await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("Missing test server address");
+			const nativeFetch = globalThis.fetch;
+			vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+				if (String(input).startsWith("https://api.anthropic.com/v1/models"))
+					return nativeFetch(`http://127.0.0.1:${address.port}/models`, init);
+				return Promise.resolve(new Response("not found", { status: 404 }));
+			});
+			try {
+				authStorage.set("anthropic", { type: "api_key", key: "key-a" });
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				await registry.refreshAvailableModels();
+				await registry.waitForPendingModelRefreshes(2_000);
+				expect(registry.find("anthropic", knownId)?.name).toBe("key-a");
+				expect(requests).toEqual(["key-a"]);
+				authStorage.set("anthropic", { type: "api_key", key: "key-b" });
+				expect(registry.find("anthropic", knownId)?.name).not.toBe("key-a");
+				await registry.refreshAvailableModels();
+				await registry.waitForPendingModelRefreshes(2_000);
+				expect(registry.find("anthropic", knownId)?.name).toBe("key-b");
+				expect(registry.find("anthropic", knownId)?.name).not.toBe("key-a");
+				expect(requests).toEqual(["key-a", "key-b"]);
+				authStorage.logout("anthropic");
+				expect(registry.find("anthropic", knownId)?.name).not.toBe("key-b");
+			} finally {
+				server.closeAllConnections();
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+			}
+		});
+	});
+
+	describe("issue #5 auth lookup ordering", () => {
+		test("a delayed old credential cannot replace the rotated provider scope", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("ANTHROPIC_API_KEY", "");
+			const knownId = getBundledModels().find((model) => model.provider === "anthropic")!.id;
+			authStorage.set("anthropic", { type: "api_key", key: "old-key" });
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			let release!: () => void;
+			let entered!: () => void;
+			const held = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			const original = authStorage.getApiKeyWithSourceToken.bind(authStorage);
+			let delayOnce = true;
+			const lookup = vi
+				.spyOn(authStorage, "getApiKeyWithSourceToken")
+				.mockImplementation(async (provider, options) => {
+					const result = await original(provider, options);
+					if (provider === "anthropic" && delayOnce) {
+						delayOnce = false;
+						entered();
+						await held;
+					}
+					return result;
+				});
+			const requests: string[] = [];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+					if (String(input).startsWith("https://api.anthropic.com/v1/models")) {
+						const key = new Headers(init?.headers).get("x-api-key")!;
+						requests.push(key);
+						return new Response(JSON.stringify({ data: [{ id: knownId, display_name: key }] }));
+					}
+					return new Response("missing", { status: 404 });
+				}),
+			);
+			try {
+				const old = registry.refreshModelCatalog();
+				await started;
+				authStorage.set("anthropic", { type: "api_key", key: "new-key" });
+				release();
+				await old;
+				await registry.refreshAvailableModels();
+				await registry.waitForPendingModelRefreshes(2_000);
+				expect(requests).not.toContain("old-key");
+				expect(registry.find("anthropic", knownId)?.name).toBe("new-key");
+			} finally {
+				release();
+				lookup.mockRestore();
+			}
+		});
+	});
+
+	describe("issue #5 provider-owned discovery", () => {
+		test.each([
+			["output-only audio", { output_modalities: ["audio"] }],
+			["input-only image", { input_modalities: ["image"] }],
+		] as const)(
+			"uses provider endpoint, retains partial data, and revokes %s across offline restart",
+			async (_name, revokedArchitecture) => {
+				vi.stubEnv("PI_OFFLINE", "0");
+				let payload: unknown = {
+					data: [
+						{
+							id: "test/discovered",
+							name: "First",
+							context_length: 32000,
+							top_provider: { max_completion_tokens: 4096 },
+							pricing: { prompt: "0.000001", completion: "0.000002" },
+							architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+						},
+					],
+				};
+				const seen: string[] = [];
+				const server = createServer((request, response) => {
+					seen.push(request.url ?? "");
+					response.setHeader("Content-Type", "application/json");
+					response.end(JSON.stringify(payload));
+				});
+				await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+				const address = server.address();
+				if (!address || typeof address === "string") throw new Error("Missing test server address");
+				const localUrl = `http://127.0.0.1:${address.port}`;
+				const nativeFetch = globalThis.fetch;
+				vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+					if (String(input) === "https://openrouter.ai/api/v1/models")
+						return nativeFetch(`${localUrl}/models`, init);
+					return Promise.resolve(new Response("not found", { status: 404 }));
+				});
+				try {
+					const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+					const pinned = getModelsForProvider(registry, "openrouter")[0];
+					await registry.refreshAvailableModels();
+					await registry.waitForPendingModelRefreshes(2_000);
+					expect(seen).toEqual(["/models"]);
+					expect(registry.find("openrouter", "test/discovered")).toMatchObject({
+						name: "First",
+						contextWindow: 32000,
+					});
+					expect(registry.find("openrouter", pinned!.id)).toBeDefined();
+					expect(registry.getProviderCatalogStatus("openrouter").source).toBe("network");
+					payload = {
+						data: [
+							{
+								id: "test/other",
+								name: "Other",
+								context_length: 64000,
+								top_provider: { max_completion_tokens: 8192 },
+								pricing: { prompt: "0.000003", completion: "0.000004" },
+								architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+							},
+						],
+					};
+					const cachePath = join(tempDir, "models", "openrouter-models.v1.json");
+					const snapshot = JSON.parse(readFileSync(cachePath, "utf8"));
+					snapshot.fetchedAt = Date.now() - 60 * 60_000 - 1;
+					snapshot.checkedAt = snapshot.fetchedAt;
+					writeFileSync(cachePath, JSON.stringify(snapshot));
+					const restored = ModelRegistry.create(authStorage, modelsJsonPath);
+					expect(restored.find("openrouter", "test/discovered")?.name).toBe("First");
+					await restored.refreshAvailableModels();
+					await restored.waitForPendingModelRefreshes(2_000);
+					expect(restored.find("openrouter", "test/other")?.name).toBe("Other");
+					expect(restored.find("openrouter", "test/discovered")?.name).toBe("First");
+					vi.stubEnv("PI_OFFLINE", "1");
+					const offline = ModelRegistry.create(authStorage, modelsJsonPath);
+					expect(offline.find("openrouter", "test/other")?.name).toBe("Other");
+					expect(offline.find("openrouter", "test/discovered")?.name).toBe("First");
+					vi.stubEnv("PI_OFFLINE", "0");
+					payload = {
+						data: [{ id: "test/discovered", architecture: revokedArchitecture }],
+					};
+					const stale = JSON.parse(readFileSync(cachePath, "utf8"));
+					stale.fetchedAt = Date.now() - 60 * 60_000 - 1;
+					stale.checkedAt = stale.fetchedAt;
+					writeFileSync(cachePath, JSON.stringify(stale));
+					const revoked = ModelRegistry.create(authStorage, modelsJsonPath);
+					expect(revoked.find("openrouter", "test/discovered")).toBeDefined();
+					await revoked.refreshAvailableModels();
+					await revoked.waitForPendingModelRefreshes(2_000);
+					expect(revoked.find("openrouter", "test/discovered")).toBeUndefined();
+					vi.stubEnv("PI_OFFLINE", "1");
+					expect(
+						ModelRegistry.create(authStorage, modelsJsonPath).find("openrouter", "test/discovered"),
+					).toBeUndefined();
+				} finally {
+					server.closeAllConnections();
+					await new Promise<void>((resolve) => server.close(() => resolve()));
+				}
+			},
+		);
+	});
+
 	describe("auth refresh across processes", () => {
 		test("refreshAvailableModels returns while provider catalog refresh is still pending", async () => {
 			vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
@@ -749,8 +951,7 @@ describe("ModelRegistry", () => {
 			vi.stubGlobal(
 				"fetch",
 				vi.fn((input: string | URL | Request) => {
-					if (String(input).includes("prime-agent-catalog/main/models/catalog.v1.json"))
-						providerCatalogRequested = true;
+					if (String(input).includes("openrouter.ai/api/v1/models")) providerCatalogRequested = true;
 					return new Promise<Response>(() => {});
 				}),
 			);

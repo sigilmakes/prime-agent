@@ -1,0 +1,2 @@
+- Added provider-owned model discovery for OpenRouter, OpenAI, Anthropic, and Google with credential-scoped offline fallback ([#5](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/5)).
+- Added catalog source, age, and error details to the model list.

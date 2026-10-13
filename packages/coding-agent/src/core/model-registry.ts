@@ -47,7 +47,14 @@ import {
 	isPrivatePrimeInferenceModel,
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
-import { PROVIDER_MODEL_CATALOG_URL, parseProviderModelCatalog } from "./provider-model-catalog.js";
+import {
+	DISCOVERABLE_PROVIDERS,
+	type DiscoverableProvider,
+	discoveryHeaders,
+	mergeProviderDiscoveryPayload,
+	PROVIDER_DISCOVERY_URLS,
+	parseProviderDiscovery,
+} from "./provider-model-discovery.js";
 import {
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
@@ -379,10 +386,10 @@ function readOpenAICodexAccountId(token: string): string | undefined {
  * than an error. Prime Agent's own package version is far below the Codex CLI's version line, so it must
  * report a supported Codex client version here instead.
  *
- * Model rows ship from the prime-agent-catalog repo through the live provider catalog fetch, so shipping
- * a new Codex subscription model needs no client-side model data. It still needs this constant raised to a
- * Codex CLI release whose catalog includes that model: `getExecutableModels()` below intersects the
- * registry with the discovered catalog, so a catalog model the backend omits is dropped.
+ * Codex model rows come from the bundled catalog until the provider has a compatible
+ * metadata discovery adapter. New rows need a catalog asset update and this constant
+ * raised to a Codex CLI release whose catalog includes the model: `getExecutableModels()`
+ * intersects the registry with the discovered Codex backend list.
  *
  * A stale constant fails silently and asymmetrically: `rlm` subagent delegation and `find_models()`
  * resolve through `getExecutableModels()` and lose the model, while `/model` reads the unfiltered
@@ -465,9 +472,12 @@ export class ModelRegistry {
 	private livePrimeInferenceModels: Model<"openai-completions">[] | undefined;
 	private pendingPrimeInferenceCatalogRefresh: Promise<void> | undefined;
 	private pendingProviderCatalogRefresh: Promise<void> | undefined;
-	private readonly providerCatalog: CatalogCache<Model<Api>[]>;
+	private readonly providerCatalogs = new Map<DiscoverableProvider, CatalogCache<Model<Api>[]>>();
+	private readonly lastProviderModels = new Map<DiscoverableProvider, Model<Api>[]>();
+	private readonly providerScopes = new Map<DiscoverableProvider, string>();
 	private catalogRefreshTimer?: ReturnType<typeof setInterval>;
 	private scheduledCatalogRefresh?: Promise<void>;
+	private discoveryGeneration = 0;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -478,20 +488,33 @@ export class ModelRegistry {
 		private modelsJsonPath: string | undefined,
 	) {
 		const cachePath = (name: string) => (modelsJsonPath ? join(dirname(modelsJsonPath), "models", name) : undefined);
-		const legacyCachePaths = (name: string) =>
-			modelsJsonPath ? [join(dirname(modelsJsonPath), name), join(dirname(modelsJsonPath), "catalog", name)] : [];
-		this.providerCatalog = new CatalogCache(
-			PROVIDER_MODEL_CATALOG_URL,
-			cachePath("provider-model-catalog.v1.json"),
-			(payload) => parseProviderModelCatalog(payload, this.bundledCatalogModels),
-			legacyCachePaths("provider-model-catalog.v1.json"),
-		);
+		for (const provider of DISCOVERABLE_PROVIDERS) {
+			this.providerCatalogs.set(
+				provider,
+				new CatalogCache(PROVIDER_DISCOVERY_URLS[provider], cachePath(`${provider}-models.v1.json`), (payload) =>
+					parseProviderDiscovery(
+						provider,
+						payload,
+						this.bundledCatalogModels,
+						this.lastProviderModels.get(provider),
+					),
+				),
+			);
+		}
+		const openrouter = this.providerCatalogs.get("openrouter")?.get("public");
+		if (openrouter) this.lastProviderModels.set("openrouter", openrouter);
 		this.loadModels();
 		const reference = new WeakRef(this);
 		const unsubscribe = authStorage.onChange(() => {
 			const registry = reference.deref();
-			if (registry) void registry.scheduleCatalogRefresh().catch(() => {});
-			else unsubscribe();
+			if (registry) {
+				registry.discoveryGeneration++;
+				for (const provider of DISCOVERABLE_PROVIDERS) {
+					if (provider !== "openrouter") registry.lastProviderModels.delete(provider);
+				}
+				registry.reloadModelsAfterCatalogChange();
+				void registry.scheduleCatalogRefresh().catch(() => {});
+			} else unsubscribe();
 		});
 	}
 
@@ -624,8 +647,13 @@ export class ModelRegistry {
 		modelOverrides: Map<string, Map<string, ModelOverride>>,
 		livePrimeInferenceModels?: Model<"openai-completions">[],
 	): Model<Api>[] {
-		const remote = this.providerCatalog.get("public");
-		const bundledModels = remote ? [...remote, ...this.bundledPrimeInferenceModels()] : this.bundledCatalogModels;
+		const discovered = new Map<string, Model<Api>[]>();
+		for (const provider of DISCOVERABLE_PROVIDERS) {
+			const models = this.lastProviderModels.get(provider);
+			if (models) discovered.set(provider, models);
+		}
+		const bundledModels = this.bundledCatalogModels.filter((model) => !discovered.has(model.provider));
+		for (const models of discovered.values()) bundledModels.push(...models);
 		return mergePrimeInferenceModels(bundledModels, livePrimeInferenceModels).map((model) => {
 			const providerOverride = overrides.get(model.provider);
 			const perModelOverrides = modelOverrides.get(model.provider);
@@ -925,11 +953,51 @@ export class ModelRegistry {
 	}
 
 	private async refreshProviderCatalog(force: boolean): Promise<void> {
-		await this.providerCatalog.refresh("public", { force });
-		// The catalog-defined default model rides the same cadence; failures keep the
-		// cached value and never block model discovery.
+		const generation = this.discoveryGeneration;
+		await Promise.all(
+			DISCOVERABLE_PROVIDERS.map(async (provider) => {
+				const cache = this.providerCatalogs.get(provider)!;
+				const apiKey = await this.getApiKeyForProvider(provider);
+				if (generation !== this.discoveryGeneration) return;
+				const headers = discoveryHeaders(provider, apiKey);
+				if (!headers) {
+					// A protected listing must never expose another credential's cached rows.
+					this.providerScopes.delete(provider);
+					this.lastProviderModels.delete(provider);
+					return;
+				}
+				const scope = apiKey
+					? createHmac("sha256", apiKey).update(`prime-agent:discovery:${provider}:v1`).digest("hex")
+					: "public";
+				if (this.providerScopes.get(provider) !== scope) {
+					this.lastProviderModels.delete(provider);
+					this.providerScopes.set(provider, scope);
+				}
+				const cached = cache.get(scope);
+				if (cached && generation === this.discoveryGeneration) {
+					this.lastProviderModels.set(provider, cached);
+					this.reloadModelsAfterCatalogChange();
+				}
+				const models = await cache.refresh(scope, {
+					force,
+					headers,
+					mergePayload: (payload, previous) =>
+						mergeProviderDiscoveryPayload(provider, payload, previous, this.bundledCatalogModels),
+					isCurrent: () => generation === this.discoveryGeneration && this.providerScopes.get(provider) === scope,
+				});
+				if (generation !== this.discoveryGeneration || this.providerScopes.get(provider) !== scope) return;
+				if (models) this.lastProviderModels.set(provider, models);
+				else this.lastProviderModels.delete(provider);
+				this.reloadModelsAfterCatalogChange();
+			}),
+		);
+		// Default selection remains independent of provider discovery.
 		await refreshDefaultModelCatalog(force).catch(() => undefined);
-		this.reloadModelsAfterCatalogChange();
+	}
+
+	/** Local catalog health; no daemon protocol field is added. */
+	getProviderCatalogStatus(provider: DiscoverableProvider): ReturnType<CatalogCache<Model<Api>[]>["status"]> {
+		return this.providerCatalogs.get(provider)!.status(this.providerScopes.get(provider) ?? "public");
 	}
 
 	private startCatalogRefreshTimer(): boolean {

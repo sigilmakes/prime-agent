@@ -3,6 +3,7 @@ import { fuzzyFilter } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { formatNoModelsAvailableMessage } from "../core/auth-guidance.js";
 import type { ModelRegistry } from "../core/model-registry.js";
+import { DISCOVERABLE_PROVIDERS } from "../core/provider-model-discovery.js";
 
 function formatTokenCount(count: number): string {
 	if (count >= 1_000_000) {
@@ -92,5 +93,17 @@ export async function listModels(modelRegistry: ModelRegistry, searchPattern?: s
 			row.images.padEnd(widths.images),
 		].join("  ");
 		console.log(line);
+	}
+
+	const shownProviders = new Set(filteredModels.map((model) => model.provider));
+	for (const provider of DISCOVERABLE_PROVIDERS) {
+		if (!shownProviders.has(provider)) continue;
+		const status = modelRegistry.getProviderCatalogStatus(provider);
+		const source = status.source === "none" ? "bundled fallback" : status.source;
+		const age =
+			status.fetchedAt === undefined
+				? "not fetched"
+				: `${Math.max(0, Math.floor((Date.now() - status.fetchedAt) / 60_000))}m old`;
+		console.log(`catalog ${provider}: ${source}, ${status.state}, ${age}${status.error ? `, ${status.error}` : ""}`);
 	}
 }
