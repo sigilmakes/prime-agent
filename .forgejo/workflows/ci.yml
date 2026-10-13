@@ -22,10 +22,10 @@ env:
 
 jobs:
     check:
-        runs-on: nix-host
+        runs-on: gaia-runner
         timeout-minutes: 60
         container:
-            image: nix-runner:latest
+            image: fleet-ci:latest
         steps:
             - name: Checkout
               uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
