@@ -43,6 +43,81 @@ export function getPrivatePrimeInferenceModels(): Model<"openai-completions">[] 
 	}));
 }
 
+async function fetchPrivateModels(
+	apiKey: string,
+	teamHeaders: Record<string, string>,
+	publicModelIds: ReadonlySet<string>,
+	fetchFn: typeof fetch,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<Model<"openai-completions">[]> {
+	const { payload, entries } = await fetchPrimeInferenceModelCatalog({
+		fetchFn,
+		timeoutMs,
+		allowEmpty: true,
+		signal,
+		headers: { ...teamHeaders, Authorization: `Bearer ${apiKey}` },
+	});
+	const publicIds = new Set([...publicModelIds].map((id) => id.toLowerCase()));
+	const bundledPrivateModels = getPrivatePrimeInferenceModels();
+	const bundledById = new Map(bundledPrivateModels.map((model) => [model.id.toLowerCase(), model]));
+	const entriesById = new Map(entries.map((entry) => [entry.id.toLowerCase(), entry]));
+	const data =
+		payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data) ? payload.data : [];
+	const privateEntries = data.flatMap((item) => {
+		if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") return [];
+		const id = item.id.toLowerCase();
+		if (publicIds.has(id) || !isPrivatePrimeInferenceModelId(id)) return [];
+		const parsed = entriesById.get(id);
+		if (parsed) return [parsed];
+		const template = bundledById.get(id);
+		return template ? [{ id: item.id, input: template.cost.input, output: template.cost.output }] : [];
+	});
+	return (
+		buildPrimeInferenceModels(bundledPrivateModels, privateEntries, {
+			includePrivate: true,
+			minimumModels: 0,
+		}) ?? []
+	);
+}
+
+export type PrivatePrimeInferenceModelsOutcome =
+	| { status: "authorized"; models: Model<"openai-completions">[] }
+	| { status: "auth-rejected" | "skipped" | "failed" | "cancelled" };
+
+export async function fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome(
+	apiKey: string,
+	teamHeaders: Record<string, string>,
+	publicModelIds: ReadonlySet<string>,
+	fetchFn: typeof fetch = fetch,
+	timeoutMs: number = PRIVATE_MODEL_REFRESH_TIMEOUT_MS,
+	signal?: AbortSignal,
+): Promise<PrivatePrimeInferenceModelsOutcome> {
+	if (!apiKey || !teamHeaders["X-Prime-Team-ID"]) return { status: "skipped" };
+	if (signal?.aborted) return { status: "cancelled" };
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<"cancelled">((resolve) => {
+		onAbort = () => resolve("cancelled");
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		const result = await Promise.race([
+			fetchPrivateModels(apiKey, teamHeaders, publicModelIds, fetchFn, timeoutMs, signal),
+			aborted,
+		]);
+		if (result === "cancelled" || signal?.aborted) return { status: "cancelled" };
+		return { status: "authorized", models: result };
+	} catch (error) {
+		if (signal?.aborted) return { status: "cancelled" };
+		if (error instanceof PrimeInferenceCatalogRequestError && (error.status === 401 || error.status === 403)) {
+			return { status: "auth-rejected" };
+		}
+		return { status: "failed" };
+	} finally {
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 export async function fetchAuthorizedPrivatePrimeInferenceModels(
 	apiKey: string,
 	teamHeaders: Record<string, string>,
@@ -52,33 +127,7 @@ export async function fetchAuthorizedPrivatePrimeInferenceModels(
 ): Promise<Model<"openai-completions">[]> {
 	if (!teamHeaders["X-Prime-Team-ID"]) return [];
 	try {
-		const { payload, entries } = await fetchPrimeInferenceModelCatalog({
-			fetchFn,
-			timeoutMs,
-			allowEmpty: true,
-			headers: { ...teamHeaders, Authorization: `Bearer ${apiKey}` },
-		});
-		const publicIds = new Set([...publicModelIds].map((id) => id.toLowerCase()));
-		const bundledPrivateModels = getPrivatePrimeInferenceModels();
-		const bundledById = new Map(bundledPrivateModels.map((model) => [model.id.toLowerCase(), model]));
-		const entriesById = new Map(entries.map((entry) => [entry.id.toLowerCase(), entry]));
-		const data =
-			payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data) ? payload.data : [];
-		const privateEntries = data.flatMap((item) => {
-			if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") return [];
-			const id = item.id.toLowerCase();
-			if (publicIds.has(id) || !isPrivatePrimeInferenceModelId(id)) return [];
-			const parsed = entriesById.get(id);
-			if (parsed) return [parsed];
-			const template = bundledById.get(id);
-			return template ? [{ id: item.id, input: template.cost.input, output: template.cost.output }] : [];
-		});
-		return (
-			buildPrimeInferenceModels(bundledPrivateModels, privateEntries, {
-				includePrivate: true,
-				minimumModels: 0,
-			}) ?? []
-		);
+		return await fetchPrivateModels(apiKey, teamHeaders, publicModelIds, fetchFn, timeoutMs);
 	} catch (error) {
 		if (error instanceof PrimeInferenceCatalogRequestError && (error.status === 401 || error.status === 403)) {
 			return [];

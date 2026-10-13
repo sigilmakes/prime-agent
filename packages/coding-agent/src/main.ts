@@ -57,7 +57,8 @@ import { exportFromFile } from "./core/export-html/index.js";
 import type { ExtensionFactory } from "./core/extensions/types.js";
 import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
-import type { ModelRegistry } from "./core/model-registry.js";
+import type { ModelRefreshReport } from "./core/model-refresh-types.js";
+import { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
@@ -77,6 +78,7 @@ import {
 import { SettingsManager } from "./core/settings-manager.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
+import { formatModelRefreshReport } from "./modes/agent-connection/types.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
 import {
 	DaemonSessionCreateError,
@@ -1113,6 +1115,100 @@ async function findAttachedDaemonSessionSummary(
 	return response.data;
 }
 
+function isModelRefreshReport(value: unknown): value is ModelRefreshReport {
+	if (
+		!value ||
+		typeof value !== "object" ||
+		!("sources" in value) ||
+		!Array.isArray(value.sources) ||
+		!("startedAt" in value) ||
+		typeof value.startedAt !== "number" ||
+		!("finishedAt" in value) ||
+		typeof value.finishedAt !== "number"
+	)
+		return false;
+	return value.sources.every(
+		(source: unknown) =>
+			source !== null &&
+			typeof source === "object" &&
+			"source" in source &&
+			typeof source.source === "string" &&
+			"status" in source &&
+			["updated", "unchanged", "skipped", "stale", "failed"].includes(String(source.status)),
+	);
+}
+
+async function refreshStandaloneModelRegistry(): Promise<ModelRefreshReport> {
+	const agentDir = getAgentDir();
+	const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+	return ModelRegistry.create(authStorage).forceRefreshModels();
+}
+
+export async function runOneShotModelRefresh(parsed: Args): Promise<void> {
+	if (
+		parsed.messages.length > 0 ||
+		parsed.fileArgs.length > 0 ||
+		parsed.unknownFlags.size > 0 ||
+		Object.entries(parsed).some(
+			([key, value]) =>
+				!["messages", "fileArgs", "unknownFlags", "diagnostics", "refresh", "daemonSocket", "offline"].includes(
+					key,
+				) && value !== undefined,
+		)
+	) {
+		console.error("Error: --refresh accepts only --daemon-socket and --offline; no session or prompt options.");
+		process.exitCode = 1;
+		return;
+	}
+	let report: ModelRefreshReport;
+	try {
+		const socketPath = parsed.daemonSocket ? normalizeSocketPath(parsed.daemonSocket) : defaultDaemonSocketPath();
+		const client = new DaemonClient(socketPath);
+		let connected = false;
+		try {
+			try {
+				await client.connect(250);
+				connected = true;
+			} catch (error) {
+				// A missing or stale socket is normal; handshake and request failures are not.
+				if (!(error instanceof Error) || !/ENOENT|ECONNREFUSED/.test(error.message)) throw error;
+			}
+			if (connected) await client.waitForHello(3_000);
+			if (connected && client.supportsServerCapability("model_refresh")) {
+				try {
+					const response = await client.request({ type: "refresh_all_models" }, 120_000);
+					if (!response.success || !isModelRefreshReport(response.data))
+						throw new Error("Daemon model refresh failed");
+					report = response.data.workers?.total === 0 ? await refreshStandaloneModelRegistry() : response.data;
+				} catch (error) {
+					if (
+						!(error instanceof DaemonCapabilityUnavailableError) ||
+						error.command !== "refresh_all_models" ||
+						error.afterReconnect
+					)
+						throw error;
+					report = await refreshStandaloneModelRegistry();
+				}
+			} else {
+				report = await refreshStandaloneModelRegistry();
+			}
+		} finally {
+			client.close();
+		}
+		for (const line of formatModelRefreshReport(report)) console.log(line);
+		if (
+			report.workers?.failed ||
+			report.sources.some(
+				(source) => source.status === "failed" || (source.status === "stale" && source.reason !== "offline"),
+			)
+		)
+			process.exitCode = 1;
+	} catch {
+		console.error("Model catalog refresh failed. Check the agent log for details.");
+		process.exitCode = 1;
+	}
+}
+
 export interface MainOptions {
 	extensionFactories?: ExtensionFactory[];
 }
@@ -1169,7 +1265,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 	setLogContext({ mode: appMode });
-	const shouldTakeOverStdout = appMode !== "interactive";
+	const shouldTakeOverStdout = appMode !== "interactive" && !parsed.refresh;
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
 	}
@@ -1181,6 +1277,11 @@ export async function main(args: string[], options?: MainOptions) {
 	if (parsed.help) {
 		console.log(formatTopLevelHelp());
 		process.exit(0);
+	}
+
+	if (parsed.refresh) {
+		await runOneShotModelRefresh(parsed);
+		return;
 	}
 
 	if (parsed.export) {

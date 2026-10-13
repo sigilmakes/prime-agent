@@ -74,7 +74,7 @@ The Python kernel runtime is set up automatically on first invocation. Set `PRIM
 
 ## Providers & Models
 
-For each built-in provider, Prime Agent maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
+For each built-in provider, Prime Agent ships a curated baseline of tool-capable models. Authenticate via subscription (`/login`) or API key, then select a model via `/model` (or Ctrl+L). Use `/refresh` in an idle interactive session, or run `prime-agent --refresh` as a one-shot command, to force and await a model catalog refresh. The refresh reports each supported source and keeps cached or bundled models when offline or when a source fails. It does not refresh skills, MCP integrations, extensions, or web content; it does not start a daemon. See [provider catalog refresh](docs/providers.md#model-catalog-refresh).
 
 Development checkouts do not commit the generated bundled catalog snapshots. Before running catalog-dependent tests in a fresh checkout, generate them once from the catalog repo:
 
@@ -166,6 +166,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 |---------|-------------|
 | `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
+| `/refresh` | Force and await a model catalog refresh; shows a per-source report |
 | `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Alt+M cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
@@ -579,7 +580,7 @@ cat README.md | prime-agent -p "Summarize this text"
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--models <patterns>` | Comma-separated patterns for Alt+M cycling |
 
-Use `prime-agent model list [search]` to list available models.
+Use `prime-agent model list [search]` to list available models. Run `prime-agent --refresh` alone (optionally with `--offline` or `--daemon-socket <path>`) to refresh the model catalog and print a per-source report without starting a session or daemon.
 
 ### Session Options
 

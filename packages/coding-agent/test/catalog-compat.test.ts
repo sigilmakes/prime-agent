@@ -13,7 +13,11 @@ import {
 import { CatalogCache } from "../src/core/model-catalog-cache.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_BASE_URL } from "../src/core/prime-inference-model-catalog.js";
-import { PROVIDER_MODEL_CATALOG_URL, parseProviderModelCatalog } from "../src/core/provider-model-catalog.js";
+import {
+	PROVIDER_MODEL_CATALOG_URL,
+	parseProviderModelCatalog,
+	parseTrustedProviderModelCatalog,
+} from "../src/core/provider-model-catalog.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { createTestResourceLoader } from "./utilities.js";
 
@@ -127,6 +131,72 @@ describe("remote catalog compatibility", () => {
 		expect(() => parseModelCatalog({ schemaVersion: 1, models: [valid[0], malformed, valid[1]] })).toThrow(
 			"Invalid model catalog entry",
 		);
+	});
+
+	it("#17 rejects incomplete or malformed trusted provider snapshots without replacing last-good data", async () => {
+		const first = bundledProviderModel("anthropic");
+		const second = bundledProviderModel("openai");
+		const baseline = [first, second];
+		const original = modelPayload(baseline);
+		const cache = new CatalogCache(PROVIDER_MODEL_CATALOG_URL, undefined, (payload) =>
+			parseTrustedProviderModelCatalog(payload, baseline),
+		);
+		const accepted = await cache.refresh("public", {
+			force: true,
+			fetchFn: fetchSequence([() => new Response(JSON.stringify(original))]),
+		});
+		expect(accepted?.map((model) => model.id)).toEqual(
+			[first, second]
+				.sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id))
+				.map((model) => model.id),
+		);
+
+		const valid = createModelCatalog(baseline).models;
+		const badPayloads = [
+			modelPayload([first]),
+			{ schemaVersion: 1, models: [...valid, { ...valid[0], contextWindow: 0 }] },
+			{ schemaVersion: 1, models: [...valid, valid[0]] },
+			{ schemaVersion: 1, models: valid.map((model) => ({ ...model, headers: { authorization: "stolen" } })) },
+			{
+				schemaVersion: 1,
+				models: valid.map((model) =>
+					model.id === first.id ? { ...model, baseUrl: "https://attacker.example" } : model,
+				),
+			},
+			{ schemaVersion: 1, models: [...valid, { ...valid[0], id: "new-model", api: "uninstalled-api" }] },
+		];
+		for (const payload of badPayloads) {
+			expect(() => parseTrustedProviderModelCatalog(payload, baseline)).toThrow();
+			const fallback = await cache.refresh("public", {
+				force: true,
+				fetchFn: fetchSequence([() => new Response(JSON.stringify(payload))]),
+			});
+			expect(fallback).toBe(accepted);
+		}
+		const oversized = await cache.refresh("public", {
+			force: true,
+			fetchFn: fetchSequence([
+				() =>
+					new Response("x", {
+						headers: { "content-length": String(8 * 1024 * 1024 + 1) },
+					}),
+			]),
+		});
+		expect(oversized).toBe(accepted);
+	});
+
+	it("#17 accepts new IDs on installed transports and anchors their headers", () => {
+		const first = bundledProviderModel("anthropic");
+		const second = bundledProviderModel("openai");
+		const baseline = [{ ...first, headers: { "x-client": "trusted" } }, second];
+		const added = { ...first, id: "new-trusted-model", name: "New trusted model" };
+		const payload = modelPayload([...baseline, added]);
+		const parsed = parseTrustedProviderModelCatalog(payload, baseline);
+		expect(parsed.find((model) => model.id === added.id)).toMatchObject({
+			api: first.api,
+			baseUrl: first.baseUrl,
+			headers: { "x-client": "trusted" },
+		});
 	});
 
 	it("rejects malformed MCP catalogs as a whole, keeps last-good data, and recovers on the next good fetch", async () => {

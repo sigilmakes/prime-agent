@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
@@ -17,7 +18,60 @@ export const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
 const FETCH_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE = 0.5;
-const pendingRefreshes = new Map<string, Promise<Model<"openai-completions">[] | undefined>>();
+export type PrimeInferenceCatalogRefreshOutcome = {
+	status:
+		| "updated"
+		| "memory-only"
+		| "offline"
+		| "cached-fallback"
+		| "failed"
+		| "auth-rejected"
+		| "cancelled"
+		| "superseded";
+	models?: Model<"openai-completions">[];
+};
+
+type PendingRefresh = {
+	scope: string;
+	promise: Promise<PrimeInferenceCatalogRefreshOutcome>;
+	controller: AbortController;
+	waiters: number;
+};
+
+const pendingRefreshes = new Map<string, PendingRefresh>();
+const scopeSecret = randomBytes(32);
+
+function requestScope(headers?: Record<string, string>): string {
+	const normalized = [...new Headers(headers).entries()].sort(([a], [b]) => a.localeCompare(b));
+	return createHmac("sha256", scopeSecret).update(JSON.stringify(normalized)).digest("hex");
+}
+
+function waitForRefresh(
+	cachePath: string,
+	pending: PendingRefresh,
+	cached: Model<"openai-completions">[] | undefined,
+	signal?: AbortSignal,
+): Promise<PrimeInferenceCatalogRefreshOutcome> {
+	pending.waiters++;
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (outcome: PrimeInferenceCatalogRefreshOutcome) => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			pending.waiters--;
+			if (pending.waiters === 0 && signal?.aborted && pendingRefreshes.get(cachePath) === pending) {
+				pendingRefreshes.delete(cachePath);
+				pending.controller.abort();
+			}
+			resolve(outcome);
+		};
+		const onAbort = () => finish({ status: "cancelled", models: cached });
+		signal?.addEventListener("abort", onAbort, { once: true });
+		void pending.promise.then(finish);
+		if (signal?.aborted) onAbort();
+	});
+}
 
 const DEFAULT_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
@@ -110,20 +164,39 @@ export function readCachedPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
 ): Model<"openai-completions">[] | undefined {
-	// Backward-compatible cache reads: the historical flat location (beside
-	// models.json) and the intermediate "catalog" location remain readable so
-	// upgrading never costs a cold fetch; writes go to the new path only.
+	return readCachedPrimeInferenceModelsWithStatus(cachePath, bundledModels)?.models;
+}
+
+const CACHE_FORMAT = "prime-inference-catalog-v1";
+
+export function readCachedPrimeInferenceModelsWithStatus(
+	cachePath: string,
+	bundledModels: readonly Model<"openai-completions">[],
+): { models: Model<"openai-completions">[]; checkedAt?: number } | undefined {
+	// Legacy flat and catalog paths still contain a raw response without a timestamp.
 	const flat = join(dirname(cachePath), "..", basename(cachePath));
 	const catalog = join(dirname(cachePath), "..", "catalog", basename(cachePath));
-	const candidates = [cachePath, flat, catalog];
-	for (const candidate of candidates) {
+	for (const candidate of [cachePath, flat, catalog]) {
 		if (!existsSync(candidate)) continue;
 		try {
-			const models = buildPrimeInferenceModels(
-				bundledModels,
-				parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(candidate, "utf8")) as unknown),
-			);
-			if (models) return models;
+			const value: unknown = JSON.parse(readFileSync(candidate, "utf8"));
+			const envelope =
+				value !== null && typeof value === "object" && "format" in value && value.format === CACHE_FORMAT
+					? value
+					: undefined;
+			const payload = envelope && "payload" in envelope ? envelope.payload : value;
+			const models = buildPrimeInferenceModels(bundledModels, parsePrimeInferenceModelCatalog(payload));
+			if (!models) continue;
+			const checkedAt = envelope && "checkedAt" in envelope ? envelope.checkedAt : undefined;
+			return {
+				models,
+				...(typeof checkedAt === "number" &&
+				Number.isSafeInteger(checkedAt) &&
+				checkedAt > 0 &&
+				checkedAt <= Date.now()
+					? { checkedAt }
+					: {}),
+			};
 		} catch {
 			// Try the next candidate location.
 		}
@@ -131,12 +204,13 @@ export function readCachedPrimeInferenceModels(
 	return undefined;
 }
 
-function writeCache(cachePath: string, value: unknown): void {
+function writeCache(cachePath: string, payload: unknown, checkedAt: number): boolean {
 	try {
 		mkdirSync(dirname(cachePath), { recursive: true });
-		writeFileAtomicSync(cachePath, JSON.stringify(value), { mode: 0o600 });
+		writeFileAtomicSync(cachePath, JSON.stringify({ format: CACHE_FORMAT, checkedAt, payload }), { mode: 0o600 });
+		return true;
 	} catch {
-		// The bundled catalog remains available when the cache cannot be persisted.
+		return false;
 	}
 }
 
@@ -172,14 +246,71 @@ async function readResponse(response: Response): Promise<unknown> {
 }
 
 export async function fetchPrimeInferenceModelCatalog(
-	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; timeoutMs?: number; allowEmpty?: boolean } = {},
+	options: {
+		fetchFn?: typeof fetch;
+		headers?: Record<string, string>;
+		timeoutMs?: number;
+		allowEmpty?: boolean;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<{ payload: unknown; entries: PrimeInferenceCatalogEntry[] }> {
 	const response = await (options.fetchFn ?? fetch)(`${PRIME_INFERENCE_BASE_URL}/models`, {
 		headers: { accept: "application/json", ...options.headers },
-		signal: AbortSignal.timeout(options.timeoutMs ?? FETCH_TIMEOUT_MS),
+		signal: options.signal
+			? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? FETCH_TIMEOUT_MS)])
+			: AbortSignal.timeout(options.timeoutMs ?? FETCH_TIMEOUT_MS),
 	});
 	const payload = await readResponse(response);
 	return { payload, entries: parsePrimeInferenceModelCatalog(payload, { allowEmpty: options.allowEmpty }) };
+}
+
+export async function refreshPrimeInferenceModelsWithOutcome(
+	cachePath: string,
+	bundledModels: readonly Model<"openai-completions">[],
+	options: {
+		fetchFn?: typeof fetch;
+		headers?: Record<string, string>;
+		offline?: boolean;
+		force?: boolean;
+		signal?: AbortSignal;
+	} = {},
+): Promise<PrimeInferenceCatalogRefreshOutcome> {
+	const cached = readCachedPrimeInferenceModels(cachePath, bundledModels);
+	if (options.offline) return { status: "offline", models: cached };
+	if (options.signal?.aborted) return { status: "cancelled", models: cached };
+	const scope = requestScope(options.headers);
+	const existing = pendingRefreshes.get(cachePath);
+	// Force skips any future freshness policy, but an in-flight request for the
+	// same scope is already a fresh request and can be shared.
+	if (existing?.scope === scope) return waitForRefresh(cachePath, existing, cached, options.signal);
+	const pending = { scope, controller: new AbortController(), waiters: 0 } as PendingRefresh;
+	const promise = (async (): Promise<PrimeInferenceCatalogRefreshOutcome> => {
+		try {
+			const { payload, entries } = await fetchPrimeInferenceModelCatalog({
+				fetchFn: options.fetchFn,
+				headers: options.headers,
+				signal: pending.controller.signal,
+			});
+			if (pendingRefreshes.get(cachePath) !== pending) return { status: "superseded" };
+			if (pending.controller.signal.aborted) return { status: "cancelled", models: cached };
+			const models = buildPrimeInferenceModels(bundledModels, entries);
+			if (!models) return { status: cached ? "cached-fallback" : "failed", models: cached };
+			return { status: writeCache(cachePath, payload, Date.now()) ? "updated" : "memory-only", models };
+		} catch (error) {
+			if (pendingRefreshes.get(cachePath) !== pending) return { status: "superseded" };
+			if (pending.controller.signal.aborted) return { status: "cancelled", models: cached };
+			if (error instanceof PrimeInferenceCatalogRequestError && (error.status === 401 || error.status === 403)) {
+				return { status: "auth-rejected", models: cached };
+			}
+			return { status: cached ? "cached-fallback" : "failed", models: cached };
+		}
+	})();
+	pending.promise = promise;
+	pendingRefreshes.set(cachePath, pending);
+	void promise.finally(() => {
+		if (pendingRefreshes.get(cachePath) === pending) pendingRefreshes.delete(cachePath);
+	});
+	return waitForRefresh(cachePath, pending, cached, options.signal);
 }
 
 export async function refreshPrimeInferenceModels(
@@ -187,27 +318,5 @@ export async function refreshPrimeInferenceModels(
 	bundledModels: readonly Model<"openai-completions">[],
 	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; offline?: boolean } = {},
 ): Promise<Model<"openai-completions">[] | undefined> {
-	const cached = readCachedPrimeInferenceModels(cachePath, bundledModels);
-	if (options.offline) return cached;
-	const existing = pendingRefreshes.get(cachePath);
-	if (existing) return existing;
-	const promise = (async () => {
-		try {
-			const { payload, entries } = await fetchPrimeInferenceModelCatalog({
-				fetchFn: options.fetchFn,
-				headers: options.headers,
-			});
-			const models = buildPrimeInferenceModels(bundledModels, entries);
-			if (!models) return cached;
-			writeCache(cachePath, payload);
-			return models;
-		} catch {
-			return cached;
-		}
-	})();
-	pendingRefreshes.set(cachePath, promise);
-	void promise.finally(() => {
-		if (pendingRefreshes.get(cachePath) === promise) pendingRefreshes.delete(cachePath);
-	});
-	return promise;
+	return (await refreshPrimeInferenceModelsWithOutcome(cachePath, bundledModels, options)).models;
 }

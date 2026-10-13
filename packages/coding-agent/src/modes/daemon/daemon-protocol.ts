@@ -12,6 +12,7 @@ import type {
 import type { InputSource } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
+import type { ModelRefreshApplyReport, ModelRefreshReport } from "../../core/model-refresh-types.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
@@ -67,8 +68,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 28 publishes the last recorded model on saved-session rows.
 // Revision 29 adds the capability-gated abort_and_send_queued command.
 // Revision 30 adds structured update_restarting failure info for opens fenced by an update restart.
-export const DAEMON_SCHEMA_REVISION = 30;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-30-f908f493c9e1";
+// Revision 31 adds capability-gated, explicit model refresh commands.
+export const DAEMON_SCHEMA_REVISION = 31;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-31-model-refresh";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -95,6 +97,7 @@ export type DaemonServerCapability =
 	| "heartbeat_catalog"
 	| "heartbeat_management"
 	| "model_catalog"
+	| "model_refresh"
 	// The daemon honors previousTurns on start_side_question (multi-turn side
 	// conversations). Clients must check before sending follow-up transcripts.
 	| "side_question_transcript"
@@ -148,6 +151,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"delete_rlm_subagent",
 	"heartbeat_management",
 	"model_catalog",
+	"model_refresh",
 	"side_question_transcript",
 	"transient_bash",
 	"session_input_admission",
@@ -565,6 +569,9 @@ export type DaemonCommand =
 			servers: AcpMcpServerConfig[];
 	  }
 	| { id?: string; type: "get_model_catalog"; activeSessionId: string }
+	| { id?: string; type: "refresh_models"; activeSessionId: string; sources?: readonly string[] }
+	| { id?: string; type: "apply_model_snapshots"; activeSessionId: string; since?: number }
+	| { id?: string; type: "refresh_all_models" }
 	| { id?: string; type: "get_available_models"; activeSessionId: string }
 	| { id?: string; type: "get_queue"; activeSessionId: string }
 	| {
@@ -737,6 +744,8 @@ const DIRECT_PEER_TRANSPORT_COMMAND = {
 	capability: "direct_peer_transport",
 } as const;
 
+const MODEL_REFRESH_COMMAND = { minProtocol: 7, minSchemaRevision: 31, capability: "model_refresh" } as const;
+
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
@@ -786,6 +795,9 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
 	replace_acp_mcp_servers: { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" },
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
+	refresh_models: MODEL_REFRESH_COMMAND,
+	apply_model_snapshots: MODEL_REFRESH_COMMAND,
+	refresh_all_models: MODEL_REFRESH_COMMAND,
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
 	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" },
@@ -851,6 +863,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 const SUPERVISOR_ONLY_DAEMON_COMMANDS: ReadonlySet<string> = new Set([
 	"complete_owned_session",
 	"get_direct_worker_transport",
+	"refresh_all_models",
 	"list_agent_peers",
 	"promote_owned_session",
 	"reattach",
@@ -923,6 +936,9 @@ export const DAEMON_COMMAND_PLANE = {
 	get_resource_snapshot: "session",
 	replace_acp_mcp_servers: "session",
 	get_model_catalog: "session",
+	refresh_models: "session",
+	apply_model_snapshots: "session",
+	refresh_all_models: "control",
 	get_available_models: "session",
 	get_queue: "session",
 	mutate_queued_message: "session",
@@ -1035,6 +1051,21 @@ export type DaemonResponse =
 			error: string;
 			errorInfo?: DaemonErrorInfo;
 	  };
+
+/** Explicit refresh requests return one final correlated response, never a progress push. */
+export type DaemonModelRefreshResponse =
+	| {
+			id?: string;
+			type: "response";
+			command: "refresh_models" | "refresh_all_models";
+			success: true;
+			data: ModelRefreshReport;
+	  }
+	| (Extract<DaemonResponse, { success: false }> & { command: "refresh_models" | "refresh_all_models" });
+
+export type DaemonModelSnapshotApplyResponse =
+	| { id?: string; type: "response"; command: "apply_model_snapshots"; success: true; data: ModelRefreshApplyReport }
+	| (Extract<DaemonResponse, { success: false }> & { command: "apply_model_snapshots" });
 
 export type DaemonErrorInfo =
 	| { code: "missing_session_cwd"; issue: SessionCwdIssue }

@@ -1,0 +1,1 @@
+- Added on-demand model catalog refresh with `/refresh` and `prime-agent --refresh` ([#17](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/17)).

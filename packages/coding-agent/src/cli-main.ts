@@ -1,4 +1,5 @@
 import { enableCompileCache } from "node:module";
+import { parseArgs } from "./cli/args.js";
 import { maybeStartDaemonEarly } from "./cli/daemon-launch.js";
 import {
 	closeOwnedSessionWorkerOwnerWatch,
@@ -36,7 +37,7 @@ export async function runCli(): Promise<void> {
 	}
 	const handledByOwnedWorker = await maybeRunOwnedSessionWorkerFrontend(args);
 	if (!handledByOwnedWorker) {
-		if (!isOwnedSessionWorkerProcess()) {
+		if (!isOwnedSessionWorkerProcess() && !parseArgs(args).refresh) {
 			// Boot a cold daemon concurrently with this process's heavy imports.
 			maybeStartDaemonEarly(process.argv.slice(2));
 		}

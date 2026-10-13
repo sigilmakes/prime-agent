@@ -197,6 +197,7 @@ import type {
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
 import { AgentConnectionPromptAdmissionError } from "../agent-connection/index.js";
+import { formatModelRefreshReport } from "../agent-connection/types.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
@@ -5342,6 +5343,16 @@ export class InteractiveMode {
 				if (commandName === "resume") {
 					this.editor.setText("");
 					await this.handleResumeCommand(commandArgs);
+					return;
+				}
+				if (commandName === "refresh") {
+					if (commandArgs) {
+						this.editor.setText(text);
+						this.showError("Usage: /refresh");
+						return;
+					}
+					this.editor.setText("");
+					await this.handleRefreshModelsCommand();
 					return;
 				}
 				if (commandName === "reload") {
@@ -11191,6 +11202,37 @@ export class InteractiveMode {
 		}
 		this.showStatus("Packages updated. Reloading resources...");
 		await this.handleReloadCommand();
+	}
+
+	private async handleRefreshModelsCommand(): Promise<void> {
+		if (this.isAgentStreaming() || this.isAgentCompacting()) {
+			this.showWarning("Wait for the current response to finish before refreshing models.");
+			return;
+		}
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
+		try {
+			const report = await connection.refreshModels();
+			if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) return;
+			this.invalidateConnectionModels();
+			await this.getConnectionAvailableModels();
+			if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) return;
+			for (const line of formatModelRefreshReport(report)) this.showStatus(line);
+			if (
+				report.workers?.failed ||
+				report.sources.some(
+					(source) => source.status === "failed" || (source.status === "stale" && source.reason !== "offline"),
+				)
+			) {
+				this.showWarning("Some model catalogs failed to refresh.");
+			}
+		} catch (error) {
+			this.showError(
+				error instanceof Error && error.message.includes("cannot refresh models")
+					? "The running Prime Agent daemon cannot refresh models; restart or update it and try again."
+					: "Model catalog refresh failed. Check the agent log for details.",
+			);
+		}
 	}
 
 	private async handleReloadCommand(): Promise<boolean> {

@@ -1,15 +1,24 @@
 # Providers
 
-Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Models for external providers are bundled with each release. Prime Inference models refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
+Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. A curated bundled catalog is the baseline for external models; supported provider discovery can update it. Prime Inference models also refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
 
 ## Table of Contents
 
+- [Model Catalog Refresh](#model-catalog-refresh)
 - [Subscriptions](#subscriptions)
 - [API Keys](#api-keys)
 - [Auth File](#auth-file)
 - [Cloud Providers](#cloud-providers)
 - [Custom Providers](#custom-providers)
 - [Resolution Order](#resolution-order)
+
+## Model Catalog Refresh
+
+Use `/refresh` in an idle interactive session or run `prime-agent --refresh` alone to force and await the same model catalog refresh. Both show a per-source report: updated, unchanged, stale, skipped, or failed. The sources are the curated catalog, provider discovery (OpenRouter, plus configured OpenAI, Anthropic, and Google endpoints), Ollama Cloud, Prime Inference public and private catalogs, OpenAI Codex model access, and the default catalog. This is not a live discovery guarantee for every provider. Unsupported or unconfigured sources are reported as skipped.
+
+The curated baseline remains the fallback. Validated disk caches and bundled models remain available when network requests fail. With `--offline` or `PI_OFFLINE=1`, no catalog request is made and the report marks configured sources stale; cached or bundled models remain available. A refresh does not change the selected model or interrupt an active turn; interactive `/refresh` waits until the current response or compaction finishes before you can run it.
+
+`prime-agent --refresh` is a one-shot command, not an automatic startup action. It does not start a daemon. If a compatible daemon is running, it refreshes resident workers and shares updated snapshots with them; if no daemon is running or its refresh capability is absent, it refreshes from the standalone CLI instead. An interactive session attached to an incompatible daemon cannot use `/refresh` until that daemon is updated or restarted. This command refreshes model catalogs only, not skills, MCP integrations, extensions, or web content.
 
 ## Subscriptions
 

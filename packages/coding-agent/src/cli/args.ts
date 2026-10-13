@@ -20,6 +20,7 @@ export interface Args {
 	resume?: true | string;
 	help?: boolean;
 	version?: boolean;
+	refresh?: boolean;
 	mode?: Mode;
 	daemonSocket?: string;
 	noSession?: boolean;
@@ -103,6 +104,8 @@ export function parseArgs(args: string[]): Args {
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
+		} else if (arg === "--refresh") {
+			result.refresh = true;
 		} else if (arg === "--mode") {
 			if (hasRequiredOptionValue(args, i, arg, result)) {
 				const mode = args[++i];

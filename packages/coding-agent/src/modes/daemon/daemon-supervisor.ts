@@ -35,6 +35,11 @@ import {
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
+import type {
+	ModelRefreshApplyReport,
+	ModelRefreshReport,
+	ModelRefreshSourceResult,
+} from "../../core/model-refresh-types.js";
 import {
 	clearOrphanProcessJournal,
 	killOrphanProcess,
@@ -202,6 +207,53 @@ const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 ];
 const PEER_TRANSPORT_GRANT_TTL_MS = 10_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const MODEL_REFRESH_WORKER_TIMEOUT_MS = 25_000;
+const MODEL_REFRESH_SWEEP_TIMEOUT_MS = 110_000;
+const MODEL_REFRESH_FANOUT_CONCURRENCY = 4;
+function isModelRefreshReport(value: unknown): value is ModelRefreshReport {
+	if (!value || typeof value !== "object") return false;
+	const report = value as Partial<ModelRefreshReport>;
+	return (
+		Number.isFinite(report.startedAt) &&
+		Number.isFinite(report.finishedAt) &&
+		Array.isArray(report.sources) &&
+		report.sources.length <= 100 &&
+		report.sources.every((source: unknown) => {
+			if (!source || typeof source !== "object") return false;
+			const result = source as Partial<ModelRefreshSourceResult>;
+			return (
+				typeof result.source === "string" &&
+				/^[a-z0-9-]{1,64}$/.test(result.source) &&
+				["updated", "unchanged", "skipped", "stale", "failed"].includes(result.status ?? "") &&
+				(result.reason === undefined ||
+					[
+						"offline",
+						"unconfigured",
+						"auth-rejected",
+						"network",
+						"invalid-catalog",
+						"cancelled",
+						"superseded",
+						"unsupported",
+						"cache-write",
+						"worker-unavailable",
+					].includes(result.reason))
+			);
+		})
+	);
+}
+
+function isModelRefreshApplyReport(value: unknown): value is ModelRefreshApplyReport {
+	if (!value || typeof value !== "object") return false;
+	const report = value as Partial<ModelRefreshApplyReport>;
+	return [report.applied, report.skipped, report.missing].every(
+		(items) =>
+			Array.isArray(items) &&
+			items.length <= 100 &&
+			items.every((item: unknown) => typeof item === "string" && /^[a-z0-9-]{1,64}$/.test(item)),
+	);
+}
+
 // The daemon client's default request budget is 30s and each ready-worker heartbeat
 // forward gets 5s, so waiting longer than this on in-flight launches would only
 // surface as a client transport timeout instead of a bounded per-worker state error.
@@ -653,6 +705,7 @@ export class DaemonSupervisor {
 	private readonly detachingInputPauseSessions = new WeakMap<DaemonSocketClient, Set<string>>();
 	private readonly protocolClientIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly workers = new Map<string, ResidentWorker>();
+	private pendingModelRefresh?: Promise<ModelRefreshReport>;
 	private workerStopCounts?: Map<ResidentWorker, number>;
 	private readonly openingWorkers = new Map<string, Promise<ResidentWorker>>();
 	/**
@@ -2180,6 +2233,8 @@ export class DaemonSupervisor {
 				client.rosterSubscribed = false;
 				client.rosterResyncPending = false;
 				return success(command.id, command.type);
+			case "refresh_all_models":
+				return success(command.id, command.type, await this.refreshResidentModels());
 			case "list_agent_peers": {
 				const requester = [...this.workers.values()].find(
 					(worker) => worker.descriptor.authenticationToken === command.workerToken,
@@ -5309,6 +5364,116 @@ export class DaemonSupervisor {
 			throw new Error(`Ambiguous resident session path "${sessionFile}"`);
 		}
 		return matches.values().next().value;
+	}
+
+	/** Only currently connected workers participate; refresh must never wake saved sessions. */
+	private refreshResidentModels(): Promise<ModelRefreshReport> {
+		if (this.pendingModelRefresh) return this.pendingModelRefresh;
+		const task = this.runResidentModelRefresh();
+		this.pendingModelRefresh = task;
+		const clear = () => {
+			if (this.pendingModelRefresh === task) this.pendingModelRefresh = undefined;
+		};
+		void task.then(clear, clear);
+		return task;
+	}
+
+	private async runResidentModelRefresh(): Promise<ModelRefreshReport> {
+		const startedAt = Date.now();
+		const deadline = startedAt + MODEL_REFRESH_SWEEP_TIMEOUT_MS;
+		const workers = [...this.workers.values()].filter(
+			(worker) => worker.descriptor.lifecycle === "ready" && this.isLiveWorker(worker) && worker.client,
+		);
+		const sourceResults = new Map<string, ModelRefreshSourceResult[]>();
+		let succeeded = 0;
+		let failed = 0;
+		const record = (sources: ModelRefreshSourceResult[]): void => {
+			for (const result of sources) {
+				const previous = sourceResults.get(result.source) ?? [];
+				previous.push(result);
+				sourceResults.set(result.source, previous);
+			}
+		};
+		const request = async (worker: ResidentWorker, command: DaemonCommand): Promise<unknown> => {
+			// Do not use forwardToWorker: it can restart a failed worker as a side effect.
+			const client = worker.client;
+			if (!client || worker.descriptor.lifecycle !== "ready" || !this.isLiveWorker(worker)) {
+				throw new Error("Resident worker disconnected");
+			}
+			const remainingMs = deadline - Date.now();
+			if (remainingMs <= 0) throw new Error("Model refresh sweep deadline elapsed");
+			const response = await client.request(
+				withoutCommandId(command),
+				Math.min(MODEL_REFRESH_WORKER_TIMEOUT_MS, remainingMs),
+			);
+			if (!response.success) throw new Error("Resident worker rejected model refresh");
+			return response.data;
+		};
+		const refresh = async (worker: ResidentWorker, sources?: string[]): Promise<ModelRefreshReport> => {
+			const data = await request(worker, {
+				type: "refresh_models",
+				activeSessionId: worker.descriptor.rootActiveSessionId,
+				...(sources ? { sources } : {}),
+			});
+			if (!isModelRefreshReport(data)) throw new Error("Resident worker returned invalid model refresh report");
+			return data;
+		};
+		const apply = async (worker: ResidentWorker): Promise<ModelRefreshApplyReport> => {
+			const data = await request(worker, {
+				type: "apply_model_snapshots",
+				activeSessionId: worker.descriptor.rootActiveSessionId,
+				since: startedAt,
+			});
+			if (!isModelRefreshApplyReport(data))
+				throw new Error("Resident worker returned invalid model snapshot report");
+			return data;
+		};
+		let leader: ResidentWorker | undefined;
+		for (const worker of workers) {
+			try {
+				record((await refresh(worker)).sources);
+				succeeded++;
+				leader = worker;
+				break;
+			} catch {
+				failed++;
+			}
+		}
+		if (leader) {
+			const remaining = workers.slice(workers.indexOf(leader) + 1);
+			for (let i = 0; i < remaining.length; i += MODEL_REFRESH_FANOUT_CONCURRENCY) {
+				await Promise.all(
+					remaining.slice(i, i + MODEL_REFRESH_FANOUT_CONCURRENCY).map(async (worker) => {
+						try {
+							const snapshot = await apply(worker);
+							if (snapshot.missing.length > 0) {
+								record((await refresh(worker, snapshot.missing)).sources);
+								await apply(worker);
+							}
+							succeeded++;
+						} catch {
+							failed++;
+						}
+					}),
+				);
+			}
+		}
+		if (failed > 0) record([{ source: "daemon-workers", status: "failed", reason: "worker-unavailable" }]);
+		const rank: Record<ModelRefreshSourceResult["status"], number> = {
+			failed: 5,
+			stale: 4,
+			updated: 3,
+			unchanged: 2,
+			skipped: 1,
+		};
+		const sources = [...sourceResults].map(([source, results]): ModelRefreshSourceResult => {
+			const worst = results.reduce((chosen, result) =>
+				rank[result.status] > rank[chosen.status] ? result : chosen,
+			);
+			// A count across workers may refer to different credential scopes.
+			return { source, status: worst.status, ...(worst.reason ? { reason: worst.reason } : {}) };
+		});
+		return { startedAt, finishedAt: Date.now(), sources, workers: { total: workers.length, succeeded, failed } };
 	}
 
 	private async forwardToWorker(

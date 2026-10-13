@@ -202,6 +202,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
+	{ name: "refresh", description: "Refresh model catalogs without reloading session resources" },
 	{
 		name: "fullscreen",
 		description: "Toggle fullscreen (alternate screen) rendering with scrollable transcript",

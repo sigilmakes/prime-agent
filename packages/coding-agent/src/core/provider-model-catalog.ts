@@ -26,3 +26,36 @@ export function parseProviderModelCatalog(payload: unknown, bundledModels: reado
 	if (models.length === 0) throw new Error("Catalog has no models supported by this client");
 	return models;
 }
+
+/** Validate a full trusted refresh before it can replace the built-in provider snapshot. */
+export function parseTrustedProviderModelCatalog(payload: unknown, bundledModels: readonly Model<Api>[]): Model<Api>[] {
+	// The packaged asset may be partially compatible with this client. A runtime
+	// refresh must instead be atomic: even one bad record cannot hide a baseline ID.
+	const catalog = parseModelCatalog(payload);
+	const baseline = new Map(
+		bundledModels
+			.filter((model) => model.provider !== "prime-inference")
+			.map((model) => [JSON.stringify([model.provider, model.id]), model]),
+	);
+	const approved = new Set(
+		bundledModels
+			.filter((model) => model.provider !== "prime-inference")
+			.map((model) => JSON.stringify([model.provider, model.api, model.baseUrl])),
+	);
+	const covered = new Set<string>();
+	for (const model of catalog.models) {
+		if (model.provider === "prime-inference") continue;
+		const id = JSON.stringify([model.provider, model.id]);
+		const transport = JSON.stringify([model.provider, model.api, model.baseUrl]);
+		if (!approved.has(transport)) throw new Error(`Unsupported provider catalog transport ${id}`);
+		const original = baseline.get(id);
+		if (original && (model.api !== original.api || model.baseUrl !== original.baseUrl)) {
+			throw new Error(`Provider catalog changed installed model transport ${id}`);
+		}
+		covered.add(id);
+	}
+	for (const id of baseline.keys()) {
+		if (!covered.has(id)) throw new Error(`Provider catalog is missing bundled model ${id}`);
+	}
+	return parseProviderModelCatalog(payload, bundledModels);
+}

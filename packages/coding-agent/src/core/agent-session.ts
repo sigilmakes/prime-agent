@@ -1668,6 +1668,7 @@ export class AgentSession {
 	private _cwd: string;
 	private _agentDir?: string;
 	private _explicitInitialModel?: Model<Api>;
+	private _modelMetadataRefreshPending = false;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -5976,21 +5977,40 @@ export class AgentSession {
 		}
 	}
 
-	private _promptSubmissionInFlight = false;
+	private _promptSubmissionsInFlight = 0;
+	private _promptPreflightsInFlight = 0;
+
+	private get _promptSubmissionInFlight(): boolean {
+		return this._promptSubmissionsInFlight > 0;
+	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		this._applyScheduledModelMetadataRefresh();
 		// Synchronous preflight guard: from submission until the prompt promise
 		// settles, a model switch must not tear down a routed turn's override
 		// (the routing decision for this turn's images may already be made).
-		this._promptSubmissionInFlight = true;
+		this._promptSubmissionsInFlight++;
+		this._promptPreflightsInFlight++;
+		let preflightPending = true;
+		const finishPreflight = () => {
+			if (!preflightPending) return;
+			preflightPending = false;
+			this._promptPreflightsInFlight--;
+		};
 		try {
-			return await this._promptInner(text, options);
+			return await this._promptInner(text, options, finishPreflight);
 		} finally {
-			this._promptSubmissionInFlight = false;
+			finishPreflight();
+			this._promptSubmissionsInFlight--;
+			this._applyScheduledModelMetadataRefresh();
 		}
 	}
 
-	private async _promptInner(text: string, options?: InternalPromptOptions): Promise<void> {
+	private async _promptInner(
+		text: string,
+		options: InternalPromptOptions | undefined,
+		finishPreflight: () => void,
+	): Promise<void> {
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -6027,6 +6047,7 @@ export class AgentSession {
 				// await (e.g. a cron job cancelled or updated) is not admitted.
 				if (normalizationResult instanceof Promise) options?.admissionCommitted?.();
 				if (normalized.kind === "extensionCommand") {
+					finishPreflight();
 					commitFence?.release();
 					reportPreflight(true);
 					void normalized.completion.then(
@@ -6038,6 +6059,7 @@ export class AgentSession {
 					return;
 				}
 				if (normalized.kind === "handled") {
+					finishPreflight();
 					commitFence?.release();
 					reportPreflight(true);
 					this._settleAgentMessage(options?.agentMessageId, "completion");
@@ -6063,6 +6085,7 @@ export class AgentSession {
 					const result = this._admitSessionInput(action, {
 						immediatelyEligible: !wasBusy && this._canStartSessionActionImmediately(),
 					});
+					finishPreflight();
 					commitFence?.release();
 					reportPreflight(result.accepted, result.disposition === "queued");
 					if (!result.accepted || !result.ticket) return;
@@ -6129,6 +6152,7 @@ export class AgentSession {
 				const result = this._admitSessionInput(action, {
 					immediatelyEligible: !visibleQueued && this._canStartSessionActionImmediately(),
 				});
+				finishPreflight();
 				commitFence?.release();
 				if (!result.accepted || !result.ticket) {
 					if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
@@ -6905,6 +6929,7 @@ export class AgentSession {
 					return;
 				}
 				if (!this._hasCancelledDispatchCapture()) await this._agentEventQueue;
+				this._applyScheduledModelMetadataRefresh();
 				if (!preselected || preselected.payload.kind === "session_command") await this._waitForRefineIdle();
 				const activity = this._runtimeActivity();
 				const canSelectPreselectedTurn =
@@ -7040,6 +7065,7 @@ export class AgentSession {
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
 				}
+				this._applyScheduledModelMetadataRefresh();
 				if (epoch !== this._sessionInputPumpEpoch || blocked) return;
 			}
 		} finally {
@@ -8828,6 +8854,7 @@ export class AgentSession {
 						this.unfinishedActionCount > 0,
 				);
 			}
+			this._applyScheduledModelMetadataRefresh();
 		}
 	}
 
@@ -10457,6 +10484,7 @@ export class AgentSession {
 			resolveCompactionOperation();
 			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
+			this._applyScheduledModelMetadataRefresh();
 		}
 	}
 
@@ -10564,6 +10592,45 @@ export class AgentSession {
 		this._extensionErrorUnsubscriber = this._extensionErrorListener
 			? runner.onError(this._extensionErrorListener)
 			: undefined;
+	}
+
+	/** Rebind selected and scoped catalog metadata only after the current turn has settled. */
+	scheduleModelMetadataRefresh(): void {
+		this._modelMetadataRefreshPending = true;
+		this._applyScheduledModelMetadataRefresh();
+	}
+
+	private _applyScheduledModelMetadataRefresh(): void {
+		if (
+			!this._modelMetadataRefreshPending ||
+			this._disposed ||
+			this._disposing ||
+			this.isStreaming ||
+			this.isRetrying ||
+			this.isCompacting ||
+			this._postCompactionContinuationScheduled ||
+			this._promptPreflightsInFlight > 0 ||
+			this._actionStore
+				.unfinishedActions()
+				.some((action) => action.payload.kind === "turn" && action.lifecycle.state !== "queued")
+		)
+			return;
+		this._modelMetadataRefreshPending = false;
+		const currentModel = this.model;
+		if (currentModel) {
+			const explicitModel = this._explicitInitialModel;
+			const refreshedModel =
+				explicitModel && modelsAreEqual(currentModel, explicitModel)
+					? explicitModel
+					: (this._modelRegistry.find(currentModel.provider, currentModel.id) ?? currentModel);
+			this.agent.state.model = this._configureOllamaModel(refreshedModel);
+			this.setThinkingLevel(this.thinkingLevel);
+			this._clampServiceTierForModel(this._serviceTierPreference);
+		}
+		this._scopedModels = this._scopedModels.map((scoped) => {
+			const refreshed = this._modelRegistry.find(scoped.model.provider, scoped.model.id);
+			return refreshed ? { ...scoped, model: this._configureOllamaModel(refreshed) } : scoped;
+		});
 	}
 
 	refreshModelMetadata(): void {

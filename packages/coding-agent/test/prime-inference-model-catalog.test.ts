@@ -1,13 +1,16 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import type { Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, test, vi } from "vitest";
 import {
 	buildPrimeInferenceModels,
 	PRIME_INFERENCE_BASE_URL,
 	readCachedPrimeInferenceModels,
+	readCachedPrimeInferenceModelsWithStatus,
 	refreshPrimeInferenceModels,
+	refreshPrimeInferenceModelsWithOutcome,
 } from "../src/core/prime-inference-model-catalog.js";
 import {
 	fetchAuthorizedPrivatePrimeInferenceModels,
@@ -170,7 +173,7 @@ describe("Prime Inference model catalog", () => {
 			fetchFn: vi.fn(async () => response(payloadEntry("vendor/model"))),
 		});
 		expect(fetched?.[0]?.name).toBe("Live vendor/model");
-		expect(JSON.parse(readFileSync(cachePath, "utf8")).data).toHaveLength(1);
+		expect(JSON.parse(readFileSync(cachePath, "utf8")).payload.data).toHaveLength(1);
 		const fallback = await refreshPrimeInferenceModels(cachePath, bundled, {
 			fetchFn: vi.fn(async () => {
 				throw new Error("offline");
@@ -228,5 +231,250 @@ describe("Prime Inference model catalog", () => {
 			vi.fn(async () => new Response(null, { status: 403 })),
 		);
 		expect(models).toEqual([]);
+	});
+
+	test("reports offline, cached fallback, auth rejection, and partial catalog failure", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-outcomes-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "cache.json");
+		const bundled = [model("one"), model("two"), model("three")];
+		const fetchFn = vi.fn(async () => response(payloadEntry("one"), payloadEntry("two")));
+		const updated = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, { fetchFn, force: true });
+		expect(updated.status).toBe("updated");
+		expect(updated.models?.map(({ id }) => id)).toEqual(["one", "two"]);
+		expect((await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, { offline: true })).status).toBe(
+			"offline",
+		);
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		const partial = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			fetchFn: vi.fn(async () => response(payloadEntry("three"))),
+		});
+		expect(partial.status).toBe("cached-fallback");
+		expect(partial.models?.map(({ id }) => id)).toEqual(["one", "two"]);
+		const denied = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			fetchFn: vi.fn(async () => new Response(null, { status: 403 })),
+		});
+		expect(denied.status).toBe("auth-rejected");
+		expect(denied.models?.map(({ id }) => id)).toEqual(["one", "two"]);
+		expect(
+			(
+				await refreshPrimeInferenceModelsWithOutcome(join(directory, "empty.json"), bundled, {
+					fetchFn: vi.fn(async () => {
+						throw new Error("network failure");
+					}),
+				})
+			).status,
+		).toBe("failed");
+		expect(JSON.parse(readFileSync(cachePath, "utf8")).payload.data).toHaveLength(2);
+	});
+
+	test("different headers cannot join or overwrite a same-path in-flight request", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-auth-swap-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "cache.json");
+		const bundled = [model("one")];
+		let releaseOld: ((value: Response) => void) | undefined;
+		let oldStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			oldStarted = resolve;
+		});
+		const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			if (new Headers(init?.headers).get("authorization") === "Bearer old") {
+				oldStarted?.();
+				return new Promise<Response>((resolve) => {
+					releaseOld = resolve;
+				});
+			}
+			return response(payloadEntry("one"), payloadEntry("internal/secret"));
+		});
+		const old = refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			headers: { Authorization: "Bearer old" },
+			fetchFn,
+		});
+		await started;
+		const newer = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			headers: { Authorization: "Bearer new" },
+			fetchFn,
+		});
+		expect(newer.status).toBe("updated");
+		expect(newer.models?.map(({ id }) => id)).toEqual(["one"]);
+		releaseOld?.(response({ ...payloadEntry("one"), display_name: "Stale one" }));
+		expect((await old).status).toBe("superseded");
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		expect(readCachedPrimeInferenceModels(cachePath, bundled)?.[0]?.name).toBe("Live one");
+	});
+
+	test("forced refresh supersedes pending fetch, and cancellation leaves the cache alone", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-force-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "cache.json");
+		const bundled = [model("one")];
+		let release: ((value: Response) => void) | undefined;
+		let started: (() => void) | undefined;
+		const ready = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const old = refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			fetchFn: vi.fn(async () => {
+				started?.();
+				return new Promise<Response>((resolve) => {
+					release = resolve;
+				});
+			}),
+		});
+		await ready;
+		const joined = refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			fetchFn: vi.fn(async () => {
+				throw new Error("must share in-flight request");
+			}),
+		});
+		const newer = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			headers: { "X-Prime-Team-ID": "new-team" },
+			fetchFn: vi.fn(async () => response(payloadEntry("one"))),
+		});
+		expect(newer.status).toBe("updated");
+		release?.(response(payloadEntry("old/model")));
+		expect((await old).status).toBe("superseded");
+		expect((await joined).status).toBe("superseded");
+		const controller = new AbortController();
+		controller.abort();
+		const fetchFn = vi.fn(async () => response(payloadEntry("one")));
+		const cancelled = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			signal: controller.signal,
+			fetchFn,
+		});
+		expect(cancelled.status).toBe("cancelled");
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(cachePath, "utf8")).payload.data[0].id).toBe("one");
+	});
+
+	test("cancellation during a fetch does not publish its late response", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-abort-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "cache.json");
+		const bundled = [model("one")];
+		let release: ((value: Response) => void) | undefined;
+		let started: (() => void) | undefined;
+		const ready = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const controller = new AbortController();
+		const pending = refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			signal: controller.signal,
+			fetchFn: vi.fn(async () => {
+				started?.();
+				return new Promise<Response>((resolve) => {
+					release = resolve;
+				});
+			}),
+		});
+		await ready;
+		controller.abort();
+		expect((await pending).status).toBe("cancelled");
+		const fresh = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			fetchFn: vi.fn(async () => response({ ...payloadEntry("one"), display_name: "Fresh one" })),
+		});
+		expect(fresh.status).toBe("updated");
+		release?.(response({ ...payloadEntry("one"), display_name: "Stale one" }));
+		await nextTurn();
+		expect(readCachedPrimeInferenceModels(cachePath, bundled)?.[0]?.name).toBe("Fresh one");
+	});
+
+	it.each(["first", "second"])("one same-scope %s waiter aborts while the other succeeds", async (which) => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-shared-abort-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "cache.json");
+		const bundled = [model("one")];
+		let release: ((value: Response) => void) | undefined;
+		const fetchFn = vi.fn(
+			async (_url: string | URL | Request, _init?: RequestInit) =>
+				new Promise<Response>((resolve) => {
+					release = resolve;
+				}),
+		);
+		const firstController = new AbortController();
+		const secondController = new AbortController();
+		const first = refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			signal: firstController.signal,
+			fetchFn,
+		});
+		const second = refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			signal: secondController.signal,
+			fetchFn,
+		});
+		const aborted = which === "first" ? first : second;
+		const survivor = which === "first" ? second : first;
+		(which === "first" ? firstController : secondController).abort();
+		expect((await aborted).status).toBe("cancelled");
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(fetchFn.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+		release?.(response(payloadEntry("one")));
+		expect((await survivor).status).toBe("updated");
+		expect(readCachedPrimeInferenceModels(cachePath, bundled)?.[0]?.name).toBe("Live one");
+	});
+
+	test("a second reader sees a durable checkedAt without refetching, while legacy raw caches lack it", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-checked-at-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "cache.json");
+		const bundled = [model("one")];
+		const since = Date.now() - 1;
+		const fetchFn = vi.fn(async () => response(payloadEntry("one")));
+		expect((await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, { force: true, fetchFn })).status).toBe(
+			"updated",
+		);
+		// A fresh independent reader has only the persisted file, not the leader's in-memory status.
+		const follower = readCachedPrimeInferenceModelsWithStatus(cachePath, bundled);
+		expect(follower?.models[0]?.name).toBe("Live one");
+		expect(follower?.checkedAt).toBeGreaterThanOrEqual(since);
+		const followerFetch = vi.fn(async () => {
+			throw new Error("second network call");
+		});
+		if (!follower?.checkedAt || follower.checkedAt < since) {
+			await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, { force: true, fetchFn: followerFetch });
+		}
+		expect(followerFetch).not.toHaveBeenCalled();
+		expect(
+			(await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, { offline: true })).models?.[0]?.name,
+		).toBe("Live one");
+		writeFileSync(cachePath, JSON.stringify({ object: "list", data: [payloadEntry("one")] }));
+		expect(readCachedPrimeInferenceModelsWithStatus(cachePath, bundled)?.checkedAt).toBeUndefined();
+		expect(readCachedPrimeInferenceModelsWithStatus(cachePath, bundled)?.models[0]?.name).toBe("Live one");
+	});
+
+	test("invalid payload and invalid timestamps cannot advertise a checkedAt", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-invalid-metadata-"));
+		directories.push(directory);
+		const cachePath = join(directory, "cache.json");
+		const bundled = [model("one")];
+		for (const [payload, checkedAt] of [
+			[{ object: "list", data: [payloadEntry("other")] }, Date.now()],
+			[{ object: "list", data: [payloadEntry("one")] }, Date.now() + 100_000],
+			[{ object: "list", data: [payloadEntry("one")] }, "future"],
+		] as const) {
+			writeFileSync(cachePath, JSON.stringify({ format: "prime-inference-catalog-v1", payload, checkedAt }));
+			expect(readCachedPrimeInferenceModelsWithStatus(cachePath, bundled)?.checkedAt).toBeUndefined();
+		}
+	});
+
+	test("cache write failure returns memory-only rather than a durable update", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-write-failure-"));
+		directories.push(directory);
+		const cachePath = join(directory, "cache.json");
+		mkdirSync(cachePath);
+		const bundled = [model("one")];
+		const result = await refreshPrimeInferenceModelsWithOutcome(cachePath, bundled, {
+			force: true,
+			fetchFn: vi.fn(async () => response(payloadEntry("one"))),
+		});
+		expect(result.status).toBe("memory-only");
+		expect(result.models?.[0]?.name).toBe("Live one");
+		expect(readCachedPrimeInferenceModelsWithStatus(cachePath, bundled)).toBeUndefined();
 	});
 });

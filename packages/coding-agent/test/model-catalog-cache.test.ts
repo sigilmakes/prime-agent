@@ -31,6 +31,78 @@ const parse = (payload: unknown): string => {
 };
 
 describe("CatalogCache shared foundation", () => {
+	it("reports each attempt and shares one force fetch while caller cancellation stays local (#17)", async () => {
+		const cache = new CatalogCache("https://example.test/catalog", cachePath(), parse);
+		const gate = deferred<Response>();
+		let calls = 0;
+		const fetchFn = (async () => {
+			calls++;
+			return gate.promise;
+		}) as typeof fetch;
+		const controller = new AbortController();
+		const cancelled = cache.refreshWithOutcome("public", { force: true, fetchFn, signal: controller.signal });
+		const retained = cache.refreshWithOutcome("public", { force: true, fetchFn });
+		controller.abort();
+		await expect(cancelled).resolves.toMatchObject({ kind: "cancelled" });
+		gate.resolve(response("good"));
+		await expect(retained).resolves.toMatchObject({ kind: "updated", models: "good" });
+		expect(calls).toBe(1);
+		await expect(cache.refreshWithOutcome("public", { fetchFn })).resolves.toMatchObject({
+			kind: "cached",
+			models: "good",
+		});
+		expect(calls).toBe(1);
+	});
+
+	it("reports 304, offline, transient fallback, private revocation, and supersession (#17)", async () => {
+		const cache = new CatalogCache("https://example.test/catalog", cachePath(), parse);
+		await cache.refreshWithOutcome("private", {
+			force: true,
+			fetchFn: (async () => response("good")) as typeof fetch,
+		});
+		await expect(
+			cache.refreshWithOutcome("private", {
+				force: true,
+				fetchFn: (async () => new Response(null, { status: 304 })) as typeof fetch,
+			}),
+		).resolves.toMatchObject({ kind: "not-modified", models: "good" });
+		const prior = process.env.PI_OFFLINE;
+		try {
+			process.env.PI_OFFLINE = "1";
+			await expect(cache.refreshWithOutcome("private", { force: true })).resolves.toMatchObject({
+				kind: "offline",
+				models: "good",
+			});
+		} finally {
+			if (prior === undefined) delete process.env.PI_OFFLINE;
+			else process.env.PI_OFFLINE = prior;
+		}
+		await expect(
+			cache.refreshWithOutcome("private", {
+				force: true,
+				fetchFn: (async () => {
+					throw new Error("secret-token");
+				}) as typeof fetch,
+			}),
+		).resolves.toMatchObject({ kind: "error", models: "good", error: "Catalog refresh failed" });
+		await expect(
+			cache.refreshWithOutcome("private", {
+				force: true,
+				fetchFn: (async () => new Response(null, { status: 403 })) as typeof fetch,
+			}),
+		).resolves.toMatchObject({ kind: "revoked", status: 403 });
+		expect(cache.get("private")).toBeUndefined();
+		const gate = deferred<Response>();
+		const pending = cache.refreshWithOutcome("private", {
+			force: true,
+			fetchFn: (async () => gate.promise) as typeof fetch,
+		});
+		cache.get("other");
+		gate.resolve(response("late"));
+		await expect(pending).resolves.toMatchObject({ kind: "cancelled" });
+		expect(cache.get("other")).toBeUndefined();
+	});
+
 	it("coalesces a scoped refresh without letting an aborted caller cancel another", async () => {
 		const cache = new CatalogCache("https://example.test/catalog", cachePath(), parse);
 		const gate = deferred<Response>();
@@ -60,6 +132,74 @@ describe("CatalogCache shared foundation", () => {
 		gate.resolve(response("older"));
 		await pending;
 		expect(new CatalogCache(url, path, parse).get("public")).toBe("newer");
+	});
+
+	it("reports memory-only on cache lock failure without exposing errors or destroying last-good disk (#17)", async () => {
+		const path = cachePath();
+		const url = "https://example.test/catalog";
+		const cache = new CatalogCache(url, path, parse);
+		await cache.refresh("private", { force: true, fetchFn: (async () => response("previous")) as typeof fetch });
+		mkdirSync(`${path}.lock`); // Deterministic unwritable lock without permission assumptions.
+		try {
+			const outcome = await cache.refreshWithOutcome("private", {
+				force: true,
+				fetchFn: (async () => response("new")) as typeof fetch,
+			});
+			expect(outcome).toEqual({ kind: "memory-only", models: "new", error: "Catalog cache persistence failed" });
+			expect(JSON.stringify(outcome)).not.toContain(path);
+			expect(cache.get("private")).toBe("new");
+			expect(new CatalogCache(url, path, parse).get("private")).toBe("previous");
+		} finally {
+			rmSync(`${path}.lock`, { recursive: true });
+		}
+	});
+
+	it("does not claim network update when a newer disk snapshot wins (#17)", async () => {
+		const path = cachePath();
+		const url = "https://example.test/catalog";
+		const slow = new CatalogCache(url, path, parse);
+		const fast = new CatalogCache(url, path, parse);
+		const gate = deferred<Response>();
+		const pending = slow.refreshWithOutcome("public", {
+			force: true,
+			fetchFn: (async () => gate.promise) as typeof fetch,
+		});
+		await fast.refreshWithOutcome("public", {
+			force: true,
+			fetchFn: (async () => response("newer")) as typeof fetch,
+		});
+		gate.resolve(response("older"));
+		await expect(pending).resolves.toMatchObject({ kind: "cached", models: "newer" });
+	});
+
+	it("reloads an external same-scope disk update without a network request (#17)", async () => {
+		const path = cachePath();
+		const url = "https://example.test/catalog";
+		const local = new CatalogCache(url, path, parse);
+		const external = new CatalogCache(url, path, parse);
+		await local.refresh("public", { force: true, fetchFn: (async () => response("old")) as typeof fetch });
+		await external.refresh("public", { force: true, fetchFn: (async () => response("new")) as typeof fetch });
+		expect(local.get("public")).toBe("old");
+		expect(local.reloadFromDisk("public")).toBe("new");
+		expect(local.get("public")).toBe("new");
+	});
+
+	it("reload cancels an old in-flight publication after an external write (#17)", async () => {
+		const path = cachePath();
+		const url = "https://example.test/catalog";
+		const local = new CatalogCache(url, path, parse);
+		const external = new CatalogCache(url, path, parse);
+		const gate = deferred<Response>();
+		const pending = local.refreshWithOutcome("public", {
+			force: true,
+			fetchFn: (async () => gate.promise) as typeof fetch,
+		});
+		await external.refresh("public", { force: true, fetchFn: (async () => response("external")) as typeof fetch });
+		expect(local.reloadFromDisk("public")).toBe("external");
+		gate.resolve(response("late"));
+		await expect(pending).resolves.toMatchObject({ kind: "cancelled" });
+		expect(local.get("public")).toBe("external");
+		expect(new CatalogCache(url, path, parse).get("public")).toBe("external");
 	});
 
 	it("does not let an old scope overwrite a newly selected account", async () => {

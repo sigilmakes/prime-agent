@@ -110,6 +110,9 @@ describe("AgentSession semantic edges", () => {
 			subagentRuntimeHost?: SubagentRuntimeHost;
 			hangMarker?: string;
 			onChildCallStarted?: () => void;
+			streamFn?: StreamFn;
+			scopedModels?: Array<{ model: typeof model; thinkingLevel?: "off" }>;
+			explicitInitialModel?: typeof model;
 		} = {},
 	) {
 		const capturedHeaders: Array<Record<string, string> | undefined> = [];
@@ -143,8 +146,13 @@ describe("AgentSession semantic edges", () => {
 		const agent = new Agent({
 			convertToLlm,
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
-			streamFn,
+			initialState: {
+				model: options.explicitInitialModel ?? model,
+				systemPrompt: "",
+				tools: [],
+				thinkingLevel: "off",
+			},
+			streamFn: options.streamFn ?? streamFn,
 		});
 
 		const session = new AgentSession({
@@ -156,6 +164,8 @@ describe("AgentSession semantic edges", () => {
 			resourceLoader: createTestResourceLoader(
 				options.extensionsResult ? { extensionsResult: options.extensionsResult } : undefined,
 			),
+			scopedModels: options.scopedModels,
+			explicitInitialModel: options.explicitInitialModel,
 			rlmSessionDir: options.rlmSessionDir,
 			subagentRuntimeHost: options.subagentRuntimeHost,
 		});
@@ -953,5 +963,123 @@ describe("AgentSession semantic edges", () => {
 		]);
 		// The continuation from that slice is suppressed in favor of the compaction edge.
 		expect(edges.filter((edge) => edge.target_request_id === afterId)).toHaveLength(1);
+	});
+
+	it("#17 holds selected and scoped catalog metadata until the active turn settles", async () => {
+		const held = createAssistantMessageEventStream();
+		const seenModels: Array<typeof model> = [];
+		let calls = 0;
+		const streamFn: StreamFn = (requestedModel) => {
+			seenModels.push(requestedModel as typeof model);
+			if (calls++ === 0) return held;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: assistantMessage("next") }));
+			return stream;
+		};
+		const { session } = createSession({ streamFn, scopedModels: [{ model }] });
+		const oldModel = session.model;
+		const first = session.prompt("held");
+		await waitForAsync(async () => seenModels.length === 1);
+		const refreshed = { ...model, name: "refreshed metadata", contextWindow: model.contextWindow + 1234 };
+		session.modelRegistry.registerProvider(model.provider, {
+			baseUrl: "https://example.invalid",
+			apiKey: "test-key",
+			models: [refreshed],
+		});
+		session.scheduleModelMetadataRefresh();
+		expect(session.model).toBe(oldModel);
+		expect(seenModels[0]).toBe(oldModel);
+		await session.prompt("next", { streamingBehavior: "followUp" });
+		held.push({ type: "done", reason: "stop", message: assistantMessage("held") });
+		await first;
+		await session.waitForIdle();
+		expect(session.model).toMatchObject({ provider: model.provider, id: model.id, name: refreshed.name });
+		expect(session.model).not.toBe(oldModel);
+		expect(seenModels[1]).toMatchObject({ name: refreshed.name, contextWindow: refreshed.contextWindow });
+		expect(session.scopedModels[0]?.model).toMatchObject({ name: refreshed.name });
+	});
+
+	it("#17 keeps refresh deferred when another prompt is still waiting for admission", async () => {
+		const held = createAssistantMessageEventStream();
+		let calls = 0;
+		const streamFn: StreamFn = () => {
+			if (calls++ === 0) return held;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: assistantMessage("next") }));
+			return stream;
+		};
+		let releasePreflight = () => {};
+		const preflightHeld = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		let enteredPreflight = () => {};
+		const preflightStarted = new Promise<void>((resolve) => {
+			enteredPreflight = resolve;
+		});
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) =>
+					pi.on("input", async (event) => {
+						if (event.text === "second") {
+							enteredPreflight();
+							await preflightHeld;
+						}
+						return { action: "continue" };
+					}),
+			],
+			tempDir,
+		);
+		const { session } = createSession({ streamFn, extensionsResult });
+		const first = session.prompt("first");
+		await waitForAsync(async () => calls === 1);
+		const second = session.prompt("second", { streamingBehavior: "followUp" });
+		try {
+			await preflightStarted;
+			held.push({ type: "done", reason: "stop", message: assistantMessage("first") });
+			await first;
+			expect(calls).toBe(1);
+			const oldModel = session.model;
+			const refreshed = { ...model, name: "after preflight" };
+			session.modelRegistry.registerProvider(model.provider, {
+				baseUrl: "https://example.invalid",
+				apiKey: "test-key",
+				models: [refreshed],
+			});
+			session.scheduleModelMetadataRefresh();
+			expect(session.model).toBe(oldModel);
+			releasePreflight();
+			await second;
+			await session.waitForIdle();
+			expect(session.model?.name).toBe(refreshed.name);
+		} finally {
+			releasePreflight();
+			await second;
+		}
+	});
+
+	it("#17 refreshes selected metadata immediately when the session is idle", () => {
+		const { session } = createSession();
+		const oldModel = session.model;
+		const refreshed = { ...model, name: "idle refresh" };
+		session.modelRegistry.registerProvider(model.provider, {
+			baseUrl: "https://example.invalid",
+			apiKey: "test-key",
+			models: [refreshed],
+		});
+		session.scheduleModelMetadataRefresh();
+		expect(session.model).not.toBe(oldModel);
+		expect(session.model?.name).toBe(refreshed.name);
+	});
+
+	it("#17 preserves an explicit SDK initial model during catalog metadata refresh", () => {
+		const explicit = { ...model, provider: "ollama-cloud" as const, name: "explicit SDK model" };
+		const { session } = createSession({ explicitInitialModel: explicit });
+		session.modelRegistry.registerProvider(explicit.provider, {
+			baseUrl: "https://example.invalid",
+			apiKey: "test-key",
+			models: [{ ...explicit, name: "catalog model" }],
+		});
+		session.scheduleModelMetadataRefresh();
+		expect(session.model).toBe(explicit);
 	});
 });

@@ -28,12 +28,26 @@ import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-import { getAgentDir } from "../config.js";
+import { getAgentDir, getModelCacheDir } from "../config.js";
 import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { getBundledModels } from "./bundled-model-catalog.js";
-import { refreshDefaultModelCatalog } from "./default-model-catalog.js";
-import { CATALOG_REFRESH_INTERVAL_MS, CatalogCache, isCatalogOffline } from "./model-catalog-cache.js";
+import {
+	getDefaultModelCatalogStatus,
+	refreshDefaultModelCatalog,
+	refreshDefaultModelCatalogWithOutcome,
+	reloadDefaultModelCatalogFromDisk,
+} from "./default-model-catalog.js";
+import {
+	CATALOG_REFRESH_INTERVAL_MS,
+	CatalogCache,
+	type CatalogRefreshOutcome,
+	isCatalogOffline,
+} from "./model-catalog-cache.js";
+import type { ModelRefreshApplyReport, ModelRefreshReport, ModelRefreshSourceResult } from "./model-refresh-types.js";
+
+export type { ModelRefreshApplyReport, ModelRefreshReport, ModelRefreshSourceResult } from "./model-refresh-types.js";
+
 import { applyOllamaCloudModelOverrides, loadOllamaCloudConfig } from "./ollama-cloud-config.js";
 import {
 	mergeOllamaCloudCatalog,
@@ -48,14 +62,18 @@ import {
 	buildPrimeInferenceModels,
 	mergePrimeInferenceModels,
 	readCachedPrimeInferenceModels,
+	readCachedPrimeInferenceModelsWithStatus,
 	refreshPrimeInferenceModels,
+	refreshPrimeInferenceModelsWithOutcome,
 } from "./prime-inference-model-catalog.js";
 import {
 	fetchAuthorizedPrivatePrimeInferenceModels,
+	fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome,
 	getPrivatePrimeInferenceModels,
 	isPrivatePrimeInferenceModel,
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
+import { PROVIDER_MODEL_CATALOG_URL, parseTrustedProviderModelCatalog } from "./provider-model-catalog.js";
 import {
 	DISCOVERABLE_PROVIDERS,
 	type DiscoverableProvider,
@@ -465,6 +483,12 @@ function isOfflineModeEnabled(): boolean {
  */
 export class ModelRegistry {
 	private readonly bundledCatalogModels = getBundledModels();
+	private readonly curatedCatalog = new CatalogCache(
+		PROVIDER_MODEL_CATALOG_URL,
+		join(getModelCacheDir(), "provider-models.v1.json"),
+		(payload: unknown) => parseTrustedProviderModelCatalog(payload, this.bundledCatalogModels),
+	);
+	private curatedModels: Model<Api>[] | undefined;
 	private models: Model<Api>[] = [];
 	private xaiModelSources = new WeakMap<Model<Api>, Model<Api>>();
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
@@ -475,6 +499,7 @@ export class ModelRegistry {
 	private authorizedPrivatePrimeInferenceModelIds = new Set<string>();
 	private authorizedPrivatePrimeInferenceModels: Model<"openai-completions">[] = [];
 	private authorizedPrivatePrimeInferenceTeamId: string | undefined;
+	private privateAuthorizationGeneration = 0;
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
 	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
@@ -482,7 +507,7 @@ export class ModelRegistry {
 	private pendingPrimeInferenceCatalogRefresh: Promise<void> | undefined;
 	private pendingProviderCatalogRefresh: Promise<void> | undefined;
 	private readonly providerCatalogs = new Map<DiscoverableProvider, CatalogCache<Model<Api>[]>>();
-	private readonly ollamaCatalog: CatalogCache<Model<Api>[]>;
+	private ollamaCatalog: CatalogCache<Model<Api>[]>;
 	private readonly ollamaBaseUrl: string;
 	private ollamaModels?: Model<Api>[];
 	private ollamaScope?: string;
@@ -523,6 +548,7 @@ export class ModelRegistry {
 		}
 		const openrouter = this.providerCatalogs.get("openrouter")?.get("public");
 		if (openrouter) this.lastProviderModels.set("openrouter", openrouter);
+		this.curatedModels = this.curatedCatalog.get("public");
 		this.loadModels();
 		const reference = new WeakRef(this);
 		const unsubscribe = authStorage.onChange(() => {
@@ -614,6 +640,558 @@ export class ModelRegistry {
 		);
 	}
 
+	/** Apply validated disk snapshots from a sibling process without fetching catalogs. */
+	async applyModelRefreshSnapshots(options: { since?: number } = {}): Promise<ModelRefreshApplyReport> {
+		this.discoveryGeneration++;
+		this.refresh();
+		const generation = this.discoveryGeneration;
+		for (const provider of DISCOVERABLE_PROVIDERS) {
+			if (provider !== "openrouter" || this.providerScopes.get(provider) !== "public") {
+				this.providerScopes.delete(provider);
+				this.lastProviderModels.delete(provider);
+			}
+		}
+		this.ollamaScope = undefined;
+		this.ollamaModels = undefined;
+		this.reloadModelsAfterCatalogChange();
+		const report: ModelRefreshApplyReport = { applied: [], skipped: [], missing: [] };
+		const record = (source: string, present: boolean, checkedAt?: number): void => {
+			(present && (options.since === undefined || (checkedAt !== undefined && checkedAt >= options.since))
+				? report.applied
+				: report.missing
+			).push(source);
+		};
+		this.curatedModels = this.curatedCatalog.reloadFromDisk("public");
+		record("curated", Boolean(this.curatedModels), this.curatedCatalog.status("public").checkedAt);
+		const cachePath = this.primeInferenceCatalogCachePath();
+		const publicSnapshot = cachePath
+			? readCachedPrimeInferenceModelsWithStatus(cachePath, this.bundledPrimeInferenceModels())
+			: undefined;
+		this.livePrimeInferenceModels = publicSnapshot?.models;
+		record("prime-inference-public", Boolean(publicSnapshot), publicSnapshot?.checkedAt);
+		for (const provider of DISCOVERABLE_PROVIDERS) {
+			if (!this.canResolveCatalogAuthLocally(provider)) {
+				this.providerScopes.delete(provider);
+				this.lastProviderModels.delete(provider);
+				(this.getProviderAuthStatus(provider).configured ? report.missing : report.skipped).push(provider);
+				continue;
+			}
+			const key = await this.getApiKeyForProvider(provider);
+			if (generation !== this.discoveryGeneration) return report;
+			const headers = discoveryHeaders(provider, key);
+			if (!headers) {
+				this.providerScopes.delete(provider);
+				this.lastProviderModels.delete(provider);
+				report.skipped.push(provider);
+				continue;
+			}
+			const scope = key
+				? createHmac("sha256", key).update(`prime-agent:discovery:${provider}:v1`).digest("hex")
+				: "public";
+			this.providerScopes.set(provider, scope);
+			const models = this.providerCatalogs.get(provider)!.reloadFromDisk(scope);
+			if (models) this.lastProviderModels.set(provider, models);
+			else this.lastProviderModels.delete(provider);
+			record(provider, Boolean(models), this.providerCatalogs.get(provider)!.status(scope).checkedAt);
+		}
+		this.ollamaModels = undefined;
+		this.ollamaScope = undefined;
+		if (this.canResolveCatalogAuthLocally(OLLAMA_CLOUD_PROVIDER)) {
+			const model = this.models.find((candidate) => candidate.provider === OLLAMA_CLOUD_PROVIDER);
+			const resolved = model ? await this.getApiKeyAndHeaders(model) : undefined;
+			if (generation !== this.discoveryGeneration) return report;
+			let sameOrigin = false;
+			try {
+				sameOrigin = !!model && new URL(model.baseUrl).origin === new URL(this.ollamaBaseUrl).origin;
+			} catch {
+				/* Invalid origin is not authorized for credential forwarding. */
+			}
+			const configured =
+				sameOrigin && resolved?.ok
+					? Object.entries(resolved.headers ?? {}).find(([name]) => name.toLowerCase() === "authorization")?.[1]
+					: undefined;
+			const authorization =
+				configured ?? (sameOrigin && resolved?.ok && resolved.apiKey ? `Bearer ${resolved.apiKey}` : undefined);
+			if (authorization) {
+				const scope = createHmac("sha256", authorization)
+					.update("prime-agent:discovery:ollama-cloud:v1")
+					.digest("hex");
+				this.ollamaScope = scope;
+				this.ollamaModels = this.ollamaCatalog.reloadFromDisk(scope);
+				record("ollama-cloud", Boolean(this.ollamaModels), this.ollamaCatalog.status(scope).checkedAt);
+			} else report.skipped.push("ollama-cloud");
+		} else
+			(this.getProviderAuthStatus(OLLAMA_CLOUD_PROVIDER).configured ? report.missing : report.skipped).push(
+				"ollama-cloud",
+			);
+		if (this.canResolveCatalogAuthLocally(PRIME_INFERENCE_PROVIDER_ID)) {
+			const key = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
+			if (generation !== this.discoveryGeneration) return report;
+			const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
+			const cached = this.readPrivatePrimeAuthorizationCache();
+			const fingerprint = key && teamId ? privatePrimeAuthorizationFingerprint(key, teamId) : undefined;
+			if (fingerprint && cached?.fingerprint === fingerprint) {
+				this.authorizedPrivatePrimeInferenceModels = cached.models;
+				this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.models.map((model) => model.id));
+				this.authorizedPrivatePrimeInferenceTeamId = teamId;
+				record("prime-inference-private", true, cached.refreshedAt);
+			} else (fingerprint ? report.missing : report.skipped).push("prime-inference-private");
+		} else
+			(this.getProviderAuthStatus(PRIME_INFERENCE_PROVIDER_ID).configured ? report.missing : report.skipped).push(
+				"prime-inference-private",
+			);
+		this.openAICodexModelsCache = undefined;
+		(this.getProviderAuthStatus("openai-codex").configured &&
+		this.getAll().some((model) => model.provider === "openai-codex")
+			? report.missing
+			: report.skipped
+		).push("openai-codex");
+		const defaultValue = reloadDefaultModelCatalogFromDisk();
+		record("default", defaultValue !== undefined, getDefaultModelCatalogStatus().checkedAt);
+		this.reloadModelsAfterCatalogChange();
+		return report;
+	}
+
+	/** OAuth lookup may renew a token over the network, so disk-only apply skips it. */
+	private canResolveCatalogAuthLocally(provider: string): boolean {
+		const stored = this.authStorage.get(provider);
+		if (stored?.type === "oauth" || (stored?.type === "api_key" && stored.key.startsWith("!"))) return false;
+		const requestConfig = this.providerRequestConfigs.get(provider);
+		if (requestConfig?.apiKey?.startsWith("!")) return false;
+		if (provider === OLLAMA_CLOUD_PROVIDER) {
+			const model = this.models.find((candidate) => candidate.provider === provider);
+			const headers = {
+				...requestConfig?.headers,
+				...(model ? this.modelRequestHeaders.get(this.getModelRequestKey(provider, model.id)) : {}),
+			};
+			if (Object.values(headers).some((value) => value.startsWith("!"))) return false;
+		}
+		return true;
+	}
+
+	/** Refresh every supported catalog now and report each source without exposing credentials. */
+	async forceRefreshModels(options: { sources?: readonly string[] } = {}): Promise<ModelRefreshReport> {
+		const selected = (source: string) => !options.sources || options.sources.includes(source);
+		const startedAt = Date.now();
+		const sources: ModelRefreshSourceResult[] = [];
+		// AuthStorage.reload() sees credentials written by another process. A new
+		// generation invalidates older discovery requests, including their disk writes.
+		this.discoveryGeneration++;
+		this.privateAuthorizationGeneration++;
+		this.refresh();
+		const generation = this.discoveryGeneration;
+		const offline = isOfflineModeEnabled();
+		if (offline) {
+			// In offline mode even credential lookup is forbidden: an expired OAuth
+			// token would otherwise trigger a renewal request before catalog fetch.
+			this.curatedModels = this.curatedCatalog.reloadFromDisk("public");
+			this.livePrimeInferenceModels = this.primeInferenceCatalogCachePath()
+				? readCachedPrimeInferenceModels(this.primeInferenceCatalogCachePath()!, this.bundledPrimeInferenceModels())
+				: undefined;
+			for (const provider of DISCOVERABLE_PROVIDERS) {
+				this.providerScopes.delete(provider);
+				this.lastProviderModels.delete(provider);
+			}
+			const openrouter = this.providerCatalogs.get("openrouter")!.reloadFromDisk("public");
+			if (openrouter) this.lastProviderModels.set("openrouter", openrouter);
+			this.ollamaScope = undefined;
+			this.ollamaModels = undefined;
+			this.reloadModelsAfterCatalogChange();
+			for (const source of [
+				"curated",
+				...DISCOVERABLE_PROVIDERS,
+				"ollama-cloud",
+				"prime-inference-public",
+				"prime-inference-private",
+				"openai-codex",
+				"default",
+			].filter(selected)) {
+				const protectedSource =
+					(DISCOVERABLE_PROVIDERS.includes(source as DiscoverableProvider) && source !== "openrouter") ||
+					["ollama-cloud", "prime-inference-private", "openai-codex"].includes(source);
+				const configured =
+					!protectedSource ||
+					this.getProviderAuthStatus(source === "prime-inference-private" ? PRIME_INFERENCE_PROVIDER_ID : source)
+						.configured;
+				sources.push({
+					source,
+					status: configured ? "stale" : "skipped",
+					reason: configured ? "offline" : "unconfigured",
+				});
+			}
+			return { startedAt, finishedAt: Date.now(), sources };
+		}
+		const classify = (source: string, outcome: CatalogRefreshOutcome<Model<Api>[]>, count?: number): void => {
+			const status: ModelRefreshSourceResult["status"] =
+				outcome.kind === "updated"
+					? "updated"
+					: outcome.kind === "not-modified"
+						? "unchanged"
+						: outcome.kind === "offline" || outcome.kind === "cached"
+							? "stale"
+							: outcome.kind === "error"
+								? outcome.models
+									? "stale"
+									: "failed"
+								: outcome.kind === "revoked" || outcome.kind === "memory-only"
+									? "failed"
+									: "stale";
+			const reason: ModelRefreshSourceResult["reason"] =
+				outcome.kind === "offline"
+					? "offline"
+					: outcome.kind === "revoked"
+						? "auth-rejected"
+						: outcome.kind === "cancelled"
+							? "cancelled"
+							: outcome.kind === "memory-only"
+								? "cache-write"
+								: undefined;
+			sources.push({
+				source,
+				status,
+				...(count !== undefined ? { modelCount: count } : {}),
+				...(reason ? { reason } : {}),
+			});
+		};
+		if (selected("curated")) {
+			const curated = await this.curatedCatalog.refreshWithOutcome("public", {
+				force: true,
+				isCurrent: () => generation === this.discoveryGeneration,
+			});
+			if (generation === this.discoveryGeneration && curated.models) {
+				this.curatedModels = curated.models;
+				this.reloadModelsAfterCatalogChange();
+			}
+			classify("curated", curated, curated.models?.length);
+		}
+		await Promise.all(
+			DISCOVERABLE_PROVIDERS.filter(selected).map(async (provider) => {
+				const apiKey = await this.getApiKeyForProvider(provider);
+				if (generation !== this.discoveryGeneration) {
+					sources.push({ source: provider, status: "stale", reason: "cancelled" });
+					return;
+				}
+				const headers = discoveryHeaders(provider, apiKey);
+				if (!headers) {
+					this.providerScopes.delete(provider);
+					this.lastProviderModels.delete(provider);
+					this.reloadModelsAfterCatalogChange();
+					sources.push({ source: provider, status: "skipped", reason: "unconfigured" });
+					return;
+				}
+				const scope = apiKey
+					? createHmac("sha256", apiKey).update(`prime-agent:discovery:${provider}:v1`).digest("hex")
+					: "public";
+				this.providerScopes.set(provider, scope);
+				const outcome = await this.providerCatalogs.get(provider)!.refreshWithOutcome(scope, {
+					force: true,
+					headers,
+					mergePayload: (payload, previous) =>
+						mergeProviderDiscoveryPayload(provider, payload, previous, this.bundledCatalogModels),
+					isCurrent: () => generation === this.discoveryGeneration && this.providerScopes.get(provider) === scope,
+				});
+				if (generation === this.discoveryGeneration && this.providerScopes.get(provider) === scope) {
+					if (outcome.models) this.lastProviderModels.set(provider, outcome.models);
+					else this.lastProviderModels.delete(provider);
+					this.reloadModelsAfterCatalogChange();
+				}
+				classify(provider, outcome, outcome.models?.length);
+			}),
+		);
+		if (generation !== this.discoveryGeneration) {
+			for (const source of [
+				"ollama-cloud",
+				"prime-inference-public",
+				"prime-inference-private",
+				"openai-codex",
+				"default",
+			].filter(selected)) {
+				sources.push({ source, status: "stale", reason: "superseded" });
+			}
+			return { startedAt, finishedAt: Date.now(), sources };
+		}
+		if (selected("ollama-cloud")) await this.forceRefreshOllama(generation, sources);
+		if (selected("prime-inference-public") || selected("prime-inference-private")) {
+			const cachePath = this.primeInferenceCatalogCachePath();
+			if (!cachePath) {
+				if (selected("prime-inference-public")) {
+					sources.push({ source: "prime-inference-public", status: "skipped", reason: "unsupported" });
+				}
+				if (selected("prime-inference-private")) {
+					sources.push({ source: "prime-inference-private", status: "skipped", reason: "unsupported" });
+				}
+			} else {
+				const key = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
+				if (generation !== this.discoveryGeneration) {
+					if (selected("prime-inference-public")) {
+						sources.push({ source: "prime-inference-public", status: "stale", reason: "superseded" });
+					}
+					if (selected("prime-inference-private")) {
+						sources.push({ source: "prime-inference-private", status: "stale", reason: "superseded" });
+					}
+					return { startedAt, finishedAt: Date.now(), sources };
+				}
+				const team = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
+				const fingerprint =
+					key && team?.["X-Prime-Team-ID"]
+						? privatePrimeAuthorizationFingerprint(key, team["X-Prime-Team-ID"])
+						: undefined;
+				if (selected("prime-inference-public") || !this.livePrimeInferenceModels) {
+					const publicOutcome = await refreshPrimeInferenceModelsWithOutcome(
+						cachePath,
+						this.bundledPrimeInferenceModels(),
+						{
+							force: true,
+							offline,
+							headers: key ? { ...team, Authorization: `Bearer ${key}` } : undefined,
+						},
+					);
+					if (
+						generation === this.discoveryGeneration &&
+						(publicOutcome.status === "updated" || publicOutcome.status === "memory-only") &&
+						publicOutcome.models
+					) {
+						this.livePrimeInferenceModels = publicOutcome.models;
+						this.reloadModelsAfterCatalogChange();
+					}
+					if (generation !== this.discoveryGeneration) {
+						sources.push({ source: "prime-inference-public", status: "stale", reason: "superseded" });
+						if (selected("prime-inference-private")) {
+							sources.push({ source: "prime-inference-private", status: "stale", reason: "superseded" });
+						}
+						return { startedAt, finishedAt: Date.now(), sources };
+					}
+					const publicStatus: ModelRefreshSourceResult["status"] =
+						publicOutcome.status === "updated"
+							? "updated"
+							: publicOutcome.status === "offline" ||
+									publicOutcome.status === "cached-fallback" ||
+									publicOutcome.status === "cancelled" ||
+									publicOutcome.status === "superseded"
+								? "stale"
+								: "failed";
+					if (selected("prime-inference-public"))
+						sources.push({
+							source: "prime-inference-public",
+							status: publicStatus,
+							...(publicOutcome.models ? { modelCount: publicOutcome.models.length } : {}),
+							...(publicOutcome.status === "offline"
+								? { reason: "offline" as const }
+								: publicOutcome.status === "auth-rejected"
+									? { reason: "auth-rejected" as const }
+									: publicOutcome.status === "memory-only"
+										? { reason: "cache-write" as const }
+										: {}),
+						});
+				}
+				if (selected("prime-inference-private"))
+					await this.forceRefreshPrivatePrime(key, team, fingerprint, generation, sources);
+			}
+		}
+		if (selected("openai-codex")) await this.forceRefreshCodex(generation, sources);
+		if (selected("default")) {
+			const defaultOutcome = await refreshDefaultModelCatalogWithOutcome(true);
+			sources.push({
+				source: "default",
+				status:
+					defaultOutcome.kind === "updated"
+						? "updated"
+						: defaultOutcome.kind === "not-modified"
+							? "unchanged"
+							: defaultOutcome.kind === "memory-only" ||
+									(defaultOutcome.kind === "error" && !defaultOutcome.models)
+								? "failed"
+								: "stale",
+				...(defaultOutcome.kind === "offline"
+					? { reason: "offline" as const }
+					: defaultOutcome.kind === "cancelled"
+						? { reason: "cancelled" as const }
+						: defaultOutcome.kind === "memory-only"
+							? { reason: "cache-write" as const }
+							: {}),
+			});
+		}
+		return { startedAt, finishedAt: Date.now(), sources };
+	}
+
+	private async forceRefreshOllama(generation: number, sources: ModelRefreshSourceResult[]): Promise<void> {
+		const model = this.models.find((candidate) => candidate.provider === OLLAMA_CLOUD_PROVIDER);
+		const resolved = model ? await this.getApiKeyAndHeaders(model) : undefined;
+		let sameOrigin = false;
+		try {
+			sameOrigin = !!model && new URL(model.baseUrl).origin === new URL(this.ollamaBaseUrl).origin;
+		} catch {
+			/* Invalid inference origin must not receive the credential. */
+		}
+		const configured =
+			sameOrigin && resolved?.ok
+				? Object.entries(resolved.headers ?? {}).find(([name]) => name.toLowerCase() === "authorization")?.[1]
+				: undefined;
+		const authorization =
+			configured ?? (sameOrigin && resolved?.ok && resolved.apiKey ? `Bearer ${resolved.apiKey}` : undefined);
+		if (!authorization || generation !== this.discoveryGeneration) {
+			this.ollamaScope = undefined;
+			this.ollamaModels = undefined;
+			sources.push({ source: "ollama-cloud", status: "skipped", reason: "unconfigured" });
+			return;
+		}
+		const scope = createHmac("sha256", authorization).update("prime-agent:discovery:ollama-cloud:v1").digest("hex");
+		this.ollamaScope = scope;
+		const outcome = await this.ollamaCatalog.refreshWithOutcome(scope, {
+			force: true,
+			headers: { Authorization: authorization },
+			fetchFn: ollamaCloudFetch(this.ollamaBaseUrl),
+			mergePayload: mergeOllamaCloudCatalog,
+			isCurrent: () => generation === this.discoveryGeneration && this.ollamaScope === scope,
+		});
+		if (generation === this.discoveryGeneration && this.ollamaScope === scope) {
+			this.ollamaModels = outcome.models;
+			this.reloadModelsAfterCatalogChange();
+		}
+		sources.push({
+			source: "ollama-cloud",
+			status:
+				outcome.kind === "updated"
+					? "updated"
+					: outcome.kind === "not-modified"
+						? "unchanged"
+						: outcome.kind === "memory-only" ||
+								outcome.kind === "revoked" ||
+								(outcome.kind === "error" && !outcome.models)
+							? "failed"
+							: "stale",
+			...(outcome.models ? { modelCount: outcome.models.length } : {}),
+			...(outcome.kind === "offline"
+				? { reason: "offline" as const }
+				: outcome.kind === "revoked"
+					? { reason: "auth-rejected" as const }
+					: outcome.kind === "memory-only"
+						? { reason: "cache-write" as const }
+						: {}),
+		});
+	}
+
+	private async forceRefreshPrivatePrime(
+		key: string | undefined,
+		headers: Record<string, string> | undefined,
+		fingerprint: string | undefined,
+		generation: number,
+		sources: ModelRefreshSourceResult[],
+	): Promise<void> {
+		if (!key || !headers?.["X-Prime-Team-ID"] || !fingerprint) {
+			this.authorizedPrivatePrimeInferenceModels = [];
+			this.authorizedPrivatePrimeInferenceModelIds.clear();
+			this.authorizedPrivatePrimeInferenceTeamId = undefined;
+			this.reloadModelsAfterCatalogChange();
+			sources.push({ source: "prime-inference-private", status: "skipped", reason: "unconfigured" });
+			return;
+		}
+		const cached = this.readPrivatePrimeAuthorizationCache();
+		if (isOfflineModeEnabled()) {
+			if (cached?.fingerprint === fingerprint) {
+				this.authorizedPrivatePrimeInferenceModels = cached.models;
+				this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.models.map((model) => model.id));
+				this.authorizedPrivatePrimeInferenceTeamId = headers["X-Prime-Team-ID"];
+				this.reloadModelsAfterCatalogChange();
+			}
+			sources.push({ source: "prime-inference-private", status: "stale", reason: "offline" });
+			return;
+		}
+		const result = await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome(
+			key,
+			headers,
+			new Set((this.livePrimeInferenceModels ?? this.bundledPrimeInferenceModels()).map((model) => model.id)),
+		);
+		if (
+			generation !== this.discoveryGeneration ||
+			(await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint
+		) {
+			sources.push({ source: "prime-inference-private", status: "stale", reason: "superseded" });
+			return;
+		}
+		if (result.status !== "authorized") {
+			if (result.status === "auth-rejected") {
+				this.markProviderAuthStale(PRIME_INFERENCE_PROVIDER_ID);
+				this.authorizedPrivatePrimeInferenceModels = [];
+				this.authorizedPrivatePrimeInferenceModelIds.clear();
+				this.authorizedPrivatePrimeInferenceTeamId = undefined;
+				this.reloadModelsAfterCatalogChange();
+			}
+			sources.push({
+				source: "prime-inference-private",
+				status: result.status === "cancelled" ? "stale" : result.status === "skipped" ? "skipped" : "failed",
+				...(result.status === "auth-rejected"
+					? { reason: "auth-rejected" as const }
+					: result.status === "cancelled"
+						? { reason: "cancelled" as const }
+						: result.status === "skipped"
+							? { reason: "unconfigured" as const }
+							: { reason: "network" as const }),
+			});
+			return;
+		}
+		this.authorizedPrivatePrimeInferenceModels = result.models;
+		this.authorizedPrivatePrimeInferenceModelIds = new Set(result.models.map((model) => model.id));
+		this.authorizedPrivatePrimeInferenceTeamId = headers["X-Prime-Team-ID"];
+		this.reloadModelsAfterCatalogChange();
+		this.writePrivatePrimeAuthorizationCache({ fingerprint, models: result.models, refreshedAt: Date.now() });
+		sources.push({ source: "prime-inference-private", status: "updated", modelCount: result.models.length });
+	}
+
+	private async forceRefreshCodex(generation: number, sources: ModelRefreshSourceResult[]): Promise<void> {
+		const model = this.getAvailable().find((candidate) => candidate.provider === "openai-codex");
+		if (!model) {
+			sources.push({ source: "openai-codex", status: "skipped", reason: "unconfigured" });
+			return;
+		}
+		const auth = await this.getApiKeyAndHeaders(model);
+		const accountId = auth.ok && auth.apiKey ? readOpenAICodexAccountId(auth.apiKey) : undefined;
+		if (!auth.ok || !auth.apiKey || !accountId) {
+			sources.push({ source: "openai-codex", status: "skipped", reason: "unconfigured" });
+			return;
+		}
+		if (isOfflineModeEnabled()) {
+			sources.push({ source: "openai-codex", status: "stale", reason: "offline" });
+			return;
+		}
+		const fingerprint = createHmac("sha256", auth.apiKey).update("prime-agent:openai-codex-models:v1").digest("hex");
+		try {
+			const response = await fetch(openAICodexModelsUrl(model.baseUrl), {
+				headers: {
+					...auth.headers,
+					Authorization: `Bearer ${auth.apiKey}`,
+					"chatgpt-account-id": accountId,
+					originator: "pi",
+				},
+				signal: AbortSignal.timeout(5_000),
+			});
+			if (!response.ok) {
+				sources.push({
+					source: "openai-codex",
+					status: "failed",
+					reason: response.status === 401 || response.status === 403 ? "auth-rejected" : "network",
+				});
+				return;
+			}
+			const modelIds = readOpenAICodexModelIds(await response.json());
+			const current = await this.getApiKeyAndHeaders(model);
+			if (
+				generation !== this.discoveryGeneration ||
+				!current.ok ||
+				!current.apiKey ||
+				createHmac("sha256", current.apiKey).update("prime-agent:openai-codex-models:v1").digest("hex") !==
+					fingerprint
+			) {
+				sources.push({ source: "openai-codex", status: "stale", reason: "superseded" });
+				return;
+			}
+			this.openAICodexModelsCache = { authFingerprint: fingerprint, modelIds, refreshedAt: Date.now() };
+			sources.push({ source: "openai-codex", status: "updated", modelCount: modelIds.size });
+		} catch {
+			sources.push({ source: "openai-codex", status: "failed", reason: "network" });
+		}
+	}
+
 	/**
 	 * Get any error from loading models.json (undefined if no error).
 	 */
@@ -673,7 +1251,7 @@ export class ModelRegistry {
 			const models = this.lastProviderModels.get(provider);
 			if (models) discovered.set(provider, models);
 		}
-		const bundledModels = this.bundledCatalogModels.filter(
+		const bundledModels = (this.curatedModels ?? this.bundledCatalogModels).filter(
 			(model) => !discovered.has(model.provider) && model.provider !== OLLAMA_CLOUD_PROVIDER,
 		);
 		for (const models of discovered.values()) bundledModels.push(...models);
@@ -952,6 +1530,7 @@ export class ModelRegistry {
 				// Track the in-flight catalog refresh so waitForPendingModelRefreshes()
 				// can await it: session-model restore must observe the post-refresh
 				// catalog, not the pre-refresh fallback (bundled/disk snapshot).
+				const catalogGeneration = this.discoveryGeneration;
 				this.pendingPrimeInferenceCatalogRefresh = refreshPrimeInferenceModels(
 					cachePath,
 					this.bundledPrimeInferenceModels(),
@@ -961,7 +1540,7 @@ export class ModelRegistry {
 					},
 				)
 					.then((models) => {
-						if (!models) return;
+						if (!models || catalogGeneration !== this.discoveryGeneration) return;
 						this.livePrimeInferenceModels = models;
 						this.reloadModelsAfterCatalogChange();
 					})
@@ -1168,6 +1747,7 @@ export class ModelRegistry {
 		}
 
 		const fingerprint = privatePrimeAuthorizationFingerprint(apiKey, teamId);
+		const authorizationGeneration = this.privateAuthorizationGeneration;
 		const cached = this.readPrivatePrimeAuthorizationCache();
 		if (cached?.fingerprint === fingerprint) {
 			// Serve the credential-scoped cache so startup and model lists don't
@@ -1200,7 +1780,10 @@ export class ModelRegistry {
 			// Fall back to the previous authorization below.
 		}
 		// Leave newer state untouched if the credentials changed while fetching.
-		if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
+		if (
+			authorizationGeneration !== this.privateAuthorizationGeneration ||
+			(await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint
+		) {
 			return;
 		}
 		if (authorizedModels) {
@@ -1237,6 +1820,7 @@ export class ModelRegistry {
 		if (this.backgroundPrivatePrimeAuthorization?.fingerprint === fingerprint) {
 			return;
 		}
+		const authorizationGeneration = this.privateAuthorizationGeneration;
 		const run = async () => {
 			try {
 				const authorizedModels = await fetchAuthorizedPrivatePrimeInferenceModels(
@@ -1246,7 +1830,10 @@ export class ModelRegistry {
 					undefined,
 					PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS,
 				);
-				if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
+				if (
+					authorizationGeneration !== this.privateAuthorizationGeneration ||
+					(await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint
+				) {
 					return;
 				}
 				this.authorizedPrivatePrimeInferenceModels = authorizedModels;

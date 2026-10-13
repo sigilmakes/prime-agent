@@ -39,6 +39,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 |---------|-------------|
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
+| `/refresh` | Force and await a model catalog refresh; shows a per-source report |
 | `/effort` | Set the reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Alt+M cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
@@ -216,7 +217,7 @@ cat README.md | prime-agent -p "Summarize this text"
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `--models <patterns>` | Comma-separated patterns for Alt+M cycling |
 
-Use `prime-agent model list [search]` to list available models.
+Use `prime-agent model list [search]` to list available models. `prime-agent --refresh` runs only a model catalog refresh, prints a per-source report, and exits. It accepts `--offline` and `--daemon-socket <path>`, but not prompts or session options. It does not auto-start a daemon; with a compatible running daemon it refreshes resident workers, otherwise it uses a standalone CLI refresh. An unsupported daemon cannot handle interactive `/refresh`; update or restart it before retrying. See [Model catalog refresh](providers.md#model-catalog-refresh).
 
 ### Session Options
 

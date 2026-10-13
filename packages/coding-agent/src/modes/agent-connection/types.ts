@@ -18,6 +18,7 @@ import type { GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
+import type { ModelRefreshReport } from "../../core/model-refresh-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
 import type {
@@ -30,6 +31,31 @@ import type { DeleteSessionFileResult } from "../../core/session-file-actions.js
 import type { SessionStats } from "../../core/session-stats.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
+
+/** Format only fixed report fields; never surface endpoints or error text from a provider. */
+export function formatModelRefreshReport(report: ModelRefreshReport): string[] {
+	return report.sources.map(({ source, status, modelCount, reason }) => {
+		const safeSource = /^[a-z0-9-]{1,64}$/i.test(source) ? source : "unknown-source";
+		const safeStatus =
+			(["updated", "unchanged", "skipped", "stale", "failed"] as const).find((value) => value === status) ??
+			"failed";
+		const safeReason = (
+			[
+				"offline",
+				"unconfigured",
+				"auth-rejected",
+				"network",
+				"invalid-catalog",
+				"cancelled",
+				"superseded",
+				"unsupported",
+				"cache-write",
+				"worker-unavailable",
+			] as const
+		).find((value) => value === reason);
+		return `${safeSource}: ${safeStatus}${Number.isSafeInteger(modelCount) && modelCount! >= 0 ? ` (${modelCount} models)` : ""}${safeReason ? ` (${safeReason})` : ""}`;
+	});
+}
 
 /**
  * Client-side interaction boundary consumed by InteractiveMode.
@@ -786,6 +812,7 @@ export interface AgentConnection {
 	abortBranchSummary(): Promise<void>;
 	abortRetry(): Promise<void>;
 
+	refreshModels(): Promise<ModelRefreshReport>;
 	reload(): Promise<void>;
 	newSession(options?: AgentConnectionNewSessionOptions): Promise<{ cancelled: boolean }>;
 	switchSession(sessionPath: string, options?: AgentConnectionSwitchSessionOptions): Promise<{ cancelled: boolean }>;

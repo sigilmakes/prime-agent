@@ -743,6 +743,647 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("issue #17 explicit refresh", () => {
+		test("offline refresh never fetches and reports stale cached sources", async () => {
+			vi.stubEnv("PI_OFFLINE", "1");
+			authStorage.set("anthropic", { type: "api_key", key: "test-key" });
+			const fetchSpy = vi.fn(async () => {
+				throw new Error("offline must not fetch");
+			});
+			vi.stubGlobal("fetch", fetchSpy);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const original = registry.find(
+				"anthropic",
+				getBundledModels().find((model) => model.provider === "anthropic")!.id,
+			);
+
+			const report = await registry.forceRefreshModels();
+
+			expect(fetchSpy).not.toHaveBeenCalled();
+			expect(report.startedAt).toBeLessThanOrEqual(report.finishedAt);
+			expect(report.sources.find((source) => source.source === "anthropic")).toMatchObject({
+				status: "stale",
+				reason: "offline",
+			});
+			expect(registry.find("anthropic", original!.id)).toEqual(original);
+		});
+
+		test("an older same-key entitlement response cannot overwrite forced authorization", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("PRIME_API_KEY", "");
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "test-key",
+				primeTeam: { teamId: "team-a", name: "Test" },
+			});
+			const model = (id: string) => ({
+				id,
+				display_name: id,
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 32000,
+					max_output_tokens: 4096,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			});
+			let release!: (response: Response) => void;
+			let entered!: () => void;
+			const held = new Promise<Response>((resolve) => {
+				release = resolve;
+			});
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			let authenticated = 0;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+					if (
+						String(input) === "https://api.pinference.ai/api/v1/models" &&
+						new Headers(init?.headers).has("Authorization")
+					) {
+						authenticated++;
+						if (authenticated === 2) {
+							entered();
+							return held;
+						}
+						return new Response(JSON.stringify({ data: [model("internal/forced")] }));
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const pending = registry.refreshAvailableModels();
+			try {
+				await started;
+				const report = await registry.forceRefreshModels({ sources: ["prime-inference-private"] });
+				expect(report.sources.find((source) => source.source === "prime-inference-private")?.status).toBe(
+					"updated",
+				);
+				release(new Response(JSON.stringify({ data: [model("internal/old")] })));
+				await pending;
+				expect(registry.find("prime-inference", "internal/forced")).toBeDefined();
+				expect(registry.find("prime-inference", "internal/old")).toBeUndefined();
+			} finally {
+				release(new Response("not found", { status: 404 }));
+			}
+		});
+
+		test.each([
+			["rejected", 401, false, "failed", "auth-rejected"],
+			["malformed", 200, false, "failed", undefined],
+			["network", 0, true, "stale", undefined],
+		] as const)("Ollama %s with cache=%s reports honest status", async (_name, status, warm, expected, reason) => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("OLLAMA_API_BASE", "https://ollama.com");
+			authStorage.set("ollama-cloud", { type: "api_key", key: "fake-key" });
+			let fail = false;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (String(input) === "https://ollama.com/v1/models") {
+						if (fail) {
+							if (status === 0) throw new Error("connection refused");
+							return status === 401 ? new Response("denied", { status }) : new Response("malformed");
+						}
+						return new Response(JSON.stringify({ data: [{ id: "test-model" }] }));
+					}
+					if (String(input) === "https://ollama.com/api/show") {
+						return new Response(
+							JSON.stringify({ capabilities: ["tools"], model_info: { "test.context_length": 32000 } }),
+						);
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			if (warm) await registry.forceRefreshModels({ sources: ["ollama-cloud"] });
+			fail = true;
+
+			const report = await registry.forceRefreshModels({ sources: ["ollama-cloud"] });
+
+			expect(report.sources).toHaveLength(1);
+			expect(report.sources[0]).toMatchObject({
+				source: "ollama-cloud",
+				status: expected,
+				...(reason ? { reason } : {}),
+			});
+		});
+
+		test("resident applies a newer public Prime disk snapshot by persisted timestamp", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
+			const entries = bundled.map((model) => ({
+				id: model.id,
+				display_name: `New ${model.name}`,
+				pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+				specs: {
+					context_window: model.contextWindow,
+					max_output_tokens: model.maxTokens,
+					modalities: { input: model.input, output: ["text"] },
+					supports_reasoning: model.reasoning,
+				},
+			}));
+			const fetchSpy = vi.fn(async (input: string | URL | Request) =>
+				String(input) === "https://api.pinference.ai/api/v1/models"
+					? new Response(JSON.stringify({ data: entries }))
+					: new Response("not found", { status: 404 }),
+			);
+			vi.stubGlobal("fetch", fetchSpy);
+			const resident = ModelRegistry.create(authStorage, modelsJsonPath);
+			const writer = ModelRegistry.create(authStorage, modelsJsonPath);
+			const written = await writer.forceRefreshModels({ sources: ["prime-inference-public"] });
+			const count = fetchSpy.mock.calls.length;
+
+			const applied = await resident.applyModelRefreshSnapshots({ since: written.startedAt });
+
+			expect(applied.applied).toContain("prime-inference-public");
+			expect(resident.find("prime-inference", bundled[0]!.id)?.name).toBe(`New ${bundled[0]!.name}`);
+			expect(fetchSpy).toHaveBeenCalledTimes(count);
+		});
+
+		test("targeted private uses a validated public snapshot without repeating public fetch", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("PRIME_API_KEY", "");
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "test-key",
+				primeTeam: { teamId: "team-a", name: "Test" },
+			});
+			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
+			const publicData = bundled.map((model) => ({
+				id: model.id,
+				pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+				specs: {
+					context_window: model.contextWindow,
+					max_output_tokens: model.maxTokens,
+					modalities: { input: model.input, output: ["text"] },
+					supports_reasoning: model.reasoning,
+				},
+			}));
+			let calls = 0;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (String(input) !== "https://api.pinference.ai/api/v1/models")
+						return new Response("not found", { status: 404 });
+					calls++;
+					return new Response(JSON.stringify({ data: calls === 1 ? publicData : [] }));
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			await registry.forceRefreshModels({ sources: ["prime-inference-public"] });
+
+			const report = await registry.forceRefreshModels({ sources: ["prime-inference-private"] });
+
+			expect(calls).toBe(2);
+			expect(report.sources.map((entry) => entry.source)).toEqual(["prime-inference-private"]);
+			expect(report.sources[0]).toMatchObject({ status: "updated", modelCount: 0 });
+		});
+
+		test("older public Prime response after key rotation cannot replace forced catalog", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("PRIME_API_KEY", "");
+			authStorage.set("prime-inference", { type: "api_key", key: "old-key" });
+			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
+			const entries = (label: string) =>
+				bundled.map((model) => ({
+					id: model.id,
+					display_name: `${label} ${model.name}`,
+					pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+					specs: {
+						context_window: model.contextWindow,
+						max_output_tokens: model.maxTokens,
+						modalities: { input: model.input, output: ["text"] },
+						supports_reasoning: model.reasoning,
+					},
+				}));
+			let release!: (response: Response) => void;
+			let entered!: () => void;
+			const held = new Promise<Response>((resolve) => {
+				release = resolve;
+			});
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+					if (String(input) === "https://api.pinference.ai/api/v1/models") {
+						const authorization = new Headers(init?.headers).get("Authorization");
+						if (authorization === "Bearer old-key") {
+							entered();
+							return held;
+						}
+						return new Response(JSON.stringify({ data: entries("new") }));
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			await registry.refreshAvailableModels();
+			try {
+				await started;
+				authStorage.set("prime-inference", { type: "api_key", key: "new-key" });
+				const report = await registry.forceRefreshModels({ sources: ["prime-inference-public"] });
+				expect(report.sources.find((source) => source.source === "prime-inference-public")?.status).toBe("updated");
+				release(new Response(JSON.stringify({ data: entries("old") })));
+				await registry.waitForPendingModelRefreshes(2_000);
+				expect(registry.find("prime-inference", bundled[0]!.id)?.name).toBe(`new ${bundled[0]!.name}`);
+			} finally {
+				release(new Response("not found", { status: 404 }));
+			}
+		});
+
+		test("older background entitlement cannot replace forced result for the same credential", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("PRIME_API_KEY", "");
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "test-key",
+				primeTeam: { teamId: "team-a", name: "Test" },
+			});
+			const entry = (id: string) => ({
+				id,
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 32000,
+					max_output_tokens: 4096,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			});
+			let release!: (response: Response) => void;
+			let entered!: () => void;
+			const held = new Promise<Response>((resolve) => {
+				release = resolve;
+			});
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			let requestCount = 0;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+					if (
+						String(input) === "https://api.pinference.ai/api/v1/models" &&
+						new Headers(init?.headers).has("Authorization")
+					) {
+						requestCount++;
+						if (requestCount === 4) {
+							entered();
+							return held;
+						}
+						return new Response(
+							JSON.stringify({ data: [entry(requestCount <= 2 ? "internal/initial" : "internal/forced")] }),
+						);
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			await registry.refreshAvailableModels();
+			await registry.waitForPendingModelRefreshes(2_000);
+			const cacheFile = join(tempDir, "prime-inference-private-models.json");
+			const snapshot = JSON.parse(readFileSync(cacheFile, "utf8"));
+			snapshot.refreshedAt = 0;
+			writeFileSync(cacheFile, JSON.stringify(snapshot));
+			await registry.refreshAvailableModels();
+			try {
+				await started;
+				const report = await registry.forceRefreshModels({ sources: ["prime-inference-private"] });
+				expect(report.sources.find((source) => source.source === "prime-inference-private")?.status).toBe(
+					"updated",
+				);
+				release(new Response(JSON.stringify({ data: [entry("internal/old-background")] })));
+				await registry.waitForPendingModelRefreshes(2_000);
+				expect(registry.find("prime-inference", "internal/forced")).toBeDefined();
+				expect(registry.find("prime-inference", "internal/old-background")).toBeUndefined();
+			} finally {
+				release(new Response("not found", { status: 404 }));
+			}
+		});
+
+		test("private authorization rejection is not reported as an empty successful entitlement", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("PRIME_API_KEY", "");
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "test-key",
+				primeTeam: { teamId: "team-a", name: "Test" },
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response("denied", { status: 401 })),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			const report = await registry.forceRefreshModels({ sources: ["prime-inference-private"] });
+
+			expect(report.sources.find((source) => source.source === "prime-inference-private")).toMatchObject({
+				status: "failed",
+				reason: "auth-rejected",
+			});
+			expect(
+				registry
+					.getAvailable()
+					.some((model) => model.provider === "prime-inference" && model.id.startsWith("internal/")),
+			).toBe(false);
+		});
+
+		test("disk-only apply skips OAuth credentials without renewal or network", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			authStorage.set("anthropic", {
+				type: "oauth",
+				access: "expired",
+				refresh: "refresh",
+				expires: Date.now() - 1,
+			});
+			const fetchSpy = vi.fn(async () => {
+				throw new Error("apply must never fetch");
+			});
+			vi.stubGlobal("fetch", fetchSpy);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const lookup = vi.spyOn(authStorage, "getApiKeyWithSourceToken");
+
+			const report = await registry.applyModelRefreshSnapshots();
+
+			expect(report.missing).toContain("anthropic");
+			expect(lookup.mock.calls.some(([provider]) => provider === "anthropic")).toBe(false);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		});
+
+		test("nonpersistent provider refresh reports cache-write rather than durable update", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) =>
+					String(input) === "https://openrouter.ai/api/v1/models"
+						? new Response(
+								JSON.stringify({
+									data: [
+										{
+											id: "test/memory-only",
+											name: "Memory Only",
+											context_length: 32000,
+											top_provider: { max_completion_tokens: 4096 },
+											pricing: { prompt: "0.000001", completion: "0.000002" },
+											architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+										},
+									],
+								}),
+							)
+						: new Response("not found", { status: 404 }),
+				),
+			);
+			const registry = ModelRegistry.inMemory(authStorage);
+
+			const report = await registry.forceRefreshModels({ sources: ["openrouter"] });
+
+			expect(report.sources).toEqual([
+				{ source: "openrouter", status: "failed", reason: "cache-write", modelCount: expect.any(Number) },
+			]);
+			expect(registry.find("openrouter", "test/memory-only")).toBeDefined();
+		});
+
+		test("disk apply does not execute command-backed models.json credentials", async () => {
+			const marker = join(tempDir, "command-ran");
+			writeRawModelsJson({
+				anthropic: {
+					apiKey: `!sh -c 'touch "${toShPath(marker)}"; echo fake-key'`,
+					baseUrl: "https://api.anthropic.com",
+				},
+			});
+			const fetchSpy = vi.fn(async () => {
+				throw new Error("disk apply must not fetch");
+			});
+			vi.stubGlobal("fetch", fetchSpy);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			const report = await registry.applyModelRefreshSnapshots();
+
+			expect(report.missing).toContain("anthropic");
+			expect(existsSync(marker)).toBe(false);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		});
+
+		test("offline forced refresh never renews expired OAuth", async () => {
+			vi.stubEnv("PI_OFFLINE", "1");
+			authStorage.set("anthropic", {
+				type: "oauth",
+				access: "expired",
+				refresh: "refresh",
+				expires: Date.now() - 1,
+			});
+			const fetchSpy = vi.fn(async () => {
+				throw new Error("offline must not fetch");
+			});
+			vi.stubGlobal("fetch", fetchSpy);
+			const lookup = vi.spyOn(authStorage, "getApiKeyWithSourceToken");
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			const report = await registry.forceRefreshModels({ sources: ["anthropic"] });
+
+			expect(report.sources).toEqual([{ source: "anthropic", status: "stale", reason: "offline" }]);
+			expect(fetchSpy).not.toHaveBeenCalled();
+			expect(lookup.mock.calls.some(([provider]) => provider === "anthropic")).toBe(false);
+		});
+
+		test("each resident OAuth worker forces its own missing scope after disk-only apply", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			authStorage.set("anthropic", {
+				type: "oauth",
+				access: "expired",
+				refresh: "refresh",
+				expires: Date.now() - 1,
+			});
+			const lookup = vi.spyOn(authStorage, "getApiKeyWithSourceToken");
+			const original = lookup.getMockImplementation();
+			lookup.mockImplementation(async (provider, options) =>
+				provider === "anthropic"
+					? { apiKey: "fake-oauth-key", credentialType: "oauth" as const }
+					: original
+						? original(provider, options)
+						: { apiKey: undefined },
+			);
+			const requests: string[] = [];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					requests.push(String(input));
+					return new Response(
+						JSON.stringify({
+							data: [
+								{
+									id: getBundledModels().find((model) => model.provider === "anthropic")!.id,
+									display_name: "Fresh",
+								},
+							],
+						}),
+					);
+				}),
+			);
+			const residents = [
+				ModelRegistry.create(authStorage, modelsJsonPath),
+				ModelRegistry.create(authStorage, modelsJsonPath),
+			];
+			for (const resident of residents) {
+				const applied = await resident.applyModelRefreshSnapshots({ since: Date.now() });
+				expect(applied.missing).toContain("anthropic");
+			}
+			expect(requests).toEqual([]);
+			for (const resident of residents) {
+				const report = await resident.forceRefreshModels({ sources: ["anthropic"] });
+				expect(report.sources.find((source) => source.source === "anthropic")?.status).toBe("updated");
+			}
+			expect(requests).toHaveLength(2);
+		});
+
+		test("targeted refresh fetches only requested source and apply marks old snapshots missing", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			const requests: string[] = [];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					requests.push(String(input));
+					return new Response(JSON.stringify({ data: [] }));
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const report = await registry.forceRefreshModels({ sources: ["openrouter"] });
+			expect(report.sources.map((source) => source.source)).toEqual(["openrouter"]);
+			expect(requests).toEqual(["https://openrouter.ai/api/v1/models"]);
+			const applied = await registry.applyModelRefreshSnapshots({ since: Date.now() + 1_000 });
+			expect(applied.missing).toContain("openrouter");
+			expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		});
+
+		test("late forced discovery cannot overwrite models after a credential change", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubEnv("ANTHROPIC_API_KEY", "");
+			authStorage.set("anthropic", { type: "api_key", key: "original-key" });
+			const id = getBundledModels().find((candidate) => candidate.provider === "anthropic")!.id;
+			let release!: (response: Response) => void;
+			let entered!: () => void;
+			const held = new Promise<Response>((resolve) => {
+				release = resolve;
+			});
+			const started = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+					if (String(input).startsWith("https://api.anthropic.com/v1/models")) {
+						if (new Headers(init?.headers).get("x-api-key") === "original-key") {
+							entered();
+							return held;
+						}
+						return new Response(JSON.stringify({ data: [{ id, display_name: "new-key" }] }));
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const pending = registry.forceRefreshModels();
+			try {
+				await started;
+				authStorage.set("anthropic", { type: "api_key", key: "new-key" });
+				release(new Response(JSON.stringify({ data: [{ id, display_name: "old-key" }] })));
+				const report = await pending;
+				expect(report.sources.find((entry) => entry.source === "anthropic")).toMatchObject({
+					status: "stale",
+					reason: "cancelled",
+				});
+				expect(registry.find("anthropic", id)?.name).not.toBe("old-key");
+			} finally {
+				release(new Response("not found", { status: 404 }));
+			}
+		});
+
+		test("apply-only loads a sibling's same-scope disk snapshot without fetching", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					if (String(input) === "https://openrouter.ai/api/v1/models") {
+						return new Response(
+							JSON.stringify({
+								data: [
+									{
+										id: "test/sibling",
+										name: "Sibling Model",
+										context_length: 32000,
+										top_provider: { max_completion_tokens: 4096 },
+										pricing: { prompt: "0.000001", completion: "0.000002" },
+										architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+									},
+								],
+							}),
+						);
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const resident = ModelRegistry.create(authStorage, modelsJsonPath);
+			const writer = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(resident.find("openrouter", "test/sibling")).toBeUndefined();
+			await writer.forceRefreshModels();
+			const requests = vi.mocked(globalThis.fetch).mock.calls.length;
+
+			const applied = await resident.applyModelRefreshSnapshots();
+			expect(applied.applied).toContain("openrouter");
+
+			expect(globalThis.fetch).toHaveBeenCalledTimes(requests);
+			expect(resident.find("openrouter", "test/sibling")?.name).toBe("Sibling Model");
+		});
+
+		test("force refresh bypasses fresh discovery cache and applies local overrides", async () => {
+			vi.stubEnv("PI_OFFLINE", "0");
+			writeRawModelsJson({ openrouter: { modelOverrides: { "test/discovered": { name: "Local Name" } } } });
+			let revision = "first";
+			const requests: string[] = [];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) => {
+					const url = String(input);
+					if (url === "https://openrouter.ai/api/v1/models") {
+						requests.push(revision);
+						return new Response(
+							JSON.stringify({
+								data: [
+									{
+										id: "test/discovered",
+										name: revision,
+										context_length: revision === "first" ? 32000 : 64000,
+										top_provider: { max_completion_tokens: 4096 },
+										pricing: { prompt: "0.000001", completion: "0.000002" },
+										architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+									},
+								],
+							}),
+						);
+					}
+					return new Response("not found", { status: 404 });
+				}),
+			);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			await registry.forceRefreshModels();
+			const selected = registry.find("openrouter", "test/discovered")!;
+			const selectedSnapshot = structuredClone(selected);
+			expect(selected.name).toBe("Local Name");
+			revision = "second";
+			const second = await registry.forceRefreshModels();
+			expect(requests).toEqual(["first", "second"]);
+			expect(second.sources.find((entry) => entry.source === "openrouter")?.status).toBe("updated");
+			expect(registry.find("openrouter", "test/discovered")?.name).toBe("Local Name");
+			expect(selected).toEqual(selectedSnapshot);
+			expect(registry.find("openrouter", "test/discovered")?.contextWindow).toBe(64000);
+			expect(selected.contextWindow).toBe(32000);
+		});
+	});
+
 	describe("issue #5 credential-scoped discovery", () => {
 		test("never loads another credential's cached models after key rotation or logout", async () => {
 			vi.stubEnv("PI_OFFLINE", "0");

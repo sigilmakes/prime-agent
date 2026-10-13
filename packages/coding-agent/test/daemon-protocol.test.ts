@@ -9,11 +9,14 @@ import {
 	DAEMON_COMMAND_TYPES,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_PROTOCOL_INFO,
+	DAEMON_SCHEMA_REVISION,
 	type DaemonCommand,
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
+	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
 	isSessionSummary,
+	meetsDaemonCommandCompatibility,
 	salvageDaemonCommandId,
 	WORKER_DAEMON_COMMAND_TYPES,
 } from "../src/modes/daemon/daemon-protocol.js";
@@ -29,6 +32,9 @@ describe("daemon protocol helpers", () => {
 		["delete_rlm_subagent", { minProtocol: 7, capability: "delete_rlm_subagent" }, true],
 		["replace_acp_mcp_servers", { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" }, true],
 		["get_model_catalog", { minProtocol: 7, capability: "model_catalog" }, true],
+		["refresh_models", { minProtocol: 7, minSchemaRevision: 31, capability: "model_refresh" }, true],
+		["apply_model_snapshots", { minProtocol: 7, minSchemaRevision: 31, capability: "model_refresh" }, true],
+		["refresh_all_models", { minProtocol: 7, minSchemaRevision: 31, capability: "model_refresh" }, true],
 		["mutate_queued_message", { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" }, true],
 		["abort_and_send_queued", { minProtocol: 7, minSchemaRevision: 29, capability: "abort_and_send_queued" }, true],
 		["get_rlm_max_depth_status", { minProtocol: 7, minSchemaRevision: 11 }, undefined],
@@ -118,6 +124,16 @@ describe("daemon protocol helpers", () => {
 		expect(getDaemonCommandCompatibilities(command as DaemonCommand)).toEqual(expected);
 	});
 
+	it("keeps old-client commands compatible with a new daemon without model_refresh", () => {
+		const hello = { protocol: DAEMON_PROTOCOL_INFO, schemaRevision: DAEMON_SCHEMA_REVISION, serverCapabilities: [] };
+		expect(
+			getDaemonCommandCompatibilities({ type: "get_state", activeSessionId: "active-1" }).every((requirement) =>
+				meetsDaemonCommandCompatibility(hello, requirement),
+			),
+		).toBe(true);
+		expect(meetsDaemonCommandCompatibility(hello, DAEMON_COMMAND_COMPATIBILITY.refresh_models)).toBe(false);
+	});
+
 	it("serializes worker descriptors as identity-only version 2 state", () => {
 		const descriptor = {
 			version: 1,
@@ -198,6 +214,12 @@ describe("daemon protocol helpers", () => {
 		// A worker "list" means only that worker's sessions; the supervisor list is authoritative.
 		expect(DAEMON_COMMAND_PLANE.list).toBe("control");
 		expect(DAEMON_COMMAND_PLANE.prompt).toBe("session");
+		expect(DAEMON_COMMAND_PLANE.refresh_models).toBe("session");
+		expect(DAEMON_COMMAND_PLANE.apply_model_snapshots).toBe("session");
+		expect(isDaemonMutatingCommand({ type: "apply_model_snapshots" })).toBe(true);
+		expect(DAEMON_COMMAND_PLANE.refresh_all_models).toBe("control");
+		expect(isDaemonMutatingCommand({ type: "refresh_models" })).toBe(true);
+		expect(isDaemonMutatingCommand({ type: "refresh_all_models" })).toBe(true);
 		expect(isSessionPlaneDaemonCommand("no_such_command")).toBe(false);
 	});
 
@@ -205,6 +227,7 @@ describe("daemon protocol helpers", () => {
 		const supervisorOnly = [
 			"complete_owned_session",
 			"get_direct_worker_transport",
+			"refresh_all_models",
 			"list_agent_peers",
 			"promote_owned_session",
 			"reattach",

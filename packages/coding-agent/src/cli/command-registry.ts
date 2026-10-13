@@ -220,6 +220,7 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 			["--mode <text|json|rpc|acp|daemon>", "Select the output mode (default: text)"],
 			["--cwd <dir>", "Use a specific working directory"],
 			["--offline", "Disable startup network operations"],
+			["--refresh", "Refresh model catalogs and exit without starting a session"],
 			["--verbose", "Force verbose startup"],
 			["--daemon-socket <path>", "Use a specific daemon socket"],
 		],

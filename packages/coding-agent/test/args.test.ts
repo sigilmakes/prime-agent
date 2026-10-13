@@ -8,6 +8,8 @@ const FRONTMATTER = "---\ntitle: hello\n---\nSay hi.";
 /** argv -> parsed fields, for inputs that must produce no diagnostics. */
 const parseCases: Array<[string, string[], Expected]> = [
 	["--version", ["--version"], { version: true }],
+	["--refresh one-shot", ["--refresh"], { refresh: true }],
+	["--refresh after end-of-options remains prompt text", ["--", "--refresh"], { messages: ["--refresh"] }],
 	["-v", ["-v"], { version: true }],
 	[
 		"--version does not suppress later args",

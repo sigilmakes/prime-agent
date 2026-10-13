@@ -16,13 +16,17 @@ import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import { type Api, createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_FAMILY_REACH_ERROR, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
+import { AgentSession } from "../src/core/agent-session.js";
 import { type CreateAgentSessionRuntimeFactory, rlmSubagentRuntimeSpec } from "../src/core/agent-session-runtime.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { convertToLlm } from "../src/core/messages.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import {
@@ -31,6 +35,7 @@ import {
 	type SessionInfo,
 	SessionManager,
 } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { bindActiveSessionState } from "../src/modes/daemon/daemon-extension-binding.js";
 import {
@@ -56,7 +61,9 @@ import {
 } from "../src/modes/daemon/snapshot-transcript-cache.js";
 
 import { type PrivateFrame, PrivateFrameDecoder } from "../src/modes/session-worker/private-framing.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
+import { createTestResourceLoader } from "./utilities.js";
 
 describe("daemon mode helpers", () => {
 	it("persists a real child completion for passive discovery, roster, and listing", async () => {
@@ -64,7 +71,7 @@ describe("daemon mode helpers", () => {
 		try {
 			const sessionDir = join(tempDir, "sessions");
 			const parentManager = SessionManager.create(tempDir, sessionDir);
-			parentManager.newSession();
+			parentManager.newSession({ rlmDepth: 0 });
 			parentManager.appendSessionInfo("parent");
 			const parentSessionFile = parentManager.getSessionFile();
 			if (!parentSessionFile) throw new Error("Missing parent session file");
@@ -4160,5 +4167,174 @@ describe("session replacement binding", () => {
 		});
 		await expect(rebind()(session)).rejects.toThrow("cron store contention");
 		expect(broadcasts).toEqual(["session_replaced"]);
+	});
+});
+
+describe("issue #17 worker model refresh dispatch", () => {
+	it("routes wire commands to the resident registry without changing the selected model or active turn", async () => {
+		let networkRefreshes = 0;
+		let diskApplies = 0;
+		let metadataRefreshes = 0;
+		const state = makeState("resident");
+		const session = {
+			modelRegistry: {
+				forceRefreshModels: async ({ sources }: { sources?: readonly string[] }) => {
+					if (sources?.join(",") !== "curated") throw new Error("Unexpected refresh scope");
+					networkRefreshes++;
+					return { startedAt: 1, finishedAt: 2, sources: [{ source: "curated", status: "updated" }] };
+				},
+				applyModelRefreshSnapshots: async ({ since }: { since?: number }) => {
+					if (since !== 1) throw new Error("Unexpected snapshot time");
+					diskApplies++;
+					return { applied: ["curated"], skipped: [], missing: [] };
+				},
+			},
+			scheduleModelMetadataRefresh: () => {
+				metadataRefreshes++;
+			},
+			model: { provider: "test", id: "original" },
+			isStreaming: true,
+		};
+		state.runtime = { session } as unknown as ActiveSessionState["runtime"];
+		const messages: DaemonOutbound[] = [];
+		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
+			options: {},
+			sessions: new Map([["resident", state]]),
+			bindingSessions: new Set(),
+			closingSessions: new Set(),
+			mutationDrain: { begin: () => {}, end: () => {} },
+			write: (_client: DaemonSocketClient, message: DaemonOutbound) => messages.push(message),
+			log: () => {},
+		}) as { handleLine(client: DaemonSocketClient, line: string): Promise<void> };
+		const client = makeClient("client", "resident");
+		await daemon.handleLine(
+			client,
+			JSON.stringify({ id: "one", type: "refresh_models", activeSessionId: "resident", sources: ["curated"] }),
+		);
+		await daemon.handleLine(
+			client,
+			JSON.stringify({ id: "two", type: "apply_model_snapshots", activeSessionId: "resident", since: 1 }),
+		);
+		expect(
+			messages.map(({ type, ...message }) => ({
+				type,
+				...("command" in message ? { command: message.command } : {}),
+				...("success" in message ? { success: message.success } : {}),
+			})),
+		).toEqual([
+			{ type: "response", command: "refresh_models", success: true },
+			{ type: "response", command: "apply_model_snapshots", success: true },
+		]);
+		expect({ networkRefreshes, diskApplies, metadataRefreshes }).toEqual({
+			networkRefreshes: 1,
+			diskApplies: 1,
+			metadataRefreshes: 2,
+		});
+		expect(session.model).toEqual({ provider: "test", id: "original" });
+		expect(session.isStreaming).toBe(true);
+	});
+
+	it("keeps a held xAI turn on its selected model and rebinds metadata after idle", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-daemon-refresh-xai-"));
+		const model = getCodingAgentFixtureModel("xai", "grok-code-fast-1");
+		const held = createAssistantMessageEventStream();
+		let releaseStart: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		});
+		const seenModels: Model<Api>[] = [];
+		const complete = () => ({
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "ok" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: Date.now(),
+		});
+		const streamFn: StreamFn = (requestedModel) => {
+			seenModels.push(requestedModel);
+			if (seenModels.length === 1) {
+				releaseStart?.();
+				return held;
+			}
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: complete() }));
+			return stream;
+		};
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		authStorage.setRuntimeApiKey("xai", "fake-key");
+		const modelRegistry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
+		const session = new AgentSession({
+			agent: new Agent({
+				convertToLlm,
+				getApiKey: () => "fake-key",
+				initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
+				streamFn,
+			}),
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			settingsManager: SettingsManager.inMemory(),
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader(),
+		});
+		try {
+			const state = makeState("xai-resident");
+			state.runtime = { session } as unknown as ActiveSessionState["runtime"];
+			const messages: DaemonOutbound[] = [];
+			const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
+				options: {},
+				sessions: new Map([["xai-resident", state]]),
+				bindingSessions: new Set(),
+				closingSessions: new Set(),
+				mutationDrain: { begin: () => {}, end: () => {} },
+				write: (_client: DaemonSocketClient, message: DaemonOutbound) => messages.push(message),
+				log: () => {},
+			}) as { handleLine(client: DaemonSocketClient, line: string): Promise<void> };
+			const updated = { ...model, name: "refreshed xAI metadata", contextWindow: model.contextWindow + 100 };
+			vi.spyOn(modelRegistry, "forceRefreshModels").mockImplementation(async () => {
+				modelRegistry.registerProvider("xai", { baseUrl: model.baseUrl, apiKey: "fake-key", models: [updated] });
+				return { startedAt: 1, finishedAt: 2, sources: [{ source: "curated", status: "updated" }] };
+			});
+			const selected = session.model;
+			const first = session.prompt("held");
+			await started;
+			await daemon.handleLine(
+				makeClient("client", "xai-resident"),
+				JSON.stringify({
+					id: "refresh",
+					type: "refresh_models",
+					activeSessionId: "xai-resident",
+					sources: ["curated"],
+				}),
+			);
+			expect(messages).toContainEqual(
+				expect.objectContaining({
+					id: "refresh",
+					type: "response",
+					command: "refresh_models",
+					success: true,
+				}),
+			);
+			expect(session.model).toBe(selected);
+			expect(seenModels[0]).toBe(selected);
+			held.push({ type: "done", reason: "stop", message: complete() });
+			await first;
+			await session.waitForIdle();
+			expect(session.model).toMatchObject({ name: updated.name, contextWindow: updated.contextWindow });
+			await session.prompt("next");
+			expect(seenModels[1]).toMatchObject({ name: updated.name, contextWindow: updated.contextWindow });
+		} finally {
+			session.dispose();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });

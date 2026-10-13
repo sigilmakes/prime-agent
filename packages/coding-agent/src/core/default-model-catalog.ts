@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getAgentDir, getCatalogCacheDir, getModelCacheDir } from "../config.js";
-import { CatalogCache } from "./model-catalog-cache.js";
+import { CatalogCache, type CatalogCacheStatus, type CatalogRefreshOutcome } from "./model-catalog-cache.js";
 
 export const DEFAULT_MODEL_CATALOG_URL =
 	"https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent-catalog/main/defaults.v1.json";
@@ -31,9 +31,24 @@ export function getPreferredDefaultModelId(): string | undefined {
 	return getDefaultModelCache().get("public");
 }
 
+/** Read the public default catalog's cache state without making a request. */
+export function getDefaultModelCatalogStatus(): CatalogCacheStatus {
+	return getDefaultModelCache().status("public");
+}
+
+/** Adopt validated disk data and cancel any older in-flight publication. */
+export function reloadDefaultModelCatalogFromDisk(): string | undefined {
+	return getDefaultModelCache().reloadFromDisk("public");
+}
+
 /** Background refresh of the catalog-defined default; never blocks callers. */
 export function refreshDefaultModelCatalog(force = false): Promise<string | undefined> {
 	return getDefaultModelCache().refresh("public", { force });
+}
+
+/** Report this refresh attempt while retaining the last-good default selector. */
+export function refreshDefaultModelCatalogWithOutcome(force = false): Promise<CatalogRefreshOutcome<string>> {
+	return getDefaultModelCache().refreshWithOutcome("public", { force });
 }
 
 /** Parse a cached default entry against the same rules the runtime cache applies. */

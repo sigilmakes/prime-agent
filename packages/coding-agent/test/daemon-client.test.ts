@@ -336,6 +336,71 @@ describe("DaemonClient", () => {
 		await expect(request).rejects.toThrow("closed before the operation completed");
 	});
 
+	it.each([
+		["refresh_models", { type: "refresh_models", activeSessionId: "active-1", sources: ["prime-inference"] }],
+		["apply_model_snapshots", { type: "apply_model_snapshots", activeSessionId: "active-1", since: 42 }],
+		["refresh_all_models", { type: "refresh_all_models" }],
+	] as const)("gates %s on old daemons before writing", async (_type, command) => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["model_refresh"], DAEMON_SCHEMA_REVISION - 1);
+		await expect(client.request(command)).rejects.toThrow("does not support model_refresh");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it.each([
+		["refresh_models", { type: "refresh_models", activeSessionId: "active-1", sources: ["prime-inference"] }],
+		["apply_model_snapshots", { type: "apply_model_snapshots", activeSessionId: "active-1", since: 42 }],
+		["refresh_all_models", { type: "refresh_all_models" }],
+	] as const)("gates %s without capability before writing", async (_type, command) => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, [], DAEMON_SCHEMA_REVISION);
+		await expect(client.request(command)).rejects.toThrow("does not support model_refresh");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it.each([
+		["refresh_models", { type: "refresh_models", activeSessionId: "active-1", sources: ["prime-inference"] }],
+		["apply_model_snapshots", { type: "apply_model_snapshots", activeSessionId: "active-1", since: 42 }],
+		["refresh_all_models", { type: "refresh_all_models" }],
+	] as const)("correlates the final %s report with a capable daemon", async (_type, command) => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["model_refresh"], DAEMON_SCHEMA_REVISION);
+		const unsolicited: unknown[] = [];
+		client.onMessage((message) => unsolicited.push(message));
+		const request = client.request(command);
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		const envelope = JSON.parse(socket.writes[0]!) as {
+			id: string;
+			command: { type: string; activeSessionId?: string };
+		};
+		expect(envelope.command).toMatchObject(command);
+		const report =
+			command.type === "apply_model_snapshots"
+				? { applied: ["local"], skipped: [], missing: [] }
+				: { startedAt: 1, finishedAt: 2, sources: [{ source: "local", status: "updated" }] };
+		socket.emit(
+			"data",
+			`${JSON.stringify({ id: envelope.id, type: "response", command: command.type, success: true, data: report })}\n`,
+		);
+		await expect(request).resolves.toMatchObject({ data: report, id: envelope.id });
+		expect(unsolicited).toEqual([]);
+		client.close();
+	});
+
 	it("isolates a message consumer failure from the rest of the client", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();

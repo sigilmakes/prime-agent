@@ -5004,6 +5004,20 @@ export class AgentDaemon {
 				return success(command.id, "get_model_catalog", catalog);
 			}
 
+			case "refresh_models": {
+				const { session } = this.getBoundSessionState(command.activeSessionId).runtime;
+				const report = await session.modelRegistry.forceRefreshModels({ sources: command.sources });
+				session.scheduleModelMetadataRefresh();
+				return success(command.id, command.type, report);
+			}
+
+			case "apply_model_snapshots": {
+				const { session } = this.getBoundSessionState(command.activeSessionId).runtime;
+				const report = await session.modelRegistry.applyModelRefreshSnapshots({ since: command.since });
+				session.scheduleModelMetadataRefresh();
+				return success(command.id, command.type, report);
+			}
+
 			case "get_queue": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_queue", {

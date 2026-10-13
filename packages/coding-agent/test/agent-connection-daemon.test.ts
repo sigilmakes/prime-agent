@@ -199,6 +199,17 @@ class FakeDaemonClient {
 				};
 			case "replace_acp_mcp_servers":
 				return { type: "response", command: command.type, success: true };
+			case "refresh_all_models":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						startedAt: 1,
+						finishedAt: 2,
+						sources: [{ source: "curated", status: "updated", modelCount: 3 }],
+					},
+				};
 			case "get_model_catalog":
 				return {
 					type: "response",
@@ -873,6 +884,74 @@ function emitSequencedQueueUpdate(client: FakeDaemonClient, activeSessionId: str
 }
 
 describe("DaemonAgentConnection", () => {
+	it("#17 sends an explicit model refresh to the supervisor without a session id", async () => {
+		const supervisor = new FakeDaemonClient();
+		supervisor.serverCapabilities.add("model_refresh");
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(supervisor), "active-1");
+		try {
+			expect(await connection.refreshModels()).toMatchObject({
+				sources: [{ source: "curated", status: "updated" }],
+			});
+			expect(supervisor.requestTimeouts.at(-1)).toBe(120_000);
+			expect(supervisor.requests.filter((request) => request.type === "refresh_all_models")).toEqual([
+				{ type: "refresh_all_models" },
+			]);
+			expect(
+				supervisor.requests.some((request) => request.type === "reload" || request.type === "refresh_models"),
+			).toBe(false);
+		} finally {
+			await connection.dispose();
+		}
+	});
+
+	it("#17 allows a supervisor refresh lasting more than 30 seconds", async () => {
+		const supervisor = new FakeDaemonClient();
+		supervisor.serverCapabilities.add("model_refresh");
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(supervisor), "active-1");
+		const originalRequest = supervisor.request.bind(supervisor);
+		vi.useFakeTimers();
+		try {
+			vi.spyOn(supervisor, "request").mockImplementation(async (command, timeoutMs, options) => {
+				if (command.type !== "refresh_all_models") return originalRequest(command, timeoutMs, options);
+				return new Promise((resolve, reject) => {
+					const deadline = setTimeout(() => reject(new Error("daemon request timed out")), timeoutMs);
+					setTimeout(() => {
+						clearTimeout(deadline);
+						resolve({
+							type: "response",
+							command: command.type,
+							success: true,
+							data: {
+								startedAt: 1,
+								finishedAt: 2,
+								sources: [{ source: "curated", status: "updated" }],
+							},
+						});
+					}, 31_000);
+				});
+			});
+			const refresh = expect(connection.refreshModels()).resolves.toMatchObject({
+				sources: [{ source: "curated", status: "updated" }],
+			});
+			await vi.advanceTimersByTimeAsync(31_000);
+			await refresh;
+		} finally {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+			await connection.dispose();
+		}
+	});
+
+	it("#17 rejects unsupported daemon refresh without sending a command", async () => {
+		const supervisor = new FakeDaemonClient();
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(supervisor), "active-1");
+		try {
+			await expect(connection.refreshModels()).rejects.toThrow("restart or update");
+			expect(supervisor.requests.some((request) => request.type === "refresh_all_models")).toBe(false);
+		} finally {
+			await connection.dispose();
+		}
+	});
 	it("falls back to the supervisor when the direct socket closes during initial attach", async () => {
 		const supervisor = new FakeDaemonClient();
 		const closeListeners = new Set<(error: Error) => void>();

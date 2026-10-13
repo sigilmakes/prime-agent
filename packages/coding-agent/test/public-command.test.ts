@@ -66,6 +66,9 @@ import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "../src/cli/daemon-update
 import { handlePublicCommand } from "../src/cli/public-command.js";
 
 describe("public command routing", () => {
+	it("lists one-shot model refresh in top-level help", () => {
+		expect(formatTopLevelHelp()).toContain("--refresh");
+	});
 	beforeEach(() => {
 		mocks.daemonCommands.length = 0;
 		mocks.packageCommands.length = 0;

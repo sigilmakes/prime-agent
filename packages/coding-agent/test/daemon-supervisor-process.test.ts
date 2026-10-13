@@ -307,6 +307,91 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("#17 coalesces offline model refresh across resident workers without waking saved sessions", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-supervisor-refresh-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const saved = SessionManager.create(projectDir, sessionDir);
+		saved.newSession({ rlmDepth: 0 });
+		saved.appendMessage({ role: "user", content: "saved-only fixture", timestamp: 1 });
+		saved.flushNow();
+		const savedPath = saved.getSessionFile();
+		if (!savedPath) throw new Error("Saved-only fixture was not persisted");
+		const savedBytes = readFileSync(savedPath);
+		const clearedCredentials = Object.fromEntries(
+			Object.keys(process.env)
+				.filter((name) =>
+					/(?:API_KEY|_TOKEN|_SECRET|_PASSWORD|^AWS_|^AZURE_|^GOOGLE_APPLICATION_CREDENTIALS|^PRIME_AGENT_INTERNAL_DAEMON_)/.test(
+						name,
+					),
+				)
+				.map((name) => [name, ""]),
+		);
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			...clearedCredentials,
+			HOME: join(root, "home"),
+			XDG_CONFIG_HOME: join(root, "config"),
+			XDG_CACHE_HOME: join(root, "cache"),
+			XDG_DATA_HOME: join(root, "data"),
+		});
+		let first: DaemonClient | undefined;
+		let second: DaemonClient | undefined;
+		try {
+			first = await connectEventually(socketPath, supervisor);
+			second = await connectEventually(socketPath, supervisor);
+			const summaries: SessionSummary[] = [];
+			for (const name of ["refresh-root-a", "refresh-root-b"]) {
+				const response = await first.request({
+					type: "create",
+					name,
+					config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+				});
+				if (!response.success) throw new Error(response.error);
+				const summary = requireSummary(response.data);
+				if (!summary.workerPid) throw new Error("Worker did not expose its pid");
+				workerPids.add(summary.workerPid);
+				summaries.push(summary);
+			}
+			const beforePids = summaries.map((summary) => summary.workerPid).sort();
+			expect(new Set(beforePids).size).toBe(2);
+			const beforeDescriptors = countWorkerDescriptors(agentDir);
+			expect(beforeDescriptors).toBe(2);
+			const [one, two] = await Promise.all([
+				first.request({ type: "refresh_all_models" }, 120_000),
+				second.request({ type: "refresh_all_models" }, 120_000),
+			]);
+			for (const response of [one, two]) {
+				if (!response.success) throw new Error(response.error);
+				expect(response.data).toMatchObject({
+					workers: { total: 2, succeeded: 2, failed: 0 },
+					sources: expect.arrayContaining([{ source: "curated", status: "stale", reason: "offline" }]),
+				});
+			}
+			if (!one.success || !two.success) throw new Error("Concurrent refresh failed");
+			expect(one.data).toEqual(two.data);
+			const listed = await first.request({ type: "list" });
+			if (!listed.success) throw new Error(listed.error);
+			const afterPids = requireSessionList(listed.data)
+				.filter((summary) => summaries.some((initial) => initial.id === summary.id))
+				.map((summary) => summary.workerPid)
+				.sort();
+			expect(afterPids).toEqual(beforePids);
+			expect(countWorkerDescriptors(agentDir)).toBe(beforeDescriptors);
+			expect(readFileSync(savedPath)).toEqual(savedBytes);
+		} finally {
+			try {
+				await first?.request({ type: "shutdown", force: true }, 10_000);
+			} catch {
+				// afterEach also shuts down a daemon that disconnected during this test.
+			}
+			first?.close();
+			second?.close();
+		}
+	}, 125_000);
+
 	it("accepts the canonical socket path when launched with duplicate slashes", async () => {
 		if (process.platform === "win32") return;
 		const root = tempDir();

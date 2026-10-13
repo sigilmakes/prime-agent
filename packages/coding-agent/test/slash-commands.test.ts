@@ -15,6 +15,17 @@ import {
 } from "../src/core/slash-commands.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
+describe("model catalog refresh command", () => {
+	test("/refresh is client-owned and does not accept arguments", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "refresh")).toMatchObject({
+			name: "refresh",
+		});
+		expect(isBuiltinSlashCommandName("refresh")).toBe(true);
+		expect(parseSessionSlashCommand("/refresh")).toBeUndefined();
+		expect(builtinSlashCommandTakesArgument("refresh")).toBe(false);
+	});
+});
+
 describe("slash command aliases", () => {
 	// [input, canonical name, args, alias used]
 	test.each([

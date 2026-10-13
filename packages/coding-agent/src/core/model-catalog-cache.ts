@@ -61,11 +61,30 @@ export interface CatalogCacheStatus {
 	error?: string;
 }
 
+/** Result of this caller's refresh attempt. `models` is last-good data when available. */
+export type CatalogRefreshOutcome<T> =
+	| { kind: "updated" | "not-modified"; models: T }
+	| { kind: "cached" | "offline"; models: T | undefined }
+	| { kind: "error"; models: T | undefined; error: string }
+	| { kind: "memory-only"; models: T; error: "Catalog cache persistence failed" }
+	| { kind: "revoked"; status: 401 | 403; models: undefined }
+	| { kind: "cancelled"; models: undefined };
+
+export interface CatalogRefreshOptions {
+	force?: boolean;
+	headers?: Record<string, string>;
+	fetchFn?: typeof fetch;
+	isCurrent?: () => boolean;
+	signal?: AbortSignal;
+	/** Merge validated partial records before persisting the provider-owned payload. */
+	mergePayload?: (payload: unknown, previousPayload: unknown | undefined) => unknown;
+}
+
 /** One last-good snapshot per source. Changing scope discards the previous account's view. */
 export class CatalogCache<T> {
 	private snapshot?: Snapshot<T>;
 	private scope?: string;
-	private readonly pending = new Map<string, Promise<T | undefined>>();
+	private readonly pending = new Map<string, Promise<CatalogRefreshOutcome<T>>>();
 	private source: CatalogCacheStatus["source"] = "none";
 	private error?: string;
 	private lastAttempt?: number;
@@ -101,6 +120,12 @@ export class CatalogCache<T> {
 			if (this.snapshot) this.source = "legacy";
 		}
 		return this.snapshot?.models;
+	}
+
+	/** Replace the in-memory view with the validated on-disk snapshot, without fetching. */
+	reloadFromDisk(scope: string): T | undefined {
+		this.scope = undefined;
+		return this.get(scope);
 	}
 
 	private readSnapshot(path: string, scope: string): Snapshot<T> | undefined {
@@ -262,13 +287,13 @@ export class CatalogCache<T> {
 		startedAt: number,
 		previous: Snapshot<T> | undefined,
 		isCurrent: () => boolean,
-	): Promise<Snapshot<T>> {
-		if (!this.cachePath || !isCurrent()) return snapshot;
+	): Promise<{ snapshot: Snapshot<T>; persisted: boolean }> {
+		if (!this.cachePath || !isCurrent()) return { snapshot, persisted: false };
 		const path = this.cachePath;
 		const descriptor = await this.acquireLock(path);
-		if (descriptor === undefined) return snapshot;
+		if (descriptor === undefined) return { snapshot, persisted: false };
 		try {
-			if (!isCurrent()) return snapshot;
+			if (!isCurrent()) return { snapshot, persisted: false };
 			const existing = this.readSnapshot(path, snapshot.scope);
 			let diskTime: number | undefined;
 			let diskRevision: string | undefined;
@@ -286,42 +311,42 @@ export class CatalogCache<T> {
 				diskTime >= startedAt &&
 				(diskRevision === undefined || diskRevision !== previous?.revision)
 			)
-				return existing ?? snapshot;
+				return existing ? { snapshot: existing, persisted: true } : { snapshot, persisted: false };
 			const { models: _models, ...stored } = snapshot;
 			writeFileAtomicSync(path, JSON.stringify({ url: this.url, ...stored }), { mode: 0o600 });
+			return { snapshot, persisted: true };
 		} catch {
 			/* Keep validated in-memory data on disk failure. */
+			return { snapshot, persisted: false };
 		} finally {
 			this.releaseLock(`${path}.lock`, descriptor);
 		}
-		return snapshot;
 	}
 
-	refresh(
-		scope: string,
-		options: {
-			force?: boolean;
-			headers?: Record<string, string>;
-			fetchFn?: typeof fetch;
-			isCurrent?: () => boolean;
-			signal?: AbortSignal;
-			/** Merge validated partial records before persisting the provider-owned payload. */
-			mergePayload?: (payload: unknown, previousPayload: unknown | undefined) => unknown;
-		} = {},
-	): Promise<T | undefined> {
-		const wait = (promise: Promise<T | undefined>): Promise<T | undefined> => {
-			if (!options.signal) return promise;
+	refresh(scope: string, options: CatalogRefreshOptions = {}): Promise<T | undefined> {
+		// Keep the legacy abort rejection contract while the typed API returns an outcome.
+		if (options.signal?.aborted) return Promise.reject(new DOMException("Catalog wait aborted", "AbortError"));
+		return this.refreshWithOutcome(scope, options).then((outcome) => {
+			if (outcome.kind === "cancelled" && options.signal?.aborted)
+				throw new DOMException("Catalog wait aborted", "AbortError");
+			return outcome.models;
+		});
+	}
+
+	refreshWithOutcome(scope: string, options: CatalogRefreshOptions = {}): Promise<CatalogRefreshOutcome<T>> {
+		const wait = (promise: Promise<CatalogRefreshOutcome<T>>): Promise<CatalogRefreshOutcome<T>> => {
 			const signal = options.signal;
-			if (signal.aborted) return Promise.reject(new DOMException("Catalog wait aborted", "AbortError"));
+			if (!signal) return promise;
+			if (signal.aborted) return Promise.resolve({ kind: "cancelled", models: undefined });
 			return new Promise((resolve, reject) => {
-				const aborted = () => reject(new DOMException("Catalog wait aborted", "AbortError"));
+				const aborted = () => resolve({ kind: "cancelled", models: undefined });
 				signal.addEventListener("abort", aborted, { once: true });
 				void promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
 			});
 		};
-		if (options.signal?.aborted) return wait(Promise.resolve(undefined));
+		if (options.signal?.aborted) return Promise.resolve({ kind: "cancelled", models: undefined });
 		const cached = this.get(scope);
-		if (isCatalogOffline()) return wait(Promise.resolve(cached));
+		if (isCatalogOffline()) return wait(Promise.resolve({ kind: "offline", models: cached }));
 		const active = this.pending.get(scope);
 		if (active) return wait(active);
 		const checkedAt = this.lastAttempt ?? this.snapshot?.checkedAt ?? this.snapshot?.fetchedAt;
@@ -331,7 +356,7 @@ export class CatalogCache<T> {
 			Date.now() >= checkedAt &&
 			Date.now() - checkedAt < CATALOG_REFRESH_INTERVAL_MS
 		)
-			return wait(Promise.resolve(cached));
+			return wait(Promise.resolve({ kind: "cached", models: cached }));
 		this.lastAttempt = Date.now();
 		const startedAt = this.lastAttempt;
 		this.error = undefined;
@@ -359,7 +384,7 @@ export class CatalogCache<T> {
 				if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_RESPONSE_BYTES)
 					throw new Error("Merged catalog is too large");
 				const models = response.status === 304 && previous ? previous.models : this.parse(payload, scope);
-				if (!isCurrent()) return undefined;
+				if (!isCurrent()) return { kind: "cancelled", models: undefined } as const;
 				const next: Snapshot<T> = {
 					scope,
 					fetchedAt: response.status === 304 && previous ? previous.fetchedAt : Date.now(),
@@ -369,13 +394,23 @@ export class CatalogCache<T> {
 					payload,
 					models,
 				};
-				const persisted = await this.persist(next, startedAt, previous, isCurrent);
-				if (!isCurrent()) return undefined;
-				this.snapshot = persisted;
-				this.source = persisted === next ? "network" : "disk";
-				return persisted.models;
+				const result = await this.persist(next, startedAt, previous, isCurrent);
+				if (!isCurrent()) return { kind: "cancelled", models: undefined } as const;
+				this.snapshot = result.snapshot;
+				this.source = result.snapshot === next ? "network" : "disk";
+				if (!result.persisted)
+					return {
+						kind: "memory-only",
+						models: result.snapshot.models,
+						error: "Catalog cache persistence failed",
+					} as const;
+				if (result.snapshot !== next) return { kind: "cached", models: result.snapshot.models } as const;
+				return {
+					kind: response.status === 304 && previous ? "not-modified" : "updated",
+					models: result.snapshot.models,
+				} as const;
 			} catch (error) {
-				if (!isCurrent()) return undefined;
+				if (!isCurrent()) return { kind: "cancelled", models: undefined } as const;
 				this.error =
 					error instanceof CatalogRequestError
 						? `Catalog request failed with status ${error.status}`
@@ -389,16 +424,19 @@ export class CatalogCache<T> {
 				) {
 					const revoked = this.revokeCurrentSnapshot(scope);
 					this.clear(scope);
+					const revokedGeneration = this.generation;
 					const deleted = await this.invalidateDisk(scope);
+					if (this.scope !== scope || this.generation !== revokedGeneration)
+						return { kind: "cancelled", models: undefined } as const;
 					this.lastAttempt = startedAt;
 					// An unwritable disk cannot inform a fresh process of this rejection.
 					// Keep offline private caching, but expose the failed invalidation locally.
 					this.error =
 						`Catalog request failed with status ${error.status}` +
 						(!revoked && !deleted ? "; private catalog disk invalidation failed" : "");
-					return undefined;
+					return { kind: "revoked", status: error.status as 401 | 403, models: undefined } as const;
 				}
-				return this.snapshot?.models;
+				return { kind: "error", error: this.error, models: this.snapshot?.models } as const;
 			}
 		})();
 		this.pending.set(scope, promise);

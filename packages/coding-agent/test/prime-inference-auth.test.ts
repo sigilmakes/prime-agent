@@ -9,6 +9,7 @@ import {
 	loginPrimeInference,
 	resolvePrimeInferenceAuthConfig,
 } from "../src/core/prime-inference-auth.js";
+import { fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome } from "../src/core/prime-inference-models.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -318,5 +319,111 @@ describe("Prime Inference auth", () => {
 		await expect(
 			loginPrimeInference({ onAuth: () => {} }, { configPath, fetchFn: fetchMock, pollIntervalMs: 0 }),
 		).rejects.toThrow("Prime login challenge expired");
+	});
+});
+
+describe("private Prime Inference entitlement outcomes", () => {
+	const teamHeaders = { "X-Prime-Team-ID": "team" };
+	const privateEntry = {
+		id: "internal/glm-5.2-fast",
+		display_name: "Private",
+		pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+		specs: { context_window: 100_000, max_output_tokens: 4_000, supports_reasoning: true },
+	};
+
+	it.each([
+		{ name: "empty authorized 200", response: jsonResponse({ object: "list", data: [] }), status: "authorized" },
+		{ name: "401", response: new Response(null, { status: 401 }), status: "auth-rejected" },
+		{ name: "403", response: new Response(null, { status: 403 }), status: "auth-rejected" },
+	])("distinguishes $name from denied entitlements", async ({ response, status }) => {
+		const fetchFn = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
+			expect(new Headers(init?.headers).get("x-prime-team-id")).toBe("team");
+			return response;
+		});
+		const outcome = await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome(
+			"secret",
+			teamHeaders,
+			new Set(),
+			fetchFn,
+		);
+		expect(outcome).toEqual(status === "authorized" ? { status, models: [] } : { status });
+		expect(JSON.stringify(outcome)).not.toContain("secret");
+	});
+
+	it("exposes only authorized private routes and excludes public IDs", async () => {
+		const fetchFn = vi.fn(async () =>
+			jsonResponse({
+				object: "list",
+				data: [privateEntry, { ...privateEntry, id: "public/model" }, { ...privateEntry, id: "dev/hidden" }],
+			}),
+		);
+		const outcome = await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome(
+			"secret",
+			teamHeaders,
+			new Set(["dev/hidden"]),
+			fetchFn,
+		);
+		expect(outcome.status).toBe("authorized");
+		if (outcome.status !== "authorized") throw new Error("Expected authorized outcome");
+		expect(outcome.models.map((model) => model.id)).toEqual(["internal/glm-5.2-fast"]);
+	});
+
+	it("skips missing credentials and team without a network request", async () => {
+		const fetchFn = vi.fn(async () => jsonResponse({ object: "list", data: [privateEntry] }));
+		expect(await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome("", teamHeaders, new Set(), fetchFn)).toEqual({
+			status: "skipped",
+		});
+		expect(await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome("secret", {}, new Set(), fetchFn)).toEqual({
+			status: "skipped",
+		});
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+
+	it("returns failed without exposing transport details", async () => {
+		const outcome = await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome(
+			"secret",
+			teamHeaders,
+			new Set(),
+			vi.fn(async () => {
+				throw new Error("network-secret");
+			}),
+		);
+		expect(outcome).toEqual({ status: "failed" });
+	});
+
+	it("does not publish stale private entitlements when credentials rotate and the old request is cancelled", async () => {
+		let releaseOld: ((value: Response) => void) | undefined;
+		let started: (() => void) | undefined;
+		const ready = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const controller = new AbortController();
+		const fetchFn = vi.fn(async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			if (new Headers(init?.headers).get("authorization") === "Bearer old") {
+				started?.();
+				return new Promise<Response>((resolve) => {
+					releaseOld = resolve;
+				});
+			}
+			return new Response(null, { status: 403 });
+		});
+		const old = fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome(
+			"old",
+			teamHeaders,
+			new Set(),
+			fetchFn,
+			1000,
+			controller.signal,
+		);
+		await ready;
+		controller.abort();
+		expect(await old).toEqual({ status: "cancelled" });
+		expect(
+			await fetchAuthorizedPrivatePrimeInferenceModelsWithOutcome("new", teamHeaders, new Set(), fetchFn),
+		).toEqual({ status: "auth-rejected" });
+		releaseOld?.(jsonResponse({ object: "list", data: [privateEntry] }));
+		expect(await old).toEqual({ status: "cancelled" });
+		expect(fetchFn).toHaveBeenCalledTimes(2);
 	});
 });

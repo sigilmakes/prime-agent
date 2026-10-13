@@ -1,9 +1,13 @@
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.js";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
 import {
 	type DaemonClientStartupDecision,
@@ -14,6 +18,7 @@ import {
 	parseAgentsViewCommand,
 	resolveActiveSessionLookupFailure,
 	resolveRuntimeSessionOptions,
+	runOneShotModelRefresh,
 	runtimeConfigFromArgs,
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
@@ -24,10 +29,319 @@ import {
 	shouldUseDaemonClientRuntime,
 	shouldUseEphemeralSessionManagerForDaemonInteractive,
 } from "../src/main.js";
+import { formatModelRefreshReport } from "../src/modes/agent-connection/types.js";
+import { DaemonCapabilityUnavailableError, DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { DaemonSessionRecoveringError } from "../src/modes/daemon/daemon-errors.js";
 import type { SessionSummary } from "../src/modes/index.js";
 
+const isolatedCliEnv = Object.fromEntries(
+	Object.entries(process.env).filter(([name]) => !/(TOKEN|KEY|SECRET|AUTH|CREDENTIAL)/i.test(name)),
+);
+
 describe("interactive startup routing", () => {
+	test("#17 writes standalone refresh results to stdout, not stderr", async () => {
+		const home = mkdtempSync(join(tmpdir(), "prime-refresh-streams-"));
+		try {
+			const child = spawn(
+				process.execPath,
+				[
+					join(process.cwd(), "../../node_modules/tsx/dist/cli.mjs"),
+					"src/cli.ts",
+					"--refresh",
+					"--offline",
+					"--daemon-socket",
+					join(home, "missing.sock"),
+				],
+				{
+					cwd: process.cwd(),
+					env: {
+						...process.env,
+						HOME: home,
+						XDG_CONFIG_HOME: join(home, "xdg"),
+						[ENV_AGENT_DIR]: join(home, "agent"),
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			);
+			let stdout = "";
+			let stderr = "";
+			child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+				stdout += chunk;
+			});
+			child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+				stderr += chunk;
+			});
+			const exitCode = await new Promise<number | null>((resolve, reject) => {
+				const deadline = setTimeout(() => {
+					child.kill();
+					reject(new Error("refresh child exceeded deadline"));
+				}, 20_000);
+				child.once("error", (error) => {
+					clearTimeout(deadline);
+					reject(error);
+				});
+				child.once("close", (code) => {
+					clearTimeout(deadline);
+					resolve(code);
+				});
+			});
+			expect(exitCode).toBe(0);
+			expect(stdout).toContain("curated: stale (offline)");
+			expect(stderr).not.toContain("curated: stale");
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+	test("#17 prints sanitized partial failures to stdout and exits one", async () => {
+		const home = mkdtempSync(join(tmpdir(), "prime-refresh-failure-"));
+		const socketPath = join(home, "fake-daemon.sock");
+		const server = createServer((socket) => {
+			socket.on("error", (error: NodeJS.ErrnoException) => {
+				if (error.code !== "ECONNRESET") throw error;
+			});
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: { name: "prime-agent.daemon", version: 7 },
+					schemaRevision: 31,
+					clientId: "test",
+					serverCapabilities: ["model_refresh"],
+				})}\n`,
+			);
+			let buffer = "";
+			socket.setEncoding("utf8").on("data", (chunk: string) => {
+				buffer += chunk;
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) return;
+				const request = JSON.parse(buffer.slice(0, newline)) as { id?: string; command?: { type?: string } };
+				if (request.command?.type !== "refresh_all_models") return;
+				socket.write(
+					`${JSON.stringify({
+						id: request.id,
+						type: "response",
+						command: request.command.type,
+						success: true,
+						data: {
+							startedAt: 1,
+							finishedAt: 2,
+							sources: [{ source: "https://secret.example/token=sk-test", status: "failed", reason: "network" }],
+							workers: { total: 1, succeeded: 0, failed: 1 },
+						},
+					})}\n`,
+				);
+			});
+		});
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(socketPath, () => {
+					server.removeListener("error", reject);
+					resolve();
+				});
+			});
+			const child = spawn(
+				process.execPath,
+				[
+					join(process.cwd(), "../../node_modules/tsx/dist/cli.mjs"),
+					"src/cli.ts",
+					"--refresh",
+					"--daemon-socket",
+					socketPath,
+				],
+				{
+					cwd: process.cwd(),
+					env: {
+						...isolatedCliEnv,
+						HOME: home,
+						XDG_CONFIG_HOME: join(home, "xdg"),
+						[ENV_AGENT_DIR]: join(home, "agent"),
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			);
+			let stdout = "";
+			let stderr = "";
+			child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+				stdout += chunk;
+			});
+			child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+				stderr += chunk;
+			});
+			const exitCode = await new Promise<number | null>((resolve, reject) => {
+				const deadline = setTimeout(() => {
+					child.kill();
+					reject(new Error("refresh child exceeded deadline"));
+				}, 20_000);
+				child.once("error", (error) => {
+					clearTimeout(deadline);
+					reject(error);
+				});
+				child.once("close", (code) => {
+					clearTimeout(deadline);
+					resolve(code);
+				});
+			});
+			expect(exitCode).toBe(1);
+			expect(stdout).toContain("unknown-source: failed (network)");
+			expect(stdout + stderr).not.toContain("sk-test");
+			expect(stderr).not.toContain("unknown-source:");
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	test("#17 refreshes through a compatible daemon without attaching a session", async () => {
+		const connect = vi.spyOn(DaemonClient.prototype, "connect").mockResolvedValue();
+		const hello = vi.spyOn(DaemonClient.prototype, "waitForHello").mockResolvedValue({
+			type: "daemon_hello",
+			socketPath: "/tmp/unused-refresh-test.sock",
+			protocol: { name: "prime-agent.daemon", version: 7 },
+			schemaRevision: 31,
+			clientId: "test",
+			serverCapabilities: ["model_refresh"],
+		});
+		const supports = vi.spyOn(DaemonClient.prototype, "supportsServerCapability").mockReturnValue(true);
+		const request = vi.spyOn(DaemonClient.prototype, "request").mockResolvedValue({
+			type: "response",
+			command: "refresh_all_models",
+			success: true,
+			data: { startedAt: 1, finishedAt: 2, sources: [{ source: "curated", status: "unchanged" }] },
+		});
+		const close = vi.spyOn(DaemonClient.prototype, "close").mockImplementation(() => {});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await runOneShotModelRefresh(parseArgs(["--refresh", "--daemon-socket", "/tmp/unused-refresh-test.sock"]));
+			expect(connect).toHaveBeenCalledTimes(1);
+			expect(supports).toHaveBeenCalledWith("model_refresh");
+			expect(request).toHaveBeenCalledWith({ type: "refresh_all_models" }, 120_000);
+			expect(log).toHaveBeenCalledWith("curated: unchanged");
+			expect(process.exitCode).not.toBe(1);
+		} finally {
+			process.exitCode = undefined;
+			connect.mockRestore();
+			hello.mockRestore();
+			supports.mockRestore();
+			request.mockRestore();
+			close.mockRestore();
+			log.mockRestore();
+		}
+	});
+
+	test("#17 does not retry a failed daemon refresh in the standalone registry", async () => {
+		const connect = vi.spyOn(DaemonClient.prototype, "connect").mockResolvedValue();
+		const hello = vi.spyOn(DaemonClient.prototype, "waitForHello").mockResolvedValue({
+			type: "daemon_hello",
+			socketPath: "/tmp/unused-refresh-test.sock",
+			protocol: { name: "prime-agent.daemon", version: 7 },
+			schemaRevision: 31,
+			clientId: "test",
+			serverCapabilities: ["model_refresh"],
+		});
+		const supports = vi.spyOn(DaemonClient.prototype, "supportsServerCapability").mockReturnValue(true);
+		const request = vi.spyOn(DaemonClient.prototype, "request").mockRejectedValue(new Error("secret endpoint"));
+		const close = vi.spyOn(DaemonClient.prototype, "close").mockImplementation(() => {});
+		const registry = vi.spyOn(ModelRegistry, "create");
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await runOneShotModelRefresh(parseArgs(["--refresh", "--daemon-socket", "/tmp/unused-refresh-test.sock"]));
+			expect(request).toHaveBeenCalledTimes(1);
+			expect(registry).not.toHaveBeenCalled();
+			expect(error).toHaveBeenCalledWith("Model catalog refresh failed. Check the agent log for details.");
+			expect(process.exitCode).toBe(1);
+		} finally {
+			process.exitCode = undefined;
+			connect.mockRestore();
+			hello.mockRestore();
+			supports.mockRestore();
+			request.mockRestore();
+			close.mockRestore();
+			registry.mockRestore();
+			error.mockRestore();
+		}
+	});
+
+	test.each(["zero-workers", "prewrite-capability"] as const)(
+		"#17 falls back to standalone refresh on %s",
+		async (scenario) => {
+			const connect = vi.spyOn(DaemonClient.prototype, "connect").mockResolvedValue();
+			const hello = vi.spyOn(DaemonClient.prototype, "waitForHello").mockResolvedValue({
+				type: "daemon_hello",
+				socketPath: "/tmp/unused-refresh-test.sock",
+				protocol: { name: "prime-agent.daemon", version: 7 },
+				schemaRevision: 31,
+				clientId: "test",
+				serverCapabilities: ["model_refresh"],
+			});
+			const supports = vi.spyOn(DaemonClient.prototype, "supportsServerCapability").mockReturnValue(true);
+			const request = vi.spyOn(DaemonClient.prototype, "request");
+			if (scenario === "prewrite-capability") {
+				request.mockRejectedValue(new DaemonCapabilityUnavailableError("refresh_all_models", "model_refresh"));
+			} else {
+				request.mockResolvedValue({
+					type: "response",
+					command: "refresh_all_models",
+					success: true,
+					data: { startedAt: 1, finishedAt: 2, sources: [], workers: { total: 0, succeeded: 0, failed: 0 } },
+				});
+			}
+			const close = vi.spyOn(DaemonClient.prototype, "close").mockImplementation(() => {});
+			const isolatedAgentDir = mkdtempSync(join(tmpdir(), "prime-model-refresh-cli-"));
+			const priorAgentDir = process.env[ENV_AGENT_DIR];
+			process.env[ENV_AGENT_DIR] = isolatedAgentDir;
+			const forceRefreshModels = vi.fn(async () => ({
+				startedAt: 3,
+				finishedAt: 4,
+				sources: [{ source: "curated", status: "updated" as const }],
+			}));
+			const registry = vi
+				.spyOn(ModelRegistry, "create")
+				.mockReturnValue({ forceRefreshModels } as unknown as ModelRegistry);
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				await runOneShotModelRefresh(parseArgs(["--refresh", "--daemon-socket", "/tmp/unused-refresh-test.sock"]));
+				expect(request).toHaveBeenCalledWith({ type: "refresh_all_models" }, 120_000);
+				expect(forceRefreshModels).toHaveBeenCalledTimes(1);
+				expect(log).toHaveBeenCalledWith("curated: updated");
+			} finally {
+				process.exitCode = undefined;
+				connect.mockRestore();
+				hello.mockRestore();
+				supports.mockRestore();
+				request.mockRestore();
+				close.mockRestore();
+				registry.mockRestore();
+				log.mockRestore();
+				if (priorAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+				else process.env[ENV_AGENT_DIR] = priorAgentDir;
+				rmSync(isolatedAgentDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test("#17 rejects prompt options before contacting a daemon or registry", async () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await runOneShotModelRefresh(parseArgs(["--refresh", "hello"]));
+			await runOneShotModelRefresh(parseArgs(["--refresh", "--goal", "oops"]));
+			expect(error).toHaveBeenCalledWith(expect.stringContaining("no session or prompt options"));
+			expect(process.exitCode).toBe(1);
+		} finally {
+			process.exitCode = undefined;
+			error.mockRestore();
+		}
+	});
+
+	test("#17 prints only safe refresh fields without leaking endpoints", () => {
+		expect(
+			formatModelRefreshReport({
+				startedAt: 1,
+				finishedAt: 2,
+				sources: [{ source: "https://secret.example/?token=sk-test", status: "failed", reason: "network" }],
+			}),
+		).toEqual(["unknown-source: failed (network)"]);
+	});
 	test.each([
 		["acp", false, false],
 		["acp", true, true],

@@ -683,3 +683,170 @@ describe("daemon supervisor prompt admission ownership", () => {
 		]);
 	});
 });
+
+describe("issue #17 resident model refresh fan-out", () => {
+	function harness() {
+		const supervisor = createHarness() as SupervisorHarness & {
+			workers: Map<string, unknown>;
+			isLiveWorker: (worker: unknown) => boolean;
+			refreshResidentModels(): Promise<{
+				sources: Array<{ source: string; status: string; reason?: string; modelCount?: number }>;
+				workers: { total: number; succeeded: number; failed: number };
+			}>;
+		};
+		supervisor.isLiveWorker = () => true;
+		return supervisor;
+	}
+
+	function addWorker(supervisor: ReturnType<typeof harness>, id: string, request: ReturnType<typeof vi.fn>) {
+		supervisor.workers.set(id, {
+			descriptor: { lifecycle: "ready", rootActiveSessionId: id },
+			client: { request },
+		});
+	}
+
+	it("returns a zero-worker sentinel and does not open saved sessions", async () => {
+		const supervisor = harness();
+		const result = await supervisor.refreshResidentModels();
+		expect(result).toMatchObject({ sources: [], workers: { total: 0, succeeded: 0, failed: 0 } });
+	});
+
+	it("coalesces clients, applies sibling disk snapshots and force-fetches only missing sources", async () => {
+		const supervisor = harness();
+		const gate = deferred<void>();
+		const first = vi.fn(async (command: DaemonCommand) => {
+			await gate.promise;
+			return success(undefined, command.type, {
+				startedAt: 1,
+				finishedAt: 2,
+				sources: [{ source: "curated", status: "updated", modelCount: 3 }],
+			});
+		});
+		const second = vi.fn(async (command: DaemonCommand, _timeoutMs: number) => {
+			if (command.type === "apply_model_snapshots") {
+				return success(undefined, command.type, {
+					applied: [],
+					skipped: [],
+					missing: second.mock.calls.length === 1 ? ["curated"] : [],
+				});
+			}
+			return success(undefined, command.type, {
+				startedAt: 3,
+				finishedAt: 4,
+				sources: [{ source: "curated", status: "unchanged", modelCount: 4 }],
+			});
+		});
+		addWorker(supervisor, "first", first);
+		addWorker(supervisor, "second", second);
+		const pending = supervisor.refreshResidentModels();
+		expect(supervisor.refreshResidentModels()).toBe(pending);
+		gate.resolve();
+		const result = await pending;
+		expect(result.workers).toEqual({ total: 2, succeeded: 2, failed: 0 });
+		expect(result.sources).toEqual([{ source: "curated", status: "updated" }]);
+		expect(first).toHaveBeenCalledTimes(1);
+		expect(second.mock.calls.map(([command]) => command.type)).toEqual([
+			"apply_model_snapshots",
+			"refresh_models",
+			"apply_model_snapshots",
+		]);
+		expect(second.mock.calls[1]?.[0]).toMatchObject({ sources: ["curated"], activeSessionId: "second" });
+		expect(second.mock.calls[0]?.[1]).toBe(25_000);
+	});
+
+	it("reports worker disconnects without leaking identities or masking fresh source status", async () => {
+		const supervisor = harness();
+		addWorker(
+			supervisor,
+			"leader",
+			vi.fn(async (command: DaemonCommand) =>
+				success(undefined, command.type, {
+					startedAt: 1,
+					finishedAt: 2,
+					sources: [{ source: "curated", status: "updated", modelCount: 2 }],
+				}),
+			),
+		);
+		addWorker(
+			supervisor,
+			"disconnected",
+			vi.fn(async () => {
+				throw new Error("credential: do not return");
+			}),
+		);
+		const result = await supervisor.refreshResidentModels();
+		expect(result).toMatchObject({
+			workers: { total: 2, succeeded: 1, failed: 1 },
+			sources: [
+				{ source: "curated", status: "updated" },
+				{ source: "daemon-workers", status: "failed", reason: "worker-unavailable" },
+			],
+		});
+		expect(JSON.stringify(result)).not.toContain("disconnected");
+		expect(JSON.stringify(result)).not.toContain("credential");
+	});
+
+	it.each([
+		["skipped", "updated", "updated"],
+		["unchanged", "updated", "updated"],
+		["stale", "updated", "stale"],
+		["failed", "updated", "failed"],
+	] as const)("aggregates %s and %s as %s", async (firstStatus, secondStatus, expectedStatus) => {
+		const supervisor = harness();
+		addWorker(
+			supervisor,
+			"one",
+			vi.fn(async (command: DaemonCommand) =>
+				success(undefined, command.type, {
+					startedAt: 1,
+					finishedAt: 2,
+					sources: [{ source: "curated", status: firstStatus }],
+				}),
+			),
+		);
+		addWorker(
+			supervisor,
+			"two",
+			vi.fn(async (command: DaemonCommand) =>
+				success(
+					undefined,
+					command.type,
+					command.type === "apply_model_snapshots"
+						? { applied: [], skipped: [], missing: ["curated"] }
+						: { startedAt: 3, finishedAt: 4, sources: [{ source: "curated", status: secondStatus }] },
+				),
+			),
+		);
+		const report = await supervisor.refreshResidentModels();
+		expect(report.workers).toEqual({ total: 2, succeeded: 2, failed: 0 });
+		expect(report.sources).toContainEqual({ source: "curated", status: expectedStatus });
+	});
+
+	it("bounds the entire sweep and marks workers beyond its deadline unavailable", async () => {
+		const supervisor = harness();
+		let now = 1000;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			const first = vi.fn(async (_command: DaemonCommand, _timeoutMs: number) => {
+				now += 105_000;
+				throw new Error("worker stalled");
+			});
+			const second = vi.fn(async (_command: DaemonCommand, _timeoutMs: number) => {
+				now += 5_000;
+				throw new Error("worker stalled");
+			});
+			const third = vi.fn();
+			addWorker(supervisor, "one", first);
+			addWorker(supervisor, "two", second);
+			addWorker(supervisor, "three", third);
+			const report = await supervisor.refreshResidentModels();
+			expect(first.mock.calls[0]?.[1]).toBe(25_000);
+			expect(second.mock.calls[0]?.[1]).toBe(5_000);
+			expect(third).not.toHaveBeenCalled();
+			expect(report.workers).toEqual({ total: 3, succeeded: 0, failed: 3 });
+			expect(report.sources).toEqual([{ source: "daemon-workers", status: "failed", reason: "worker-unavailable" }]);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+});

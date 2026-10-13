@@ -19,6 +19,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
+import type { ModelRefreshReport } from "../../core/model-refresh-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
@@ -1581,6 +1582,13 @@ export class DaemonAgentConnection implements AgentConnection {
 
 	async abortRetry(): Promise<void> {
 		await this.requestOk({ type: "abort_retry", activeSessionId: this.activeSessionId });
+	}
+
+	async refreshModels(): Promise<ModelRefreshReport> {
+		if (!this.client.supportsServerCapability("model_refresh")) {
+			throw new Error("The running Prime Agent daemon cannot refresh models; restart or update it and try again.");
+		}
+		return this.requestData<ModelRefreshReport>({ type: "refresh_all_models" }, 120_000);
 	}
 
 	async reload(): Promise<void> {
