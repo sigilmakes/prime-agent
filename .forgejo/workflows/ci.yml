@@ -35,7 +35,7 @@ jobs:
             - name: Check CI rules and workflow syntax
               run: |
                   nix develop --no-update-lock-file -c node --test scripts/ci.test.mjs
-                  actionlint -shellcheck='' -ignore '^label "nix-host" is unknown' -ignore '^specifying action "https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in invalid format' .forgejo/workflows/ci.yml
+                  actionlint -shellcheck='' -ignore '^label "gaia-runner" is unknown' -ignore '^specifying action "https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in invalid format' .forgejo/workflows/ci.yml
             - name: Select checks
               id: plan
               env:
