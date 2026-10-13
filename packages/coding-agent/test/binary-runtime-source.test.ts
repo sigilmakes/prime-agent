@@ -17,7 +17,11 @@ it("resolves and fingerprints the Python source beside a standalone executable",
 	vi.stubEnv("PI_PACKAGE_DIR", directory);
 	const source = join(directory, "prime-agent-runtime");
 	mkdirSync(join(source, "src/rlm"), { recursive: true });
-	const files = { "pyproject.toml": '[project]\nname = "prime-agent-runtime"\n', "src/rlm/repl.py": "VALUE = 1\n" };
+	const files = {
+		"pyproject.toml": '[project]\nname = "prime-agent-runtime"\n',
+		"src/rlm/repl.py": "VALUE = 1\n",
+		"uv.lock": "version = 1\n",
+	};
 	const expected = createHash("sha256");
 	for (const [name, content] of Object.entries(files)) {
 		writeFileSync(join(source, name), content);
@@ -25,6 +29,11 @@ it("resolves and fingerprints the Python source beside a standalone executable",
 	}
 	const initial = await resolveRuntimeIdentity();
 	expect(initial).toBe(`sha256:${expected.digest("hex")}`);
+	writeFileSync(join(source, "uv.lock"), "version = 2\n");
+	const lockChanged = await resolveRuntimeIdentity();
+	expect(lockChanged).not.toBe(initial);
 	writeFileSync(join(source, "src/rlm/repl.py"), "VALUE = 2\n");
-	expect(await resolveRuntimeIdentity()).not.toBe(initial);
+	expect(await resolveRuntimeIdentity()).not.toBe(lockChanged);
+	rmSync(join(source, "uv.lock"));
+	await expect(resolveRuntimeIdentity()).rejects.toThrow("missing uv.lock");
 });

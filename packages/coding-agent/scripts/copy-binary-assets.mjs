@@ -80,6 +80,7 @@ export function validateBinaryAssets(directory) {
 	validateBundledCatalogDir(directory);
 	for (const name of [
 		"prime-agent-runtime/pyproject.toml",
+		"prime-agent-runtime/uv.lock",
 		"prime-agent-runtime/src/rlm/repl.py",
 		"theme/prime.json",
 		"theme/dark.json",

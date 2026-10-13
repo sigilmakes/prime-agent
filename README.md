@@ -63,7 +63,7 @@ The package exposes `packages.x86_64-linux.prime-agent` (also `default`) and `ap
 }
 ```
 
-Building does not install or restart Prime Agent. Normal execution still uses `~/.prime/agent`; test with a separate `PRIME_AGENT_CODING_AGENT_DIR`, `HOME`, and session directory rather than connecting a development build to a live daemon. Python kernel environments remain user-owned and bootstrap through `uv`; the flake does not yet provide a fully offline Python environment.
+Building does not install or restart Prime Agent. Normal execution still uses `~/.prime/agent`; test with a separate `PRIME_AGENT_CODING_AGENT_DIR`, `HOME`, and session directory rather than connecting a development build to a live daemon. Python kernel environments remain user-owned. The bundled `prime-agent-runtime/uv.lock` pins the base runtime, snapshot support, and default REPL packages; `uv sync --locked` installs them into an isolated kernel venv. Changed runtime sources or lockfiles sync a copy of the previous venv with `--inexact`, retaining compatible user-installed packages and keeping the previous venv for rollback. First setup needs network access for uv, Python, the build backend, and missing wheels; a ready venv starts offline. Python skills remain editable user-installed packages, not part of this lock. The flake does not provide a fully offline Python environment or pin the Python interpreter patch release.
 
 ### CI
 

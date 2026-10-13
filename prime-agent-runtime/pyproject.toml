@@ -9,6 +9,22 @@ dependencies = [
 ]
 
 [dependency-groups]
+# The user-owned kernel venv is installed from uv.lock, not a live resolver.
+# Keep the REPL's default imports and snapshot dependency in this group.
+kernel = [
+  "dill",
+  "requests",
+  "httpx",
+  "pyyaml",
+  "tomli",
+  "python-dotenv",
+  "pandas",
+  "numpy",
+  "scipy",
+  "beautifulsoup4",
+  "lxml",
+  "pydantic",
+]
 dev = ["dill"]
 
 [build-system]

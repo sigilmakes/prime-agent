@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -12,9 +12,9 @@ import { isProcessAlive, spawnHidden } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
-const BOOTSTRAP_SCHEMA = 9;
+const BOOTSTRAP_SCHEMA = 10;
 const PYTHON_VERSION = "3.11";
-const RUNTIME_REQUIREMENT = "prime-agent-runtime";
+const KERNEL_DEPENDENCY_GROUP = "kernel";
 // Serializes the kernel's user namespace so it can be revived across session
 // resume. Internal-only; intentionally not surfaced to the model as an import.
 const STATE_SNAPSHOT_REQUIREMENT = "dill";
@@ -423,10 +423,14 @@ function isBatchShim(command: string): boolean {
 	return process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
 }
 
-function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
+function run(
+	command: string,
+	args: string[],
+	options: { stdio?: "ignore" | "inherit"; env?: NodeJS.ProcessEnv } = {},
+): Promise<void> {
 	return new Promise((resolve, reject) => {
 		// CPython must read UTF-8 .pth files even under a Windows legacy code page.
-		const env = { ...process.env, ...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}) };
+		const env = { ...process.env, ...options.env, ...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}) };
 		const batch = isBatchShim(command) ? buildBatchShimInvocation(command, args, env) : undefined;
 		const child = spawnHidden(batch ? (process.env.ComSpec ?? "cmd.exe") : command, batch?.args ?? args, {
 			env: batch?.env ?? env,
@@ -708,8 +712,15 @@ async function writeBootstrapVersion(
 	let lastError: unknown;
 	for (let attempt = 1; attempt <= BOOTSTRAP_MARKER_SWAP_ATTEMPTS; attempt += 1) {
 		try {
-			await writeFile(tmpPath, serialized, "utf8");
+			const file = await open(tmpPath, "w", 0o600);
+			try {
+				await file.writeFile(serialized, "utf8");
+				await file.sync();
+			} finally {
+				await file.close();
+			}
 			await rename(tmpPath, filePath);
+			await syncParentDirectory(filePath);
 			return;
 		} catch (error) {
 			lastError = error;
@@ -756,6 +767,9 @@ function runtimeCandidateDirs(): string[] {
 async function resolveRuntimeSourceDir(): Promise<string | null> {
 	for (const candidate of runtimeCandidateDirs()) {
 		if (await exists(path.join(candidate, "pyproject.toml"))) {
+			if (!(await exists(path.join(candidate, "uv.lock")))) {
+				throw new Error(`Python runtime source at ${candidate} is missing uv.lock`);
+			}
 			return candidate;
 		}
 	}
@@ -763,21 +777,20 @@ async function resolveRuntimeSourceDir(): Promise<string | null> {
 }
 
 // Identity of the runtime to be installed. For a local source checkout this is a
-// content hash of every rlm/*.py file plus pyproject.toml, so any runtime code or
-// dependency change invalidates an existing venv automatically. Falls back to the
-// bare package name when the runtime resolves to a registry install (no local source).
+// content hash of every rlm/*.py file, pyproject.toml and uv.lock, so any
+// runtime code or dependency change invalidates an existing venv. The matching
+// lockfile is mandatory: falling back to an unpinned registry install is unsafe.
 export async function resolveRuntimeIdentity(): Promise<string> {
 	const sourceDir = await resolveRuntimeSourceDir();
-	if (!sourceDir) return RUNTIME_REQUIREMENT;
+	if (!sourceDir) throw new Error("Python runtime source and uv.lock are missing from this installation");
 	return hashRuntimeSource(sourceDir);
 }
 
-// Throws if the local source can't be read. A failure here must surface rather than
-// fall back to RUNTIME_REQUIREMENT: that constant is the registry-install identity, and
-// recording it for a local checkout would permanently mask later source changes.
+// A missing or unreadable local source must fail, not silently install an
+// unpinned registry package or mask later source and lockfile changes.
 async function hashRuntimeSource(sourceDir: string): Promise<string> {
 	const rlmDir = path.join(sourceDir, "src", "rlm");
-	const files: string[] = [path.join(sourceDir, "pyproject.toml")];
+	const files: string[] = [path.join(sourceDir, "pyproject.toml"), path.join(sourceDir, "uv.lock")];
 	async function collect(dir: string): Promise<void> {
 		const entries = await readdir(dir, { withFileTypes: true });
 		for (const entry of entries) {
@@ -805,6 +818,31 @@ export function kernelVenvPython(venv: string, platform: NodeJS.Platform = proce
 	return platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
 }
 
+async function syncLockedRuntime(
+	uv: string,
+	venv: string,
+	sourceDir: string,
+	preserveInstalled: boolean,
+): Promise<void> {
+	await run(
+		uv,
+		[
+			"sync",
+			"--locked",
+			...(preserveInstalled ? ["--inexact", "--reinstall-package", "prime-agent-runtime"] : []),
+			"--no-default-groups",
+			"--group",
+			KERNEL_DEPENDENCY_GROUP,
+			"--no-config",
+			"--project",
+			sourceDir,
+			"--python",
+			PYTHON_VERSION,
+		],
+		{ env: { UV_PROJECT_ENVIRONMENT: venv } },
+	);
+}
+
 async function bootstrapVenv(
 	venv: string,
 	pythonSkills: readonly BootstrapPythonSkill[],
@@ -814,27 +852,40 @@ async function bootstrapVenv(
 	const uv = await ensureUv(options);
 	const python = kernelVenvPython(venv);
 	const sourceDir = await resolveRuntimeSourceDir();
-	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
+	if (!sourceDir) throw new Error("Python runtime source and uv.lock are missing from this installation");
 	const runtimeIdentity = await resolveRuntimeIdentity();
 
 	await run(uv, ["python", "install", PYTHON_VERSION]);
-	// Nothing invokes the venv's own pip; every kernel-venv package is installed
-	// through `uv pip install --python`, so the venv is created unseeded.
+	// Fresh installs sync only the locked base into this user-owned venv.
+	// Later upgrades use --inexact on a copy to retain added packages.
 	await run(uv, ["venv", venv, "--python", PYTHON_VERSION]);
-	await run(uv, [
-		"pip",
-		"install",
-		"--python",
-		python,
-		runtimeRequirement,
-		STATE_SNAPSHOT_REQUIREMENT,
-		...DEFAULT_RLM_EXTRA_UV_ARGS,
-	]);
+	await syncLockedRuntime(uv, venv, sourceDir, false);
 	// Land the base marker before the skill sync: a session killed mid-sync
 	// must leave the next one on the skills-only path instead of wiping the
 	// venv and re-paying the runtime install.
 	await writeBootstrapVersion(venv, runtimeIdentity, []);
 	await syncPythonSkills(uv, venv, python, runtimeIdentity, pythonSkills, options);
+}
+
+async function upgradeVenv(
+	venv: string,
+	previous: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+	options: EnsureKernelPythonOptions,
+): Promise<void> {
+	const uv = await ensureUv(options);
+	const sourceDir = await resolveRuntimeSourceDir();
+	if (!sourceDir) throw new Error("Python runtime source and uv.lock are missing from this installation");
+	const runtimeIdentity = await resolveRuntimeIdentity();
+	// Restore the old absolute venv path in the copy. uv --inexact keeps packages
+	// added by the user or Python skills while updating only the locked base.
+	await cp(previous, venv, { recursive: true, verbatimSymlinks: true });
+	await syncLockedRuntime(uv, venv, sourceDir, true);
+	const installedSkills = (await readBootstrapVersion(venv))?.pythonSkills ?? [];
+	await writeBootstrapVersion(venv, runtimeIdentity, installedSkills);
+	if (pythonSkills.length > 0) {
+		await syncPythonSkills(uv, venv, kernelVenvPython(venv), runtimeIdentity, pythonSkills, options);
+	}
 }
 
 async function syncPythonSkills(
@@ -942,10 +993,164 @@ async function kernelReady(
 function formatBootstrapFailure(error: unknown): Error {
 	return new Error(
 		`Failed to set up the Python kernel runtime. ${errorMessage(error)}\n` +
-			"First-time setup needs internet to install uv, Python, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
+			"First-time setup needs internet for uv, Python, the Python build backend, and locked package wheels; once set up, prime-agent runs offline. " +
 			"An interrupted runtime upgrade needs network once more, so re-run this while online. " +
 			"Set PRIME_AGENT_KERNEL_PYTHON to a Python with a current prime-agent-runtime and default Python packages installed to skip auto-bootstrap.",
 	);
+}
+
+function kernelBackupDir(venv: string): string {
+	return `${venv}.bootstrap-backups`;
+}
+
+function kernelUpgradeIntentPath(venv: string): string {
+	return `${venv}.bootstrap-upgrade`;
+}
+
+const KERNEL_BACKUP_NAME = /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function ensureKernelBackupDir(venv: string): Promise<string> {
+	const directory = kernelBackupDir(venv);
+	await mkdir(directory, { recursive: true });
+	const info = await lstat(directory);
+	if (!info.isDirectory() || info.isSymbolicLink())
+		throw new Error(`unsafe Python kernel backup directory: ${directory}`);
+	return directory;
+}
+
+async function syncParentDirectory(filePath: string): Promise<void> {
+	// Windows cannot open a directory as a regular file for fsync.
+	if (process.platform === "win32") return;
+	const directory = await open(path.dirname(filePath), "r");
+	try {
+		await directory.sync();
+	} finally {
+		await directory.close();
+	}
+}
+
+async function removeUpgradeIntent(venv: string): Promise<void> {
+	const intentPath = kernelUpgradeIntentPath(venv);
+	await rm(intentPath, { force: true });
+	await syncParentDirectory(intentPath);
+}
+
+async function archiveForUpgrade(venv: string, runtimeIdentity: string): Promise<string> {
+	const directory = await ensureKernelBackupDir(venv);
+	const backup = path.join(directory, `${Date.now()}-${randomUUID()}`);
+	const intentPath = kernelUpgradeIntentPath(venv);
+	const temporary = `${intentPath}.${randomUUID()}.tmp`;
+	const file = await open(temporary, "wx", 0o600);
+	try {
+		await file.writeFile(`${JSON.stringify({ backup, target: runtimeIdentity })}\n`, "utf8");
+		await file.sync();
+	} finally {
+		await file.close();
+	}
+	await rename(temporary, intentPath);
+	await syncParentDirectory(intentPath);
+	try {
+		await rename(venv, backup);
+	} catch (error) {
+		await removeUpgradeIntent(venv);
+		throw error;
+	}
+	return backup;
+}
+
+async function recoverInterruptedUpgrade(venv: string, runtimeIdentity: string): Promise<void> {
+	const intentPath = kernelUpgradeIntentPath(venv);
+	let raw: string;
+	try {
+		raw = await readFile(intentPath, "utf8");
+	} catch (error) {
+		if (isRecord(error) && error.code === "ENOENT") return;
+		throw error;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error(`invalid Python kernel upgrade intent: ${intentPath}`);
+	}
+	const directory = await ensureKernelBackupDir(venv);
+	if (
+		!isRecord(parsed) ||
+		typeof parsed.backup !== "string" ||
+		path.dirname(parsed.backup) !== directory ||
+		!KERNEL_BACKUP_NAME.test(path.basename(parsed.backup)) ||
+		typeof parsed.target !== "string" ||
+		!/^sha256:[0-9a-f]{64}$/.test(parsed.target)
+	) {
+		throw new Error(`invalid Python kernel upgrade intent: ${intentPath}`);
+	}
+	const backupInfo = await lstat(parsed.backup).catch((error: unknown) => {
+		if (isRecord(error) && error.code === "ENOENT") return null;
+		throw error;
+	});
+	if (!backupInfo) {
+		await removeUpgradeIntent(venv);
+		return;
+	}
+	if (
+		!backupInfo.isDirectory() ||
+		backupInfo.isSymbolicLink() ||
+		!(await readBootstrapVersion(parsed.backup)) ||
+		!(await exists(kernelVenvPython(parsed.backup)))
+	) {
+		throw new Error(`invalid archived Python kernel for upgrade: ${parsed.backup}`);
+	}
+	if (parsed.target === runtimeIdentity && (await kernelBaseReady(kernelVenvPython(venv), venv, runtimeIdentity))) {
+		await removeUpgradeIntent(venv);
+		return;
+	}
+	// Preserve even an incomplete copy: only a validated archived predecessor
+	// may become active. If the process dies here, the same intent is replayed.
+	const displaced = existsSync(venv) ? await archiveKernelVenv(venv) : null;
+	try {
+		await rename(parsed.backup, venv);
+	} catch (error) {
+		if (displaced) await rename(displaced, venv);
+		throw error;
+	}
+	await removeUpgradeIntent(venv);
+}
+
+async function archiveKernelVenv(venv: string): Promise<string> {
+	const directory = await ensureKernelBackupDir(venv);
+	const backup = path.join(directory, `${Date.now()}-${randomUUID()}`);
+	await rename(venv, backup);
+	return backup;
+}
+
+// A source rollback can reuse its previous environment without downloading
+// Python or wheels. The archived venv returns to its original path before use:
+// scripts installed into a venv can contain that absolute path in shebangs.
+async function restoreKernelVenv(venv: string, runtimeIdentity: string): Promise<boolean> {
+	let entries: string[];
+	try {
+		entries = await readdir(kernelBackupDir(venv));
+	} catch (error) {
+		if (isRecord(error) && error.code === "ENOENT") return false;
+		throw error;
+	}
+	const directory = await ensureKernelBackupDir(venv);
+	for (const entry of entries.sort().reverse()) {
+		if (!KERNEL_BACKUP_NAME.test(entry)) continue;
+		const candidate = path.join(directory, entry);
+		const info = await lstat(candidate);
+		if (!info.isDirectory() || info.isSymbolicLink()) continue;
+		if (!(await kernelBaseReady(kernelVenvPython(candidate), candidate, runtimeIdentity))) continue;
+		const displaced = existsSync(venv) ? await archiveKernelVenv(venv) : null;
+		try {
+			await rename(candidate, venv);
+		} catch (error) {
+			if (displaced) await rename(displaced, venv);
+			throw error;
+		}
+		return true;
+	}
+	return false;
 }
 
 async function ensureKernelPythonUncached(
@@ -996,24 +1201,47 @@ async function ensureKernelPythonUncached(
 		pythonSkills.length === 0
 			? kernelBaseReady(python, venv, runtimeIdentity)
 			: kernelReady(python, venv, runtimeIdentity, pythonSkills);
-	if (await readyForCaller()) return python;
+	if (!existsSync(kernelUpgradeIntentPath(venv)) && (await readyForCaller())) return python;
 
 	const releaseLock = await acquireBootstrapLock(venv);
 	try {
+		await recoverInterruptedUpgrade(venv, runtimeIdentity);
 		if (await readyForCaller()) return python;
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
 			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
 			return python;
 		}
 
-		const hadVenv = existsSync(venv);
-		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
-		if (hadVenv) {
-			reportProgress(options, "rebuilding kernel venv");
-			await rm(venv, { recursive: true, force: true });
+		if (await restoreKernelVenv(venv, runtimeIdentity)) {
+			if (pythonSkills.length > 0 && !(await readyForCaller())) {
+				await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
+			}
+			return python;
 		}
 
-		await bootstrapVenv(venv, pythonSkills, options);
+		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
+		const previous = existsSync(venv) ? await archiveForUpgrade(venv, runtimeIdentity) : null;
+		try {
+			if (previous && existsSync(kernelVenvPython(previous))) {
+				await upgradeVenv(venv, previous, pythonSkills, options);
+			} else {
+				await bootstrapVenv(venv, pythonSkills, options);
+			}
+			if (!(await kernelBaseReady(python, venv, runtimeIdentity))) {
+				throw new Error("locked Python runtime failed its readiness check");
+			}
+		} catch (error) {
+			// Only remove the incomplete environment created by this attempt. Leave
+			// every archived working environment intact for rollback.
+			await rm(venv, { recursive: true, force: true });
+			if (previous) {
+				await rename(previous, venv);
+				await removeUpgradeIntent(venv);
+			}
+			throw error;
+		}
+		// Keep the intent through the first successful start. A crash before
+		// the copied venv is durable can still recover its archived predecessor.
 	} catch (error) {
 		throw formatBootstrapFailure(error);
 	} finally {

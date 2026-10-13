@@ -1,6 +1,15 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -33,6 +42,22 @@ let tempDir = "";
 let originalEnv: NodeJS.ProcessEnv;
 let runtimeIdentity = "";
 
+function killDetachedProcessTree(child: ChildProcess): void {
+	const pid = child.pid;
+	if (pid === undefined) return;
+	// test-policy: allow environment-gated-path -- both platforms run the same killed-child test; only process-tree cleanup differs
+	if (process.platform === "win32") {
+		const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", timeout: 5_000 });
+		if (result.status !== 0) child.kill("SIGKILL");
+		return;
+	}
+	try {
+		process.kill(-pid, "SIGKILL");
+	} catch {
+		child.kill("SIGKILL");
+	}
+}
+
 function pyprojectHash(pyprojectPath: string): string {
 	return `sha256:${createHash("sha256").update(readFileSync(pyprojectPath)).digest("hex")}`;
 }
@@ -46,7 +71,7 @@ function writeBootstrapVersion(venv: string, pythonSkills: readonly KernelPython
 	writeFileSync(
 		join(venv, ".bootstrap-version"),
 		`${JSON.stringify({
-			schema: 9,
+			schema: 10,
 			runtime: runtimeIdentity,
 			snapshot: "dill",
 			extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
@@ -157,6 +182,13 @@ function installFakeUv(): string {
 			'  chmod +x "$venv/bin/python"',
 			"  exit 0",
 			"fi",
+			'if [ "$1" = "sync" ]; then',
+			'  if [ "$UV_HANG_SYNC" = "1" ]; then sleep 30; fi',
+			'  if [ "$UV_FAIL_SYNC" = "1" ]; then exit 1; fi',
+			'  if [ "$UV_GOOD_PYTHON_SOURCE" != "" ]; then cp "$UV_GOOD_PYTHON_SOURCE" "$UV_PROJECT_ENVIRONMENT/bin/python"; fi',
+			'  printf "locked\n" > "$UV_PROJECT_ENVIRONMENT/.locked-install"',
+			"  exit 0",
+			"fi",
 			'if [ "$1" = "pip" ]; then',
 			'  marker_file=""',
 			'  seen_editable=""',
@@ -213,9 +245,208 @@ describe("kernel bootstrap", () => {
 		}
 	});
 
+	it("retains a working kernel and its skills when the locked upgrade fails", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const skill = createPythonSkill();
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [skill]);
+		const markerPath = join(venv, ".bootstrap-version");
+		const staleMarker = JSON.parse(readFileSync(markerPath, "utf8"));
+		writeFileSync(markerPath, `${JSON.stringify({ ...staleMarker, runtime: "sha256:previous" })}\n`);
+		const previousMarker = readFileSync(markerPath, "utf8");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.UV_FAIL_SYNC = "1";
+
+		await expect(ensureKernelPython()).rejects.toThrow(/Failed to set up/);
+
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(previousMarker);
+		expect(existsSync(python)).toBe(true);
+	});
+
+	it("does not damage the old kernel if the OS refuses to archive a running venv", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const markerPath = join(venv, ".bootstrap-version");
+		const previous = JSON.parse(readFileSync(markerPath, "utf8"));
+		writeFileSync(markerPath, `${JSON.stringify({ ...previous, runtime: "sha256:old" })}\n`);
+		const unchanged = readFileSync(markerPath, "utf8");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		renameFault.remaining = 1;
+
+		await expect(ensureKernelPython()).rejects.toThrow(/EBUSY/);
+		expect(readFileSync(markerPath, "utf8")).toBe(unchanged);
+		expect(existsSync(python)).toBe(true);
+	});
+
+	it("restores the previous kernel after a process dies between archive and copy", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const markerPath = join(venv, ".bootstrap-version");
+		const old = JSON.parse(readFileSync(markerPath, "utf8"));
+		writeFileSync(markerPath, `${JSON.stringify({ ...old, runtime: "sha256:previous" })}\n`);
+		writeFileSync(join(venv, "user-package.txt"), "still installed\n");
+		const oldMarker = readFileSync(markerPath, "utf8");
+		const backupDir = `${venv}.bootstrap-backups`;
+		mkdirSync(backupDir);
+		const backup = join(backupDir, "1791880000000-00000000-0000-4000-8000-000000000000");
+		renameSync(venv, backup);
+		writeFileSync(`${venv}.bootstrap-upgrade`, `${JSON.stringify({ backup, target: runtimeIdentity })}\n`);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.UV_FAIL_SYNC = "1";
+
+		await expect(ensureKernelPython()).rejects.toThrow(/Failed to set up/);
+
+		expect(readFileSync(join(venv, "user-package.txt"), "utf8")).toBe("still installed\n");
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(oldMarker);
+		expect(existsSync(`${venv}.bootstrap-upgrade`)).toBe(false);
+	});
+
+	it("rejects an unsafe upgrade intent without moving the active venv", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const markerPath = join(venv, ".bootstrap-version");
+		const old = JSON.parse(readFileSync(markerPath, "utf8"));
+		writeFileSync(markerPath, `${JSON.stringify({ ...old, runtime: "sha256:previous" })}\n`);
+		const marker = readFileSync(markerPath, "utf8");
+		const backupDir = `${venv}.bootstrap-backups`;
+		mkdirSync(backupDir);
+		writeFileSync(
+			`${venv}.bootstrap-upgrade`,
+			`${JSON.stringify({ backup: join(backupDir, ".."), target: runtimeIdentity })}\n`,
+		);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython()).rejects.toThrow(/invalid Python kernel upgrade intent/);
+		expect(readFileSync(markerPath, "utf8")).toBe(marker);
+		expect(existsSync(python)).toBe(true);
+	});
+
+	it("recovers when the durable intent exists but the archive rename was interrupted", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const markerPath = join(venv, ".bootstrap-version");
+		const old = JSON.parse(readFileSync(markerPath, "utf8"));
+		writeFileSync(markerPath, `${JSON.stringify({ ...old, runtime: "sha256:previous" })}\n`);
+		const marker = readFileSync(markerPath, "utf8");
+		const backupDir = `${venv}.bootstrap-backups`;
+		mkdirSync(backupDir);
+		writeFileSync(
+			`${venv}.bootstrap-upgrade`,
+			`${JSON.stringify({ backup: join(backupDir, "1791880000000-00000000-0000-4000-8000-000000000000"), target: runtimeIdentity })}\n`,
+		);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.UV_FAIL_SYNC = "1";
+
+		await expect(ensureKernelPython()).rejects.toThrow(/Failed to set up/);
+		expect(readFileSync(markerPath, "utf8")).toBe(marker);
+		expect(existsSync(`${venv}.bootstrap-upgrade`)).toBe(false);
+	});
+
+	// test-policy: allow explicit-test-timeout -- bounds a real killed upgrade and process teardown
+	it("recovers a killed upgrade without discarding user packages", { timeout: 60_000 }, async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const markerPath = join(venv, ".bootstrap-version");
+		const old = JSON.parse(readFileSync(markerPath, "utf8"));
+		writeFileSync(markerPath, `${JSON.stringify({ ...old, runtime: "sha256:previous" })}\n`);
+		writeFileSync(join(venv, "user-package.txt"), "still installed\n");
+		const oldMarker = readFileSync(markerPath, "utf8");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		const child = spawn(process.execPath, [tsxPath, kernelSyncChildPath], {
+			env: {
+				...process.env,
+				KERNEL_SYNC_CHILD_SKILLS: "[]",
+				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+				UV_HANG_SYNC: "1",
+			},
+			stdio: "ignore",
+			detached: true,
+		});
+		try {
+			const deadline = Date.now() + 30_000;
+			while (Date.now() < deadline) {
+				if (child.exitCode !== null || child.signalCode !== null) break;
+				if (existsSync(logPath) && readFileSync(logPath, "utf8").includes("sync --locked --inexact")) break;
+				// test-policy: allow wall-clock-sleep -- waits for the external uv process log before killing its group
+				await sleep(50);
+			}
+			expect(readFileSync(logPath, "utf8")).toContain("sync --locked --inexact");
+		} finally {
+			killDetachedProcessTree(child);
+			if (child.exitCode === null && child.signalCode === null) {
+				await new Promise((resolve) => child.once("exit", resolve));
+			}
+		}
+
+		const intentPath = `${venv}.bootstrap-upgrade`;
+		expect(existsSync(intentPath)).toBe(true);
+		const intent = JSON.parse(readFileSync(intentPath, "utf8")) as { backup: string; target: string };
+		expect(intent.target).toBe(runtimeIdentity);
+		expect(readFileSync(join(intent.backup, "user-package.txt"), "utf8")).toBe("still installed\n");
+		process.env.UV_FAIL_SYNC = "1";
+		await expect(ensureKernelPython()).rejects.toThrow(/Failed to set up/);
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(oldMarker);
+		expect(readFileSync(join(venv, "user-package.txt"), "utf8")).toBe("still installed\n");
+		expect(existsSync(intentPath)).toBe(false);
+	});
+
+	it("restores a previous locked kernel on source rollback without a network install", async () => {
+		const logPath = installFakeUv();
+		const source = join(tempDir, "package", "prime-agent-runtime");
+		mkdirSync(join(source, "src", "rlm"), { recursive: true });
+		writeFileSync(join(source, "pyproject.toml"), '[project]\nname = "prime-agent-runtime"\n');
+		writeFileSync(join(source, "src", "rlm", "repl.py"), "VALUE = 1\n");
+		const lockPath = join(source, "uv.lock");
+		writeFileSync(lockPath, "version = 1\n");
+		process.env.PI_PACKAGE_DIR = join(tempDir, "package");
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		runtimeIdentity = await resolveRuntimeIdentity();
+		writeBootstrapVersion(venv, [createPythonSkill()]);
+		const previousMarker = readFileSync(join(venv, ".bootstrap-version"), "utf8");
+
+		writeFileSync(lockPath, "version = 2\n");
+		await expect(ensureKernelPython()).resolves.toBe(python);
+		const upgradedLog = readFileSync(logPath, "utf8");
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).not.toBe(previousMarker);
+
+		writeFileSync(lockPath, "version = 1\n");
+		await expect(ensureKernelPython()).resolves.toBe(python);
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(previousMarker);
+		expect(readFileSync(logPath, "utf8")).toBe(upgradedLog);
+	});
+
 	it("bootstraps a missing venv with uv, the runtime, extras and editable Python skills", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
 		const pythonSkill = createPythonSkill();
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
@@ -225,19 +456,16 @@ describe("kernel bootstrap", () => {
 		expect(log).toContain("python install 3.11");
 		expect(log).toContain(`venv ${venv} --python 3.11`);
 		expect(log).not.toContain("--seed");
-		expect(log).toContain("pip install --python");
-		expect(log).not.toContain("ipykernel");
-		expect(log).toContain("prime-agent-runtime");
-		expect(log).toContain("dill");
-		expect(log).toContain(`--editable ${pythonSkill.packagePath}`);
-		for (const uvArg of DEFAULT_RLM_EXTRA_UV_ARGS) {
-			expect(log).toContain(uvArg);
-		}
+		expect(log).toContain("sync --locked --no-default-groups --group kernel --no-config --project");
+		expect(existsSync(join(venv, ".locked-install"))).toBe(true);
+		expect(log.split("\n").filter((line) => line.startsWith("pip install"))).toEqual([
+			`pip install --python ${python} --editable ${pythonSkill.packagePath}`,
+		]);
 
 		// The on-disk manifest is what every later warm-start decision reads.
 		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
 		expect(version).toEqual({
-			schema: 9,
+			schema: 10,
 			runtime: runtimeIdentity,
 			snapshot: "dill",
 			extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
@@ -380,14 +608,7 @@ describe("kernel bootstrap", () => {
 				await sleep(50);
 			}
 		} finally {
-			const pid = child.pid;
-			if (pid !== undefined) {
-				try {
-					process.kill(-pid, "SIGKILL");
-				} catch {
-					child.kill("SIGKILL");
-				}
-			}
+			killDetachedProcessTree(child);
 			await new Promise((resolve) => child.once("exit", resolve));
 		}
 		const versionAtKill = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
@@ -443,7 +664,7 @@ describe("kernel bootstrap", () => {
 				writeFileSync(
 					join(venv, ".bootstrap-version"),
 					`${JSON.stringify({
-						schema: 9,
+						schema: 10,
 						runtime: "sha256:stale",
 						snapshot: "dill",
 						extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
@@ -479,8 +700,12 @@ describe("kernel bootstrap", () => {
 			name: "rebuilds a venv whose rlm runtime is stale",
 			rebuilds: true,
 			prepare: (venv: string, python: string) => {
-				// Imports rlm but fails the runtime-capability probe.
+				// Imports rlm but fails the runtime-capability probe. A locked
+				// reinstall restores the good Python fixture in the copied venv.
 				writeFakePython(python, ["rlm"], ["_harness_methods"]);
+				const repaired = join(tempDir, "repaired-python");
+				writeFakePython(repaired, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+				process.env.UV_GOOD_PYTHON_SOURCE = repaired;
 				writeBootstrapVersion(venv);
 			},
 		},
@@ -497,15 +722,21 @@ describe("kernel bootstrap", () => {
 		const python = join(venv, "bin", "python");
 		mkdirSync(join(venv, "bin"), { recursive: true });
 		prepare(venv, python);
+		const hadPython = existsSync(python);
+		const userPackage = join(venv, "user-installed-package.txt");
+		if (hadPython && rebuilds) writeFileSync(userPackage, "keep my package\n");
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
 		await expect(ensureKernelPython()).resolves.toBe(python);
 
 		// A warm venv that needs no work never runs uv, so the log may not exist at all.
 		const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
-		expect(log.includes(`venv ${venv} --python 3.11`)).toBe(rebuilds);
+		expect(log.includes("sync --locked")).toBe(rebuilds);
+		expect(log.includes("--inexact --reinstall-package prime-agent-runtime")).toBe(rebuilds && hadPython);
+		expect(log.includes(`venv ${venv} --python 3.11`)).toBe(rebuilds && !hadPython);
 		if (rebuilds) {
 			expect(JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8")).runtime).toBe(runtimeIdentity);
+			if (hadPython) expect(readFileSync(userPackage, "utf8")).toBe("keep my package\n");
 		}
 	});
 

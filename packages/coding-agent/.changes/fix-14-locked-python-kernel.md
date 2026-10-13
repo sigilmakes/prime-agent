@@ -1,0 +1,1 @@
+- Fixed Python kernel setup to use pinned runtime dependencies and preserve the previous environment for rollback ([#14](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/14)).

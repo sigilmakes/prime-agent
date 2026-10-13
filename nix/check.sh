@@ -40,6 +40,10 @@ if [ -e "$PRIME_AGENT_CODING_AGENT_DIR/auth.json" ] || [ -e "$PRIME_AGENT_SESSIO
     echo "Information commands created authentication or session state" >&2
     exit 1
 fi
+if [ ! -f "$package/lib/prime-agent/packages/coding-agent/dist/prime-agent-runtime/uv.lock" ]; then
+    echo "Installed Python runtime is missing its locked dependencies" >&2
+    exit 1
+fi
 node "$verifier" verify --out "$package/lib/prime-agent/packages/coding-agent/dist"
 # Resolve the public SDK from the installed tree, never the source checkout.
 cp "$smoke" "$state/runtime-smoke.mjs"
