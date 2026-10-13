@@ -700,6 +700,7 @@ prime-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `PRIME_API_KEY` | Prime Inference API key |
+| `OLLAMA_API_KEY` | Ollama Cloud API key (or save `ollama-cloud` in auth.json; see [providers](docs/providers.md#ollama-cloud)) |
 | `PRIME_TEAM_ID` | Override the Prime Inference team request header without changing the saved Agent team |
 | `PRIME_AGENT_INFERENCE_API_BASE_URL` | Override Agent authentication and team API URLs, not model inference URLs; defaults to production |
 | `PRIME_AGENT_INFERENCE_FRONTEND_URL` | Override the Agent login browser frontend; defaults to production |

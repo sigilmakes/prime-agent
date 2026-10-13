@@ -34,6 +34,15 @@ import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js
 import { getBundledModels } from "./bundled-model-catalog.js";
 import { refreshDefaultModelCatalog } from "./default-model-catalog.js";
 import { CATALOG_REFRESH_INTERVAL_MS, CatalogCache, isCatalogOffline } from "./model-catalog-cache.js";
+import { applyOllamaCloudModelOverrides, loadOllamaCloudConfig } from "./ollama-cloud-config.js";
+import {
+	mergeOllamaCloudCatalog,
+	OLLAMA_CLOUD_BASE,
+	OLLAMA_CLOUD_PROVIDER,
+	ollamaCloudFetch,
+	parseOllamaCloudCatalog,
+	pinnedOllamaCloudModels,
+} from "./ollama-cloud-model-catalog.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
 	buildPrimeInferenceModels,
@@ -473,6 +482,11 @@ export class ModelRegistry {
 	private pendingPrimeInferenceCatalogRefresh: Promise<void> | undefined;
 	private pendingProviderCatalogRefresh: Promise<void> | undefined;
 	private readonly providerCatalogs = new Map<DiscoverableProvider, CatalogCache<Model<Api>[]>>();
+	private readonly ollamaCatalog: CatalogCache<Model<Api>[]>;
+	private readonly ollamaBaseUrl: string;
+	private ollamaModels?: Model<Api>[];
+	private ollamaScope?: string;
+	private readonly ollamaUncappedModels = new WeakMap<Model<Api>, Model<Api>>();
 	private readonly lastProviderModels = new Map<DiscoverableProvider, Model<Api>[]>();
 	private readonly providerScopes = new Map<DiscoverableProvider, string>();
 	private catalogRefreshTimer?: ReturnType<typeof setInterval>;
@@ -488,6 +502,12 @@ export class ModelRegistry {
 		private modelsJsonPath: string | undefined,
 	) {
 		const cachePath = (name: string) => (modelsJsonPath ? join(dirname(modelsJsonPath), "models", name) : undefined);
+		this.ollamaBaseUrl = (process.env.OLLAMA_API_BASE || OLLAMA_CLOUD_BASE).replace(/\/+$/, "");
+		this.ollamaCatalog = new CatalogCache(
+			`${this.ollamaBaseUrl}/v1/models`,
+			cachePath("ollama-cloud-models.v1.json"),
+			(payload) => parseOllamaCloudCatalog(payload, this.ollamaBaseUrl),
+		);
 		for (const provider of DISCOVERABLE_PROVIDERS) {
 			this.providerCatalogs.set(
 				provider,
@@ -509,6 +529,7 @@ export class ModelRegistry {
 			const registry = reference.deref();
 			if (registry) {
 				registry.discoveryGeneration++;
+				registry.ollamaModels = undefined;
 				for (const provider of DISCOVERABLE_PROVIDERS) {
 					if (provider !== "openrouter") registry.lastProviderModels.delete(provider);
 				}
@@ -652,8 +673,11 @@ export class ModelRegistry {
 			const models = this.lastProviderModels.get(provider);
 			if (models) discovered.set(provider, models);
 		}
-		const bundledModels = this.bundledCatalogModels.filter((model) => !discovered.has(model.provider));
+		const bundledModels = this.bundledCatalogModels.filter(
+			(model) => !discovered.has(model.provider) && model.provider !== OLLAMA_CLOUD_PROVIDER,
+		);
 		for (const models of discovered.values()) bundledModels.push(...models);
+		bundledModels.push(...(this.ollamaModels ?? pinnedOllamaCloudModels(this.ollamaBaseUrl)));
 		return mergePrimeInferenceModels(bundledModels, livePrimeInferenceModels).map((model) => {
 			const providerOverride = overrides.get(model.provider);
 			const perModelOverrides = modelOverrides.get(model.provider);
@@ -670,6 +694,18 @@ export class ModelRegistry {
 			const modelOverride = perModelOverrides?.get(model.id);
 			return modelOverride ? applyModelOverride(configuredModel, modelOverride) : configuredModel;
 		});
+	}
+
+	/** Return session-specific context caps without changing the shared registry catalog. */
+	configureOllamaModel<T extends Model<Api>>(model: T, cwd: string, agentDir = getAgentDir()): T {
+		if (model.provider !== OLLAMA_CLOUD_PROVIDER) return model;
+		const original = (this.ollamaUncappedModels.get(model) ?? model) as T;
+		const configured = applyOllamaCloudModelOverrides(
+			[original],
+			loadOllamaCloudConfig(cwd, agentDir).modelOverrides,
+		)[0] as T;
+		if (configured !== original) this.ollamaUncappedModels.set(configured, original);
+		return configured;
 	}
 
 	/** Merge custom models into built-in list by provider+id (custom wins on conflicts). */
@@ -954,8 +990,8 @@ export class ModelRegistry {
 
 	private async refreshProviderCatalog(force: boolean): Promise<void> {
 		const generation = this.discoveryGeneration;
-		await Promise.all(
-			DISCOVERABLE_PROVIDERS.map(async (provider) => {
+		await Promise.all([
+			...DISCOVERABLE_PROVIDERS.map(async (provider) => {
 				const cache = this.providerCatalogs.get(provider)!;
 				const apiKey = await this.getApiKeyForProvider(provider);
 				if (generation !== this.discoveryGeneration) return;
@@ -990,13 +1026,62 @@ export class ModelRegistry {
 				else this.lastProviderModels.delete(provider);
 				this.reloadModelsAfterCatalogChange();
 			}),
-		);
+			this.refreshOllamaCatalog(force, generation),
+		]);
 		// Default selection remains independent of provider discovery.
 		await refreshDefaultModelCatalog(force).catch(() => undefined);
 	}
 
+	private async refreshOllamaCatalog(force: boolean, generation: number): Promise<void> {
+		const model = this.models.find((candidate) => candidate.provider === OLLAMA_CLOUD_PROVIDER);
+		const resolved = model ? await this.getApiKeyAndHeaders(model) : undefined;
+		if (generation !== this.discoveryGeneration) return;
+		let sameOrigin = false;
+		try {
+			sameOrigin = !!model && new URL(model.baseUrl).origin === new URL(this.ollamaBaseUrl).origin;
+		} catch {
+			// An invalid inference base URL cannot authorize forwarding configured headers.
+		}
+		const configuredAuthorization = sameOrigin
+			? Object.entries(resolved?.ok ? (resolved.headers ?? {}) : {}).find(
+					([name]) => name.toLowerCase() === "authorization",
+				)?.[1]
+			: undefined;
+		const authorization =
+			configuredAuthorization ??
+			(sameOrigin && resolved?.ok && resolved.apiKey ? `Bearer ${resolved.apiKey}` : undefined);
+		if (!authorization) {
+			this.ollamaScope = undefined;
+			this.ollamaModels = undefined;
+			return;
+		}
+		const scope = createHmac("sha256", authorization).update("prime-agent:discovery:ollama-cloud:v1").digest("hex");
+		if (this.ollamaScope !== scope) {
+			this.ollamaModels = undefined;
+			this.ollamaScope = scope;
+		}
+		const cached = this.ollamaCatalog.get(scope);
+		if (cached) {
+			this.ollamaModels = cached;
+			this.reloadModelsAfterCatalogChange();
+		}
+		const models = await this.ollamaCatalog.refresh(scope, {
+			force,
+			headers: { Authorization: authorization },
+			fetchFn: ollamaCloudFetch(this.ollamaBaseUrl),
+			mergePayload: mergeOllamaCloudCatalog,
+			isCurrent: () => generation === this.discoveryGeneration && this.ollamaScope === scope,
+		});
+		if (generation !== this.discoveryGeneration || this.ollamaScope !== scope) return;
+		this.ollamaModels = models;
+		this.reloadModelsAfterCatalogChange();
+	}
+
 	/** Local catalog health; no daemon protocol field is added. */
-	getProviderCatalogStatus(provider: DiscoverableProvider): ReturnType<CatalogCache<Model<Api>[]>["status"]> {
+	getProviderCatalogStatus(
+		provider: DiscoverableProvider | typeof OLLAMA_CLOUD_PROVIDER,
+	): ReturnType<CatalogCache<Model<Api>[]>["status"]> {
+		if (provider === OLLAMA_CLOUD_PROVIDER) return this.ollamaCatalog.status(this.ollamaScope ?? "public");
 		return this.providerCatalogs.get(provider)!.status(this.providerScopes.get(provider) ?? "public");
 	}
 

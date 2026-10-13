@@ -512,6 +512,8 @@ export interface AgentSessionConfig {
 	resourceLoader: ResourceLoader;
 	customTools?: ToolDefinition[];
 	modelRegistry: ModelRegistry;
+	/** Explicit SDK model to preserve across reloads instead of replacing it from the catalog. */
+	explicitInitialModel?: Model<Api>;
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
 	/**
@@ -1665,6 +1667,7 @@ export class AgentSession {
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _agentDir?: string;
+	private _explicitInitialModel?: Model<Api>;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
@@ -1790,6 +1793,8 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir;
+		this._explicitInitialModel =
+			config.explicitInitialModel?.provider === "ollama-cloud" ? config.explicitInitialModel : undefined;
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -2715,7 +2720,7 @@ export class AgentSession {
 			extraMessages.some((message) => messageCarriesImages(message)) ||
 			turns.some((action) => action.payload.records.some((record) => messageCarriesImages(record.message)));
 		if (!carriesImages) return undefined;
-		return resolveImageModelOverride({
+		const override = resolveImageModelOverride({
 			sessionModel,
 			thinkingLevel: this.thinkingLevel,
 			serviceTier: this.serviceTier,
@@ -2724,6 +2729,9 @@ export class AgentSession {
 			hasConfiguredAuth: (model) => this._modelRegistry.hasConfiguredAuth(model),
 			blockImages: this.settingsManager.getBlockImages(),
 		});
+		if (!override) return undefined;
+		const configuredModel = this._configureOllamaModel(override.model);
+		return configuredModel === override.model ? override : { ...override, model: configuredModel };
 	}
 
 	/**
@@ -5377,6 +5385,10 @@ export class AgentSession {
 
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
+	}
+
+	private _configureOllamaModel<T extends Model<Api>>(model: T): T {
+		return this._modelRegistry.configureOllamaModel(model, this._cwd, this._agentDir);
 	}
 
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
@@ -8366,7 +8378,12 @@ export class AgentSession {
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
-		this.agent.state.model = model;
+		const selectedModel = this._configureOllamaModel(model);
+		this._explicitInitialModel =
+			model.provider === "ollama-cloud" && model !== this._modelRegistry.find(model.provider, model.id)
+				? model
+				: undefined;
+		this.agent.state.model = selectedModel;
 		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
@@ -8374,7 +8391,7 @@ export class AgentSession {
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
-		const emitPromise = this._queueModelSelectEmit(model, previousModel, "set");
+		const emitPromise = this._queueModelSelectEmit(selectedModel, previousModel, "set");
 		if (this._shouldWaitForModelSelectEmit(options)) {
 			await emitPromise;
 		} else {
@@ -8434,7 +8451,9 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 		const serviceTier = this._getServiceTierForModelSwitch();
 
-		this.agent.state.model = next.model;
+		const selectedModel = this._configureOllamaModel(next.model);
+		this._explicitInitialModel = undefined;
+		this.agent.state.model = selectedModel;
 		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
@@ -8442,7 +8461,7 @@ export class AgentSession {
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
-		const emitPromise = this._queueModelSelectEmit(next.model, currentModel, "cycle");
+		const emitPromise = this._queueModelSelectEmit(selectedModel, currentModel, "cycle");
 		if (this._shouldWaitForModelSelectEmit(options)) {
 			await emitPromise;
 		} else {
@@ -8450,7 +8469,7 @@ export class AgentSession {
 		}
 
 		return {
-			model: next.model,
+			model: selectedModel,
 			thinkingLevel: this.thinkingLevel,
 			serviceTier: this.serviceTier,
 			isScoped: true,
@@ -8474,7 +8493,9 @@ export class AgentSession {
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
-		this.agent.state.model = nextModel;
+		const selectedModel = this._configureOllamaModel(nextModel);
+		this._explicitInitialModel = undefined;
+		this.agent.state.model = selectedModel;
 		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
@@ -8482,7 +8503,7 @@ export class AgentSession {
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
-		const emitPromise = this._queueModelSelectEmit(nextModel, currentModel, "cycle");
+		const emitPromise = this._queueModelSelectEmit(selectedModel, currentModel, "cycle");
 		if (this._shouldWaitForModelSelectEmit(options)) {
 			await emitPromise;
 		} else {
@@ -8490,7 +8511,7 @@ export class AgentSession {
 		}
 
 		return {
-			model: nextModel,
+			model: selectedModel,
 			thinkingLevel: this.thinkingLevel,
 			serviceTier: this.serviceTier,
 			isScoped: false,
@@ -10564,12 +10585,13 @@ export class AgentSession {
 			return;
 		}
 
-		const refreshedModel = this._modelRegistry.find(currentModel.provider, currentModel.id);
-		if (!refreshedModel || refreshedModel === currentModel) {
-			return;
-		}
-
-		this.agent.state.model = refreshedModel;
+		const explicitModel = this._explicitInitialModel;
+		const refreshedModel =
+			explicitModel && modelsAreEqual(currentModel, explicitModel)
+				? explicitModel
+				: (this._modelRegistry.find(currentModel.provider, currentModel.id) ?? currentModel);
+		const configuredModel = this._configureOllamaModel(refreshedModel);
+		if (configuredModel !== currentModel) this.agent.state.model = configuredModel;
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -11091,6 +11113,7 @@ export class AgentSession {
 		// Re-read auth.json: a login saved by the client process (daemon mode) must be
 		// visible here so MCP skill gating sees the new credentials.
 		this._modelRegistry.authStorage.reload();
+		this._refreshCurrentModelFromRegistry();
 		resetApiProviders();
 		this._mcpManager?.refresh();
 		await this._resourceLoader.reload();
@@ -11241,7 +11264,7 @@ export class AgentSession {
 			sessionName: options.sessionName,
 			spawnCode: options.spawnCode,
 			sessionDir: options.sessionDir,
-			model: options.model,
+			model: this._configureOllamaModel(options.model),
 			thinkingLevel:
 				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
 			serviceTier: this._serviceTierPreference,
@@ -11271,6 +11294,7 @@ export class AgentSession {
 	}
 
 	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
+		const childModel = this._configureOllamaModel(options.model);
 		const childSessionManager = SessionManager.create(this._cwd, options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			childSessionManager.newSession({
@@ -11285,9 +11309,9 @@ export class AgentSession {
 		const childAgent = new Agent({
 			initialState: {
 				systemPrompt: "",
-				model: options.model,
+				model: childModel,
 				thinkingLevel: options.thinkingLevel,
-				serviceTier: clampServiceTier(options.model, options.serviceTier),
+				serviceTier: clampServiceTier(childModel, options.serviceTier),
 				tools: [],
 			},
 			convertToLlm: this.agent.convertToLlm,
@@ -13514,7 +13538,7 @@ export class AgentSession {
 		if (this.agent.modelOverride && !backupModel.input.includes("image")) {
 			return undefined;
 		}
-		return backupModel;
+		return this._configureOllamaModel(backupModel);
 	}
 
 	/** Route the failed turn to the backup model and retry immediately on it. */
@@ -13535,14 +13559,15 @@ export class AgentSession {
 		// must take the override too or the retry would silently return to the
 		// routed model while reporting the backup.
 		const routedOverride = this.agent.modelOverride;
-		this.agent.state.model = backupModel;
+		const selectedBackup = this._configureOllamaModel(backupModel);
+		this.agent.state.model = selectedBackup;
 		// Clamp per-request fields to what the backup supports; all of them are
 		// restored when the turn returns to the primary.
-		this.agent.state.thinkingLevel = clampThinkingLevel(backupModel, previousThinkingLevel) as ThinkingLevel;
+		this.agent.state.thinkingLevel = clampThinkingLevel(selectedBackup, previousThinkingLevel) as ThinkingLevel;
 		this._clampServiceTierForModel();
 		if (routedOverride) {
 			this.agent.modelOverride = {
-				model: backupModel,
+				model: selectedBackup,
 				thinkingLevel: this.agent.state.thinkingLevel,
 				serviceTier: this.agent.state.serviceTier,
 			};
@@ -13550,7 +13575,7 @@ export class AgentSession {
 		// Session-log the switch so primary->backup->primary transitions stay debuggable.
 		this.sessionManager.appendModelChange(backupModel.provider, backupModel.id);
 		this._backupModel = {
-			backup: backupModel,
+			backup: selectedBackup,
 			primary: previousModel,
 			thinkingLevel: previousThinkingLevel,
 			serviceTier: previousServiceTier,
@@ -14869,7 +14894,10 @@ export class AgentSession {
 	}
 
 	private _contextWindowResolver(): ContextWindowResolver {
-		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
+		return (provider, modelId) => {
+			const model = this._modelRegistry.find(provider, modelId);
+			return model ? this._configureOllamaModel(model).contextWindow : undefined;
+		};
 	}
 
 	private _subtractUnindexedChildUsage(ownUsage: Usage, entries: SessionEntry[]): void {

@@ -16,10 +16,13 @@ const model: Model<Api> = {
 	maxTokens: 4096,
 };
 
-function registryWithStatus(status: ReturnType<ModelRegistry["getProviderCatalogStatus"]>): ModelRegistry {
+function registryWithStatus(
+	status: ReturnType<ModelRegistry["getProviderCatalogStatus"]>,
+	availableModels: Model<Api>[] = [model],
+): ModelRegistry {
 	return {
 		getError: () => undefined,
-		refreshAvailableModels: async () => [model],
+		refreshAvailableModels: async () => availableModels,
 		getProviderCatalogStatus: () => status,
 	} as unknown as ModelRegistry;
 }
@@ -54,5 +57,15 @@ describe("listModels catalog health", () => {
 		await listModels(registryWithStatus({ state: "idle", source: "none" }));
 		const output = log.mock.calls.map(([line]) => String(line)).join("\n");
 		expect(output).toContain("catalog openrouter: bundled fallback, idle, not fetched");
+	});
+
+	test("shows Ollama Cloud cache health for its listed models", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const ollamaModel: Model<Api> = { ...model, id: "gpt-oss:20b", provider: "ollama-cloud" };
+		await listModels(registryWithStatus({ state: "stale", source: "disk", fetchedAt: Date.now() }, [ollamaModel]));
+		const output = log.mock.calls.map(([line]) => String(line)).join("\n");
+		expect(output).toContain(ollamaModel.id);
+		expect(output).toContain("catalog ollama-cloud: disk, stale");
+		expect(output).not.toContain("catalog openrouter:");
 	});
 });

@@ -1,6 +1,6 @@
 /** Image-turn routing: `settings.imageModel` serves image turns on text-only session models. */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -105,5 +105,85 @@ it.each([
 	} finally {
 		session.dispose();
 		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// A project cap must follow a model that serves only one routed/retried turn.
+it.each([
+	["image route", { imageModel: "ollama-cloud/vision" }, true],
+	["backup retry", { providerBackupModel: "ollama-cloud/vision", retry: RETRY }, false],
+])("#6 applies project caps on %s without changing the primary model", async (_name, settings, images) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-ollama-route-"));
+	const cwd = join(root, "project");
+	const agentDir = join(root, "agent");
+	mkdirSync(join(cwd, ".prime", "agent"), { recursive: true });
+	mkdirSync(agentDir);
+	writeFileSync(
+		join(cwd, ".prime", "agent", "ollama-cloud.json"),
+		JSON.stringify({ modelOverrides: { vision: { contextWindow: 4000 } } }),
+	);
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
+	writeFileSync(
+		join(agentDir, "models.json"),
+		JSON.stringify({
+			providers: {
+				"ollama-cloud": {
+					api: "openai-completions",
+					baseUrl: "http://127.0.0.1:1/v1",
+					apiKey: "test-key",
+					models: [{ id: "vision", input: ["text", "image"], contextWindow: 32768, maxTokens: 1024 }],
+				},
+			},
+		}),
+	);
+	const auth = AuthStorage.create(join(agentDir, "auth.json"));
+	auth.setRuntimeApiKey("anthropic", "test-key");
+	auth.setRuntimeApiKey("ollama-cloud", "test-key");
+	const primary = { ...getCodingAgentFixtureModel("anthropic", "claude-opus-4-7"), input: ["text"] as ["text"] };
+	const served: Array<{ provider: string; contextWindow: number }> = [];
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model: primary, systemPrompt: "Test", tools: [] },
+		streamFn: (model) => {
+			served.push({ provider: model.provider, contextWindow: model.contextWindow });
+			const stream = new EventStream<AssistantMessageEvent, AssistantMessage>(
+				(e) => e.type === "done",
+				(e: any) => e.message,
+			);
+			const response = !images && served.length === 1 ? transientFailure() : assistantMsg("ok");
+			stream.push({ type: "done", reason: "stop", message: response });
+			return stream;
+		},
+	});
+	const registry = ModelRegistry.create(auth, join(agentDir, "models.json"));
+	expect(
+		registry
+			.getAll()
+			.filter((m) => m.provider === "ollama-cloud" && m.id === "vision")
+			.map((m) => [m.id, m.input]),
+	).toEqual([["vision", ["text", "image"]]]);
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(cwd),
+		settingsManager: SettingsManager.create(cwd, agentDir),
+		cwd,
+		agentDir,
+		modelRegistry: registry,
+		resourceLoader: createTestResourceLoader(),
+	});
+	try {
+		await session.prompt("describe", images ? { images: [IMAGE] } : undefined);
+		expect(served).toEqual(
+			images
+				? [{ provider: "ollama-cloud", contextWindow: 4000 }]
+				: [
+						{ provider: "anthropic", contextWindow: primary.contextWindow },
+						{ provider: "ollama-cloud", contextWindow: 4000 },
+					],
+		);
+		expect(session.model?.provider).toBe("anthropic");
+	} finally {
+		session.dispose();
+		rmSync(root, { recursive: true, force: true });
 	}
 });

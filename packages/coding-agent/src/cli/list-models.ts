@@ -3,6 +3,7 @@ import { fuzzyFilter } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { formatNoModelsAvailableMessage } from "../core/auth-guidance.js";
 import type { ModelRegistry } from "../core/model-registry.js";
+import { OLLAMA_CLOUD_PROVIDER } from "../core/ollama-cloud-model-catalog.js";
 import { DISCOVERABLE_PROVIDERS } from "../core/provider-model-discovery.js";
 
 function formatTokenCount(count: number): string {
@@ -96,7 +97,7 @@ export async function listModels(modelRegistry: ModelRegistry, searchPattern?: s
 	}
 
 	const shownProviders = new Set(filteredModels.map((model) => model.provider));
-	for (const provider of DISCOVERABLE_PROVIDERS) {
+	for (const provider of [...DISCOVERABLE_PROVIDERS, OLLAMA_CLOUD_PROVIDER] as const) {
 		if (!shownProviders.has(provider)) continue;
 		const status = modelRegistry.getProviderCatalogStatus(provider);
 		const source = status.source === "none" ? "bundled fallback" : status.source;

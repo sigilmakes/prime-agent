@@ -65,6 +65,7 @@ prime-agent
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
 | Prime Inference | `PRIME_API_KEY` | `prime-inference` |
+| Ollama Cloud | `OLLAMA_API_KEY` | `ollama-cloud` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
@@ -131,6 +132,22 @@ The `key` field supports three formats:
   ```
 
 OAuth credentials are also stored here after `/login` and managed automatically.
+
+### Ollama Cloud
+
+Set `OLLAMA_API_KEY` or use `/login` to save a key under `ollama-cloud` in `~/.prime/agent/auth.json`. Saved keys take priority over the environment key; the same resolved key is used for model discovery and inference. Models are discovered from Ollama Cloud's `/v1/models` and `/api/show` endpoints. `PI_OFFLINE=1` keeps cached or bundled models without network refresh.
+
+Optional inference settings go in `~/.prime/agent/ollama-cloud.json` or `<project>/.prime/agent/ollama-cloud.json`. Project entries override global entries per key. For example:
+
+```json
+{
+  "inferenceParams": { "temperature": 0.2 },
+  "models": { "glm-5.3": { "top_p": 0.9 } },
+  "modelOverrides": { "glm-5.3": { "contextWindow": 100000 } }
+}
+```
+
+`inferenceParams` and `models` change outgoing Ollama Cloud request bodies only. User `before_provider_request` extension hooks run afterward and can override these values. `modelOverrides` caps the model metadata used for context budgeting and compaction. Other providers are unaffected. The existing Ollama Cloud extension and Python web-search/fetch skill remain available; do not enable both the extension and built-in Ollama Cloud provider for the same model if duplicate registration is unwanted.
 
 ### Prime Inference
 

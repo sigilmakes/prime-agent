@@ -20,6 +20,7 @@ export const BUILT_IN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	opencode: "OpenCode Zen",
 	"opencode-go": "OpenCode Go",
 	openai: "OpenAI",
+	"ollama-cloud": "Ollama Cloud",
 	openrouter: "OpenRouter",
 	"prime-inference": "Prime Inference",
 	"vercel-ai-gateway": "Vercel AI Gateway",

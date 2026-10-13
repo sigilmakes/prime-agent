@@ -31,13 +31,14 @@ export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.3";
 export const SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS = 5_000;
 
 /** Default model IDs for each known provider */
-export const defaultModelPerProvider: Record<KnownProvider, string> = {
+export const defaultModelPerProvider: Record<KnownProvider, string> & { "ollama-cloud": string } = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
 	anthropic: "claude-opus-4-7",
 	openai: "gpt-5.4",
 	"azure-openai-responses": "gpt-5.4",
 	"openai-codex": "gpt-5.5",
 	"prime-inference": PRIME_INFERENCE_DEFAULT_MODEL_ID,
+	"ollama-cloud": "glm-5.3",
 	deepseek: "deepseek-v4-pro",
 	google: "gemini-3.1-pro-preview",
 	"google-vertex": "gemini-3.1-pro-preview",

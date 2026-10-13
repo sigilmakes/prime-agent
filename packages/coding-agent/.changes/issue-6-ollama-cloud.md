@@ -1,0 +1,2 @@
+- Added Ollama Cloud model discovery and configurable inference with shared auth and cached metadata ([#6](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/6)).
+- Added Ollama Cloud cache source, age, and error status to the model list.

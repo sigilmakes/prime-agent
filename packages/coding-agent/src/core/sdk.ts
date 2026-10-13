@@ -13,6 +13,7 @@ import { McpManager } from "./mcp/mcp-manager.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel, findSessionModelWithReadinessWait } from "./model-resolver.js";
+import { loadOllamaCloudConfig, overlayOllamaCloudRequest } from "./ollama-cloud-config.js";
 import {
 	instrumentConvertToLlm,
 	instrumentStreamFn,
@@ -222,6 +223,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	if (model) model = modelRegistry.configureOllamaModel(model, cwd, agentDir);
+
 	let thinkingLevel = options.thinkingLevel;
 
 	if (thinkingLevel === undefined && hasExistingSession) {
@@ -312,12 +315,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				headers: auth.headers,
 			});
 		}),
-		onPayload: async (payload, _model) => {
+		onPayload: async (payload, requestModel) => {
+			const configuredPayload =
+				requestModel.provider === "ollama-cloud"
+					? (overlayOllamaCloudRequest(payload, loadOllamaCloudConfig(cwd, agentDir), requestModel.id) ?? payload)
+					: payload;
 			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("before_provider_request")) {
-				return payload;
-			}
-			return runner.emitBeforeProviderRequest(payload);
+			return runner?.hasHandlers("before_provider_request")
+				? runner.emitBeforeProviderRequest(configuredPayload)
+				: configuredPayload;
 		},
 		onResponse: async (response, _model) => {
 			const runner = extensionRunnerRef.current;
@@ -369,6 +375,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		resourceLoader,
 		customTools: options.customTools,
 		modelRegistry,
+		explicitInitialModel: options.model,
 		mcpManager,
 		initialActiveToolNames,
 		allowedToolNames,

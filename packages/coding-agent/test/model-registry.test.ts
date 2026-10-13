@@ -19,6 +19,7 @@ describe("ModelRegistry", () => {
 		tempDir = join(tmpdir(), `pi-test-model-registry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = join(tempDir, "models.json");
+		vi.stubEnv("PRIME_AGENT_CODING_AGENT_DIR", tempDir);
 		authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 	});
 

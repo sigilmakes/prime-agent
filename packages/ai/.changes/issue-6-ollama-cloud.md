@@ -1,0 +1,1 @@
+- Added Ollama Cloud API key detection for native provider requests ([#6](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues/6)).
