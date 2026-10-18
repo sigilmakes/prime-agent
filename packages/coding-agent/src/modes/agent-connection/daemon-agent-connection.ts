@@ -58,6 +58,7 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { buildSessionTranscript, sessionContextFromSnapshot } from "./session-transcript.js";
 import type {
 	AgentConnection,
 	AgentConnectionBeforeSessionInvalidateListener,
@@ -910,6 +911,24 @@ export class DaemonAgentConnection implements AgentConnection {
 			activeSessionId: this.activeSessionId,
 		});
 		return data.context;
+	}
+
+	async getSessionTranscript(snapshot?: AgentConnectionSnapshot): Promise<AgentConnectionSessionContext> {
+		const captured = snapshot ?? (await this.getInitialSnapshot());
+		const sessionId = captured.state.sessionId;
+		if (this.latestSnapshot && this.latestSnapshot.state.sessionId !== sessionId) {
+			throw new Error("Session changed while loading its transcript");
+		}
+		const tree = captured.sessionTree ?? (await this.getSessionTree());
+		if (this.latestSnapshot && this.latestSnapshot.state.sessionId !== sessionId) {
+			throw new Error("Session changed while loading its transcript");
+		}
+		return buildSessionTranscript(
+			tree.tree,
+			captured.state.leafId,
+			sessionContextFromSnapshot(captured),
+			!captured.sessionContext,
+		);
 	}
 
 	async getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }> {

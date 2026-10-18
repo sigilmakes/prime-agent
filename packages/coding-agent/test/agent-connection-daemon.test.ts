@@ -1,11 +1,18 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
+import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnectionEvent,
 	AgentConnectionRlmChildAgentSnapshot,
+	AgentConnectionSnapshot,
 	AgentConnectionState,
 } from "../src/modes/agent-connection/types.js";
 import {
@@ -884,6 +891,350 @@ function emitSequencedQueueUpdate(client: FakeDaemonClient, activeSessionId: str
 }
 
 describe("DaemonAgentConnection", () => {
+	it.each([false, true])(
+		"#19 preserves equal-timestamp custom occurrences and an unsaved duplicate (raw=%s)",
+		async (raw) => {
+			const client = new FakeDaemonClient();
+			const connection = await DaemonAgentConnection.attach(asDaemonClient(client), "active-1");
+			const timestamp = "2026-01-01T00:00:00.000Z";
+			const entry = (id: string, parentId: string | null) => ({
+				type: "custom_message" as const,
+				id,
+				parentId,
+				timestamp,
+				customType: "note",
+				content: "repeat",
+				display: true,
+			});
+			const first = entry("first-note", null);
+			const second = entry("second-note", first.id);
+			const message: AgentMessage = {
+				role: "custom",
+				customType: "note",
+				content: "repeat",
+				display: true,
+				timestamp: Date.parse(timestamp) - (raw ? 10 : 0),
+			};
+			const context = {
+				messages: [message, { ...message }, { ...message }],
+				thinkingLevel: "medium",
+				serviceTier: "default" as const,
+				model: null,
+			};
+			const snapshot: AgentConnectionSnapshot = {
+				state: { ...createConnectionState("active-1", "session-current"), leafId: second.id },
+				messages: context.messages,
+				...(raw ? {} : { sessionContext: context }),
+				sessionTree: { leafId: second.id, tree: [{ entry: first, children: [{ entry: second, children: [] }] }] },
+			};
+			try {
+				const transcript = await connection.getSessionTranscript(snapshot);
+				expect(transcript.messages).toHaveLength(3);
+				expect(transcript.messages.every((item) => item.role === "custom" && item.content === "repeat")).toBe(true);
+				expect(snapshot.messages).toHaveLength(3);
+			} finally {
+				await connection.dispose();
+			}
+		},
+	);
+
+	it.each(["daemon", "in-process"])(
+		"#19 fences %s transcript at the supplied snapshot leaf and preserves repeated messages",
+		async (adapter) => {
+			const client = new FakeDaemonClient();
+			const connection =
+				adapter === "daemon"
+					? await DaemonAgentConnection.attach(asDaemonClient(client), "active-1")
+					: new InProcessAgentConnection({
+							session: { sessionId: "session-current", subscribe: () => () => {} },
+							setRebindSession: () => {},
+							dispose: async () => {},
+						} as unknown as AgentSessionRuntime);
+			const entry = (id: string, parentId: string | null, content: string) => ({
+				type: "message" as const,
+				id,
+				parentId,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: { role: "user" as const, content, timestamp: 1 },
+			});
+			const first = entry("first", null, "repeated");
+			const second = entry("second", "first", "repeated");
+			const appended = entry("appended", "second", "new live message");
+			const snapshot: AgentConnectionSnapshot = {
+				state: { ...createConnectionState("active-1", "session-current"), leafId: "second" },
+				messages: [first.message, second.message],
+				sessionTree: {
+					leafId: "appended",
+					tree: [{ entry: first, children: [{ entry: second, children: [{ entry: appended, children: [] }] }] }],
+				},
+			};
+			try {
+				expect((await connection.getSessionTranscript(snapshot)).messages).toEqual([first.message, second.message]);
+				expect(snapshot.messages).toEqual([first.message, second.message]);
+				await expect(
+					connection.getSessionTranscript({ ...snapshot, state: { ...snapshot.state, leafId: "missing" } }),
+				).rejects.toThrow("no longer available");
+				await expect(
+					connection.getSessionTranscript({ ...snapshot, state: { ...snapshot.state, sessionId: "replaced" } }),
+				).rejects.toThrow("Session changed");
+			} finally {
+				await connection.dispose();
+			}
+		},
+	);
+
+	it("#19 rejects a transcript load superseded by a session replacement", async () => {
+		const client = new FakeDaemonClient();
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(client), "active-1");
+		const snapshot = await connection.getInitialSnapshot();
+		delete snapshot.sessionTree;
+		const original = client.request.bind(client);
+		vi.spyOn(client, "request").mockImplementation(async (command, timeout, options) => {
+			if (command.type !== "get_session_tree") return original(command, timeout, options);
+			const replacement = createAttachResult("active-1", "client-1", undefined, 13, {
+				state: createConnectionState("active-1", "replacement"),
+			});
+			client.emitMessage({
+				type: "session_replaced",
+				activeSessionId: "active-1",
+				state: replacement.snapshot.state,
+				messages: [],
+			});
+			return success(command.id, command.type, { flatNodes: [], leafId: null });
+		});
+		try {
+			await expect(connection.getSessionTranscript(snapshot)).rejects.toThrow("Session changed");
+		} finally {
+			await connection.dispose();
+		}
+	});
+
+	it.each(["snapshot", "legacy tree command", "implicit snapshot", "raw snapshot"])(
+		"#19 restores the saved active-branch transcript through %s without expanding model context",
+		async (source) => {
+			const directory = mkdtempSync(join(tmpdir(), "session-transcript-"));
+			let connection: DaemonAgentConnection | undefined;
+			try {
+				const timestamp = "2026-01-01T00:00:00.000Z";
+				const entries: SessionEntry[] = [];
+				let parentId: string | null = null;
+				const append = (entry: SessionEntry) => {
+					entries.push(entry);
+					parentId = entry.id;
+				};
+				for (let index = 0; index < 405; index++) {
+					append({
+						type: "message",
+						id: `user-${index}`,
+						parentId,
+						timestamp,
+						message: { role: "user", content: `saved-${index}`, timestamp: 1 },
+					});
+				}
+				append({
+					type: "message",
+					id: "old-tool",
+					parentId,
+					timestamp,
+					message: {
+						role: "toolResult",
+						toolCallId: "call-old",
+						toolName: "ipython",
+						content: [{ type: "text", text: "done" }],
+						isError: false,
+						timestamp: 1,
+					},
+				});
+				const receipt = {
+					id: "receipt-1",
+					message: "late reply",
+					deliveryStatus: "delivered",
+					target: { activeSessionId: "child-active", sessionId: "child" },
+				};
+				append({
+					type: "custom",
+					id: "late-receipt",
+					parentId,
+					timestamp,
+					customType: "ipython_sent_agent_message",
+					data: { toolCallId: "call-old", message: receipt },
+				});
+				append({
+					type: "custom_message",
+					id: "historical-outcome",
+					parentId,
+					timestamp,
+					customType: "compaction-outcome",
+					content: "unsaved outcome",
+					display: true,
+				});
+				append({
+					type: "compaction",
+					id: "compact-1",
+					parentId,
+					timestamp,
+					summary: "first summary",
+					firstKeptEntryId: "user-404",
+					tokensBefore: 5000,
+					customInstructions: "keep facts",
+				});
+				append({
+					type: "message",
+					id: "retained",
+					parentId,
+					timestamp,
+					message: { role: "user", content: "retained", timestamp: 1 },
+				});
+				append({
+					type: "compaction",
+					id: "compact-2",
+					parentId,
+					timestamp,
+					summary: "second summary",
+					firstKeptEntryId: "retained",
+					tokensBefore: 6000,
+				});
+				append({
+					type: "custom_message",
+					id: "note",
+					parentId,
+					timestamp,
+					customType: "note",
+					content: "visible",
+					display: true,
+				});
+				append({
+					type: "custom_message",
+					id: "digest",
+					parentId,
+					timestamp,
+					customType: "harness_digest",
+					content: "hidden",
+					display: false,
+				});
+				append({
+					type: "branch_summary",
+					id: "branch",
+					parentId,
+					timestamp,
+					fromId: "other",
+					summary: "branch marker",
+				});
+				entries.push({
+					type: "message",
+					id: "other",
+					parentId: "user-0",
+					timestamp,
+					message: { role: "user", content: "not this branch", timestamp: 1 },
+				});
+				append({
+					type: "message",
+					id: "last",
+					parentId,
+					timestamp,
+					message: { role: "user", content: "latest", timestamp: 1 },
+				});
+				const path = join(directory, "session.jsonl");
+				writeFileSync(
+					path,
+					`${[{ type: "session", version: 3, id: "saved-session", cwd: directory, timestamp }, ...entries]
+						.map((entry) => JSON.stringify(entry))
+						.join("\n")}\n`,
+				);
+				const manager = SessionManager.open(path, directory);
+				const context = manager.buildSessionContext();
+				const outcome: AgentMessage = {
+					role: "custom",
+					customType: "compaction-outcome",
+					content: "unsaved outcome",
+					display: true,
+					timestamp: 2,
+				};
+				context.messages.push(outcome);
+				const client = new FakeDaemonClient();
+				client.attachResultFactory = (command) => {
+					const result = createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
+						state: { ...createConnectionState(command.activeSessionId, "saved-session"), leafId: "last" },
+						messages:
+							source === "raw snapshot"
+								? context.messages.map((message) =>
+										message.role === "custom" && message.customType === "note"
+											? { ...message, timestamp: message.timestamp - 10 }
+											: message,
+									)
+								: context.messages,
+						sessionContext: context,
+						omitSessionContext: source === "raw snapshot",
+						sessionTree: { tree: manager.getTree(), leafId: "last" },
+					});
+					if (source === "legacy tree command") delete result.snapshot.sessionTree;
+					return result;
+				};
+				const original = client.request.bind(client);
+				vi.spyOn(client, "request").mockImplementation(async (command, timeout, options) => {
+					if (command.type === "get_session_context") {
+						client.requests.push(command);
+						return success(command.id, command.type, { context });
+					}
+					if (command.type !== "get_session_tree") return original(command, timeout, options);
+					client.requests.push(command);
+					return success(command.id, command.type, {
+						flatNodes: [
+							...manager.getFlatTree(),
+							{
+								entry: {
+									type: "message",
+									id: "post-snapshot",
+									parentId: "last",
+									timestamp,
+									message: { role: "user", content: "post-snapshot appended", timestamp: 2 },
+								},
+							},
+						],
+						leafId: "post-snapshot",
+					});
+				});
+				connection = await DaemonAgentConnection.attach(asDaemonClient(client), "active-1");
+				const snapshot = await connection.getInitialSnapshot();
+				const transcript =
+					source === "implicit snapshot"
+						? await connection.getSessionTranscript()
+						: await connection.getSessionTranscript(snapshot);
+				expect(transcript.messages[0]).toMatchObject({ content: "saved-0" });
+				expect(transcript.messages.filter((message) => message.role === "user")).toHaveLength(407);
+				expect(
+					transcript.messages
+						.filter((message) => message.role === "compactionSummary")
+						.map((message) => message.summary),
+				).toEqual(["first summary", "second summary"]);
+				expect(transcript.messages.find((message) => message.role === "compactionSummary")).toMatchObject({
+					customInstructions: "keep facts",
+				});
+				expect(transcript.messages.find((message) => message.role === "toolResult")).toMatchObject({
+					details: { sentAgentMessages: [receipt] },
+				});
+				expect(
+					transcript.messages.filter((message) => message.role === "custom").map((message) => message.content),
+				).toEqual(["unsaved outcome", "visible", "unsaved outcome"]);
+				expect(transcript.messages.slice(-3)).toMatchObject([
+					{ role: "branchSummary" },
+					{ content: "latest" },
+					{ content: "unsaved outcome" },
+				]);
+				expect(JSON.stringify(transcript)).not.toContain("not this branch");
+				expect(JSON.stringify(transcript)).not.toContain("post-snapshot appended");
+				expect(await connection.getSessionContext()).toEqual(context);
+				expect(JSON.stringify(context)).not.toContain("saved-0");
+				expect(client.requests.filter((request) => request.type === "get_session_tree")).toHaveLength(
+					source === "legacy tree command" ? 1 : 0,
+				);
+			} finally {
+				await connection?.dispose();
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("#17 sends an explicit model refresh to the supervisor without a session id", async () => {
 		const supervisor = new FakeDaemonClient();
 		supervisor.serverCapabilities.add("model_refresh");

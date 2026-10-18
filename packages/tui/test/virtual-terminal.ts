@@ -13,13 +13,14 @@ export class VirtualTerminal implements Terminal {
 	private _altScreenActive = false;
 	private _mouseTrackingActive = false;
 
-	constructor(columns = 80, rows = 24) {
+	constructor(columns = 80, rows = 24, scrollback = 1000) {
 		this._columns = columns;
 		this._rows = rows;
 
 		this.xterm = new XtermTerminal({
 			cols: columns,
 			rows: rows,
+			scrollback,
 			disableStdin: true,
 			allowProposedApi: true,
 		});

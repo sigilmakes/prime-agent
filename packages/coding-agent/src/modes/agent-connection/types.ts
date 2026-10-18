@@ -207,6 +207,7 @@ export interface AgentConnectionCompactionEntry extends AgentConnectionSessionEn
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	customInstructions?: string;
 	details?: unknown;
 	fromHook?: boolean;
 }
@@ -718,6 +719,8 @@ export interface AgentConnection {
 	getSessionStats(): Promise<SessionStats>;
 	getContextTree(): Promise<ContextTreeNode>;
 	getSessionContext(): Promise<AgentConnectionSessionContext>;
+	/** Chronological active-branch display history, fenced at the supplied snapshot leaf. */
+	getSessionTranscript(snapshot?: AgentConnectionSnapshot): Promise<AgentConnectionSessionContext>;
 	getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }>;
 	listSavedSessions(
 		scope: AgentConnectionSavedSessionScope,

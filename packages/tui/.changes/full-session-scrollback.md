@@ -1,0 +1,1 @@
+- Fixed restored session transcripts missing older lines from terminal scrollback.

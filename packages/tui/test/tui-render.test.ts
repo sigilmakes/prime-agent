@@ -53,7 +53,7 @@ async function withEnv<T>(updates: Record<string, string | undefined>, run: () =
 	}
 }
 
-type RenderMode = "diff" | "full" | "preserve";
+type RenderMode = "diff" | "full" | "preserve" | "replay";
 
 interface Harness {
 	terminal: LoggingVirtualTerminal;
@@ -85,7 +85,8 @@ async function withHarness(
 
 	const update = async (lines: string[], mode: RenderMode = "diff") => {
 		component.lines = lines;
-		if (mode === "preserve") tui.requestRenderPreservingViewport();
+		if (mode === "replay") tui.replayTranscript();
+		else if (mode === "preserve") tui.requestRenderPreservingViewport();
 		else tui.requestRender(mode === "full");
 		await terminal.waitForRender();
 	};
@@ -391,6 +392,83 @@ describe("TUI differential rendering", () => {
 		} finally {
 			tui.stop();
 		}
+	});
+});
+
+describe("TUI transcript replay", () => {
+	it("#19 restores every loaded transcript line to native scrollback after an existing frame", async () => {
+		await withHarness(["Loading session"], async ({ terminal, update }) => {
+			const history = numbered(30, "Restored sentinel");
+			terminal.clearWrites();
+			await update([...history], "replay");
+
+			assert.deepStrictEqual(terminal.getScrollBuffer(), history);
+			assert.deepStrictEqual(terminal.getViewport(), history.slice(-10));
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "replay must not erase native scrollback");
+		});
+	});
+
+	it("preserves pre-existing native scrollback when replay replaces the current session", async () => {
+		const previous = numbered(30, "Previous session");
+		await withHarness([...previous], async ({ terminal, update }) => {
+			const restored = numbered(30, "Replacement sentinel");
+			await update([...restored], "replay");
+
+			assert.deepStrictEqual(terminal.getScrollBuffer(), [...previous.slice(0, 20), ...restored]);
+		});
+	});
+
+	it("coalesces replay requests and keeps later redraws, resizes and streaming updates incremental", async () => {
+		await withHarness(["Loading session"], async ({ terminal, tui, component, update, resize }) => {
+			const restored = numbered(30, "Restored sentinel");
+			component.lines = [...restored];
+			tui.replayTranscript();
+			tui.replayTranscript();
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getScrollBuffer(), restored);
+
+			await update([...restored], "full");
+			await resize(60, 10);
+			await resize(60, 8);
+			const changed = [...restored];
+			changed[0] = "Off-screen change";
+			await update([...changed]);
+			assert.deepStrictEqual(terminal.getScrollBuffer(), restored, "normal repaint must not replay history");
+
+			await update([...changed, "Stream tail"]);
+			assert.deepStrictEqual(terminal.getScrollBuffer(), [...restored, "Stream tail"]);
+			assert.deepStrictEqual(terminal.getViewport(), [...restored.slice(-7), "Stream tail"]);
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "must never erase native scrollback");
+		});
+	});
+
+	it("consumes replay in fullscreen without native history output or a replay after exit", async () => {
+		await withHarness(["Loading session"], async ({ terminal, tui, component, update }) => {
+			const dock = new TestComponent();
+			dock.lines = ["Editor dock"];
+			tui.enterFullscreen({ scroll: [component], dock });
+			await terminal.waitForRender();
+			terminal.clearWrites();
+			await update(numbered(30, "Fullscreen sentinel"), "replay");
+
+			assert.strictEqual(terminal.getActiveBufferType(), "alternate");
+			assert.strictEqual(terminal.getScrollBuffer().length, 10);
+			assert.ok(terminal.getViewport().includes("Fullscreen sentinel 29"));
+			assert.ok(!terminal.getWrites().includes("Fullscreen sentinel 0"), "only the owned window is painted");
+			tui.scrollToTop();
+			await terminal.waitForRender();
+			assert.ok(
+				terminal.getViewport().includes("Fullscreen sentinel 0"),
+				"loaded history is scrollable in fullscreen",
+			);
+
+			tui.exitFullscreen({ flush: false });
+			tui.requestRender(true);
+			await terminal.waitForRender();
+			assert.strictEqual(terminal.getActiveBufferType(), "normal");
+			assert.deepStrictEqual(terminal.getScrollBuffer(), numbered(30, "Fullscreen sentinel").slice(-10));
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"));
+		});
 	});
 });
 

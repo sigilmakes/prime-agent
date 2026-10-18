@@ -24,6 +24,7 @@ import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
+import { buildSessionTranscript, sessionContextFromSnapshot } from "./session-transcript.js";
 import {
 	createAgentConnectionCommands,
 	createAgentConnectionResourceSnapshot,
@@ -192,6 +193,20 @@ export class InProcessAgentConnection implements AgentConnection {
 
 	async getSessionContext(): Promise<AgentConnectionSessionContext> {
 		return this.session.buildSessionContext();
+	}
+
+	async getSessionTranscript(snapshot?: AgentConnectionSnapshot): Promise<AgentConnectionSessionContext> {
+		const captured = snapshot ?? createAgentConnectionSnapshot(this.runtimeHost);
+		const sessionId = captured.state.sessionId;
+		if (this.session.sessionId !== sessionId) throw new Error("Session changed while loading its transcript");
+		const tree = captured.sessionTree ?? (await this.getSessionTree());
+		if (this.session.sessionId !== sessionId) throw new Error("Session changed while loading its transcript");
+		return buildSessionTranscript(
+			tree.tree,
+			captured.state.leafId,
+			sessionContextFromSnapshot(captured),
+			!captured.sessionContext,
+		);
 	}
 
 	async getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }> {

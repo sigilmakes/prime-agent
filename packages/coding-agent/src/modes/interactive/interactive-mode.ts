@@ -712,7 +712,6 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 // inline limit before storing, so this holds many recent pastes; the oldest are
 // evicted past the cap to keep a long session bounded.
 const MAX_PASTED_IMAGE_BYTES = 64 * 1024 * 1024;
-const INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT = 400;
 // Coalesce at most this many heartbeats_changed refreshes into one refresh
 // promise; sustained churn must not hold rebindCurrentSession in a drain loop.
 const HEARTBEAT_REFRESH_DRAIN_LIMIT = 25;
@@ -745,95 +744,6 @@ async function fetchHeartbeatsWithinDeadline(
 	} finally {
 		clearTimeout(timeout);
 	}
-}
-
-function initialRenderMessages(messages: AgentMessage[]): AgentMessage[] {
-	if (messages.length <= INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT) {
-		return messages;
-	}
-	const toolCallMessages = new Map<string, { index: number; message: Extract<AgentMessage, { role: "assistant" }> }>();
-	for (const [index, message] of messages.entries()) {
-		if (message.role !== "assistant") {
-			continue;
-		}
-		for (const content of message.content) {
-			if (content.type === "toolCall") {
-				toolCallMessages.set(content.id, { index, message });
-			}
-		}
-	}
-
-	const initialStartIndex = messages.length - INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT;
-	for (let startIndex = initialStartIndex; startIndex < messages.length; startIndex++) {
-		const visibleMessages = messages.slice(startIndex);
-		const visibleToolCallIds = new Set<string>();
-		for (const message of visibleMessages) {
-			if (message.role !== "assistant") {
-				continue;
-			}
-			for (const content of message.content) {
-				if (content.type === "toolCall") {
-					visibleToolCallIds.add(content.id);
-				}
-			}
-		}
-
-		const requiredToolCallIdsByMessage = new Map<
-			number,
-			{ message: Extract<AgentMessage, { role: "assistant" }>; toolCallIds: Set<string> }
-		>();
-		for (const message of visibleMessages) {
-			if (message.role !== "toolResult" || visibleToolCallIds.has(message.toolCallId)) {
-				continue;
-			}
-			const toolCallMessage = toolCallMessages.get(message.toolCallId);
-			if (!toolCallMessage || toolCallMessage.index >= startIndex) {
-				continue;
-			}
-			const requiredMessage = requiredToolCallIdsByMessage.get(toolCallMessage.index) ?? {
-				message: toolCallMessage.message,
-				toolCallIds: new Set<string>(),
-			};
-			requiredMessage.toolCallIds.add(message.toolCallId);
-			requiredToolCallIdsByMessage.set(toolCallMessage.index, requiredMessage);
-		}
-
-		if (visibleMessages.length + requiredToolCallIdsByMessage.size > INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT) {
-			continue;
-		}
-
-		const requiredToolCallMessages = [...requiredToolCallIdsByMessage.entries()]
-			.sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
-			.map(([, { message, toolCallIds }]) => ({
-				...message,
-				content: message.content.filter((content) => content.type !== "toolCall" || toolCallIds.has(content.id)),
-			}));
-		return omitOrphanToolResults([...requiredToolCallMessages, ...visibleMessages]);
-	}
-
-	return [];
-}
-
-function omitOrphanToolResults(messages: AgentMessage[]): AgentMessage[] {
-	const renderedToolCallIds = new Set<string>();
-	const renderableMessages: AgentMessage[] = [];
-	for (const message of messages) {
-		if (message.role === "assistant") {
-			for (const content of message.content) {
-				if (content.type === "toolCall") {
-					renderedToolCallIds.add(content.id);
-				}
-			}
-			renderableMessages.push(message);
-		} else if (message.role === "toolResult") {
-			if (renderedToolCallIds.has(message.toolCallId)) {
-				renderableMessages.push(message);
-			}
-		} else {
-			renderableMessages.push(message);
-		}
-	}
-	return renderableMessages;
 }
 
 function isDeadTerminalError(error: unknown): boolean {
@@ -1293,6 +1203,7 @@ export class InteractiveMode {
 	// The in-flight initial transcript render, if any. Session resync/replacement
 	// renders await it so they never interleave with a half-built transcript.
 	private initialRenderPromise: Promise<void> | undefined = undefined;
+	private replayedSessionId: string | undefined;
 	private sessionEventGeneration = 0;
 	private serviceTierChangeQueue: Promise<void> = Promise.resolve();
 
@@ -3426,20 +3337,47 @@ export class InteractiveMode {
 	}
 
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
+		const generation = this.sessionEventGeneration;
+		let transcript: AgentConnectionSessionContext | undefined;
+		let historyWarning: string | undefined;
+		try {
+			transcript = await this.agentConnection.getSessionTranscript(snapshot);
+		} catch (error) {
+			historyWarning = `Full session history unavailable: ${error instanceof Error ? error.message : String(error)}`;
+			if (this.connectionState?.sessionId !== snapshot.state.sessionId) {
+				transcript = this.getSessionContextFromConnectionSnapshot(snapshot);
+			}
+		}
+		if (generation !== this.sessionEventGeneration) return;
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
 		this.refreshQueueSelectionFromState();
 		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages);
-		this.streamingComponent = undefined;
-		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
 		this.replaceSubagentSummary(snapshot.children);
-		await this.renderSessionContext(this.getSessionContextFromConnectionSnapshot(snapshot), {
-			clearChat: true,
-			updateFooter: true,
-			limitTranscript: true,
-		});
-		await this.restoreStreamingMessageFromSnapshot(snapshot.streamingMessage);
+		if (transcript) {
+			this.streamingComponent = undefined;
+			this.streamingMessage = undefined;
+			await this.renderSessionContext(transcript, {
+				clearChat: true,
+				updateFooter: true,
+				chronological: historyWarning === undefined,
+				replaySessionId: historyWarning === undefined ? snapshot.state.sessionId : undefined,
+				forceReplay: historyWarning === undefined,
+				stillCurrent: () => generation === this.sessionEventGeneration,
+			});
+			if (generation !== this.sessionEventGeneration) return;
+			await this.restoreStreamingMessageFromSnapshot(snapshot.streamingMessage);
+		} else {
+			if (!snapshot.state.isStreaming && this.streamingComponent) {
+				if (this.streamingMessage) this.streamingComponent.updateContent(this.streamingMessage, false);
+				else this.chatContainer.removeChild(this.streamingComponent);
+				this.streamingComponent = undefined;
+				this.streamingMessage = undefined;
+			}
+		}
+		if (generation !== this.sessionEventGeneration) return;
+		if (historyWarning) this.showWarning(`${historyWarning}. /reload retries full history.`);
 		this.updatePendingMessagesDisplay();
 		if (bashFinished) {
 			if (this.activeBashComponent) {
@@ -7039,7 +6977,7 @@ export class InteractiveMode {
 	 * @param options.updateFooter Update footer state
 	 * @param options.populateHistory Add user messages to editor history
 	 * @param options.clearChat Clear the current transcript immediately before rendering
-	 * @param options.limitTranscript Limit transcript replay to the recent tail
+	 * @param options.chronological Messages already follow durable entry order
 	 */
 	private orderMessagesForTranscript(messages: AgentMessage[]): AgentMessage[] {
 		const summaryIndex = messages.findIndex((message) => message.role === "compactionSummary");
@@ -7067,14 +7005,15 @@ export class InteractiveMode {
 			updateFooter?: boolean;
 			populateHistory?: boolean;
 			clearChat?: boolean;
-			limitTranscript?: boolean;
+			chronological?: boolean;
+			stillCurrent?: () => boolean;
+			replaySessionId?: string;
+			forceReplay?: boolean;
 		} = {},
 	): Promise<void> {
-		this.resetPendingToolState();
-		const transcriptMessages = this.orderMessagesForTranscript(sessionContext.messages);
-		const messagesToRender = options.limitTranscript ? initialRenderMessages(transcriptMessages) : transcriptMessages;
-		this.ipythonToolComponents.clear();
-		this.lateIpythonSentAgentMessages.clear();
+		const messagesToRender = options.chronological
+			? sessionContext.messages
+			: this.orderMessagesForTranscript(sessionContext.messages);
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		const toolNames: string[] = [];
 		for (const message of messagesToRender) {
@@ -7099,6 +7038,10 @@ export class InteractiveMode {
 			}`;
 		}
 
+		if (options.stillCurrent?.() === false) return;
+		this.resetPendingToolState();
+		this.ipythonToolComponents.clear();
+		this.lateIpythonSentAgentMessages.clear();
 		if (options.clearChat) {
 			this.chatContainer.clear();
 		}
@@ -7120,20 +7063,6 @@ export class InteractiveMode {
 		}
 
 		const renderOptions = { ...options, populateHistory: false };
-
-		if (messagesToRender.length < sessionContext.messages.length) {
-			this.chatContainer.addChild(
-				new Text(
-					theme.fg(
-						"dim",
-						`Showing latest ${messagesToRender.length} of ${sessionContext.messages.length} messages for faster open.`,
-					),
-					1,
-					0,
-				),
-			);
-			this.chatContainer.addChild(new Spacer(1));
-		}
 
 		for (const message of messagesToRender) {
 			// One unrenderable message must not abort the whole transcript:
@@ -7219,7 +7148,8 @@ export class InteractiveMode {
 			component.setIncludeImageDimensions(true);
 			this.pendingTools.set(toolCallId, component);
 		}
-		this.ui.requestRender();
+		if (options.replaySessionId) this.replayLoadedTranscript(options.replaySessionId, options.forceReplay);
+		else this.ui.requestRender();
 	}
 
 	async renderInitialMessages(): Promise<void> {
@@ -7229,22 +7159,42 @@ export class InteractiveMode {
 		const previousRender = this.initialRenderPromise;
 		const render = (async () => {
 			await previousRender?.catch(() => undefined);
+			const generation = this.sessionEventGeneration;
 			const snapshot = await this.agentConnection.getInitialSnapshot();
 			const context = this.getSessionContextFromConnectionSnapshot(snapshot);
+			let transcript = context;
+			let historyWarning: string | undefined;
+			try {
+				transcript = await this.agentConnection.getSessionTranscript(snapshot);
+			} catch (error) {
+				if (generation !== this.sessionEventGeneration) return;
+				historyWarning = `Full session history unavailable: ${error instanceof Error ? error.message : String(error)}`;
+				if (this.replayedSessionId === snapshot.state.sessionId) {
+					this.showWarning(historyWarning);
+					return;
+				}
+				historyWarning += ". Showing current model context only; /reload retries full history.";
+			}
+			if (generation !== this.sessionEventGeneration) return;
 			const state = snapshot.state;
 			const streamingMessage = snapshot.streamingMessage;
 			this.rlmNodeId = snapshot.parent?.childId;
 			this.seedSubagentSummary(snapshot.children);
 			this.applyConnectionStateSnapshot(state);
 			this.restoreTurnStartFromMessages(context.messages);
-			await this.renderSessionContext(context, {
+			await this.renderSessionContext(transcript, {
 				clearChat: true,
 				updateFooter: true,
 				populateHistory: true,
-				limitTranscript: true,
+				chronological: historyWarning === undefined,
+				replaySessionId: historyWarning === undefined ? state.sessionId : undefined,
+				stillCurrent: () => generation === this.sessionEventGeneration,
 			});
+			if (generation !== this.sessionEventGeneration) return;
 			await this.restoreStreamingMessageFromSnapshot(streamingMessage);
+			if (generation !== this.sessionEventGeneration) return;
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
+			if (historyWarning) this.showWarning(historyWarning);
 
 			// Show compaction info if session was compacted
 			const compactionCount = state.compactionCount;
@@ -7278,6 +7228,15 @@ export class InteractiveMode {
 		}
 	}
 
+	private replayLoadedTranscript(sessionId: string, force = false): void {
+		if (!force && this.replayedSessionId === sessionId) {
+			this.ui.requestRender();
+			return;
+		}
+		this.ui.replayTranscript();
+		this.replayedSessionId = sessionId;
+	}
+
 	private getSessionContextFromConnectionSnapshot(snapshot: AgentConnectionSnapshot): AgentConnectionSessionContext {
 		if (snapshot.sessionContext) {
 			return snapshot.sessionContext;
@@ -7305,8 +7264,17 @@ export class InteractiveMode {
 	}
 
 	private async rebuildChatFromMessages(): Promise<void> {
-		const context = await this.agentConnection.getSessionContext();
-		await this.renderSessionContext(context, { clearChat: true, limitTranscript: true });
+		const generation = this.sessionEventGeneration;
+		const sessionId = this.connectionState?.sessionId;
+		const transcript = await this.agentConnection.getSessionTranscript();
+		if (generation !== this.sessionEventGeneration || sessionId !== this.connectionState?.sessionId) return;
+		await this.renderSessionContext(transcript, {
+			clearChat: true,
+			chronological: true,
+			replaySessionId: sessionId,
+			stillCurrent: () =>
+				generation === this.sessionEventGeneration && sessionId === this.connectionState?.sessionId,
+		});
 	}
 
 	private handleEscape(): void {

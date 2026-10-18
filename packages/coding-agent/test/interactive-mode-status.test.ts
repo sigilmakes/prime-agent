@@ -1,11 +1,17 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import { Container, Text, TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { emptyGoalState } from "../src/core/goals.js";
-import type { ModelRegistry } from "../src/core/model-registry.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnectionExtensionUiRequest,
@@ -78,7 +84,10 @@ type RenderSessionContextOptions = {
 	updateFooter?: boolean;
 	populateHistory?: boolean;
 	clearChat?: boolean;
-	limitTranscript?: boolean;
+	chronological?: boolean;
+	stillCurrent?: () => boolean;
+	replaySessionId?: string;
+	forceReplay?: boolean;
 };
 
 const renderSessionContext = (
@@ -147,15 +156,39 @@ describe("InteractiveMode.renderSessionContext", () => {
 		initTheme("dark");
 	});
 
-	test("renders only the recent tail for very long initial transcripts", async () => {
+	test("#19: renders every message in long initial transcripts", async () => {
 		const { harness, chatContainer, addMessageToChat } = createRenderSessionContextHarness();
 		const messages = Array.from({ length: 405 }, (_, index) => userMessage(`message ${index}`, index));
 
-		await renderMessages(harness, messages, { limitTranscript: true });
+		await renderMessages(harness, messages, { chronological: true });
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(400);
-		expect(addMessageToChat.mock.calls[0]?.[0]).toMatchObject({ content: "message 5" });
-		expect(renderAll(chatContainer)).toContain("Showing latest 400 of 405 messages for faster open.");
+		expect(addMessageToChat).toHaveBeenCalledTimes(405);
+		expect(addMessageToChat.mock.calls[0]?.[0]).toMatchObject({ content: "message 0" });
+		expect(renderAll(chatContainer)).not.toContain("for faster open");
+	});
+
+	test("#19: keeps the current transcript when async preparation is superseded", async () => {
+		const started = createDeferred<void>();
+		const prepared = createDeferred<void>();
+		let current = true;
+		const { harness, chatContainer } = createRenderSessionContextHarness({
+			preloadToolDefinitions: async () => {
+				started.resolve();
+				await prepared.promise;
+			},
+		});
+		chatContainer.addChild(new Text("current conversation"));
+		const rendering = renderMessages(harness, [userMessage("stale conversation", 1)], {
+			clearChat: true,
+			chronological: true,
+			stillCurrent: () => current,
+		});
+		await started.promise;
+		current = false;
+		prepared.resolve();
+		await rendering;
+		expect(renderAll(chatContainer)).toContain("current conversation");
+		expect(renderAll(chatContainer)).not.toContain("assistant");
 	});
 
 	test("keeps equal-timestamp legacy messages after the compaction summary", async () => {
@@ -173,7 +206,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 		expect(addMessageToChat.mock.calls.map((call) => call[0])).toEqual([earlier, summary, equalLater]);
 	});
 
-	test("orders the compaction summary at its exact boundary before bounding the initial transcript", async () => {
+	test("orders a model-context compaction summary without dropping retained messages", async () => {
 		const { harness, addMessageToChat } = createRenderSessionContextHarness();
 		const retained = Array.from({ length: 5 }, (_, index) => userMessage(`retained ${index}`, 5));
 		const summary = {
@@ -185,11 +218,12 @@ describe("InteractiveMode.renderSessionContext", () => {
 		} as AgentMessage;
 		const later = Array.from({ length: 399 }, (_, index) => userMessage(`later ${index}`, 5));
 
-		await renderMessages(harness, [summary, ...retained, ...later], { limitTranscript: true });
+		await renderMessages(harness, [summary, ...retained, ...later]);
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(400);
-		expect(addMessageToChat.mock.calls[0]?.[0]).toBe(summary);
-		expect(addMessageToChat.mock.calls[1]?.[0]).toMatchObject({ content: "later 0" });
+		expect(addMessageToChat).toHaveBeenCalledTimes(405);
+		expect(addMessageToChat.mock.calls[0]?.[0]).toBe(retained[0]);
+		expect(addMessageToChat.mock.calls[5]?.[0]).toBe(summary);
+		expect(addMessageToChat.mock.calls[6]?.[0]).toMatchObject({ content: "later 0" });
 	});
 
 	test("preserves the full transcript when rebuilding a cleared transcript", async () => {
@@ -205,13 +239,13 @@ describe("InteractiveMode.renderSessionContext", () => {
 		expect(renderAll(chatContainer)).not.toContain("for faster open");
 	});
 
-	test("populates editor history from the full transcript when initial rendering is capped", async () => {
+	test("populates editor history from the full rendered transcript", async () => {
 		const { harness, addMessageToChat, addToHistory } = createRenderSessionContextHarness();
 		const messages = Array.from({ length: 405 }, (_, index) => userMessage(`message ${index}`, index));
 
-		await renderMessages(harness, messages, { populateHistory: true, limitTranscript: true });
+		await renderMessages(harness, messages, { populateHistory: true, chronological: true });
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(400);
+		expect(addMessageToChat).toHaveBeenCalledTimes(405);
 		expect(addToHistory).toHaveBeenCalledTimes(405);
 		expect(addToHistory.mock.calls[0]?.[0]).toBe("message 0");
 		expect(addToHistory.mock.calls.at(-1)?.[0]).toBe("message 404");
@@ -268,6 +302,15 @@ describe("InteractiveMode connection events", () => {
 
 	function createResyncHarness(overrides: Record<string, any> = {}): Record<string, any> {
 		const fakeThis: Record<string, any> = {
+			agentConnection: {
+				getSessionTranscript: async (snapshot: AgentConnectionSnapshot) => ({
+					messages: snapshot.messages,
+					thinkingLevel: snapshot.state.thinkingLevel,
+					serviceTier: snapshot.state.serviceTier,
+					model: null,
+				}),
+			},
+			connectionState: createConnectionState(),
 			applyConnectionStateSnapshot: vi.fn(),
 			refreshQueueSelectionFromState: vi.fn(),
 			restoreTurnStartFromMessages: vi.fn(),
@@ -280,6 +323,7 @@ describe("InteractiveMode connection events", () => {
 			})),
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot: vi.fn(),
+			ui: { requestRender: vi.fn(), replayTranscript: vi.fn() },
 			updatePendingMessagesDisplay: vi.fn(),
 			flushPendingBashComponents: vi.fn(),
 			updateTerminalTitle: vi.fn(),
@@ -490,7 +534,10 @@ describe("InteractiveMode connection events", () => {
 		expect(fakeThis.renderSessionContext).toHaveBeenCalledWith(expect.anything(), {
 			clearChat: true,
 			updateFooter: true,
-			limitTranscript: true,
+			chronological: true,
+			replaySessionId: "session-1",
+			forceReplay: true,
+			stillCurrent: expect.any(Function),
 		});
 		expect(startAssistantStreamingMessage).toHaveBeenCalledWith(streamingMessage);
 		expect(fakeThis.turnStartedAt).toBe(100);
@@ -498,6 +545,29 @@ describe("InteractiveMode connection events", () => {
 		expect(fakeThis.updateWorkingLoaderMessage).toHaveBeenCalledOnce();
 		// A resync render must not re-refresh the catalog the resync handler already refreshed.
 		expect(fakeThis.refreshCommandCatalogForCurrentSession).not.toHaveBeenCalled();
+	});
+
+	test("#19: applies authoritative resync status when full-history loading fails", async () => {
+		const snapshot: AgentConnectionSnapshot = {
+			state: createConnectionState({ isStreaming: false, isBashRunning: false }),
+			messages: [],
+		};
+		const activeBashComponent = { setComplete: vi.fn() };
+		const fakeThis = createResyncHarness({
+			agentConnection: {
+				getSessionTranscript: async () => {
+					throw new Error("tree unavailable");
+				},
+			},
+			activeBashComponent,
+			isBashRunning: () => true,
+			showWarning: vi.fn(),
+		});
+		await expect(renderResyncedSession.call(fakeThis, snapshot)).resolves.toBeUndefined();
+		expect(fakeThis.applyConnectionStateSnapshot).toHaveBeenCalledWith(snapshot.state);
+		expect(fakeThis.renderSessionContext).not.toHaveBeenCalled();
+		expect(activeBashComponent.setComplete).toHaveBeenCalledWith(undefined, false);
+		expect(fakeThis.activeBashComponent).toBeUndefined();
 	});
 
 	test("finishes local bash UI when a resync proves the operation ended", async () => {
@@ -759,6 +829,216 @@ class EventEmittingReplacementRuntime {
 		return { cancelled: false };
 	}
 }
+
+describe("InteractiveMode saved transcript replay", () => {
+	beforeAll(() => initTheme("dark"));
+
+	test.each(["plain", "compacted", "streaming"] as const)(
+		"#19: reopens all saved messages in terminal scrollback (%s)",
+		async (variant) => {
+			const compacted = variant === "compacted";
+			const directory = mkdtempSync(join(tmpdir(), "prime-transcript-"));
+			const terminal = new VirtualTerminal(100, 24, 10000);
+			const ui = new TUI(terminal);
+			let mode: InteractiveMode | undefined;
+			try {
+				const saved = SessionManager.create(directory, join(directory, "sessions"));
+				saved.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "saved assistant" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 0,
+				});
+				let lastMessageId = "";
+				for (let index = 0; index < 405; index++) {
+					lastMessageId = saved.appendMessage(userMessage(`saved-marker-${index}-end`, index + 1));
+				}
+				if (compacted) saved.appendCompaction("saved summary", lastMessageId, 10000);
+				const file = saved.getSessionFile();
+				expect(file).toBeDefined();
+				const reopened = SessionManager.open(file!);
+				const context = reopened.buildSessionContext();
+				let sessionListener: Parameters<AgentSessionRuntime["session"]["subscribe"]>[0] | undefined;
+				const session = Object.assign(createFakeConnectionSession("saved-transcript"), {
+					sessionManager: reopened,
+					messages: context.messages,
+					state: { messages: context.messages, streamingMessage: undefined as AgentMessage | undefined },
+					sessionId: reopened.getSessionId(),
+					sessionFile: file,
+					buildSessionContext: () => reopened.buildSessionContext(),
+					getRlmChildSnapshots: () => [],
+					subscribe: (listener: Parameters<AgentSessionRuntime["session"]["subscribe"]>[0]) => {
+						sessionListener = listener;
+						return () => {
+							sessionListener = undefined;
+						};
+					},
+				});
+				const runtime = new EventEmittingReplacementRuntime(session, session);
+				const connection = new InProcessAgentConnection(runtime as unknown as AgentSessionRuntime);
+				mode = new InteractiveMode({
+					agentConnection: connection,
+					uiServices: {
+						settingsManager: SettingsManager.inMemory({ theme: "dark" }),
+						modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
+						getInitialCwd: () => directory,
+						getInitialSessionName: () => undefined,
+						getThemes: () => [],
+					},
+				});
+				// Mount the real chat with an isolated terminal, without init's tool downloads or process handlers.
+				Reflect.set(mode, "ui", ui);
+				Reflect.set(mode, "isInitialized", true);
+				Reflect.get(mode, "subscribeToAgent").call(mode);
+				ui.addChild(new Text("Loading saved session"));
+				ui.start();
+				await terminal.waitForRender();
+				ui.clear();
+				ui.addChild(Reflect.get(mode, "chatContainer") as Container);
+				if (compacted) {
+					const unavailable = vi
+						.spyOn(connection, "getSessionTranscript")
+						.mockRejectedValueOnce(new Error("history unavailable"));
+					await expect(mode.renderInitialMessages()).resolves.toBeUndefined();
+					await terminal.waitForRender();
+					expect((Reflect.get(mode, "chatContainer") as Container).render(100).join("\n")).toContain(
+						"Full session history unavailable",
+					);
+					unavailable.mockRestore();
+					// /reload uses this same production rebuild path after refreshing resources.
+					await Reflect.get(mode, "rebuildChatFromMessages").call(mode);
+					await terminal.waitForRender();
+					expect(terminal.getScrollBuffer().join("\n")).toContain("saved-marker-0-end");
+				}
+				if (variant === "streaming") {
+					const started = createDeferred<void>();
+					const definition = createDeferred<undefined>();
+					const rpc = vi.spyOn(connection, "getToolDefinition").mockImplementation(async () => {
+						started.resolve();
+						return definition.promise;
+					});
+					session.state.streamingMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "stream-call", name: "slow-tool", arguments: {} }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "test",
+						usage: {
+							input: 1,
+							output: 1,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 500,
+					};
+					const rendering = mode.renderInitialMessages();
+					await started.promise;
+					await terminal.waitForRender();
+					definition.resolve(undefined);
+					await rendering;
+					rpc.mockRestore();
+				} else {
+					await mode.renderInitialMessages();
+				}
+				await terminal.waitForRender();
+				const history = terminal.getScrollBuffer().join("\n");
+				for (const index of [0, 200, 404]) expect(history).toContain(`saved-marker-${index}-end`);
+				expect(history.match(/saved-marker-0-end/g)).toHaveLength(1);
+				if (variant === "streaming") return;
+				if (compacted) {
+					expect(history.indexOf("saved-marker-404-end")).toBeLessThan(history.indexOf("saved summary"));
+					expect((await connection.getSessionContext()).messages).not.toContainEqual(
+						userMessage("saved-marker-0-end", 1),
+					);
+				}
+				await mode.renderInitialMessages();
+				await terminal.waitForRender();
+				expect(
+					terminal
+						.getScrollBuffer()
+						.join("\n")
+						.match(/saved-marker-0-end/g),
+				).toHaveLength(1);
+				if (!compacted) {
+					reopened.appendCompaction("live summary", lastMessageId, 10000);
+					session.messages = reopened.buildSessionContext().messages;
+					session.state.messages = session.messages;
+					sessionListener!({
+						type: "compaction_end",
+						reason: "manual",
+						aborted: false,
+						willRetry: false,
+						result: { summary: "live summary", firstKeptEntryId: lastMessageId, tokensBefore: 10000 },
+					});
+					await Reflect.get(mode, "sessionEventQueue");
+					await terminal.waitForRender();
+					const rebuilt = (Reflect.get(mode, "chatContainer") as Container).render(100).join("\n");
+					for (const index of [0, 200, 404]) expect(rebuilt).toContain(`saved-marker-${index}-end`);
+					expect(rebuilt.indexOf("saved-marker-404-end")).toBeLessThan(rebuilt.indexOf("live summary"));
+					expect(
+						terminal
+							.getScrollBuffer()
+							.join("\n")
+							.match(/saved-marker-0-end/g),
+					).toHaveLength(1);
+					expect((await connection.getSessionContext()).messages).not.toContainEqual(
+						userMessage("saved-marker-0-end", 1),
+					);
+				}
+				if (!compacted) {
+					await Reflect.get(mode, "renderResyncedSession").call(mode, await connection.getInitialSnapshot());
+					await terminal.waitForRender();
+					expect(
+						terminal
+							.getScrollBuffer()
+							.join("\n")
+							.match(/saved-marker-0-end/g),
+					).toHaveLength(2);
+					const first = reopened.getBranch()[0];
+					if (first?.type !== "message" || first.message.role !== "assistant")
+						throw new Error("missing saved assistant");
+					first.message.content = [{ type: "text", text: "old offscreen output changed" }];
+					for (let index = 0; index < 40; index++)
+						reopened.appendMessage(userMessage(`missed-marker-${index}-end`, 1000 + index));
+					session.messages = reopened.buildSessionContext().messages;
+					session.state.messages = session.messages;
+					await Reflect.get(mode, "renderResyncedSession").call(mode, await connection.getInitialSnapshot());
+					await terminal.waitForRender();
+					const restored = terminal.getScrollBuffer().join("\n");
+					expect(restored).toContain("old offscreen output changed");
+					for (const index of [0, 20, 39]) expect(restored).toContain(`missed-marker-${index}-end`);
+					expect(restored.match(/saved-marker-0-end/g)).toHaveLength(3);
+				}
+				const unavailable = vi
+					.spyOn(connection, "getSessionTranscript")
+					.mockRejectedValueOnce(new Error("history unavailable"));
+				await expect(mode.renderInitialMessages()).resolves.toBeUndefined();
+				expect((Reflect.get(mode, "chatContainer") as Container).render(100).join("\n")).toContain(
+					"saved-marker-0-end",
+				);
+				unavailable.mockRestore();
+			} finally {
+				if (mode) mode.stop();
+				else ui.stop();
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+});
 
 describe("InteractiveMode session switch command catalog", () => {
 	test.each(["switchSession", "newSession", "fork"] as const)(

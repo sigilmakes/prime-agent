@@ -1,0 +1,2 @@
+- Fixed session resume, reconnect, and compaction replay to retain the full saved conversation without expanding model context.
+- Changed reconnect recovery to replay the saved conversation into native terminal scrollback; a reconnect can print a restored copy of prior output.

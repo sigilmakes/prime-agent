@@ -357,6 +357,7 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private preserveViewportOnNextRender = false; // One-shot: repaint visible viewport in place instead of replaying scrollback
+	private replayTranscriptOnNextRender = false;
 	private stopped = false;
 	private fullscreenLeftMouseDragged = false;
 	private fullscreenPressedHyperlink: string | null = null;
@@ -659,6 +660,16 @@ export class TUI extends Container {
 			this.terminal.showCursor();
 		}
 		this.terminal.stop({ preserveAltScreen });
+	}
+
+	/**
+	 * Replay all current transcript lines once after an authoritative load or session
+	 * replacement. Existing native scrollback is retained. Fullscreen only repaints
+	 * its owned viewport; ordinary renders after this request do not replay history.
+	 */
+	replayTranscript(): void {
+		this.replayTranscriptOnNextRender = true;
+		this.requestRender(true);
 	}
 
 	requestRender(force = false): void {
@@ -1658,6 +1669,8 @@ export class TUI extends Container {
 
 	private doRender(): void {
 		if (this.stopped) return;
+		const replayTranscript = this.replayTranscriptOnNextRender;
+		this.replayTranscriptOnNextRender = false;
 		if (this.fullscreen) {
 			this.preserveViewportOnNextRender = false;
 			this.renderFullscreen();
@@ -1761,7 +1774,8 @@ export class TUI extends Container {
 				return;
 			}
 
-			const renderStart = clear && this.previousLines.length > 0 ? Math.max(0, newLines.length - height) : 0;
+			const renderStart =
+				clear && this.previousLines.length > 0 && !replayTranscript ? Math.max(0, newLines.length - height) : 0;
 			if (clear) {
 				const previousVisibleTop = Math.min(prevViewportTop, Math.max(0, this.previousLines.length - height));
 				const previousVisibleBottom = Math.min(this.previousLines.length - 1, previousVisibleTop + height - 1);
@@ -1798,6 +1812,12 @@ export class TUI extends Container {
 			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
 			fs.appendFileSync(logPath, msg);
 		};
+
+		if (replayTranscript) {
+			logRedraw("transcript replay");
+			fullRender(true);
+			return;
+		}
 
 		// First render - just output everything without clearing (assumes clean screen)
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
