@@ -356,12 +356,10 @@ export function resolveModelScopeFromModels(patterns: string[], availableModels:
 }
 
 export async function resolveModelScope(patterns: string[], modelRegistry: ModelRegistry): Promise<ScopedModel[]> {
-	await modelRegistry.refreshAvailableModels();
-	// refreshAvailableModels() schedules provider catalog refreshes but returns the
-	// pre-refresh list. A cold registry (fresh daemon, new session worker) would
-	// otherwise resolve patterns against the pinned fallback catalog and drop
-	// dated ollama-cloud tags that only exist in the live catalog. Wait the same
-	// bounded time session-model restore uses, then resolve against the settled list.
+	// Await provider discovery through cache publication, including persistence-lock
+	// waits. A separate caller timeout can expire after a successful fetch but
+	// before its tagged models enter the registry.
+	await modelRegistry.refreshModelCatalog();
 	await modelRegistry.waitForPendingModelRefreshes(SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS);
 	const availableModels = modelRegistry.getAvailable();
 	return resolveModelScopeFromModels(patterns, availableModels);

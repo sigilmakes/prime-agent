@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Api, getModels, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
@@ -138,13 +138,11 @@ describe("resolveModelScopeFromModels", () => {
 			const auth = AuthStorage.inMemory({ "ollama-cloud": { type: "api_key", key: "faux-ollama-key" } });
 			const cold = ModelRegistry.create(auth, join(tempDir, "models.json"));
 			registries.push(cold);
-			const refresh = vi.spyOn(cold, "refreshAvailableModels");
 			expect(cold.find("ollama-cloud", id)).toBeUndefined();
 			const savedPatterns = SettingsManager.create(tempDir, tempDir).getEnabledModels();
 			expect(savedPatterns).toEqual([reference]);
 			const resolving = resolveModelScope(savedPatterns!, cold);
 			await listingReady;
-			await refresh.mock.results[0].value;
 			expect(cold.find("ollama-cloud", id)).toBeUndefined();
 			expect(warn).not.toHaveBeenCalled();
 			releaseListing();
@@ -159,6 +157,73 @@ describe("resolveModelScopeFromModels", () => {
 			await Promise.all(registries.map((registry) => registry.waitForPendingModelRefreshes(5_000)));
 			warn.mockRestore();
 			vi.restoreAllMocks();
+			vi.clearAllTimers();
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+			vi.unstubAllEnvs();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps a tagged scope when catalog publication waits for a sibling cache lock", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-model-scope-lock-"));
+		const id = "deepseek-v4.1-flash:1017";
+		const reference = `ollama-cloud/${id}`;
+		const lock = join(tempDir, "models", "ollama-cloud-models.v1.json.lock");
+		mkdirSync(join(tempDir, "models"));
+		writeFileSync(lock, "sibling cache writer", { mode: 0o600 });
+		let lockHeld = true;
+		let releaseDetails!: () => void;
+		const detailsGate = new Promise<void>((resolve) => {
+			releaseDetails = resolve;
+		});
+		let detailsStarted!: () => void;
+		const detailsReady = new Promise<void>((resolve) => {
+			detailsStarted = resolve;
+		});
+		vi.useFakeTimers();
+		vi.stubEnv("PRIME_AGENT_CODING_AGENT_DIR", tempDir);
+		vi.stubEnv("PI_OFFLINE", "0");
+		vi.stubEnv("OLLAMA_API_BASE", "https://ollama.example.test");
+		vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+			if (String(input) === "https://ollama.example.test/v1/models") {
+				return Response.json({ data: [{ id }] });
+			}
+			if (String(input) === "https://ollama.example.test/api/show") {
+				detailsStarted();
+				await detailsGate;
+				return Response.json({ capabilities: ["tools", "thinking"], model_info: {} });
+			}
+			return new Response("not found", { status: 404 });
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const auth = AuthStorage.inMemory({ "ollama-cloud": { type: "api_key", key: "faux-ollama-key" } });
+		const registry = ModelRegistry.create(auth, join(tempDir, "models.json"));
+		try {
+			let resolved = false;
+			const resolving = resolveModelScope([reference], registry).then((scope) => {
+				resolved = true;
+				return scope;
+			});
+			await detailsReady;
+			await vi.advanceTimersByTimeAsync(4_900);
+			releaseDetails();
+			// Discovery succeeds within its 5s network deadline, but publication
+			// still needs the sibling's lock after the old caller cutoff expires.
+			await vi.advanceTimersByTimeAsync(100);
+			expect(resolved).toBe(false);
+			expect(warn).not.toHaveBeenCalled();
+			unlinkSync(lock);
+			lockHeld = false;
+			await vi.advanceTimersByTimeAsync(20);
+			expect((await resolving).map((scoped) => `${scoped.model.provider}/${scoped.model.id}`)).toEqual([reference]);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			releaseDetails();
+			if (lockHeld) unlinkSync(lock);
+			await vi.advanceTimersByTimeAsync(20);
+			await registry.waitForPendingModelRefreshes(5_000);
+			warn.mockRestore();
 			vi.clearAllTimers();
 			vi.useRealTimers();
 			vi.unstubAllGlobals();
