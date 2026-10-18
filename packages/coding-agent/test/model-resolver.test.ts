@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type Api, getModels, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, test, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import { getBundledModels } from "../src/core/bundled-model-catalog.js";
-import type { ModelRegistry } from "../src/core/model-registry.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import {
 	defaultModelPerProvider,
 	findInitialModel,
@@ -10,6 +14,7 @@ import {
 	resolveModelScopeFromModels,
 } from "../src/core/model-resolver.js";
 import { getPrivatePrimeInferenceModels } from "../src/core/prime-inference-models.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 
 /** Any catalog model, matching what ModelRegistry.getAll() returns. */
 type AnyModel = Model<Api>;
@@ -97,22 +102,69 @@ describe("resolveModelScopeFromModels", () => {
 		}
 	});
 
-	test("resolveModelScope waits for pending catalog refreshes before resolving", async () => {
-		const flashTagged = model({ id: "deepseek-v4.1-flash:1017", provider: "ollama-cloud" });
-		let warmed = false;
-		const registry = {
-			refreshAvailableModels: async () => (warmed ? [flashTagged] : []),
-			waitForPendingModelRefreshes: async (timeoutMs: number) => {
-				expect(timeoutMs).toBeGreaterThan(0);
-				warmed = true;
-			},
-			getAvailable: () => (warmed ? [flashTagged] : []),
-		} as unknown as ModelRegistry;
-		// A cold registry reports no models until the scheduled refresh settles.
-		// The scope must be resolved AFTER the wait so dated tags are not dropped.
-		const scoped = await resolveModelScope(["ollama-cloud/deepseek-v4.1-flash:1017"], registry);
-		expect(scoped.map((s) => `${s.model.provider}/${s.model.id}`)).toEqual(["ollama-cloud/deepseek-v4.1-flash:1017"]);
-		expect(warmed).toBe(true);
+	test("restores a saved dated Ollama scope with a cold registry and a fresh registry", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-model-scope-"));
+		const id = "deepseek-v4.1-flash:1017";
+		const reference = `ollama-cloud/${id}`;
+		let releaseListing!: () => void;
+		const listingGate = new Promise<void>((resolve) => {
+			releaseListing = resolve;
+		});
+		let listingStarted!: () => void;
+		const listingReady = new Promise<void>((resolve) => {
+			listingStarted = resolve;
+		});
+		vi.useFakeTimers();
+		vi.stubEnv("PRIME_AGENT_CODING_AGENT_DIR", tempDir);
+		vi.stubEnv("PI_OFFLINE", "0");
+		vi.stubEnv("OLLAMA_API_BASE", "https://ollama.example.test");
+		vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+			if (String(input) === "https://ollama.example.test/v1/models") {
+				listingStarted();
+				await listingGate;
+				return Response.json({ data: [{ id }] });
+			}
+			if (String(input) === "https://ollama.example.test/api/show") {
+				return Response.json({ capabilities: ["tools", "thinking"], model_info: {} });
+			}
+			return new Response("not found", { status: 404 });
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const registries: ModelRegistry[] = [];
+		try {
+			const settings = SettingsManager.create(tempDir, tempDir);
+			settings.setEnabledModels([reference]);
+			await settings.flush();
+			const auth = AuthStorage.inMemory({ "ollama-cloud": { type: "api_key", key: "faux-ollama-key" } });
+			const cold = ModelRegistry.create(auth, join(tempDir, "models.json"));
+			registries.push(cold);
+			const refresh = vi.spyOn(cold, "refreshAvailableModels");
+			expect(cold.find("ollama-cloud", id)).toBeUndefined();
+			const savedPatterns = SettingsManager.create(tempDir, tempDir).getEnabledModels();
+			expect(savedPatterns).toEqual([reference]);
+			const resolving = resolveModelScope(savedPatterns!, cold);
+			await listingReady;
+			await refresh.mock.results[0].value;
+			expect(cold.find("ollama-cloud", id)).toBeUndefined();
+			expect(warn).not.toHaveBeenCalled();
+			releaseListing();
+			expect((await resolving).map((scoped) => `${scoped.model.provider}/${scoped.model.id}`)).toEqual([reference]);
+			const fresh = ModelRegistry.create(auth, join(tempDir, "models.json"));
+			registries.push(fresh);
+			const restored = await resolveModelScope(SettingsManager.create(tempDir, tempDir).getEnabledModels()!, fresh);
+			expect(restored.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`)).toEqual([reference]);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			releaseListing();
+			await Promise.all(registries.map((registry) => registry.waitForPendingModelRefreshes(5_000)));
+			warn.mockRestore();
+			vi.restoreAllMocks();
+			vi.clearAllTimers();
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+			vi.unstubAllEnvs();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	test("prefers the exact dated tag over the base id when the catalog has both", () => {

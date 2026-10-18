@@ -1,0 +1,1 @@
+- Fixed saved scoped models with provider tags being replaced by base models or omitted when a new session starts before catalog discovery completes.
