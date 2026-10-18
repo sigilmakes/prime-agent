@@ -7,7 +7,9 @@ Prime Agent uses JSON settings files with project settings overriding global set
 | `~/.prime/agent/settings.json` | Global (all projects) |
 | `.prime/agent/settings.json` | Project (current directory) |
 
-Edit directly or use `/settings` for common options.
+Edit directly or use `/settings` for common options. Choices save immediately; Escape closes the menu without undoing them.
+
+If the project and global paths resolve to the same file (including through symlinks), Prime treats that file as global settings only. Project-scoped writes then update that same global file without creating a second override.
 
 ## All Settings
 
@@ -80,7 +82,7 @@ Conversation output starts at the `chatDetail` level (default `details`). Ctrl+O
 |---------|------|---------|-------------|
 | `theme` | string | detected | Theme name (built-ins: `"prime"`, `"dark"`, `"light"`; or custom). Unset uses `"prime"` on dark terminals and `"light"` on light terminals |
 | `quietStartup` | boolean | `false` | Hide startup header |
-| `treeFilterMode` | string | `"user-only"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
+| `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
 | `chatDetail` | string | `"details"` | Conversation detail level: `"overview"`, `"details"`, or `"all"`. Ctrl+O updates it |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |

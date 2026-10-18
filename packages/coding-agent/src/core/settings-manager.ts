@@ -1,10 +1,10 @@
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { dirname, join } from "path";
+import { basename, dirname, join, resolve } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
-import { writeFileAtomicSync } from "../utils/atomic-file.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import { MAX_PROVIDER_PAUSE_MS, type ProviderWaitPolicy } from "./provider-retry.js";
 
 const RECENT_MODELS_LIMIT = 20;
@@ -252,7 +252,7 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
-	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default: "user-only"
+	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default: "default"
 	chatDetail?: ChatDetail; // Default: "details"
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
@@ -296,6 +296,8 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 export type SettingsScope = "global" | "project";
 
 export interface SettingsStorage {
+	/** Physical scope for project settings; omitted means a distinct project scope. */
+	readonly projectScope?: SettingsScope;
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
 }
 
@@ -304,13 +306,29 @@ export interface SettingsError {
 	error: Error;
 }
 
+function canonicalSettingsPath(path: string): string {
+	const resolved = resolve(path);
+	let target: string;
+	try {
+		target = realpathIfPresentSync(resolved);
+	} catch {
+		// Leave inaccessible or invalid paths to the normal storage load/save error handling.
+		return resolved;
+	}
+	if (existsSync(target)) return target;
+	const parent = dirname(target);
+	return parent === target ? target : join(canonicalSettingsPath(parent), basename(target));
+}
+
 export class FileSettingsStorage implements SettingsStorage {
+	readonly projectScope: SettingsScope;
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
 
 	constructor(cwd: string, agentDir: string) {
-		this.globalSettingsPath = join(agentDir, "settings.json");
-		this.projectSettingsPath = join(cwd, CONFIG_DIR_NAME, "settings.json");
+		this.globalSettingsPath = canonicalSettingsPath(join(agentDir, "settings.json"));
+		this.projectSettingsPath = canonicalSettingsPath(join(cwd, CONFIG_DIR_NAME, "settings.json"));
+		this.projectScope = this.globalSettingsPath === this.projectSettingsPath ? "global" : "project";
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -473,6 +491,8 @@ export class SettingsManager {
 	}
 
 	private static loadFromStorage(storage: SettingsStorage, scope: SettingsScope): Settings {
+		// A shared file has one authority, not a stale project overlay of itself.
+		if (scope === "project" && storage.projectScope === "global") return {};
 		let content: string | undefined;
 		storage.withLock(scope, (current) => {
 			content = current;
@@ -712,6 +732,25 @@ export class SettingsManager {
 	}
 
 	private saveProjectSettings(settings: Settings): void {
+		if (this.storage.projectScope === "global") {
+			for (const field of this.modifiedProjectFields) {
+				const nestedKeys = this.modifiedProjectNestedFields.get(field);
+				if (nestedKeys) {
+					const merged = { ...(this.globalSettings[field] as Record<string, unknown>) };
+					for (const key of nestedKeys) {
+						merged[key] = (settings[field] as Record<string, unknown>)[key];
+						this.markModified(field, key);
+					}
+					(this.globalSettings as Record<string, unknown>)[field] = merged;
+				} else {
+					(this.globalSettings as Record<string, unknown>)[field] = structuredClone(settings[field]);
+					this.markModified(field);
+				}
+			}
+			this.clearModifiedScope("project");
+			this.save();
+			return;
+		}
 		this.projectSettings = structuredClone(settings);
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
@@ -1372,7 +1411,7 @@ export class SettingsManager {
 	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all" {
 		const mode = this.settings.treeFilterMode;
 		const valid = ["default", "no-tools", "user-only", "labeled-only", "all"];
-		return mode && valid.includes(mode) ? mode : "user-only";
+		return mode && valid.includes(mode) ? mode : "default";
 	}
 
 	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void {

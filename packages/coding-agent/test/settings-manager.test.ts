@@ -1,18 +1,22 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { homedir } from "os";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
 describe("SettingsManager", () => {
-	const testDir = join(process.cwd(), "test-settings-tmp");
-	const agentDir = join(testDir, "agent");
-	const projectDir = join(testDir, "project");
-	const globalPath = join(agentDir, "settings.json");
-	const projectPath = join(projectDir, ".prime", "agent", "settings.json");
+	let testDir: string;
+	let agentDir: string;
+	let projectDir: string;
+	let globalPath: string;
+	let projectPath: string;
 
 	beforeEach(() => {
-		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+		testDir = mkdtempSync(join(tmpdir(), "prime-settings-"));
+		agentDir = join(testDir, "agent");
+		projectDir = join(testDir, "project");
+		globalPath = join(agentDir, "settings.json");
+		projectPath = join(projectDir, ".prime", "agent", "settings.json");
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
 	});
@@ -67,15 +71,11 @@ describe("SettingsManager", () => {
 		});
 
 		// An unparsable file must never be clobbered: the user's settings would be lost.
-		it.each<[string, string, (manager: SettingsManager) => void, string]>([
-			["global", globalPath, (manager) => manager.setRlmMaxDepth(3), "Global settings not saved"],
-			[
-				"project",
-				projectPath,
-				(manager) => manager.setProjectPackages(["npm:test-pkg"]),
-				"Project settings not saved",
-			],
-		])("keeps invalid %s settings on disk and reports the failed save", async (scope, path, mutate, message) => {
+		it.each<[string, (manager: SettingsManager) => void, string]>([
+			["global", (manager) => manager.setRlmMaxDepth(3), "Global settings not saved"],
+			["project", (manager) => manager.setProjectPackages(["npm:test-pkg"]), "Project settings not saved"],
+		])("keeps invalid %s settings on disk and reports the failed save", async (scope, mutate, message) => {
+			const path = scope === "global" ? globalPath : projectPath;
 			const invalid = `{ invalid ${scope} json`;
 			writeFileSync(path, invalid);
 
@@ -125,6 +125,132 @@ describe("SettingsManager", () => {
 
 			expect(existsSync(projectPath)).toBe(true);
 		});
+	});
+
+	describe("shared settings scope", () => {
+		it("#18 applies HOME settings changes immediately and after reload", async () => {
+			const sharedDir = join(projectDir, ".prime", "agent");
+			writeSettings(projectPath, {
+				treeFilterMode: "user-only",
+				quietStartup: false,
+				terminal: { showImages: true },
+			});
+			const manager = SettingsManager.create(projectDir, sharedDir);
+
+			manager.setTreeFilterMode("default");
+			manager.setQuietStartup(true);
+			manager.setShowImages(false);
+			expect(manager.getTreeFilterMode()).toBe("default");
+			expect(manager.getQuietStartup()).toBe(true);
+			expect(manager.getShowImages()).toBe(false);
+			expect(manager.getProjectSettings()).toEqual({});
+			await manager.flush();
+			expect(readSettings(projectPath)).toEqual({
+				treeFilterMode: "default",
+				quietStartup: true,
+				terminal: { showImages: false },
+			});
+
+			await manager.reload();
+			manager.setQuietStartup(false);
+			expect(manager.getQuietStartup()).toBe(false);
+			await manager.flush();
+			const reopened = SettingsManager.create(projectDir, sharedDir);
+			expect(reopened.getTreeFilterMode()).toBe("default");
+			expect(reopened.getQuietStartup()).toBe(false);
+			expect(reopened.getShowImages()).toBe(false);
+			expect(reopened.getProjectSettings()).toEqual({});
+			expect(manager.drainErrors()).toEqual([]);
+		});
+
+		it.each(["existing directory", "missing file", "missing parents", "file symlink", "dangling file symlink"])(
+			"#18 keeps %s aliases in one scope across saves and reopening",
+			async (kind) => {
+				const sharedDir = join(projectDir, ".prime", "agent");
+				const aliasDir = join(testDir, "alias");
+				if (kind === "file symlink" || kind === "dangling file symlink") {
+					mkdirSync(aliasDir);
+					symlinkSync(projectPath, join(aliasDir, "settings.json"));
+				} else {
+					symlinkSync(projectDir, aliasDir, "dir");
+				}
+				if (kind === "missing parents") rmSync(sharedDir, { recursive: true });
+				if (kind === "existing directory" || kind === "file symlink") {
+					writeSettings(projectPath, { quietStartup: false });
+				}
+				const aliasedAgentDir = kind.includes("file symlink") ? aliasDir : join(aliasDir, ".prime", "agent");
+				const manager = SettingsManager.create(projectDir, aliasedAgentDir);
+				manager.setQuietStartup(true);
+				expect(manager.getQuietStartup()).toBe(true);
+				expect(manager.getProjectSettings()).toEqual({});
+				await manager.flush();
+				expect(readSettings(projectPath).quietStartup).toBe(true);
+				expect(SettingsManager.create(projectDir, aliasedAgentDir).getProjectSettings()).toEqual({});
+				if (kind.includes("file symlink")) {
+					expect(lstatSync(join(aliasDir, "settings.json")).isSymbolicLink()).toBe(true);
+				}
+				expect(manager.drainErrors()).toEqual([]);
+			},
+		);
+
+		it.each([
+			["packages", "setProjectPackages", "setPackages", "getPackages"],
+			["extensions", "setProjectExtensionPaths", "setExtensionPaths", "getExtensionPaths"],
+			["skills", "setProjectSkillPaths", "setSkillPaths", "getSkillPaths"],
+			["prompts", "setProjectPromptTemplatePaths", "setPromptTemplatePaths", "getPromptTemplatePaths"],
+			["themes", "setProjectThemePaths", "setThemePaths", "getThemePaths"],
+		] as const)(
+			"#18 routes shared project %s writes to the global scope",
+			async (field, setProject, setGlobal, get) => {
+				const sharedDir = join(projectDir, ".prime", "agent");
+				writeSettings(projectPath, { quietStartup: true });
+				const manager = SettingsManager.create(projectDir, sharedDir);
+				writeSettings(projectPath, { quietStartup: true, untouched: "external" });
+				manager[setProject](["project-value"]);
+				expect(manager[get]()).toEqual(["project-value"]);
+				expect(manager.getGlobalSettings()[field]).toEqual(["project-value"]);
+				expect(manager.getProjectSettings()).toEqual({});
+				await manager.flush();
+				expect(readSettings(projectPath)).toEqual({
+					quietStartup: true,
+					untouched: "external",
+					[field]: ["project-value"],
+				});
+				manager[setGlobal](["global-value"]);
+				expect(manager[get]()).toEqual(["global-value"]);
+				await manager.reload();
+				expect(manager[get]()).toEqual(["global-value"]);
+				expect(SettingsManager.create(projectDir, sharedDir)[get]()).toEqual(["global-value"]);
+				expect(manager.getProjectSettings()).toEqual({});
+				expect(manager.drainErrors()).toEqual([]);
+			},
+		);
+
+		it("#18 reports a shared parse error once and never clobbers invalid settings", async () => {
+			writeFileSync(projectPath, "{ invalid shared json");
+			const manager = SettingsManager.create(projectDir, join(projectDir, ".prime", "agent"));
+			expect(manager.drainErrors().map((entry) => entry.scope)).toEqual(["global"]);
+			manager.setQuietStartup(true);
+			manager.setProjectPackages(["npm:test-pkg"]);
+			await manager.flush();
+			expect(manager.drainErrors().map((entry) => entry.scope)).toEqual(["global", "global"]);
+			expect(readFileSync(projectPath, "utf8")).toBe("{ invalid shared json");
+		});
+	});
+
+	describe("tree filter preference", () => {
+		it.each([undefined, null, "invalid"])("#18 defaults an unset or invalid tree filter (%s) to default", (value) => {
+			writeSettings(globalPath, { treeFilterMode: value });
+			expect(SettingsManager.create(projectDir, agentDir).getTreeFilterMode()).toBe("default");
+		});
+
+		it.each(["default", "no-tools", "user-only", "labeled-only", "all"])(
+			"#18 preserves an explicit %s tree filter",
+			(value) => {
+				writeSettings(globalPath, { treeFilterMode: value });
+				expect(SettingsManager.create(projectDir, agentDir).getTreeFilterMode()).toBe(value);
+			},
+		);
 	});
 
 	describe("project vs global precedence", () => {

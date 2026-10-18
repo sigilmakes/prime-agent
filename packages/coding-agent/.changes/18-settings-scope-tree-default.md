@@ -1,0 +1,2 @@
+- Fixed settings changes being masked by stale project overrides when global and project paths resolve to the same file, including symlink aliases.
+- Restored the `/tree` default filter to `default`, showing assistant replies while preserving explicit filter preferences.
