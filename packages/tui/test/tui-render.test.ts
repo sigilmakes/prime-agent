@@ -408,7 +408,7 @@ describe("TUI transcript replay", () => {
 		});
 	});
 
-	it("preserves pre-existing native scrollback when replay replaces the current session", async () => {
+	it("#19 preserves pre-existing native scrollback when replay replaces the current session", async () => {
 		const previous = numbered(30, "Previous session");
 		await withHarness([...previous], async ({ terminal, update }) => {
 			const restored = numbered(30, "Replacement sentinel");
@@ -418,7 +418,7 @@ describe("TUI transcript replay", () => {
 		});
 	});
 
-	it("coalesces replay requests and keeps later redraws, resizes and streaming updates incremental", async () => {
+	it("#19 coalesces replay requests and keeps later redraws, resizes and streaming updates incremental", async () => {
 		await withHarness(["Loading session"], async ({ terminal, tui, component, update, resize }) => {
 			const restored = numbered(30, "Restored sentinel");
 			component.lines = [...restored];
@@ -442,7 +442,7 @@ describe("TUI transcript replay", () => {
 		});
 	});
 
-	it("consumes replay in fullscreen without native history output or a replay after exit", async () => {
+	it("#19 consumes replay in fullscreen without native history output or a replay after exit", async () => {
 		await withHarness(["Loading session"], async ({ terminal, tui, component, update }) => {
 			const dock = new TestComponent();
 			dock.lines = ["Editor dock"];

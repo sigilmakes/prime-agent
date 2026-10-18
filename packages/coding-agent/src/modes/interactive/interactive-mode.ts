@@ -4957,8 +4957,7 @@ export class InteractiveMode {
 
 	private async renderTreeNavigation(result: { editorText?: string }): Promise<void> {
 		this.clearSideQuestion({ abort: true });
-		this.chatContainer.clear();
-		await this.renderInitialMessages();
+		await this.renderInitialMessages({ forceReplay: true });
 		if (result.editorText && !this.editor.getText().trim()) {
 			this.editor.setText(result.editorText);
 		}
@@ -7152,7 +7151,7 @@ export class InteractiveMode {
 		else this.ui.requestRender();
 	}
 
-	async renderInitialMessages(): Promise<void> {
+	async renderInitialMessages(options: { forceReplay?: boolean } = {}): Promise<void> {
 		// Serialize with any in-flight initial render: resync/replacement handlers
 		// re-enter this method, and two concurrent transcript builds race the
 		// chat container.
@@ -7169,10 +7168,15 @@ export class InteractiveMode {
 			} catch (error) {
 				if (generation !== this.sessionEventGeneration) return;
 				historyWarning = `Full session history unavailable: ${error instanceof Error ? error.message : String(error)}`;
-				if (this.replayedSessionId === snapshot.state.sessionId) {
+				if (
+					!options.forceReplay &&
+					this.replayedSessionId === snapshot.state.sessionId &&
+					this.chatContainer.children.length > 0
+				) {
 					this.showWarning(historyWarning);
 					return;
 				}
+				this.replayedSessionId = undefined;
 				historyWarning += ". Showing current model context only; /reload retries full history.";
 			}
 			if (generation !== this.sessionEventGeneration) return;
@@ -7188,6 +7192,7 @@ export class InteractiveMode {
 				populateHistory: true,
 				chronological: historyWarning === undefined,
 				replaySessionId: historyWarning === undefined ? state.sessionId : undefined,
+				forceReplay: options.forceReplay,
 				stillCurrent: () => generation === this.sessionEventGeneration,
 			});
 			if (generation !== this.sessionEventGeneration) return;

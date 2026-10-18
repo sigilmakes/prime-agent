@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import { Container, Text, TUI } from "@earendil-works/pi-tui";
+import { Container, Editor, Text, TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
@@ -22,10 +22,11 @@ import type {
 	AgentConnectionSnapshot,
 	AgentConnectionState,
 } from "../src/modes/agent-connection/types.js";
+import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { getEditorTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 import { createDeferred } from "./suite/scheduling.js";
 
 function renderAll(container: Container, width = 120): string {
@@ -65,12 +66,12 @@ type RenderSessionContextHarness = {
 	lateIpythonSentAgentMessages: Map<string, unknown[]>;
 	toolOutputExpanded: boolean;
 	chatContainer: Container;
-	editor: { addToHistory?: (text: string) => void };
+	editor: Editor;
 	footer: { invalidate: () => void };
 	updateEditorBorderColor: () => void;
 	resetPendingToolState: () => void;
 	preloadToolDefinitions: (toolNames: string[]) => Promise<void>;
-	settingsManager: { getShowImages: () => boolean };
+	settingsManager: { getShowImages: () => boolean; getCodeBlockIndent: () => string };
 	getCachedToolDefinition: () => undefined;
 	getCurrentCwd: () => string;
 	getRetryAttempt: () => number;
@@ -103,36 +104,31 @@ const renderSessionContext = (
 function createRenderSessionContextHarness(overrides: Partial<RenderSessionContextHarness> = {}): {
 	harness: RenderSessionContextHarness;
 	chatContainer: Container;
-	addMessageToChat: ReturnType<typeof vi.fn>;
-	addToHistory: ReturnType<typeof vi.fn>;
+	editor: Editor;
 } {
 	const chatContainer = overrides.chatContainer ?? new Container();
-	const addMessageToChat = vi.fn(() => {
-		chatContainer.addChild({ render: () => ["assistant"], invalidate: () => {} });
-	});
-	const addToHistory = vi.fn();
-	const harness: RenderSessionContextHarness = {
+	const editor = new Editor(new TUI(new VirtualTerminal()), getEditorTheme());
+	const harness = {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
 		ipythonToolComponents: new Map<string, unknown>(),
 		lateIpythonSentAgentMessages: new Map<string, unknown[]>(),
 		toolOutputExpanded: false,
 		chatContainer,
-		editor: { addToHistory },
+		editor,
 		footer: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		resetPendingToolState: vi.fn(),
-		preloadToolDefinitions: vi.fn(async () => {}),
-		settingsManager: { getShowImages: () => true },
+		preloadToolDefinitions: async () => {},
+		settingsManager: { getShowImages: () => true, getCodeBlockIndent: () => "  " },
 		getCachedToolDefinition: () => undefined,
 		getCurrentCwd: () => process.cwd(),
 		getRetryAttempt: () => 0,
 		ui: { requestRender: vi.fn() },
-		addMessageToChat,
 		showWarning: vi.fn(),
 		...overrides,
-	};
+	} as RenderSessionContextHarness;
 	Object.setPrototypeOf(harness, InteractiveMode.prototype);
-	return { harness, chatContainer, addMessageToChat, addToHistory };
+	return { harness, chatContainer, editor };
 }
 
 function userMessage(content: string, timestamp: number): Extract<AgentMessage, { role: "user" }> {
@@ -157,14 +153,15 @@ describe("InteractiveMode.renderSessionContext", () => {
 	});
 
 	test("#19: renders every message in long initial transcripts", async () => {
-		const { harness, chatContainer, addMessageToChat } = createRenderSessionContextHarness();
+		const { harness, chatContainer } = createRenderSessionContextHarness();
 		const messages = Array.from({ length: 405 }, (_, index) => userMessage(`message ${index}`, index));
 
 		await renderMessages(harness, messages, { chronological: true });
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(405);
-		expect(addMessageToChat.mock.calls[0]?.[0]).toMatchObject({ content: "message 0" });
-		expect(renderAll(chatContainer)).not.toContain("for faster open");
+		const rendered = renderAll(chatContainer);
+		expect(rendered.match(/message \d+/g)).toHaveLength(405);
+		for (const index of [0, 200, 404]) expect(rendered).toContain(`message ${index}`);
+		expect(rendered).not.toContain("for faster open");
 	});
 
 	test("#19: keeps the current transcript when async preparation is superseded", async () => {
@@ -188,11 +185,11 @@ describe("InteractiveMode.renderSessionContext", () => {
 		prepared.resolve();
 		await rendering;
 		expect(renderAll(chatContainer)).toContain("current conversation");
-		expect(renderAll(chatContainer)).not.toContain("assistant");
+		expect(renderAll(chatContainer)).not.toContain("stale conversation");
 	});
 
-	test("keeps equal-timestamp legacy messages after the compaction summary", async () => {
-		const { harness, addMessageToChat } = createRenderSessionContextHarness();
+	test("#19: keeps equal-timestamp legacy messages after the compaction summary", async () => {
+		const { harness, chatContainer } = createRenderSessionContextHarness();
 		const earlier = userMessage("earlier", 4);
 		const summary = {
 			role: "compactionSummary",
@@ -203,11 +200,13 @@ describe("InteractiveMode.renderSessionContext", () => {
 		const equalLater = userMessage("equal later", 5);
 
 		await renderMessages(harness, [summary, earlier, equalLater]);
-		expect(addMessageToChat.mock.calls.map((call) => call[0])).toEqual([earlier, summary, equalLater]);
+		const rendered = renderAll(chatContainer);
+		expect(rendered.indexOf("earlier")).toBeLessThan(rendered.indexOf("legacy summary"));
+		expect(rendered.indexOf("legacy summary")).toBeLessThan(rendered.indexOf("equal later"));
 	});
 
-	test("orders a model-context compaction summary without dropping retained messages", async () => {
-		const { harness, addMessageToChat } = createRenderSessionContextHarness();
+	test("#19: orders a model-context compaction summary without dropping retained messages", async () => {
+		const { harness, chatContainer } = createRenderSessionContextHarness();
 		const retained = Array.from({ length: 5 }, (_, index) => userMessage(`retained ${index}`, 5));
 		const summary = {
 			role: "compactionSummary",
@@ -220,35 +219,36 @@ describe("InteractiveMode.renderSessionContext", () => {
 
 		await renderMessages(harness, [summary, ...retained, ...later]);
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(405);
-		expect(addMessageToChat.mock.calls[0]?.[0]).toBe(retained[0]);
-		expect(addMessageToChat.mock.calls[5]?.[0]).toBe(summary);
-		expect(addMessageToChat.mock.calls[6]?.[0]).toMatchObject({ content: "later 0" });
+		const rendered = renderAll(chatContainer);
+		expect(rendered.match(/retained \d+/g)).toHaveLength(5);
+		expect(rendered.match(/later \d+/g)).toHaveLength(399);
+		expect(rendered.indexOf("retained 4")).toBeLessThan(rendered.indexOf("summary"));
+		expect(rendered.indexOf("summary")).toBeLessThan(rendered.indexOf("later 0"));
 	});
 
-	test("preserves the full transcript when rebuilding a cleared transcript", async () => {
-		const { harness, chatContainer, addMessageToChat } = createRenderSessionContextHarness();
+	test("#19: preserves the full transcript when rebuilding a cleared transcript", async () => {
+		const { harness, chatContainer } = createRenderSessionContextHarness();
 		chatContainer.addChild({ render: () => ["old transcript"], invalidate: () => {} });
 		const messages = Array.from({ length: 405 }, (_, index) => userMessage(`message ${index}`, index));
 
 		await renderMessages(harness, messages, { clearChat: true });
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(405);
-		expect(addMessageToChat.mock.calls[0]?.[0]).toMatchObject({ content: "message 0" });
+		expect(renderAll(chatContainer).match(/message \d+/g)).toHaveLength(405);
+		expect(renderAll(chatContainer)).toContain("message 0");
 		expect(renderAll(chatContainer)).not.toContain("old transcript");
 		expect(renderAll(chatContainer)).not.toContain("for faster open");
 	});
 
-	test("populates editor history from the full rendered transcript", async () => {
-		const { harness, addMessageToChat, addToHistory } = createRenderSessionContextHarness();
+	test("#19: populates recent editor history without trimming the rendered transcript", async () => {
+		const { harness, chatContainer, editor } = createRenderSessionContextHarness();
 		const messages = Array.from({ length: 405 }, (_, index) => userMessage(`message ${index}`, index));
 
 		await renderMessages(harness, messages, { populateHistory: true, chronological: true });
 
-		expect(addMessageToChat).toHaveBeenCalledTimes(405);
-		expect(addToHistory).toHaveBeenCalledTimes(405);
-		expect(addToHistory.mock.calls[0]?.[0]).toBe("message 0");
-		expect(addToHistory.mock.calls.at(-1)?.[0]).toBe("message 404");
+		expect(renderAll(chatContainer).match(/message \d+/g)).toHaveLength(405);
+		expect(editor.getHistory()).toHaveLength(100);
+		expect(editor.getHistory()[0]).toBe("message 404");
+		expect(editor.getHistory().at(-1)).toBe("message 305");
 	});
 });
 
@@ -531,43 +531,12 @@ describe("InteractiveMode connection events", () => {
 		expect(fakeThis.sideQuestionEvent).toBe(sideQuestion);
 		expect(fakeThis.activeConnectionExtensionUiRequests).toBe(extensionRequests);
 		expect(fakeThis.activeBashComponent).toBe(activeBashComponent);
-		expect(fakeThis.renderSessionContext).toHaveBeenCalledWith(expect.anything(), {
-			clearChat: true,
-			updateFooter: true,
-			chronological: true,
-			replaySessionId: "session-1",
-			forceReplay: true,
-			stillCurrent: expect.any(Function),
-		});
 		expect(startAssistantStreamingMessage).toHaveBeenCalledWith(streamingMessage);
 		expect(fakeThis.turnStartedAt).toBe(100);
 		expect(fakeThis.workingStartedAt).toBe(100);
 		expect(fakeThis.updateWorkingLoaderMessage).toHaveBeenCalledOnce();
 		// A resync render must not re-refresh the catalog the resync handler already refreshed.
 		expect(fakeThis.refreshCommandCatalogForCurrentSession).not.toHaveBeenCalled();
-	});
-
-	test("#19: applies authoritative resync status when full-history loading fails", async () => {
-		const snapshot: AgentConnectionSnapshot = {
-			state: createConnectionState({ isStreaming: false, isBashRunning: false }),
-			messages: [],
-		};
-		const activeBashComponent = { setComplete: vi.fn() };
-		const fakeThis = createResyncHarness({
-			agentConnection: {
-				getSessionTranscript: async () => {
-					throw new Error("tree unavailable");
-				},
-			},
-			activeBashComponent,
-			isBashRunning: () => true,
-			showWarning: vi.fn(),
-		});
-		await expect(renderResyncedSession.call(fakeThis, snapshot)).resolves.toBeUndefined();
-		expect(fakeThis.applyConnectionStateSnapshot).toHaveBeenCalledWith(snapshot.state);
-		expect(fakeThis.renderSessionContext).not.toHaveBeenCalled();
-		expect(activeBashComponent.setComplete).toHaveBeenCalledWith(undefined, false);
-		expect(fakeThis.activeBashComponent).toBeUndefined();
 	});
 
 	test("finishes local bash UI when a resync proves the operation ended", async () => {
@@ -833,7 +802,7 @@ class EventEmittingReplacementRuntime {
 describe("InteractiveMode saved transcript replay", () => {
 	beforeAll(() => initTheme("dark"));
 
-	test.each(["plain", "compacted", "streaming"] as const)(
+	test.each(["plain", "compacted", "streaming", "branch", "branch-failure"] as const)(
 		"#19: reopens all saved messages in terminal scrollback (%s)",
 		async (variant) => {
 			const compacted = variant === "compacted";
@@ -959,6 +928,47 @@ describe("InteractiveMode saved transcript replay", () => {
 				for (const index of [0, 200, 404]) expect(history).toContain(`saved-marker-${index}-end`);
 				expect(history.match(/saved-marker-0-end/g)).toHaveLength(1);
 				if (variant === "streaming") return;
+				if (variant === "branch" || variant === "branch-failure") {
+					const sharedRoot = reopened.getBranch()[0];
+					if (!sharedRoot) throw new Error("missing branch root");
+					reopened.branch(sharedRoot.id);
+					let branchLeaf = sharedRoot.id;
+					for (let index = 0; index < 405; index++) {
+						branchLeaf = reopened.appendMessage(userMessage(`branch-marker-${index}-end`, 2000 + index));
+					}
+					if (variant === "branch-failure") reopened.appendCompaction("branch summary", branchLeaf, 10000);
+					session.messages = reopened.buildSessionContext().messages;
+					session.state.messages = session.messages;
+					const unavailable =
+						variant === "branch-failure"
+							? vi
+									.spyOn(connection, "getSessionTranscript")
+									.mockRejectedValueOnce(new Error("branch history unavailable"))
+							: undefined;
+					await Reflect.get(mode, "renderTreeNavigation").call(mode, {});
+					await terminal.waitForRender();
+					const displayed = (Reflect.get(mode, "chatContainer") as Container).render(100).join("\n");
+					expect(displayed).toContain("branch-marker-404-end");
+					expect(displayed).not.toContain("saved-marker-0-end");
+					if (unavailable) {
+						expect(displayed).toContain("Full session history unavailable");
+						unavailable.mockRestore();
+						await Reflect.get(mode, "rebuildChatFromMessages").call(mode);
+						await terminal.waitForRender();
+					}
+					const restored = terminal.getScrollBuffer().join("\n");
+					for (const index of [0, 200, 404]) expect(restored).toContain(`branch-marker-${index}-end`);
+					expect(restored.match(/branch-marker-0-end/g)).toHaveLength(1);
+					await mode.renderInitialMessages();
+					await terminal.waitForRender();
+					expect(
+						terminal
+							.getScrollBuffer()
+							.join("\n")
+							.match(/branch-marker-0-end/g),
+					).toHaveLength(1);
+					return;
+				}
 				if (compacted) {
 					expect(history.indexOf("saved-marker-404-end")).toBeLessThan(history.indexOf("saved summary"));
 					expect((await connection.getSessionContext()).messages).not.toContainEqual(
@@ -1022,6 +1032,25 @@ describe("InteractiveMode saved transcript replay", () => {
 					expect(restored).toContain("old offscreen output changed");
 					for (const index of [0, 20, 39]) expect(restored).toContain(`missed-marker-${index}-end`);
 					expect(restored.match(/saved-marker-0-end/g)).toHaveLength(3);
+				}
+				if (variant === "plain") {
+					const chat = Reflect.get(mode, "chatContainer") as Container;
+					const bash = new BashExecutionComponent("echo resync-status", ui);
+					chat.addChild(bash);
+					Reflect.set(mode, "activeBashComponent", bash);
+					Reflect.set(mode, "connectionState", { ...Reflect.get(mode, "connectionState"), isBashRunning: true });
+					expect(chat.render(100).join("\n")).toContain("Running...");
+					const failedHistory = vi
+						.spyOn(connection, "getSessionTranscript")
+						.mockRejectedValueOnce(new Error("tree unavailable"));
+					await Reflect.get(mode, "renderResyncedSession").call(mode, await connection.getInitialSnapshot());
+					await terminal.waitForRender();
+					const recovered = chat.render(100).join("\n");
+					expect(recovered).toContain("saved-marker-0-end");
+					expect(recovered).toContain("echo resync-status");
+					expect(recovered).toContain("Full session history unavailable");
+					expect(recovered).not.toContain("Running...");
+					failedHistory.mockRestore();
 				}
 				const unavailable = vi
 					.spyOn(connection, "getSessionTranscript")
