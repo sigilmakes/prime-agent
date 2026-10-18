@@ -267,6 +267,15 @@ function parseModelPattern(
 			// This avoids accidentally resolving to a different model.
 			return { model: undefined, thinkingLevel: undefined, warning: undefined };
 		}
+		// The suffix is not a thinking level, but the stripped prefix is itself an exact
+		// catalog id. Providers with colon-tagged ids (ollama-cloud snapshots like
+		// deepseek-v4.1-flash:1017, openrouter variants) make this ambiguity real: the
+		// tag may simply be missing from a stale catalog snapshot. Stripping it would
+		// silently resolve the pattern to a DIFFERENT model, so treat the suffix as part
+		// of the id and report no match instead.
+		if (findExactModelReferenceMatch(prefix, availableModels)) {
+			return { model: undefined, thinkingLevel: undefined, warning: undefined };
+		}
 		const result = parseModelPattern(prefix, availableModels, options);
 		if (result.model) {
 			return {

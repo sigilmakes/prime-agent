@@ -78,6 +78,36 @@ describe("resolveModelScopeFromModels", () => {
 			warn.mockRestore();
 		}
 	});
+
+	test("does not collapse a colon-tagged ollama-cloud id to its base when the tag is missing", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const flash = model({ id: "deepseek-v4.1-flash", provider: "ollama-cloud" });
+			// Stale catalog: the dated snapshot is gone but the base id is an exact
+			// match for the stripped prefix. The suffix must stay part of the id
+			// instead of silently resolving to the base model.
+			expect(resolveModelScopeFromModels(["ollama-cloud/deepseek-v4.1-flash:1017"], [flash])).toEqual([]);
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining('No models match pattern "ollama-cloud/deepseek-v4.1-flash:1017"'),
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("prefers the exact dated tag over the base id when the catalog has both", () => {
+		const flash = model({ id: "deepseek-v4.1-flash", provider: "ollama-cloud" });
+		const flashTagged = model({ id: "deepseek-v4.1-flash:1017", provider: "ollama-cloud" });
+		expect(
+			resolveModelScopeFromModels(
+				["ollama-cloud/deepseek-v4.1-flash:1017", "ollama-cloud/deepseek-v4.1-flash"],
+				[flash, flashTagged],
+			),
+		).toEqual([
+			{ model: flashTagged, thinkingLevel: undefined },
+			{ model: flash, thinkingLevel: undefined },
+		]);
+	});
 });
 
 describe("resolveCliModel", () => {
