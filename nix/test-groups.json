@@ -52,6 +52,7 @@
 		"runner": "vitest",
 		"files": [
 			"test/args.test.ts",
+			"test/model-resolver.test.ts",
 			"test/catalog-assets.test.ts"
 		]
 	}
