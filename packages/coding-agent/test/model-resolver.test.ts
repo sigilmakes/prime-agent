@@ -1,10 +1,12 @@
 import { type Api, getModels, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, test, vi } from "vitest";
 import { getBundledModels } from "../src/core/bundled-model-catalog.js";
+import type { ModelRegistry } from "../src/core/model-registry.js";
 import {
 	defaultModelPerProvider,
 	findInitialModel,
 	resolveCliModel,
+	resolveModelScope,
 	resolveModelScopeFromModels,
 } from "../src/core/model-resolver.js";
 import { getPrivatePrimeInferenceModels } from "../src/core/prime-inference-models.js";
@@ -93,6 +95,24 @@ describe("resolveModelScopeFromModels", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	test("resolveModelScope waits for pending catalog refreshes before resolving", async () => {
+		const flashTagged = model({ id: "deepseek-v4.1-flash:1017", provider: "ollama-cloud" });
+		let warmed = false;
+		const registry = {
+			refreshAvailableModels: async () => (warmed ? [flashTagged] : []),
+			waitForPendingModelRefreshes: async (timeoutMs: number) => {
+				expect(timeoutMs).toBeGreaterThan(0);
+				warmed = true;
+			},
+			getAvailable: () => (warmed ? [flashTagged] : []),
+		} as unknown as ModelRegistry;
+		// A cold registry reports no models until the scheduled refresh settles.
+		// The scope must be resolved AFTER the wait so dated tags are not dropped.
+		const scoped = await resolveModelScope(["ollama-cloud/deepseek-v4.1-flash:1017"], registry);
+		expect(scoped.map((s) => `${s.model.provider}/${s.model.id}`)).toEqual(["ollama-cloud/deepseek-v4.1-flash:1017"]);
+		expect(warmed).toBe(true);
 	});
 
 	test("prefers the exact dated tag over the base id when the catalog has both", () => {
