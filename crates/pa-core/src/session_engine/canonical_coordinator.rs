@@ -14,6 +14,12 @@ pub mod integration_test_support;
 
 use std::sync::Arc;
 
+mod epoch;
+pub use epoch::{
+    CanonicalAppendGrant, CanonicalClosing, CanonicalDrainView, CanonicalEpoch,
+    CanonicalRetiredEpoch,
+};
+
 use crate::session::canonical::{
     CanonicalAckPhase, CanonicalAcknowledgement, CanonicalAdmissionPolicy,
     CanonicalAdoptionCertificate, CanonicalAppendReceipt, CanonicalCallerGuard,

@@ -239,6 +239,17 @@ impl AuthorityOwner {
     pub(super) fn quarantine(&self) {
         self.shared.quarantine();
     }
+    /// Whether an uncertain write poisoned this epoch.
+    ///
+    /// Reads the poison flag ONLY. It deliberately does not look at the gate, at
+    /// outstanding work, or at contribution retirement: it answers nothing about
+    /// readiness, drain or permission to project. `ANDing` gate state into this
+    /// query is what turned projection reachability into a readiness oracle
+    /// before G2, and `poisoned_ignores_gate_state` exists to stop that.
+    pub(super) fn is_poisoned(&self) -> bool {
+        self.shared.lock().is_ok_and(|entry| entry.poisoned)
+    }
+
     /// Whether this epoch has not quarantined projection.
     ///
     /// NOT a readiness predicate and it must not gate Ready. It is module-private
