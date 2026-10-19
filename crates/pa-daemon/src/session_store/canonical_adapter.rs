@@ -207,6 +207,9 @@ pub(super) fn grant_for_row(
             .map(Some)
             .map_err(anyhow::Error::from);
     }
+    // LAST arm on purpose, and it must stay last: a row type nobody thought about
+    // is COUNTED here rather than silently admitted. A match that admits anything
+    // it does not recognise is how an undeclared path becomes a covered claim.
     Ok(None)
 }
 
