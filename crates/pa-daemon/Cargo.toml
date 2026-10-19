@@ -21,6 +21,11 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+# Cross-crate canonical writer joint: the daemon test builds a REAL write
+# ticket through Core's non-default integration-test-support feature, so the
+# shipped build never compiles that surface. Production code receives the
+# ticket as a parameter; only this test target can construct one.
+pa-core = { path = "../pa-core", version = "0.10.0", features = ["canonical-integration-test-support"] }
 filetime = "0.2"
 tempfile = "3"
 # The orphan-journal e2e signals and probes process groups directly.

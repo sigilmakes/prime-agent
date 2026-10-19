@@ -28,8 +28,12 @@ mod stream_tests;
 mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
+mod canonical_io;
+#[cfg(test)]
+mod canonical_io_seam_tests;
 pub(crate) mod canonical_raw;
 pub(crate) mod canonical_revision;
+mod canonical_write_seam;
 mod child_usage;
 #[cfg(test)]
 #[path = "session_store/child_usage_tests.rs"]
