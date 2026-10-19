@@ -73,6 +73,12 @@ pub struct CanonicalWriteRecorder {
 }
 
 impl CanonicalWriteRecorder {
+    /// Wrap an owned authority recorder. Core-internal: the only callers are the
+    /// epoch's own grant constructors, so a writer cannot mint a recorder.
+    pub(in crate::session_engine) fn from_io(inner: IoResultRecorder) -> Self {
+        Self { inner: Some(inner) }
+    }
+
     /// Record the writer's own observation.
     ///
     /// Synchronous: no I/O, no await, and no foreign lock is taken here. `Known`
@@ -130,6 +136,24 @@ impl CanonicalWriteTicket {
             permit: admitted.permit,
             control: admitted.control,
         }
+    }
+
+    /// Give up this ticket and keep only its permit.
+    ///
+    /// Dropping the permit releases the transaction lease exactly as dropping the
+    /// whole ticket does; the control half is only a weak view of that lease.
+    #[must_use]
+    pub fn into_permit(self) -> CanonicalWritePermit {
+        self.permit
+    }
+
+    /// Split the ticket into the permit (for a commit request) and its control
+    /// (for the writer's recorder). Core-internal: the writer never mints either.
+    #[must_use]
+    pub(in crate::session_engine) fn into_commit_parts(
+        self,
+    ) -> (CanonicalWritePermit, TransactionControl) {
+        (self.permit, self.control)
     }
 
     /// The single-use recorder for a stage this authority admitted.

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::session::canonical::{
     CanonicalCursor, CanonicalEntryDraft, CanonicalIoFlight, CanonicalIoStage, CanonicalOperation,
-    CanonicalStoreError,
+    CanonicalStoreError, CanonicalWritePermit,
 };
 use crate::session_engine::canonical_authority::{
     AuthorityOwner, CapturedRun, CloseReason, CloseTicket, DrainRefusal, DrainStatus, LateRunAnchor,
@@ -98,7 +98,7 @@ impl From<DrainRefusal> for CanonicalDrainView {
 /// so a cancelled or panicking writer can never look `Known`.
 #[must_use]
 pub struct CanonicalAppendGrant {
-    ticket: CanonicalWriteTicket,
+    permit: CanonicalWritePermit,
     flight: CanonicalIoFlight,
     recorder: CanonicalWriteRecorder,
 }
@@ -111,14 +111,76 @@ impl CanonicalAppendGrant {
     /// then released unclassified, which fails closed (the epoch will not drain).
     pub fn settle(self, certainty: CanonicalWriteCertainty) -> Result<(), CanonicalStoreError> {
         let CanonicalAppendGrant {
-            ticket,
+            permit,
             flight,
             recorder,
         } = self;
         recorder.record(certainty)?;
         drop(flight);
-        drop(ticket);
+        drop(permit);
         Ok(())
+    }
+}
+
+/// The two halves a coordinator-driven commit needs.
+///
+/// The store puts [`Self::into_request_parts`]' permit into
+/// `CanonicalCommitRequest`, so the flight the store admits inside `commit` is the
+/// caller's authority, not a second one. The recorder half stays with the store and
+/// claims the single-use classification for the stage that same permit admitted.
+pub struct CanonicalCommitGrant {
+    permit: CanonicalWritePermit,
+    control: crate::session_engine::canonical_authority::TransactionControl,
+    /// The ONE stage this grant may classify. The permit alone cannot be narrowed
+    /// (it is a frozen v3 type), so the narrowing lives here: the recorder refuses
+    /// every other stage, and an unconsumed flight at any other stage therefore
+    /// fails closed instead of being silently classifiable.
+    stage: CanonicalIoStage,
+}
+
+impl CanonicalCommitGrant {
+    /// Split into the permit the request carries and the recorder the writer keeps.
+    ///
+    /// This is the ONLY way to obtain either half. Dropping the recorder without
+    /// claiming it leaves the flight that permit admits unclassified, which fails
+    /// closed: the epoch is poisoned when the flight drops, and cannot drain. The
+    /// split is safe only because dropping half of it is loud.
+    #[must_use]
+    pub fn into_request_parts(self) -> (CanonicalWritePermit, CanonicalCommitRecorder) {
+        (
+            self.permit,
+            CanonicalCommitRecorder {
+                control: self.control,
+                stage: self.stage,
+            },
+        )
+    }
+}
+
+/// The writer half of a coordinator-driven commit.
+///
+/// It can classify exactly one flight per stage, and only a stage this authority
+/// actually admitted; both refusals are typed.
+pub struct CanonicalCommitRecorder {
+    control: crate::session_engine::canonical_authority::TransactionControl,
+    stage: CanonicalIoStage,
+}
+
+impl CanonicalCommitRecorder {
+    /// Claim the single-use recorder for the stage the store admitted.
+    ///
+    /// # Errors
+    /// Typed refusal when this authority has no outstanding flight for the stage,
+    /// or when the recorder was already claimed.
+    pub fn claim(&self) -> Result<CanonicalWriteRecorder, CanonicalStoreError> {
+        let inner = self.control.io_recorder(self.stage)?;
+        Ok(CanonicalWriteRecorder::from_io(inner))
+    }
+
+    /// The stage this recorder may classify.
+    #[must_use]
+    pub fn stage(&self) -> CanonicalIoStage {
+        self.stage
     }
 }
 
@@ -227,7 +289,20 @@ impl CanonicalEpoch {
         self.grant(admitted, stage, &operation, Some(draft))
     }
 
-    /// Admit one append that classifies no single row (a batch or preflight write).
+    /// Admit one append that binds no payload: a batch, or a row the owner admitted
+    /// at receipt time instead of through a draft.
+    ///
+    /// This is the ONLY cover for a user row. `CanonicalEntryDraft::new` refuses
+    /// `AgentMessage::User(_)` ("user rows require exact owner admission/replay"),
+    /// and every FINAL admission requires a draft, so a user row can never take a
+    /// final flight. It can take this one: the prepare phase requires `draft: None`
+    /// and `canonical.rs:289` grants that "Preparation may itself write rows".
+    ///
+    /// LIMITATION, stated rather than implied: with no draft there is no payload
+    /// binding, so the epoch vouches for the write's COMPLETION (the flight exists,
+    /// cannot be drained across, and is classified exactly once) and NOT for its
+    /// content. That is acceptable only because the session owner admitted the
+    /// content at receipt time, before this grant existed.
     ///
     /// # Errors
     /// Refuses a closed/poisoned epoch and any admission failure.
@@ -254,9 +329,58 @@ impl CanonicalEpoch {
             .enter_io(stage, self.run.source(), operation, draft)?;
         let recorder = ticket.recorder(stage)?;
         Ok(CanonicalAppendGrant {
-            ticket,
+            permit: ticket.into_permit(),
             flight,
             recorder,
+        })
+    }
+
+    /// Admit the COMMIT of a coordinator-prepared operation.
+    ///
+    /// The commit path must classify a flight it did not create, so Core issues the
+    /// permit for it here and keeps the transaction control that alone can mint the
+    /// single-use recorder. A bare [`CanonicalWritePermit`] cannot do this: it holds
+    /// only a mutation kind and the admission trait object, while the recorder lives
+    /// on the transaction control.
+    ///
+    /// The operation is the CALLER's prepared operation, never one minted here, so
+    /// no second admission exists over the write. The draft is consumed into the
+    /// final admission, which is what binds `enter_io(RequestedMutation, ...)` to
+    /// exactly this payload.
+    ///
+    /// # Errors
+    /// `OwnerChanged`/`SourceChanged`/`BranchChanged` when `expected` is not this
+    /// epoch's source, plus any admission refusal.
+    pub fn begin_commit(
+        &self,
+        operation: &CanonicalOperation,
+        expected: &CanonicalCursor,
+        draft: CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalCommitGrant, CanonicalStoreError> {
+        self.owner.validate_source_against(expected)?;
+        let scope = self.run.context_policy();
+        let (capture, prepare) = scope.begin_prepare()?;
+        // Bind the caller's operation through a prepare-phase admission that writes
+        // nothing; an unprepared operation is refused by `admit_final`.
+        let prepare_ticket = CanonicalWriteTicket::from_admitted(prepare);
+        let prepare_flight = prepare_ticket.permit.enter_io(
+            CanonicalIoStage::PreparePreflight,
+            expected,
+            operation,
+            None,
+        )?;
+        prepare_ticket
+            .recorder(CanonicalIoStage::PreparePreflight)?
+            .record(CanonicalWriteCertainty::Known)?;
+        drop(prepare_flight);
+        drop(prepare_ticket);
+        let admitted = capture.admit_final(operation, draft)?;
+        let (permit, control) = CanonicalWriteTicket::from_admitted(admitted).into_commit_parts();
+        Ok(CanonicalCommitGrant {
+            permit,
+            control,
+            stage,
         })
     }
 
@@ -508,5 +632,167 @@ mod tests {
             },
             "no flight was admitted, so no io count exists to classify"
         );
+    }
+
+    /// A coordinator-driven commit takes the CALLER's operation and admits no
+    /// second one; its permit classifies the flight the store admits.
+    #[test]
+    fn begin_commit_uses_the_callers_operation_and_classifies_once() {
+        let epoch = epoch();
+        let operation = CanonicalOperation::new();
+        let cursor = epoch.cursor().clone();
+        let grant = epoch
+            .begin_commit(
+                &operation,
+                &cursor,
+                compaction(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("commit grant");
+        let (permit, recorder) = grant.into_request_parts();
+        let flight = permit
+            .enter_io(
+                CanonicalIoStage::RequestedMutation,
+                &cursor,
+                &operation,
+                Some(&compaction()),
+            )
+            .expect("flight");
+        recorder
+            .claim()
+            .expect("recorder")
+            .record(CanonicalWriteCertainty::Known)
+            .expect("classify");
+        drop(flight);
+        drop(permit);
+        assert!(!epoch.poisoned());
+    }
+
+    /// A cursor from a DIFFERENT epoch is refused before any flight exists.
+    #[test]
+    fn begin_commit_refuses_a_foreign_epoch_cursor() {
+        let mine = epoch();
+        let theirs = epoch();
+        let operation = CanonicalOperation::new();
+        let refused = mine.begin_commit(
+            &operation,
+            theirs.cursor(),
+            compaction(),
+            CanonicalIoStage::RequestedMutation,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(CanonicalStoreError {
+                    kind: crate::session::canonical::CanonicalFailureKind::OwnerChanged,
+                    ..
+                })
+            ),
+            "a foreign owner allocation must be refused"
+        );
+        assert!(!mine.poisoned(), "a refusal admits no flight to poison");
+    }
+
+    /// A permit from a foreign epoch cannot classify this epoch's scope either:
+    /// the refusal comes from that permit's own admission, not from a second check.
+    #[test]
+    fn a_foreign_epoch_permit_cannot_admit_this_scope() {
+        let mine = epoch();
+        let theirs = epoch();
+        let operation = CanonicalOperation::new();
+        let foreign = theirs
+            .begin_commit(
+                &operation,
+                theirs.cursor(),
+                compaction(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("their commit grant");
+        let (permit, _recorder) = foreign.into_request_parts();
+        let refused = permit.enter_io(
+            CanonicalIoStage::RequestedMutation,
+            mine.cursor(),
+            &operation,
+            Some(&compaction()),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(CanonicalStoreError {
+                    kind: crate::session::canonical::CanonicalFailureKind::OwnerChanged,
+                    ..
+                })
+            ),
+            "the foreign permit must refuse our cursor"
+        );
+    }
+
+    /// Dropping the recorder half without claiming it leaves the flight
+    /// unclassified, which poisons the epoch. The split is safe only because
+    /// dropping half of it is loud, so this asserts the loudness.
+    #[test]
+    fn dropping_the_commit_recorder_without_claiming_fails_closed() {
+        let epoch = epoch();
+        let operation = CanonicalOperation::new();
+        let cursor = epoch.cursor().clone();
+        let grant = epoch
+            .begin_commit(
+                &operation,
+                &cursor,
+                compaction(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("commit grant");
+        let (permit, recorder) = grant.into_request_parts();
+        drop(recorder);
+        let flight = permit
+            .enter_io(
+                CanonicalIoStage::RequestedMutation,
+                &cursor,
+                &operation,
+                Some(&compaction()),
+            )
+            .expect("flight");
+        drop(flight);
+        assert!(
+            epoch.poisoned(),
+            "an unclaimed commit flight must poison the epoch, not pass as Known"
+        );
+        drop(permit);
+    }
+
+    /// The recorder classifies ONLY the stage the grant bound: a flight admitted at
+    /// another stage cannot be classified through it, so it fails closed.
+    #[test]
+    fn the_commit_recorder_refuses_a_stage_it_did_not_bind() {
+        let epoch = epoch();
+        let operation = CanonicalOperation::new();
+        let cursor = epoch.cursor().clone();
+        let grant = epoch
+            .begin_commit(
+                &operation,
+                &cursor,
+                compaction(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("commit grant");
+        let (permit, recorder) = grant.into_request_parts();
+        assert_eq!(recorder.stage(), CanonicalIoStage::RequestedMutation);
+        let flight = permit
+            .enter_io(
+                CanonicalIoStage::RequestedMutation,
+                &cursor,
+                &operation,
+                Some(&compaction()),
+            )
+            .expect("flight");
+        // The bound stage classifies once; a second claim is refused.
+        recorder.claim().expect("first claim");
+        assert!(
+            recorder.claim().is_err(),
+            "one flight admits exactly one recorder"
+        );
+        drop(flight);
+        drop(permit);
     }
 }

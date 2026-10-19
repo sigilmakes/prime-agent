@@ -250,6 +250,20 @@ impl AuthorityOwner {
         self.shared.lock().is_ok_and(|entry| entry.poisoned)
     }
 
+    /// Validate a caller's cursor against this epoch's own source identity.
+    ///
+    /// Uses the same comparison as admission: owner allocation, session id,
+    /// source path, header certificate and branch epoch. Frontier, head and raw
+    /// generation may legitimately advance during our own preflight, so they are
+    /// NOT compared here; the store performs its own strict CAS.
+    ///
+    /// # Errors
+    /// `OwnerChanged`, `SourceChanged` or `BranchChanged` for a foreign cursor.
+    pub(super) fn validate_source_against(&self, actual: &CanonicalCursor) -> Result<()> {
+        let entry = self.shared.lock()?;
+        validate_source(&entry.source, actual)
+    }
+
     /// Whether this epoch has not quarantined projection.
     ///
     /// NOT a readiness predicate and it must not gate Ready. It is module-private
