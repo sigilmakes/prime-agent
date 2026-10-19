@@ -20,8 +20,8 @@ use crate::providers::openai_codex_responses::request::{
     resolve_codex_url, resolve_codex_websocket_url,
 };
 use crate::providers::openai_codex_responses::session::{
-    clear_continuation, is_websocket_sse_fallback_active, record_request_stats,
-    record_websocket_failure, record_websocket_sse_fallback, take_continuation_for,
+    clear_continuation, record_request_stats, record_websocket_failure,
+    record_websocket_sse_fallback, take_continuation_for,
 };
 use crate::providers::openai_codex_responses::websocket::{
     acquire_websocket, build_cached_websocket_request_body, release_connection, ContinuationState,
@@ -94,8 +94,8 @@ impl CodexTextVerbosity {
 /// `reasoningSummary` option; the TS also accepts raw string forms ("on"/"off"/null).
 fn reasoning_summary_value(summary: Option<ReasoningSummary>) -> &'static str {
     match summary {
-        Some(ReasoningSummary::Auto) | None => "auto",
-        Some(ReasoningSummary::Detailed) => "detailed",
+        Some(ReasoningSummary::Auto) => "auto",
+        Some(ReasoningSummary::Detailed) | None => "detailed",
         Some(ReasoningSummary::Concise) => "concise",
     }
 }
@@ -234,14 +234,10 @@ async fn run_stream(
     );
     let body_json = body.to_string();
     let transport = options.base.transport.unwrap_or(Transport::Auto);
-    let websocket_disabled_for_session =
-        transport != Transport::Sse && is_websocket_sse_fallback_active(session_id.as_deref());
-    if websocket_disabled_for_session {
-        record_websocket_sse_fallback(session_id.as_deref());
-    }
-
-    if transport != Transport::Sse && !websocket_disabled_for_session {
-        let mut websocket_started = false;
+    // Transport recovery belongs to this logical request. Historical socket failures must not
+    // disable the next request's fresh WebSocket probe.
+    if transport != Transport::Sse {
+        let mut progress = WebSocketAttemptProgress::default();
         // Retry a stale previous_response_id once on a fresh connection (the failed attempt's
         // cleanup dropped the cached one); the retry resends the full request body.
         let mut chain_reset_retried = false;
@@ -253,7 +249,7 @@ async fn run_stream(
                 &websocket_headers,
                 output,
                 writer,
-                &mut websocket_started,
+                &mut progress,
             )
             .await;
             match attempt {
@@ -277,7 +273,8 @@ async fn run_stream(
                     // Only reset the chain while nothing was streamed yet: after the first event
                     // the retry would duplicate "start"/content events.
                     if !aborted
-                        && !websocket_started
+                        && !progress.visible
+                        && progress.used_continuation
                         && !chain_reset_retried
                         && is_stale_codex_continuation_error(&error)
                     {
@@ -303,11 +300,11 @@ async fn run_stream(
                         output,
                         transport_error,
                         transport_debug_name(transport),
-                        websocket_started,
+                        progress.visible,
                         body_json.len(),
                     );
                     record_websocket_failure(session_id.as_deref(), &error);
-                    if websocket_started {
+                    if progress.visible {
                         return Err(error.into_provider_error());
                     }
                     record_websocket_sse_fallback(session_id.as_deref());
@@ -394,6 +391,13 @@ fn is_codex_visible_response_event(event: &Value) -> bool {
         || event_type.starts_with("response.function_")
 }
 
+/// Request-local facts that decide whether recovery can safely resend an attempt.
+#[derive(Default)]
+struct WebSocketAttemptProgress {
+    visible: bool,
+    used_continuation: bool,
+}
+
 /// One WebSocket attempt.
 #[allow(clippy::too_many_arguments)]
 // Long by design: mirrors the provider's stream shape.
@@ -405,18 +409,18 @@ async fn run_websocket_attempt(
     websocket_headers: &[(String, String)],
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
-    websocket_started: &mut bool,
+    progress: &mut WebSocketAttemptProgress,
 ) -> Result<(), CodexStreamError> {
+    progress.used_continuation = false;
     let session_id = options.base.session_id.as_deref();
     let url = resolve_codex_websocket_url(&model.base_url);
-    let mut connection = acquire_websocket(
+    let connection = acquire_websocket(
         &url,
         websocket_headers,
         session_id,
         options.base.signal.clone(),
     )
     .await?;
-    connection.abort_on_drop = options.base.event_buffer_capacity.is_some();
 
     let use_cached_context = matches!(
         options.base.transport,
@@ -438,6 +442,12 @@ async fn run_websocket_attempt(
         full_body,
         connection.connection_id,
     );
+    // A stale-code API error can reset only a request that actually sent an anchor. A fresh
+    // full request has no chain to reset and must surface the API error without a paid retry.
+    progress.used_continuation = request_body
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty());
     if let Some(session_id) = session_id {
         record_request_stats(
             session_id,
@@ -490,7 +500,7 @@ async fn run_websocket_attempt(
                         // arrives.
                         if !start_emitted && is_codex_visible_response_event(&event) {
                             start_emitted = true;
-                            *websocket_started = true;
+                            progress.visible = true;
                             writer
                                 .send(AssistantMessageEvent::Start {
                                     partial: start_partial.clone(),
@@ -850,6 +860,10 @@ impl Provider for OpenAICodexResponsesProvider {
 
 #[cfg(test)]
 mod tests {
+    mod transport_regressions {
+        include!("transport_regressions.rs");
+    }
+
     use super::*;
     use std::collections::HashMap;
 

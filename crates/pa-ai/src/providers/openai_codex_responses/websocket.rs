@@ -10,6 +10,7 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{CapacityError, ProtocolError};
 use tokio_tungstenite::tungstenite::Error as WsError;
@@ -23,16 +24,18 @@ use crate::providers::openai_codex_responses::errors::{
     WEBSOCKET_CLOSE_CODE_PROTOCOL, WEBSOCKET_CLOSE_CODE_STATUS, WEBSOCKET_CLOSE_CODE_TOO_BIG,
     WEBSOCKET_CONNECTION_ENDED_REASON,
 };
-use crate::providers::openai_codex_responses::session::{session_state, CachedConnection};
+use crate::providers::openai_codex_responses::session::{
+    evict_connection, session_state, CachedConnection,
+};
 
 pub const OPENAI_BETA_RESPONSES_WEBSOCKETS: &str = "responses_websockets=2026-02-06";
-pub(crate) const SESSION_WEBSOCKET_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
+// Rotate before the upstream 60-minute cap, regardless of idle or active reuse.
+const SESSION_WEBSOCKET_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(50);
 
 #[allow(unused_imports)] // re-exported for consumers of the transport module
 pub use crate::providers::openai_codex_responses::session::{
-    clear_continuation, close_websocket_sessions, is_websocket_sse_fallback_active,
-    record_request_stats, record_websocket_failure, record_websocket_sse_fallback,
-    schedule_session_websocket_expiry, take_continuation_for,
+    clear_continuation, close_websocket_sessions, record_request_stats, record_websocket_failure,
+    record_websocket_sse_fallback, take_continuation_for,
 };
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -43,6 +46,7 @@ pub(crate) enum WorkerCommand {
     Send {
         body: String,
         events: mpsc::Sender<WorkerEvent>,
+        signal: Option<CancellationToken>,
     },
     Close,
 }
@@ -218,16 +222,12 @@ async fn spawn_connection_worker(
 
     let connection_id = next_connection_id();
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>(4);
-    tokio::spawn(connection_worker(stream, command_rx, signal));
+    tokio::spawn(connection_worker(stream, command_rx));
     Ok((command_tx, connection_id))
 }
 
 /// The worker parks between requests so a session can reuse one connection.
-async fn connection_worker(
-    stream: WsStream,
-    mut commands: mpsc::Receiver<WorkerCommand>,
-    signal: Option<CancellationToken>,
-) {
+async fn connection_worker(stream: WsStream, mut commands: mpsc::Receiver<WorkerCommand>) {
     let (mut sink, mut stream) = stream.split();
     loop {
         let Some(command) = commands.recv().await else {
@@ -238,7 +238,11 @@ async fn connection_worker(
                 let _ = sink.close().await;
                 return;
             }
-            WorkerCommand::Send { body, events } => {
+            WorkerCommand::Send {
+                body,
+                events,
+                signal,
+            } => {
                 let sent = tokio::select! {
                     () = events.closed() => return,
                     sent = sink.send(Message::Text(body.into())) => sent,
@@ -380,7 +384,7 @@ pub struct AcquiredConnection {
     /// A cache entry backs this connection (continuation is possible).
     pub cached: bool,
     pub connection_id: u64,
-    /// Bounded streams arm this lease so aborting their producer cannot strand a busy cache entry.
+    /// An unfinished lease evicts its socket, including failed sends and producer cancellation.
     pub(super) abort_on_drop: bool,
 }
 
@@ -389,16 +393,8 @@ impl Drop for AcquiredConnection {
         if !self.abort_on_drop {
             return;
         }
-        if let (Some(session_id), Ok(mut state)) =
-            (self.session_id.as_deref(), session_state().lock())
-        {
-            let matches = state
-                .connections
-                .get(session_id)
-                .is_some_and(|entry| entry.connection_id == self.connection_id);
-            if matches {
-                state.connections.remove(session_id);
-            }
+        if let Some(session_id) = self.session_id.as_deref() {
+            evict_connection(session_id, self.connection_id);
         }
         // An active request also observes its event receiver closing. An idle worker consumes
         // this command, so a dropped lease closes both active and not-yet-started requests.
@@ -426,6 +422,7 @@ impl AcquiredConnection {
             .send(WorkerCommand::Send {
                 body: request.to_string(),
                 events: event_tx,
+                signal,
             })
             .await
             .map_err(|_| {
@@ -462,19 +459,33 @@ pub async fn acquire_websocket(
             reused: false,
             cached: false,
             connection_id,
-            abort_on_drop: false,
+            abort_on_drop: true,
         });
     };
 
     let cached_worker = {
         let mut state = session_state().lock().ok();
+        if let Some(state) = state.as_mut() {
+            let expired = state.connections.get(session_id).is_some_and(|entry| {
+                !entry.busy
+                    && (entry.created_at.elapsed() >= SESSION_WEBSOCKET_MAX_AGE
+                        || entry.worker.is_closed())
+            });
+            let retired = if expired {
+                state.connections.remove(session_id)
+            } else {
+                None
+            };
+            if let Some(entry) = retired {
+                let _ = entry.worker.try_send(WorkerCommand::Close);
+            }
+        }
         match state
             .as_mut()
             .and_then(|state| state.connections.get_mut(session_id))
         {
             Some(entry) if !entry.busy => {
                 entry.busy = true;
-                entry.expiry_generation += 1;
                 Some((entry.worker.clone(), entry.connection_id))
             }
             _ => None,
@@ -487,43 +498,31 @@ pub async fn acquire_websocket(
             reused: true,
             cached: true,
             connection_id,
-            abort_on_drop: false,
+            abort_on_drop: true,
         });
     }
 
-    // Fresh connection: cache it for the session unless an entry is busy.
-    let entry_busy = session_state().lock().is_ok_and(|state| {
-        state
-            .connections
-            .get(session_id)
-            .is_some_and(|entry| entry.busy)
-    });
+    // Decide cache ownership after connecting: another request can acquire the session while
+    // this handshake is in flight. Never overwrite its connection or continuation.
     let (worker, connection_id) = spawn_connection_worker(url, headers, signal).await?;
-
-    let cached = if entry_busy {
-        false
-    } else {
-        let Ok(mut state) = session_state().lock() else {
-            return Ok(AcquiredConnection {
-                worker,
-                session_id: Some(session_id.to_string()),
-                reused: false,
-                cached: false,
-                connection_id,
-                abort_on_drop: false,
-            });
-        };
-        state.connections.insert(
-            session_id.to_string(),
-            CachedConnection {
+    let created_at = Instant::now();
+    let cached = if let Ok(mut state) = session_state().lock() {
+        if let std::collections::hash_map::Entry::Vacant(slot) =
+            state.connections.entry(session_id.to_string())
+        {
+            slot.insert(CachedConnection {
                 worker: worker.clone(),
                 busy: true,
                 continuation: None,
-                expiry_generation: 0,
+                created_at,
                 connection_id,
-            },
-        );
-        true
+            });
+            true
+        } else {
+            false
+        }
+    } else {
+        false
     };
 
     Ok(AcquiredConnection {
@@ -532,7 +531,7 @@ pub async fn acquire_websocket(
         reused: false,
         cached,
         connection_id,
-        abort_on_drop: false,
+        abort_on_drop: true,
     })
 }
 
@@ -549,7 +548,8 @@ pub async fn release_connection(
         return;
     };
     if !keep {
-        close_websocket_sessions(Some(&session_id));
+        evict_connection(&session_id, connection.connection_id);
+        connection.close().await;
         return;
     }
     let matched = match session_state().lock() {
@@ -563,9 +563,7 @@ pub async fn release_connection(
         },
         Err(_) => false,
     };
-    if matched {
-        schedule_session_websocket_expiry(&session_id);
-    } else {
+    if !matched {
         connection.close().await;
     }
 }

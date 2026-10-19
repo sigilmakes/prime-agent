@@ -1,18 +1,16 @@
-//! Codex WebSocket session state: connection cache, SSE-fallback pinning, debug stats, continuation
-//! bookkeeping, and idle expiry.
+//! Codex WebSocket session state: connection cache, historical debug stats, and socket-bound
+//! continuation bookkeeping.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::mpsc;
 
 use serde_json::Value;
 
 use crate::providers::openai_codex_responses::errors::CodexStreamError;
-use crate::providers::openai_codex_responses::websocket::{
-    ContinuationState, WorkerCommand, SESSION_WEBSOCKET_CACHE_TTL_MS,
-};
+use crate::providers::openai_codex_responses::websocket::{ContinuationState, WorkerCommand};
 
 pub use crate::providers::openai_codex_responses::websocket::WebSocketDebugStats;
 
@@ -21,8 +19,8 @@ pub struct CachedConnection {
     pub worker: mpsc::Sender<WorkerCommand>,
     pub busy: bool,
     pub continuation: Option<ContinuationState>,
-    /// Generation counter for pending idle-expiry tasks.
-    pub expiry_generation: u64,
+    /// Monotonic socket creation time; checkout rotates at the absolute age limit.
+    pub created_at: Instant,
     /// Unique id of this connection (monotonic).
     pub connection_id: u64,
 }
@@ -31,21 +29,11 @@ pub struct CachedConnection {
 pub struct SessionState {
     pub connections: HashMap<String, CachedConnection>,
     pub stats: HashMap<String, WebSocketDebugStats>,
-    pub sse_fallback_sessions: HashSet<String>,
 }
 
 pub fn session_state() -> &'static Mutex<SessionState> {
     static STATE: OnceLock<Mutex<SessionState>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(SessionState::default()))
-}
-
-pub fn is_websocket_sse_fallback_active(session_id: Option<&str>) -> bool {
-    match session_id {
-        Some(session_id) => session_state()
-            .lock()
-            .is_ok_and(|state| state.sse_fallback_sessions.contains(session_id)),
-        None => false,
-    }
 }
 
 pub fn record_websocket_sse_fallback(session_id: Option<&str>) {
@@ -55,13 +43,12 @@ pub fn record_websocket_sse_fallback(session_id: Option<&str>) {
     let Ok(mut state) = session_state().lock() else {
         return;
     };
-    let active = state.sse_fallback_sessions.contains(session_id);
     let session_stats = state.stats.entry(session_id.to_string()).or_default();
     session_stats.sse_fallbacks += 1;
-    session_stats.websocket_fallback_active = Some(active);
+    session_stats.websocket_fallback_active = Some(false);
 }
 
-/// Pins the session to SSE fallback and records the failure in the debug stats.
+/// Retain failure history without changing the next logical request's transport choice.
 pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamError) {
     let Some(session_id) = session_id else {
         return;
@@ -69,11 +56,10 @@ pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamErr
     let Ok(mut state) = session_state().lock() else {
         return;
     };
-    state.sse_fallback_sessions.insert(session_id.to_string());
     let session_stats = state.stats.entry(session_id.to_string()).or_default();
     session_stats.websocket_failures += 1;
     session_stats.last_websocket_error = Some(error.to_string());
-    session_stats.websocket_fallback_active = Some(true);
+    session_stats.websocket_fallback_active = Some(false);
 }
 
 #[must_use]
@@ -87,10 +73,8 @@ pub fn reset_debug_stats(session_id: Option<&str>) {
     };
     if let Some(session_id) = session_id {
         state.stats.remove(session_id);
-        state.sse_fallback_sessions.remove(session_id);
     } else {
         state.stats.clear();
-        state.sse_fallback_sessions.clear();
     }
 }
 
@@ -159,34 +143,22 @@ pub fn record_request_stats(
     }
 }
 
-/// Close the cached connection after the TTL if it stayed idle.
-pub fn schedule_session_websocket_expiry(session_id: &str) {
+/// Evict only the socket owned by this lease, including its continuation. A concurrent request
+/// may have installed a different cached socket for the same session.
+pub fn evict_connection(session_id: &str, connection_id: u64) {
     let Ok(mut state) = session_state().lock() else {
         return;
     };
-    let generation = match state.connections.get_mut(session_id) {
-        Some(entry) => {
-            entry.expiry_generation += 1;
-            entry.expiry_generation
-        }
-        None => return,
-    };
-    let session_id = session_id.to_string();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(SESSION_WEBSOCKET_CACHE_TTL_MS)).await;
-        let Ok(mut state) = session_state().lock() else {
-            return;
-        };
-        let Some(entry) = state.connections.get_mut(&session_id) else {
-            return;
-        };
-        if entry.expiry_generation != generation || entry.busy {
-            return;
-        }
-        if let Some(entry) = state.connections.remove(&session_id) {
-            let _ = entry.worker.try_send(WorkerCommand::Close);
-        }
-    });
+    if state
+        .connections
+        .get(session_id)
+        .is_none_or(|entry| entry.connection_id != connection_id)
+    {
+        return;
+    }
+    if let Some(entry) = state.connections.remove(session_id) {
+        let _ = entry.worker.try_send(WorkerCommand::Close);
+    }
 }
 
 /// Take the continuation for `connection_id`, if one is anchored to it (part of
@@ -222,30 +194,26 @@ mod tests {
     fn sse_fallback_lifecycle() {
         let session = format!("test-session-{}", std::process::id());
         reset_debug_stats(Some(&session));
-        assert!(!is_websocket_sse_fallback_active(Some(&session)));
-        // Recording a fallback bump does not pin the session (only a transport failure does,
-        // matching the TS semantics).
+        // A fallback counter is historical, not a transport policy for later requests.
         record_websocket_sse_fallback(Some(&session));
-        assert!(!is_websocket_sse_fallback_active(Some(&session)));
         let stats = get_debug_stats(&session).expect("stats recorded");
         assert_eq!(stats.sse_fallbacks, 1);
         assert_eq!(stats.websocket_fallback_active, Some(false));
         reset_debug_stats(Some(&session));
         assert!(get_debug_stats(&session).is_none());
-        assert!(!is_websocket_sse_fallback_active(Some(&session)));
     }
 
     #[tokio::test]
-    async fn records_failure_and_pins_fallback() {
+    async fn records_failure_history_without_pinning_fallback() {
         let session = format!("failure-session-{}", std::process::id());
         reset_debug_stats(Some(&session));
         record_websocket_failure(
             Some(&session),
             &CodexStreamError::Transport(WebSocketTransportError::runtime("boom")),
         );
-        assert!(is_websocket_sse_fallback_active(Some(&session)));
         let stats = get_debug_stats(&session).expect("stats recorded");
         assert_eq!(stats.websocket_failures, 1);
+        assert_eq!(stats.websocket_fallback_active, Some(false));
         assert_eq!(stats.last_websocket_error.as_deref(), Some("boom"));
         close_websocket_sessions(Some(&session));
         reset_debug_stats(Some(&session));
