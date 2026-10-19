@@ -96,6 +96,7 @@ REQUIRED_FILES = (
     "models.bundled.json",
     "mcp-services.bundled.json",
     "prime-agent-runtime/pyproject.toml",
+    "prime-agent-runtime/uv.lock",
     "prime-agent-runtime/src/rlm/repl.py",
 )
 REQUIRED_DIRS = ("prime-agent-runtime/src/rlm", "skills")

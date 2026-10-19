@@ -57,7 +57,6 @@ impl AgentsViewMode {
         self.expanded_parents.insert(target.clone());
         if !self.program_shown_parents.remove(&target) {
             self.program_shown_parents.insert(target);
-            self.actions.push("program_shown");
         }
         // The selection re-resolves onto its row through the rebuild (the rebuild re-syncs it).
         self.rebuild_rows();

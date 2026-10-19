@@ -90,10 +90,6 @@ fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
-    // The disclosure prints on the ACP client's stderr before any
-    // transport starts (TS pushes the daemon-created session's diagnostics
-    // to the client; the Rust stderr surface prints it here).
-    crate::telemetry_notice::print_if_due(&options.config);
     // Flag > env > default: the same `PRIME_AGENT_DAEMON_SOCKET` contract
     // as every other mode (the `prime-agent` launcher written by
     // install-rust.sh pins that env, so the ACP path must honor it or it
@@ -156,7 +152,6 @@ fn daemon_acp_create(
     let mut create_config = serde_json::json!({
         "cwd": cwd.display().to_string(),
         "sessionDir": session_dir.display().to_string(),
-        // The telemetry execution mode (TS main.ts `executionMode: appMode`).
         "executionMode": "acp",
     });
     if let Some(provider) = &config.provider {
@@ -216,7 +211,8 @@ fn daemon_acp_create(
         no_session: options.session.no_session.then_some(true),
         name: None,
         config: Some(create_config),
-        telemetry_disabled: crate::mode::create_telemetry_disabled(config),
+        // Older daemons must also keep reporting disabled.
+        telemetry_disabled: Some(true),
         runtime_metadata: None,
         lifecycle: Some(lifecycle),
         env: None,
@@ -237,7 +233,7 @@ fn run_rpc_mode(options: &RunOptions) -> Result<i32, String> {
 async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let config = &options.config;
     let mut initial_lease = None;
-    let parts = build_headless_engine_parts(options, "rpc", &mut initial_lease).await?;
+    let parts = build_headless_engine_parts(options, &mut initial_lease).await?;
     if let Some(goal) = &config.initial_goal {
         parts
             .engine
@@ -337,7 +333,6 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                 &options,
                 faux_script_env()?.as_ref(),
                 Some(manager),
-                "rpc",
                 &HeadlessEmbedding::Rpc,
             )
             .await?;
@@ -402,9 +397,6 @@ async fn print_mode_main(
     options: &RunOptions,
     lease: &mut Option<pa_daemon::lease::SessionLease>,
 ) -> Result<i32, String> {
-    // `print` or `json`: the telemetry execution mode is the app mode (TS
-    // main.ts `executionMode: appMode`).
-    crate::telemetry_notice::print_if_due(&options.config);
     let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
     *lease = opened_lease;
     let session_manager = session_manager.unwrap_or_else(|| {
@@ -419,7 +411,6 @@ async fn print_mode_main(
         options,
         faux.as_ref(),
         Some(session_manager),
-        options.app_mode.as_str(),
         &HeadlessEmbedding::Root {
             node: std::sync::Arc::clone(&root_node),
         },
@@ -443,9 +434,22 @@ async fn print_mode_main(
         &root_node,
     )
     .await;
-    // No inline descendant outlives the print process: kernels get their
-    // final snapshot, drivers join, runs abort (every exit path).
+    // Stop new descendant admissions on every exit. A failed driver may have returned through
+    // `?` before its normal drain; abort its agent before joining generic admitted work.
+    if exit.is_err() {
+        engine.session.agent().abort();
+    }
     crate::print_rlm::dispose_inline_subagents(&root_node).await;
+    if exit.is_err() {
+        let mut seen = std::collections::HashSet::new();
+        if let Some(diagnostic) = emit_plugin_job_outcomes(
+            engine.drain_plugin_jobs().await,
+            options.app_mode == AppMode::Json,
+            &mut seen,
+        ) {
+            eprintln!("Plugin job diagnostic: {diagnostic}");
+        }
+    }
     exit
 }
 
@@ -456,17 +460,11 @@ pub(crate) async fn build_engine(
     options: &RunOptions,
     faux: Option<&serde_json::Value>,
     session_manager: Option<pa_core::session::manager::SessionManager>,
-    execution_mode: &str,
     embedding: &HeadlessEmbedding,
 ) -> Result<HeadlessEngine, String> {
     match faux {
-        Some(script) => {
-            build_faux_engine_with(options, script, session_manager, execution_mode, embedding)
-                .await
-        }
-        None => {
-            build_headless_engine_with(options, session_manager, execution_mode, embedding).await
-        }
+        Some(script) => build_faux_engine_with(options, script, session_manager, embedding).await,
+        None => build_headless_engine_with(options, session_manager, embedding).await,
     }
 }
 
@@ -528,21 +526,14 @@ pub(crate) struct HeadlessEngine {
 /// Transfer the opened lease to its mode before fallible engine assembly.
 async fn build_headless_engine_parts(
     options: &RunOptions,
-    execution_mode: &str,
     lease: &mut Option<pa_daemon::lease::SessionLease>,
 ) -> Result<HeadlessEngine, String> {
-    // Every headless mode discloses immediately (TS main: only the
-    // interactive `deferTelemetryNoticeForOnboarding` holds the notice
-    // back behind onboarding; `--list-models` never reaches this
-    // assembly, matching the TS exit before its diagnostics report).
-    crate::telemetry_notice::print_if_due(&options.config);
     let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
     *lease = opened_lease;
     build_engine(
         options,
         faux_script_env()?.as_ref(),
         session_manager,
-        execution_mode,
         &HeadlessEmbedding::Rpc,
     )
     .await
@@ -571,7 +562,6 @@ fn select_session_manager_with_lease(
 pub(crate) async fn build_headless_engine_with(
     options: &RunOptions,
     session_manager: Option<pa_core::session::manager::SessionManager>,
-    execution_mode: &str,
     embedding: &HeadlessEmbedding,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
@@ -599,6 +589,9 @@ pub(crate) async fn build_headless_engine_with(
             select_model(&mut registry, config, session.as_ref()).await?
         }
     };
+    let ollama_cloud =
+        std::sync::Arc::new(pa_core::session_engine::ollama_cloud::SessionOllamaCloud::default());
+    let model = ollama_cloud.configure_fresh_model(&config.cwd, &config.agent_dir, &model);
     // Resolve request auth once: the stored team / `PRIME_TEAM_ID` reach the wire through these
     // headers (children resolve against the same catalog the spawn used).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
@@ -639,31 +632,11 @@ pub(crate) async fn build_headless_engine_with(
                 config.cwd.clone(),
                 config.agent_dir.clone(),
                 model.clone(),
+                std::sync::Arc::clone(&ollama_cloud),
             )),
         )
     };
 
-    // Telemetry: the CLI's env/settings opt-out decides; depth 0 only, enforced by the engine.
-    // A spawned child never reports (the engine's depth gate holds anyway).
-    let telemetry = (!config.telemetry_disabled
-        && matches!(
-            embedding,
-            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc
-        ))
-    .then(|| {
-        let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
-        pa_core::session_engine::telemetry::TelemetryWiring {
-            client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
-            execution_mode: Some(execution_mode.to_string()),
-            now: None,
-            telemetry_enabled: Some(
-                pa_core::session_engine::telemetry::telemetry_enabled_switch(
-                    &config.cwd,
-                    &config.agent_dir,
-                ),
-            ),
-        }
-    });
     let queue_settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let queue_mode = |mode: pa_core::settings::QueueModeSetting| match mode {
         pa_core::settings::QueueModeSetting::All => pa_agent::agent::QueueMode::All,
@@ -735,9 +708,11 @@ pub(crate) async fn build_headless_engine_with(
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message: None,
+            context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
+            context_startup_admitted_user_ids: Vec::new(),
+            on_initial_context_selection: None,
             cron_store: None,
             semantic_edges,
-            telemetry,
             steering_mode,
             follow_up_mode,
             cwd: config.cwd.clone(),
@@ -746,6 +721,7 @@ pub(crate) async fn build_headless_engine_with(
             model: Some(agent_model),
             thinking_level,
             stream_fn: Some(stream_fn),
+            ollama_cloud: Some(std::sync::Arc::clone(&ollama_cloud)),
             tools: builtin_tools(&config.cwd),
             custom_system_prompt: config.system_prompt.clone(),
             prompt_guidelines: config.append_system_prompt.clone(),
@@ -837,6 +813,7 @@ fn headless_image_model_router(
     cwd: std::path::PathBuf,
     agent_dir: std::path::PathBuf,
     session_model: pa_types::ai::Model,
+    ollama_cloud: std::sync::Arc<pa_core::session_engine::ollama_cloud::SessionOllamaCloud>,
 ) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
     // The pre-route session target, captured at the FIRST arm (not at build):
     // the restore must return the SWITCHED-TO target, never the build-time one.
@@ -894,7 +871,7 @@ fn headless_image_model_router(
                 })
                 .map(|model| (model.provider.clone(), model.id.clone()))
                 .collect();
-            pa_core::models::resolve_image_model_override(
+            let route = pa_core::models::resolve_image_model_override(
                 &pa_core::models::ImageModelRoutingInputs {
                     session_model: &session_model,
                     thinking_level,
@@ -908,7 +885,12 @@ fn headless_image_model_router(
                     },
                     block_images,
                 },
-            )
+            )?;
+            Ok(route.map(|mut route| {
+                route.model =
+                    ollama_cloud.configure_fresh_model(&cwd, &decide_agent_dir, &route.model);
+                route
+            }))
         },
     );
     let swap_target = {
@@ -1216,7 +1198,7 @@ fn build_session_manager_with_lease(
             // writes it (the fresh-session rule): another process resuming
             // the new file can never become a second writer while this
             // engine appends — the source was only read, never leased.
-            Ok(lease_fresh_manager(manager))
+            lease_fresh_manager(manager, &crate::config::get_agent_dir())
         }
         HeadlessSession::Open(path) => {
             let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
@@ -1226,7 +1208,7 @@ fn build_session_manager_with_lease(
                 open_session_file(&path, &session_dir, &cwd, explicit_cwd_override(options))?;
             Ok((manager, Some(lease)))
         }
-        HeadlessSession::Fresh => Ok(fresh_session_with_lease(&cwd, &session_dir)),
+        HeadlessSession::Fresh => fresh_session_with_lease(&cwd, &session_dir),
     }
 }
 
@@ -1235,38 +1217,41 @@ fn build_session_manager_with_lease(
 fn fresh_session_with_lease(
     cwd: &std::path::Path,
     session_dir: &std::path::Path,
-) -> (
-    pa_core::session::manager::SessionManager,
-    Option<pa_daemon::lease::SessionLease>,
-) {
+) -> Result<
+    (
+        pa_core::session::manager::SessionManager,
+        Option<pa_daemon::lease::SessionLease>,
+    ),
+    String,
+> {
     let manager = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
-    lease_fresh_manager(manager)
+    lease_fresh_manager(manager, &crate::config::get_agent_dir())
 }
 
-/// Lease a freshly materialized session file before the engine can write it: the
-/// ungated runtime acquire (`Ok(None)` whenever the env gate is unset).
+/// A persistent manager needs ownership before it can reach an engine or writer.
+/// Only an in-memory manager can proceed without a runtime lease.
 fn lease_fresh_manager(
     manager: pa_core::session::manager::SessionManager,
-) -> (
-    pa_core::session::manager::SessionManager,
-    Option<pa_daemon::lease::SessionLease>,
-) {
-    let lease = match manager.get_session_file() {
-        Some(path) => {
-            match pa_daemon::lease::acquire_runtime_session_lease(
-                path,
-                &crate::config::get_agent_dir(),
-            ) {
-                Ok(lease) => Some(lease),
-                Err(error) => {
-                    eprintln!("prime-agent: could not lease the fresh session file: {error:#}");
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-    (manager, lease)
+    agent_dir: &std::path::Path,
+) -> Result<
+    (
+        pa_core::session::manager::SessionManager,
+        Option<pa_daemon::lease::SessionLease>,
+    ),
+    String,
+> {
+    let lease = manager
+        .get_session_file()
+        .map(|path| {
+            pa_daemon::lease::acquire_runtime_session_lease(path, agent_dir).map_err(|error| {
+                format!(
+                    "Could not lease the fresh session file {}: {error:#}",
+                    path.display()
+                )
+            })
+        })
+        .transpose()?;
+    Ok((manager, lease))
 }
 
 /// Guard an in-process open: probe the daemon's live roster, then acquire the
@@ -1409,6 +1394,34 @@ fn builtin_tools(_cwd: &std::path::Path) -> Vec<Arc<dyn pa_agent::types::AgentTo
     Vec::new()
 }
 
+/// Surface terminal generic job outcomes once. The caller decides whether a newly admitted
+/// command job can fail that command or is only an unrelated shutdown diagnostic.
+fn emit_plugin_job_outcomes(
+    statuses: Vec<serde_json::Value>,
+    json_mode: bool,
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut failure = None;
+    for job in statuses {
+        if !seen.insert(job["id"].to_string()) {
+            continue;
+        }
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::json!({"type":"plugin_job_update","job":job})
+            );
+        }
+        if job["state"]["status"] == "failed" && failure.is_none() {
+            let error = job["state"]["error"]
+                .as_str()
+                .map_or_else(|| job["state"]["error"].to_string(), str::to_string);
+            failure = Some(format!("Plugin job failed: {error}"));
+        }
+    }
+    failure
+}
+
 /// Admit prompts, stream json events when requested, and decide the exit code
 /// from the headless terminal result plus the autonomous gate contract.
 async fn run_prompts_and_emit(
@@ -1463,8 +1476,6 @@ async fn run_prompts_and_emit(
         &autonomous,
         Some(root_node),
     );
-    let global_harness_dir =
-        pa_core::refinement::get_global_harness_state_dir(&options.config.agent_dir);
     let mut boundary = crate::print_boundary::TurnBoundary::new(json_mode);
     // The autonomous runtime state the session-command executor mutates —
     // `/autonomous` rewrites what the hook, accounting, and exit contract read.
@@ -1472,6 +1483,9 @@ async fn run_prompts_and_emit(
     // A failed session command rejects the prompt wait: the raw error prints to stderr and the run
     // exits 1.
     let mut command_failure: Option<String> = None;
+    // Management results are visible but do not enter the live model context or history.
+    let mut management_result: Option<String> = None;
+    let mut surfaced_plugin_jobs = std::collections::HashSet::new();
     // The `@file` image attachments ride the initial prompt only; the later CLI messages stay text.
     'prompts: for (prompt, images) in options
         .initial_message
@@ -1479,23 +1493,34 @@ async fn run_prompts_and_emit(
         .map(|prompt| (prompt, options.initial_images.clone()))
         .chain(options.messages.iter().map(|prompt| (prompt, Vec::new())))
     {
-        // Session commands never reach the model loop: the pre-turn boundary stays theirs to skip
-        // and the prompt's turn never exists.
-        if let Some(command) = engine.session.classify_session_command(prompt) {
+        management_result = None;
+        let job_checkpoint = engine.plugin_job_checkpoint();
+        // Expand explicit resources before command admission, just as the core prompt path does.
+        // Unknown slash input must never fall through to a model call.
+        let (expanded, _) = pa_core::skills::expand_skill_command(prompt, &engine.skills);
+        let normalized =
+            pa_core::skills::expand_prompt_template(&expanded, &engine.prompt_templates);
+        // Session commands, including active Lua commands and /reload, share the core executor.
+        // They skip the pre-turn boundary and never create a model turn.
+        if let Some(command) = engine.session.classify_session_command(&normalized) {
             let execution = crate::print_session_command::execute_prompt_session_command(
                 engine,
                 &goal,
                 model,
                 api_key.clone(),
-                global_harness_dir.clone(),
                 &autonomous_state,
                 &command,
                 &images,
             )
             .await;
-            if let Some(error) = execution.error {
-                command_failure = Some(error);
+            let jobs = engine.drain_plugin_jobs_since(&job_checkpoint).await;
+            let job_failure = emit_plugin_job_outcomes(jobs, json_mode, &mut surfaced_plugin_jobs);
+            command_failure = execution.error.or(job_failure);
+            if command_failure.is_some() {
                 break 'prompts;
+            }
+            if command.name == "reload" {
+                management_result = execution.messages.last().map(|row| row.content.text());
             }
             // A `/goal` start scheduled its continuation as queued session input: the prompt wait
             // drains it inside the same wait.
@@ -1505,22 +1530,29 @@ async fn run_prompts_and_emit(
                     &mut boundary,
                     model,
                     api_key.clone(),
-                    global_harness_dir.clone(),
                     &continuation,
                 )
                 .await?;
             }
             // The same queue drain a settled turn gets: held continuations and armed steers run as
             // this prompt's follow-up turns.
-            goal.drive_boundary(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
-            .await?;
+            goal.drive_boundary(engine, &mut boundary, model, api_key.clone())
+                .await?;
+            if let Some(diagnostic) = emit_plugin_job_outcomes(
+                engine.drain_plugin_jobs_since(&job_checkpoint).await,
+                json_mode,
+                &mut surfaced_plugin_jobs,
+            ) {
+                eprintln!("Plugin job diagnostic: {diagnostic}");
+            }
             continue;
+        }
+        if normalized.trim_start().starts_with('/') {
+            command_failure = Some(format!(
+                "Unknown or unavailable headless command: {}",
+                normalized.trim()
+            ));
+            break 'prompts;
         }
         boundary
             .run_pre_turn(engine, model, api_key.clone())
@@ -1528,53 +1560,55 @@ async fn run_prompts_and_emit(
         engine
             .session
             .prompt_with_images(
-                prompt,
+                &normalized,
                 images,
-                pa_core::session_engine::PromptOptions::default(),
+                pa_core::session_engine::PromptOptions {
+                    expand_prompt_templates: Some(false),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         boundary
-            .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+            .run_at_settled_turn(engine, model, api_key.clone())
             .await?;
-        goal.drive_boundary(
-            engine,
-            &mut boundary,
-            model,
-            api_key.clone(),
-            global_harness_dir.clone(),
-        )
-        .await?;
+        goal.drive_boundary(engine, &mut boundary, model, api_key.clone())
+            .await?;
         // The autonomous arm runs only when the goal does not own the boundary (the goal arm takes
         // exclusive priority).
         if !engine.goal_owns_continuation_wakeup().await {
             // The held threshold continuation drains as this invocation's follow-up
             // turn; the stop surfaces only through the exit contract.
             autonomous
-                .drive_boundary(
-                    engine,
-                    &mut boundary,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                )
+                .drive_boundary(engine, &mut boundary, model, api_key.clone())
                 .await
                 .map_err(|error| format!("{error:#}"))?;
         }
+        if let Some(diagnostic) = emit_plugin_job_outcomes(
+            engine.drain_plugin_jobs_since(&job_checkpoint).await,
+            json_mode,
+            &mut surfaced_plugin_jobs,
+        ) {
+            eprintln!("Plugin job diagnostic: {diagnostic}");
+        }
     }
     // The rejected prompt wait: print the raw command error to stderr and
-    // exit 1 — no later prompts ran, and the disposal drain still runs.
+    // exit 1 — no later prompts ran; the owning print runtime still disposes its children.
     if let Some(error) = command_failure {
         eprintln!("{error}");
+        if let Some(diagnostic) = emit_plugin_job_outcomes(
+            engine.drain_plugin_jobs().await,
+            json_mode,
+            &mut surfaced_plugin_jobs,
+        ) {
+            eprintln!("Plugin job diagnostic: {diagnostic}");
+        }
         goal_accounting.unsubscribe().await;
         accounting.unsubscribe().await;
         if let Some(subscription) = unsubscribe {
             subscription.unsubscribe().await;
         }
-        boundary
-            .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
-            .await;
         return Ok(1);
     }
     // The #2270 fix: print waits for RLM quiescence — every admitted
@@ -1593,7 +1627,6 @@ async fn run_prompts_and_emit(
             &mut boundary,
             model,
             api_key.clone(),
-            global_harness_dir.clone(),
         )
         .await?
         {
@@ -1601,25 +1634,12 @@ async fn run_prompts_and_emit(
         }
         if let Some(continuation) = engine.take_owed_goal_continuation().await {
             goal.publish_goal_update(engine).await;
-            goal.run_queued_turn(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-                &continuation,
-            )
-            .await?;
+            goal.run_queued_turn(engine, &mut boundary, model, api_key.clone(), &continuation)
+                .await?;
             continue;
         }
         if autonomous
-            .deliver_rlm_continuation(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
+            .deliver_rlm_continuation(engine, &mut boundary, model, api_key.clone())
             .await?
         {
             continue;
@@ -1629,29 +1649,26 @@ async fn run_prompts_and_emit(
         // around — the leading quiescence pass then waits for whatever
         // they left behind.
         let mut boundary_ran = goal
-            .drive_boundary(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
+            .drive_boundary(engine, &mut boundary, model, api_key.clone())
             .await?;
         if !engine.goal_owns_continuation_wakeup().await {
             boundary_ran |= autonomous
-                .drive_boundary(
-                    engine,
-                    &mut boundary,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                )
+                .drive_boundary(engine, &mut boundary, model, api_key.clone())
                 .await?;
         }
         if boundary_ran {
             continue;
         }
         break;
+    }
+    // All CLI input is exhausted. Drain only admitted generic work, never future timers.
+    // Historical/automatic job failures are diagnostic, not failures of an unrelated user turn.
+    if let Some(diagnostic) = emit_plugin_job_outcomes(
+        engine.drain_plugin_jobs().await,
+        json_mode,
+        &mut surfaced_plugin_jobs,
+    ) {
+        eprintln!("Plugin job diagnostic: {diagnostic}");
     }
     goal_accounting.unsubscribe().await;
     accounting.unsubscribe().await;
@@ -1676,7 +1693,11 @@ async fn run_prompts_and_emit(
             eprintln!("{cap_reason}");
             exit_code = 1;
         }
-        if let Some(primary) = result.primary {
+        if let Some(text) = management_result {
+            if exit_code == 0 {
+                println!("{text}");
+            }
+        } else if let Some(primary) = result.primary {
             if let Some(stderr) = primary.stderr_text(&mut exit_code) {
                 eprintln!("{stderr}");
             }
@@ -1698,16 +1719,68 @@ async fn run_prompts_and_emit(
         eprintln!("{stderr}");
         exit_code = 1;
     }
-    // The disposal order: the exit code first, then the teardown drains a
-    // compact-trigger auto-refine no later boundary consumed.
-    boundary
-        .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
-        .await;
     Ok(exit_code)
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fresh_persistent_lease_admission_fails_before_journal_creation() {
+        let home = tempfile::TempDir::new().unwrap();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let blocker = agent_dir.join("session-leases");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let manager = pa_core::session::manager::SessionManager::persisted(
+            home.path(),
+            &home.path().join("sessions"),
+        );
+        let session_file = manager.get_session_file().unwrap().to_path_buf();
+        assert!(!session_file.exists());
+        let Err(error) = super::lease_fresh_manager(manager, &agent_dir) else {
+            panic!("persistent manager escaped failed lease admission");
+        };
+        assert!(
+            error.contains("Could not lease the fresh session file"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&session_file.display().to_string()),
+            "{error}"
+        );
+        assert!(!session_file.exists(), "failed admission created a journal");
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"not a directory");
+    }
+
+    #[test]
+    fn fresh_lease_admission_keeps_in_memory_managers_unleased() {
+        let home = tempfile::TempDir::new().unwrap();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("session-leases"), "not a directory").unwrap();
+        let manager = pa_core::session::manager::SessionManager::in_memory(home.path());
+        let (manager, lease) = super::lease_fresh_manager(manager, &agent_dir).unwrap();
+        assert!(manager.get_session_file().is_none());
+        assert!(lease.is_none());
+    }
+
+    #[test]
+    fn fresh_persistent_lease_admission_holds_ownership_before_any_append() {
+        let home = tempfile::TempDir::new().unwrap();
+        let agent_dir = home.path().join("agent");
+        let manager = pa_core::session::manager::SessionManager::persisted(
+            home.path(),
+            &home.path().join("sessions"),
+        );
+        let session_file = manager.get_session_file().unwrap().to_path_buf();
+        let (_manager, lease) = super::lease_fresh_manager(manager, &agent_dir).unwrap();
+        assert!(lease.is_some());
+        assert!(pa_daemon::lease::live_lease_owner(&agent_dir, &session_file).is_some());
+        assert!(!session_file.exists());
+        drop(lease);
+        assert!(pa_daemon::lease::live_lease_owner(&agent_dir, &session_file).is_none());
+    }
 
     /// Runtime cancellation unblocks a pending writer; ownership must remain
     /// held until that blocking writer finishes, even on errors or unwinding.
@@ -1855,6 +1928,7 @@ mod tests {
             home.path().to_path_buf(),
             agent_dir,
             session_model,
+            std::sync::Arc::default(),
         );
         let expected_route = pa_core::models::ResolvedImageModel {
             model: fixture_model("image-model"),

@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod goal;
 pub mod incident;
 pub mod memory_release;
+pub mod model_refresh;
 pub mod platform;
 pub mod session;
 pub mod skill_blocks;

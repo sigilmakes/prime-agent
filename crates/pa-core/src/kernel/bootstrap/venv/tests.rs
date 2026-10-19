@@ -44,13 +44,6 @@ fn windows_executable_candidates_skips_suffix_and_duplicates() {
 use super::*;
 
 #[test]
-fn venv_dir_honors_override() {
-    // The default path lives under $HOME.
-    let base = kernel_venv_dir();
-    assert!(base.ends_with("kernel-venv"));
-}
-
-#[test]
 fn dependency_names_parse() {
     let dir = tempfile::tempdir().unwrap();
     let pyproject = dir.path().join("pyproject.toml");
@@ -940,7 +933,7 @@ fn uv_invocations(dir: &Path) -> Vec<String> {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn skill_sync_batches_missing_installs_into_one_uv_call() {
+async fn skill_sync_installs_only_missing_skills() {
     // A fake uv records its args: every missing skill must land in ONE
     // invocation, and already-installed skills must stay out of it.
     let dir = tempfile::tempdir().unwrap();
@@ -1010,7 +1003,7 @@ async fn skill_sync_batches_missing_installs_into_one_uv_call() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
+async fn skill_sync_checkpoints_successes_and_excludes_failed_skills() {
     // A batch covering several skills fails; the fallback retries each missing skill alone.
     let dir = tempfile::tempdir().unwrap();
     let uv = fake_uv(
@@ -1046,12 +1039,12 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
     let calls = uv_invocations(dir.path());
     assert_eq!(
         calls.len(),
-        3,
-        "one failed batch then one call per skill: {calls:?}"
+        2,
+        "one invocation per missing skill: {calls:?}"
     );
     assert!(
-        calls[0].contains("edit") && calls[0].contains("broken"),
-        "the batch covers both skills: {calls:?}"
+        calls[0].contains("edit") && calls[1].contains("broken"),
+        "each skill has its own invocation: {calls:?}"
     );
     for call in &calls {
         assert!(call.contains(dir.path().join("prime-agent-runtime").to_str().unwrap()));
@@ -1070,4 +1063,134 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
         .map(|s| s.import_name.clone())
         .collect::<Vec<_>>();
     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
+}
+
+#[test]
+fn inline_dependencies_and_cycles_resolve_to_local_skills() {
+    let root = tempfile::tempdir().unwrap();
+    let mut requested = Vec::new();
+    for (name, dependency) in [("alpha", "beta[httpx]>=1"), ("beta", "alpha")] {
+        let package = root.path().join(name);
+        std::fs::create_dir(&package).unwrap();
+        let pyproject = package.join("pyproject.toml");
+        std::fs::write(
+            &pyproject,
+            format!("[project]\nname = '{name}'\ndependencies = ['{dependency}']\n"),
+        )
+        .unwrap();
+        requested.push(KernelPythonSkill {
+            name: name.into(),
+            import_name: name.into(),
+            package_path: package,
+            pyproject_path: pyproject,
+        });
+    }
+    let normalized = normalize_python_skills(&requested[..1]);
+    assert_eq!(
+        normalized
+            .iter()
+            .map(|s| s.import_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn changed_recorded_skills_each_install_and_checkpoint_without_dropping_later_records() {
+    let root = tempfile::tempdir().unwrap();
+    let venv = root.path().join("kernel");
+    std::fs::create_dir(&venv).unwrap();
+    let paths = [root.path().join("alpha"), root.path().join("beta")];
+    for path in &paths {
+        std::fs::create_dir(path).unwrap();
+    }
+    let stale: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            skill(
+                if i == 0 { "alpha" } else { "beta" },
+                p.to_str().unwrap(),
+                "old",
+            )
+        })
+        .collect();
+    write_bootstrap_version(&venv, "rt", &stale).unwrap();
+    let mut changed = stale.clone();
+    for skill in &mut changed {
+        skill.pyproject_hash = "new".into();
+    }
+    let uv = fake_uv(
+        root.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}/uv.log\"\nexit 0\n",
+            root.path().display()
+        ),
+    );
+    sync_python_skills(
+        uv.to_str().unwrap(),
+        &venv,
+        Path::new("/isolated/python"),
+        root.path(),
+        "rt",
+        &changed,
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let calls = uv_invocations(root.path());
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].contains("alpha"));
+    assert!(calls[1].contains("beta"));
+    assert_eq!(
+        read_bootstrap_version(&venv).unwrap().python_skills,
+        Some(changed)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_local_dependency_is_still_offered_as_trusted_source_to_its_dependent() {
+    let root = tempfile::tempdir().unwrap();
+    let venv = root.path().join("kernel");
+    std::fs::create_dir(&venv).unwrap();
+    let mut requested = Vec::new();
+    for (name, dependencies) in [("alpha", "['beta']"), ("beta", "[]")] {
+        let package = root.path().join(name);
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(
+            package.join("pyproject.toml"),
+            format!("[project]\nname = '{name}'\ndependencies = {dependencies}\n"),
+        )
+        .unwrap();
+        requested.push(skill(name, package.to_str().unwrap(), "new"));
+    }
+    let uv = fake_uv(root.path(), &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}/uv.log\"\ncase \"$*\" in *alpha*) exit 0;; *) exit 1;; esac\n", root.path().display()));
+    sync_python_skills(
+        uv.to_str().unwrap(),
+        &venv,
+        Path::new("/isolated/python"),
+        root.path(),
+        "rt",
+        &requested,
+        &EnsureKernelPythonOptions::default(),
+    )
+    .await
+    .unwrap();
+    let calls = uv_invocations(root.path());
+    assert_eq!(calls.len(), 2);
+    assert!(!calls[0].contains("alpha"));
+    assert!(calls[1].contains(&format!(
+        "--editable {}",
+        root.path().join("alpha").display()
+    )));
+    assert!(calls[1].contains(&format!(
+        "--editable {}",
+        root.path().join("beta").display()
+    )));
+    assert_eq!(
+        read_bootstrap_version(&venv).unwrap().python_skills,
+        Some(requested)
+    );
 }

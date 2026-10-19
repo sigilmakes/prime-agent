@@ -1,0 +1,21 @@
+--- a/src/thread.rs
++++ b/src/thread.rs
+@@ -597,12 +597,17 @@
+         let thread_state = self.thread.state();
+         unsafe {
+             let _sg = StackGuard::new(state);
+-            let _thread_sg = StackGuard::with_top(thread_state, 0);
++            let mut thread_sg = StackGuard::with_top(thread_state, 0);
+             let _wg = WakerGuard::new(&lua, cx.waker());
+ 
+             let (status, nresults) = self.thread.resume_inner(&lua, nargs)?;
+ 
+             if status.is_yielded() {
++                if nresults == 0 {
++                    // A count-hook suspension exposes the current Lua frame, not
++                    // returned yield values. Keep those locals until resume.
++                    thread_sg.keep(ffi::lua_gettop(thread_state));
++                }
+                 if !(nresults == 1 && is_poll_pending(thread_state)) {
+                     // Ignore values returned via yield()
+                     cx.waker().wake_by_ref();

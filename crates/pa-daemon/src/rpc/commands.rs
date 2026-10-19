@@ -201,7 +201,10 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
             model_commands::set_queue_mode(state, &payload, name).await
         }
         "compact" => compact(state, &payload).await,
-        "refine" => refine(state, &payload).await,
+        "refine" => Err(
+            "Plugin commands require daemon mode; use /refine through a daemon connection"
+                .to_string(),
+        ),
         "set_auto_compaction" => set_auto_compaction(state, &payload).await,
         "set_auto_retry" => set_auto_retry(state, &payload).await,
         // `abort_retry` always answers success (the in-process turn path
@@ -453,48 +456,6 @@ pub fn compaction_frame(kind: &str, instructions: Option<&str>, result: Option<&
         }
         frame
     }
-}
-
-/// `refine`: run the refinement and answer with the `RefinementResult`.
-async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
-    let options = pa_core::session_engine::refine::RefineOptions {
-        global: payload
-            .get("global")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        instructions: payload
-            .get("instructions")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        rollback_id: payload
-            .get("rollbackId")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    };
-    // The handle guard stays held through the refinement: no replacement
-    // or `set_model` interleaves before the file writes.
-    let handle = state.session.handle().await;
-    let model = handle.model.clone();
-    let api_key = handle.api_key.clone();
-    let engine = handle.engine.clone();
-    let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
-    // Refine appends durable rows into the live loop context; it shares
-    // compact's one-command-at-a-time serialization.
-    let _ops = state.session_ops.lock().await;
-    let result = engine
-        .session
-        .refine(
-            &options,
-            pa_core::session_engine::refine::RefinementSource::User,
-            &model,
-            api_key,
-            global_harness_dir,
-        )
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    Ok(ResponseData::Present(
-        serde_json::to_value(result).unwrap_or(Value::Null),
-    ))
 }
 
 /// `set_auto_compaction`: the live settings toggle plus the settings default it persists.

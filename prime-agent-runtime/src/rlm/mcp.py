@@ -31,6 +31,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
+from mcp.shared.exceptions import MCPError
+
 from . import host_request
 from .mcp_base import McpToolError
 
@@ -166,6 +168,7 @@ class _Generation:
         self.stack = AsyncExitStack()
         self.session: Any = None
         self.tools: dict[str, dict[str, Any]] = {}
+        self._discovery_expired = False
         self.closed = False
         self._call_lock = asyncio.Lock()
         self._stderr: _StderrTail | None = None
@@ -192,6 +195,10 @@ class _Generation:
             await asyncio.shield(ready)
         except BaseException:
             if ready.done():
+                # Startup cancellation can set an exception on ready after the
+                # waiter was cancelled. Retrieve it to avoid an orphaned future.
+                if not ready.cancelled():
+                    ready.exception()
                 self._close_requested.set()
             else:
                 self._lifecycle.cancel()
@@ -199,6 +206,8 @@ class _Generation:
                 await asyncio.shield(self._lifecycle)
             except BaseException:
                 pass
+            if ready.done() and not ready.cancelled():
+                ready.exception()
             raise
 
     async def _run_lifecycle(self, ready: asyncio.Future[None]) -> None:
@@ -333,7 +342,14 @@ class _Generation:
         cursor: str | None = None
         pages = 0
         while True:
-            response = await self._list_tools_page(cursor)
+            try:
+                response = await self._list_tools_page(cursor)
+            except MCPError as exc:
+                # Only tools/list is intrinsically read-only. The same error
+                # from tools/call does not prove the transport has expired.
+                if exc.code == -32600 and exc.message == "Session terminated":
+                    self._discovery_expired = True
+                raise
             pages += 1
             for tool in getattr(response, "tools", None) or []:
                 name = getattr(tool, "name", None)
@@ -413,6 +429,7 @@ class _Registry:
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._generations: dict[str, _Generation] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._epochs: dict[str, int] = {}
         self._operations: set[asyncio.Task[Any]] = set()
         self._state = "open"
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -448,34 +465,57 @@ class _Registry:
     async def get(self, server: str) -> _Generation:
         return await self._tracked(lambda: self._get(server))
 
+    def _assert_current(self, server: str, epoch: int) -> None:
+        self._accepting_work()
+        if self._epochs.get(server, 0) != epoch:
+            raise RuntimeError(f"MCP connection '{server}' was reloaded")
+
     async def _get(self, server: str) -> _Generation:
         self._accepting_work()
         _validate_name(server, "server")
+        epoch = self._epochs.get(server, 0)
         lock = self._locks.setdefault(server, asyncio.Lock())
         async with lock:
-            return await self._get_locked(server)
+            self._assert_current(server, epoch)
+            generation = await self._get_locked(server)
+            self._assert_current(server, epoch)
+            return generation
 
     async def _get_locked(self, server: str) -> _Generation:
         self._accepting_work()
+        epoch = self._epochs.get(server, 0)
         current = self._generations.get(server)
         config = await _config(server)
-        self._accepting_work()
+        self._assert_current(server, epoch)
         if current and current.config == config and not current.closed:
             return current
         if current:
             await current.close()
             if self._generations.get(server) is current:
                 self._generations.pop(server, None)
-        self._accepting_work()
-        generation = _Generation(server, config)
-        self._generations[server] = generation
-        try:
-            await generation.open()
-        except BaseException:
-            if self._generations.get(server) is generation:
-                self._generations.pop(server, None)
-            raise
-        return generation
+        self._assert_current(server, epoch)
+        first_expiry: MCPError | None = None
+        for attempt in range(2):
+            self._assert_current(server, epoch)
+            generation = _Generation(server, config)
+            self._generations[server] = generation
+            try:
+                await generation.open()
+                self._assert_current(server, epoch)
+                return generation
+            except BaseException as exc:
+                if self._generations.get(server) is generation:
+                    self._generations.pop(server, None)
+                await generation.close()
+                if not (isinstance(exc, MCPError) and generation._discovery_expired):
+                    raise
+                self._assert_current(server, epoch)
+                if attempt:
+                    assert first_expiry is not None
+                    raise first_expiry from None
+                first_expiry = exc
+                config = await _config(server)
+        raise AssertionError("unreachable")
 
     async def tools(self, server: str) -> list[dict[str, Any]]:
         async def operation() -> list[dict[str, Any]]:
@@ -509,15 +549,25 @@ class _Registry:
             self._accepting_work()
             _validate_name(server, "server")
             lock = self._locks.setdefault(server, asyncio.Lock())
+            epoch = self._epochs.get(server, 0)
             async with lock:
+                self._assert_current(server, epoch)
                 generation = await self._get_locked(server)
-                return await generation.call(tool, arguments)
+                self._assert_current(server, epoch)
+                # Tool-origin MCP errors are indistinguishable from the SDK's
+                # streamable-HTTP session-expiry error. Never replay a call or
+                # discard the session based on the error text or tool hints.
+                result = await generation.call(tool, arguments)
+                self._assert_current(server, epoch)
+                return result
 
         return await self._tracked(operation)
 
     async def reload(self, server: str | None = None) -> None:
         async def operation() -> None:
             names = [server] if server is not None else list(set(self._locks) | set(self._generations))
+            for name in names:
+                self._epochs[name] = self._epochs.get(name, 0) + 1
             results = await asyncio.gather(*(self._close_name(name) for name in names), return_exceptions=True)
             for result in results:
                 if isinstance(result, BaseException):

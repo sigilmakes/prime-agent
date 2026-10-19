@@ -166,6 +166,17 @@ impl AgentView {
                 ));
                 rows
             }
+            ChatEntry::BranchSummary { summary } => {
+                // TS addMessageToChat mounts a spacer even for the first branch summary.
+                let mut rows = vec![Vec::new()];
+                rows.extend(crate::branch_row::render_branch_summary(
+                    summary,
+                    detail.tool_output_expanded(),
+                    &self.theme,
+                    width,
+                ));
+                rows
+            }
             ChatEntry::Assistant(message) => {
                 let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
                 md.code_block_indent.clone_from(&self.code_block_indent);

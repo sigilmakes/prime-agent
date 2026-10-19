@@ -27,7 +27,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
         hello["schemaId"]
             .as_str()
             .map(std::string::ToString::to_string),
-        Some("protocol-7-schema-30-8e4b17c2a9f5".to_string())
+        Some("protocol-7-schema-32-model-refresh".to_string())
     );
     assert!(hello["supervisorOwnerToken"].is_string());
     assert!(hello["supervisorProcessStartId"]
@@ -44,10 +44,12 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
             "client_owned_sessions",
             "elide_snapshot_images",
             "windowed_snapshot",
+            "display_transcript",
             "delete_rlm_subagent",
             "heartbeat_catalog",
             "heartbeat_management",
             "model_catalog",
+            "model_refresh",
             "side_question_transcript",
             "transient_bash",
             "kernel_bash_activity",
@@ -81,6 +83,18 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     assert_eq!(list["success"], true, "list failed: {list}");
     assert_eq!(list["data"]["sessions"], serde_json::json!([]));
 
+    // Optional refresh leaves old protocol-7 list/create clients unchanged.
+    client.send_command(
+        "refresh-empty",
+        &serde_json::json!({"type":"refresh_all_models"}),
+    );
+    let empty_refresh = client.read_response("refresh-empty");
+    assert_eq!(empty_refresh["success"], true);
+    assert_eq!(
+        empty_refresh["data"]["workers"],
+        serde_json::json!({"total":0,"succeeded":0,"failed":0})
+    );
+
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
@@ -109,6 +123,28 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
         .or_else(|| created["data"]["sessionId"].as_str())
         .expect("session id in create response")
         .to_string();
+
+    client.send_command(
+        "refresh-resident",
+        &serde_json::json!({"type":"refresh_all_models"}),
+    );
+    let refreshed = client.read_response("refresh-resident");
+    assert_eq!(refreshed["success"], true, "refresh failed: {refreshed}");
+    assert_eq!(
+        refreshed["data"]["workers"],
+        serde_json::json!({"total":1,"succeeded":1,"failed":0})
+    );
+    let _: pa_types::model_refresh::ModelRefreshReport =
+        serde_json::from_value(refreshed["data"].clone()).unwrap();
+    client.send_command(
+        "refresh-selected",
+        &serde_json::json!({
+            "type":"refresh_models","activeSessionId":session_id,"sources":[],
+        }),
+    );
+    let selected_refresh = client.read_response("refresh-selected");
+    assert_eq!(selected_refresh["success"], true);
+    assert_eq!(selected_refresh["data"]["sources"], serde_json::json!([]));
 
     client.send_command(
         "a1",

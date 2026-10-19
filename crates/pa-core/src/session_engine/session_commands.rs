@@ -1,5 +1,5 @@
 //! Session slash-command execution: the daemon-side behavior behind
-//! `/compact`, `/refine`, `/goal`, and `/autonomous`. The host runtime owns
+//! `/compact`, `/goal`, and `/autonomous`. The host runtime owns
 //! persistence of what this returns; errors carry the exact TS message and
 //! the host renders the `Command failed: ...` result row.
 
@@ -22,8 +22,7 @@ use super::goal_driver::GoalDriver;
 use super::messages::{
     SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 };
-use super::refine::{RefineOptions, RefinementSource};
-use super::slash_commands::{parse_refine_command_options, SessionSlashCommand};
+use super::slash_commands::SessionSlashCommand;
 
 pub use crate::autonomous::AUTONOMOUS_STATUS_CUSTOM_TYPE;
 
@@ -32,7 +31,6 @@ pub struct SessionCommandParams<'a> {
     pub model: &'a pa_types::ai::Model,
     /// Resolved API key (None falls back to provider resolution).
     pub api_key: Option<String>,
-    pub global_harness_dir: std::path::PathBuf,
     pub autonomous: &'a mut AutonomousRuntimeState,
 }
 
@@ -66,12 +64,6 @@ pub struct SessionCommandExecution {
     /// The command failed: the TS error message (the failure result row
     /// is already appended to `messages`).
     pub error: Option<String>,
-    /// A refinement run's structured outcome; the result row in
-    /// `messages` stays display-only.
-    pub refinement: Option<crate::refinement::RefinementResult>,
-    /// A refinement run failed: the raw run error (option-parse failures
-    /// leave this `None`; they are command failures, not refinement events).
-    pub refinement_failed: Option<String>,
 }
 
 impl SessionCommandExecution {
@@ -161,6 +153,84 @@ fn goal_status_text(state: &crate::goals::GoalState) -> String {
     }
 }
 
+/// Execute only native plugin commands or plugin reload without provider inputs.
+/// Plugin echo/result rows keep the shared durable framing. Reload is management
+/// work and never enters canonical history. Other commands are rejected here.
+pub async fn execute_plugin_session_command(
+    engine: &SessionEngine,
+    command: &SessionSlashCommand,
+) -> SessionCommandExecution {
+    let mut execution = SessionCommandExecution::default();
+    let _plugin_job_guard = if command.plugin.is_some() {
+        Some(engine.session.plugin_command_guard().await)
+    } else {
+        None
+    };
+    // Management operations never enter canonical history or rebuild live context.
+    if command.name == "reload" {
+        // Host transports emit the echo separately, then skip this first row.
+        // Keep that framing without persisting either management row.
+        execution.push_message(session_command_echo_row(command));
+        let result = engine.reload_plugins().await;
+        let (text, success) = match result {
+            Ok(snapshot) => (
+                format!("Plugins reloaded (revision {}).", snapshot.revision),
+                true,
+            ),
+            Err(error) => {
+                let message = error.to_string();
+                execution.error = Some(message.clone());
+                (format!("Plugin reload failed: {message}"), false)
+            }
+        };
+        execution.push_message(slash_command_result(
+            command,
+            text,
+            success,
+            if success { "info" } else { "error" },
+            execution.error.as_deref(),
+            true,
+        ));
+        return execution;
+    }
+    let Some(target) = command.plugin.as_ref() else {
+        let error = format!("Not a plugin command: /{}", command.name);
+        execution
+            .messages
+            .push(session_command_failure_row(command, &error));
+        execution.error = Some(error);
+        return execution;
+    };
+    let echo = session_command_echo_row(command);
+    execution.push_message(echo.clone());
+    if let Err(error) = persist_rows(engine, std::iter::once(&echo)).await {
+        execution.error = Some(error);
+        return execution;
+    }
+    match engine.invoke_plugin_command(target, &command.args).await {
+        Ok(value) => execution.push_message(slash_command_result(
+            command,
+            value.to_string(),
+            true,
+            "info",
+            None,
+            true,
+        )),
+        Err(error) => {
+            let message = error.to_string();
+            execution.push_message(session_command_failure_row(command, &message));
+            execution.error = Some(message);
+        }
+    }
+    if let Err(error) = persist_rows(engine, execution.messages.iter().skip(1)).await {
+        execution.error = Some(error);
+    }
+    if let Err(error) = sync_live_context(engine).await {
+        execution.error = Some(error);
+    }
+    execution
+}
+
 /// Execute one session command. The echo row is durable whether the command
 /// succeeds or fails; a failure appends the failure row and reports `error`.
 pub async fn execute_session_command(
@@ -169,6 +239,9 @@ pub async fn execute_session_command(
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
 ) -> SessionCommandExecution {
+    if command.name == "reload" || command.plugin.is_some() {
+        return execute_plugin_session_command(engine, command).await;
+    }
     let mut execution = SessionCommandExecution::default();
     // The echo row is recorded BEFORE the command runs, so the command's
     // own work sees it in the session branch.
@@ -178,9 +251,8 @@ pub async fn execute_session_command(
         execution.error = Some(error);
         return execution;
     }
-    let result = match command.name {
+    let result = match command.name.as_str() {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
-        "refine" => execute_refine(engine, params, command, &mut execution).await,
         "goal" => execute_goal(engine, command, images, &mut execution).await,
         "autonomous" => execute_autonomous(params, command, &mut execution),
         other => Err(format!("Unknown session command: {other}")),
@@ -200,19 +272,22 @@ pub async fn execute_session_command(
     if let Err(error) = persist_rows(engine, execution.messages.iter().skip(1)).await {
         execution.error = Some(error);
     }
-    sync_live_context(engine).await;
+    if let Err(error) = sync_live_context(engine).await {
+        execution.error = Some(error);
+    }
     execution
 }
 
 /// The live agent context mirrors the durable rows (so the next admitted
 /// turn's request carries them); the rebuild is idempotent — the compaction
-/// path rebuilds mid-execution, the refinement path pushes rows mid-execution.
-async fn sync_live_context(engine: &SessionEngine) {
-    let session = engine.session.session_handle().clone();
-    let rebuilt = {
-        let session = session.lock().await;
-        session.active_context().messages
-    };
+/// path rebuilds mid-execution.
+async fn sync_live_context(engine: &SessionEngine) -> Result<(), String> {
+    let _flight = engine.session.compaction_flight.lock().await;
+    let rebuilt = engine
+        .session
+        .context_messages()
+        .await
+        .map_err(|error| format!("{error:#}"))?;
     // The raw session messages (not the LLM view): custom rows keep their
     // wire identity in the live context, like TS's state push.
     let loop_messages: Vec<pa_agent::types::AgentMessage> = rebuilt
@@ -220,6 +295,7 @@ async fn sync_live_context(engine: &SessionEngine) {
         .filter_map(super::session_message_to_loop)
         .collect();
     engine.session.agent().set_messages(loop_messages).await;
+    Ok(())
 }
 
 /// `/compact`: summarize and cut, or skip silently (TS `CompactionSkippedError`).
@@ -240,9 +316,6 @@ async fn execute_compact(
             execution.compaction_skipped = Some(message);
         }
         CompactOutcome::Ran(run) => {
-            if let Some(telemetry) = &engine.telemetry {
-                telemetry.note_compaction(Some(run.duration_ms));
-            }
             execution.compaction = Some(CompactionExecution {
                 entry: run.entry,
                 result: run.result,
@@ -250,56 +323,6 @@ async fn execute_compact(
             });
         }
     }
-    Ok(())
-}
-
-/// `/refine`: run the refinement and record the applied-edit count.
-async fn execute_refine(
-    engine: &SessionEngine,
-    params: &mut SessionCommandParams<'_>,
-    command: &SessionSlashCommand,
-    execution: &mut SessionCommandExecution,
-) -> Result<(), String> {
-    let options = parse_refine_command_options(&command.args)?;
-    let refine_options = RefineOptions {
-        global: options.global,
-        instructions: options.instructions,
-        rollback_id: options.rollback_id,
-    };
-    let result = match engine
-        .session
-        .refine(
-            &refine_options,
-            RefinementSource::User,
-            params.model,
-            params.api_key.take(),
-            params.global_harness_dir.clone(),
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            // The refinement run itself failed: a host transport surfaces
-            // this as a refinement event, distinct from the command failure.
-            execution.refinement_failed = Some(format!("{error:#}"));
-            return Err(format!("{error:#}"));
-        }
-    };
-    execution.refinement = Some(result.clone());
-    let applied = result
-        .applied_edits
-        .iter()
-        .filter(|edit| edit.applied)
-        .count();
-    let content = format!(
-        "Refined continual harness state: {applied} edit{} applied.",
-        if applied == 1 { "" } else { "s" }
-    );
-    // The refinement outcome message renders the details; the result row is
-    // durable but not displayed (TS `displayResult = false`).
-    execution.push_message(slash_command_result(
-        command, content, true, "info", None, false,
-    ));
     Ok(())
 }
 
@@ -312,15 +335,6 @@ async fn execute_goal(
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
     let goal = parse_goal_command(&command.args)?;
-    // The goal command's fixed choice for the feature-outcome seam
-    // (captured before the driver arm moves the command's fields).
-    let goal_choice = match goal {
-        GoalCommand::Status => "status",
-        GoalCommand::Clear => "clear",
-        GoalCommand::Pause => "pause",
-        GoalCommand::Resume => "resume",
-        GoalCommand::Start { .. } => "create",
-    };
     let driver: Arc<tokio::sync::Mutex<GoalDriver>> = engine.goal_driver.clone();
     let session = engine.session.session_handle().clone();
     let mut context_message: Option<CustomMessage> = None;
@@ -389,11 +403,6 @@ async fn execute_goal(
     // injected custom row), never an early durable row — the loop
     // admission appends it once.
     execution.continuation_message = context_message;
-    // The goal command's observed result at this seam (the driver applied
-    // the action), counted as `feature_goal_completed_count`.
-    if let Some(telemetry) = engine.telemetry.as_ref() {
-        telemetry.note_feature_outcome("goal", "completed", Some(goal_choice));
-    }
     Ok(())
 }
 
@@ -460,7 +469,8 @@ mod tests {
             format!("/{name} {args}")
         };
         SessionSlashCommand {
-            name,
+            name: name.to_string(),
+            plugin: None,
             args: args.to_string(),
             text,
         }
@@ -504,7 +514,7 @@ mod tests {
         assert_eq!(details["severity"], serde_json::json!("info"));
 
         let failed = slash_command_result(
-            &command("refine", ""),
+            &command("compact", ""),
             "Command failed: boom".to_string(),
             false,
             "error",
@@ -536,7 +546,6 @@ mod tests {
             &mut SessionCommandParams {
                 model: &scripted_model(),
                 api_key: None,
-                global_harness_dir: std::path::PathBuf::from("/tmp"),
                 autonomous: &mut autonomous,
             },
             &command("autonomous", "on --max-turns 5"),
@@ -560,6 +569,85 @@ mod tests {
             "contextWindow": 1000, "maxTokens": 100
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn plugin_executor_needs_no_provider_inputs_and_reload_is_history_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        let agent = dir.path().join("agent");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(
+            cwd.join("test.lua"),
+            "return {commands={{name='local_command',run=function(input) return input.args end}}}",
+        )
+        .unwrap();
+        std::fs::write(
+            agent.join("settings.json"),
+            serde_json::json!({
+                "enableBuiltinSkills": false, "harnessRefinements":false,
+                "plugins":{"test":{"enabled":true,"path":"test.lua"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Session creation still resolves a model. Command execution itself takes no
+        // provider parameters and must not consume the fixture's empty provider queue.
+        let model: pa_agent::types::Model =
+            serde_json::from_value(serde_json::to_value(scripted_model()).unwrap()).unwrap();
+        let provider = Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
+        let engine =
+            super::super::engine::create_session(super::super::engine::SessionEngineConfig {
+                cwd,
+                agent_dir: agent,
+                model: Some(model),
+                stream_fn: Some(provider.stream_fn()),
+                prewarm_ipython_kernel: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let plugin = engine
+            .session
+            .classify_session_command("/local_command exact")
+            .unwrap();
+        let result = execute_plugin_session_command(&engine, &plugin).await;
+        assert_eq!(result.error, None);
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[1].content.text(), "\"exact\"");
+        let before = engine
+            .session
+            .session_handle()
+            .lock()
+            .await
+            .active_context()
+            .messages;
+        let result = execute_plugin_session_command(&engine, &command("reload", "")).await;
+        assert_eq!(result.error, None);
+        assert_eq!(
+            engine
+                .session
+                .session_handle()
+                .lock()
+                .await
+                .active_context()
+                .messages,
+            before
+        );
+        let rejected = execute_plugin_session_command(&engine, &command("compact", "")).await;
+        assert!(rejected.error.unwrap().contains("Not a plugin command"));
+        assert!(provider.calls().is_empty());
+        assert_eq!(
+            engine
+                .session
+                .session_handle()
+                .lock()
+                .await
+                .active_context()
+                .messages,
+            before
+        );
     }
 
     #[test]

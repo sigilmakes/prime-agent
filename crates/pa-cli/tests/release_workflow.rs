@@ -114,7 +114,7 @@ struct Step {
 
 /// The promote job's steps from the committed `.github/workflows/release.yml`.
 fn promote_steps() -> Vec<Step> {
-    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+    let text = fs::read_to_string(repo_root().join(".github/upstream-workflows/release.yml"))
         .expect("read .github/workflows/release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
     workflow
@@ -430,7 +430,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
 /// as the retained TypeScript updater before their artifacts reach promotion.
 #[test]
 fn native_release_jobs_gate_fresh_and_legacy_installation() {
-    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+    let text = fs::read_to_string(repo_root().join(".github/upstream-workflows/release.yml"))
         .expect("read release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
     for job_name in ["build-gnu", "build-darwin"] {
@@ -465,7 +465,7 @@ fn native_release_jobs_gate_fresh_and_legacy_installation() {
 /// completeness gate refuses a manifest that dropped a platform row.
 #[test]
 fn windows_build_job_contract() {
-    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+    let text = fs::read_to_string(repo_root().join(".github/upstream-workflows/release.yml"))
         .expect("read release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
     let windows = workflow
@@ -550,7 +550,7 @@ fn windows_build_job_contract() {
 /// static, and never through Cargo.toml, whose dev builds stay dynamic.
 #[test]
 fn the_windows_build_links_the_static_vc_runtime() {
-    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+    let text = fs::read_to_string(repo_root().join(".github/upstream-workflows/release.yml"))
         .expect("read release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
     let windows = workflow
@@ -831,7 +831,7 @@ fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
 /// beta releases publish only the explicitly selected beta installer pair.
 #[test]
 fn production_installers_are_published_only_by_stable_releases() {
-    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+    let text = fs::read_to_string(repo_root().join(".github/upstream-workflows/release.yml"))
         .expect("read release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
     let publish = workflow

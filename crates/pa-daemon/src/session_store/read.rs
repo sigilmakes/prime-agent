@@ -157,7 +157,6 @@ impl SessionFile {
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
-            trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
         };
@@ -217,7 +216,6 @@ impl SessionFile {
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
-            trace_upload: None,
             anthropic_warning_shown,
             skipped_lines: 0,
         };
@@ -285,7 +283,6 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
-        full.trace_upload.clone_from(&self.trace_upload);
         full.child_usage_recovery
             .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
@@ -317,7 +314,6 @@ impl SessionFile {
             window: None,
             lease: None,
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
-            trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
         }

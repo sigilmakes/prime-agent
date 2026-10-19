@@ -400,10 +400,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         Arc::clone(&link),
         agent_dir.clone(),
         parent_active_session_id.clone(),
-        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
-            agent_dir.clone(),
-            /*telemetry_disabled*/ true,
-        )),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,
@@ -724,15 +720,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     let mut kids = Vec::new();
     for (index, (active, session, file)) in roots.iter().enumerate() {
         let kid_name = if index == 0 { "kid" } else { "kid-b" };
-        let children = SupervisorChildSessions::new(
-            Arc::clone(&link),
-            agent_dir.clone(),
-            active.clone(),
-            std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
-                agent_dir.clone(),
-                /*telemetry_disabled*/ true,
-            )),
-        );
+        let children =
+            SupervisorChildSessions::new(Arc::clone(&link), agent_dir.clone(), active.clone());
         children.set_identity(ParentIdentity {
             rlm_depth: 0,
             rlm_max_depth: 2,
@@ -863,15 +852,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     }
 
     // The grandchild: a worker spawned through a registry bound to KID-A's durable identity.
-    let kid_children = SupervisorChildSessions::new(
-        Arc::clone(&link),
-        agent_dir.clone(),
-        kid_a_active.clone(),
-        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
-            agent_dir.clone(),
-            /*telemetry_disabled*/ true,
-        )),
-    );
+    let kid_children =
+        SupervisorChildSessions::new(Arc::clone(&link), agent_dir.clone(), kid_a_active.clone());
     kid_children.set_identity(ParentIdentity {
         rlm_depth: 1,
         rlm_max_depth: 2,
@@ -1175,10 +1157,6 @@ async fn parent_renames_a_child_end_to_end() {
         Arc::new(SupervisorLink::new(socket.clone())),
         agent_dir.clone(),
         parent_active_session_id.clone(),
-        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
-            agent_dir.clone(),
-            /*telemetry_disabled*/ true,
-        )),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,

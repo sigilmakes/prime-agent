@@ -243,6 +243,14 @@ struct PanelMcpLoginUi {
 }
 
 impl McpLoginUi for PanelMcpLoginUi {
+    fn cancelled(&self) -> bool {
+        self.panel.cancelled()
+    }
+
+    fn wait_cancelled(&self) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.panel.cancelled_wait())
+    }
+
     fn on_progress(&self, message: &str) {
         // Unguarded chatter — a direct progress line: renders on every
         // surface.
@@ -442,6 +450,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Unknown MCP integration: nope");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_panel_login_does_not_persist_credentials() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let agent_dir = dir.path().join("agent");
+        settings_with_fixture_server(&agent_dir);
+        let auth = TerminalMcpAuth::new(dir.path(), &agent_dir);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let panel = pa_tui::auth_panel::AuthPanelHandle::new(tx);
+        panel
+            .cancel_flag()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let ui = PanelMcpLoginUi { panel };
+        let error = auth
+            .login_with("fixture", &ui, &ScriptedHttp::fixture())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Login cancelled");
+        assert!(AuthStorage::create(&agent_dir)
+            .get_all()
+            .get("mcp:fixture")
+            .is_none());
         Ok(())
     }
 

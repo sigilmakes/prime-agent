@@ -179,6 +179,7 @@ fn session_context(model: Option<(&str, &str)>) -> SessionContext {
         })],
         thinking_level: "off".into(),
         service_tier: None,
+        archive: None,
         model: model.map(|(provider, id)| (provider.to_string(), id.to_string())),
     }
 }

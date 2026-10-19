@@ -106,6 +106,10 @@ async fn a_known_resident_registration_writes_nothing_to_disk() {
     let descriptor = resident.descriptor.lock().await;
     assert_eq!(descriptor.lifecycle, DaemonWorkerLifecycle::Ready);
     assert_eq!(
+        descriptor.telemetry_disabled, None,
+        "registration must not certify a live legacy worker as opted out"
+    );
+    assert_eq!(
         descriptor.socket_path, "/tmp/w-regskip-live.sock",
         "the live socket refreshes in memory"
     );
@@ -179,6 +183,15 @@ async fn a_relaunch_spawn_record_serves_the_durable_persist() {
     .expect("parse the spawn record");
     assert_eq!(persisted.lifecycle, DaemonWorkerLifecycle::Starting);
     assert!(persisted.pid > 0, "the spawned pid rides the record");
+    assert_eq!(
+        persisted.telemetry_disabled,
+        Some(true),
+        "a recovered legacy worker's replacement is marked reporter-free"
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.telemetry_disabled,
+        Some(true)
+    );
 
     let first_path = persisted
         .orphan_process_journal_path
@@ -198,6 +211,11 @@ async fn a_relaunch_spawn_record_serves_the_durable_persist() {
         &supervisor.options.socket_path.to_string_lossy(),
         "replacement-nonce",
         &replacement,
+    );
+    assert_eq!(
+        launch_env.get(crate::worker::WORKER_TELEMETRY_DISABLED_ENV),
+        Some(&"1".to_string()),
+        "replacement launch env carries the backward-compatible opt-out"
     );
     assert_eq!(
         launch_env.get(pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV),

@@ -54,19 +54,7 @@ impl ClientSettings for CliClientSettings {
     }
 
     fn set_harness_refinements(&self, enabled: bool) -> Result<()> {
-        let mut manager = self.manager();
-        manager.set_harness_refinements(enabled)?;
-        // Adoption bookkeeping stays off the UI input/paint path.
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let agent_dir = self.agent_dir.clone();
-            runtime.spawn_blocking(move || {
-                let client = pa_core::session_engine::telemetry::build_client(&manager, &agent_dir);
-                let mut properties = pa_telemetry::Properties::new();
-                properties.set("enabled", serde_json::json!(enabled));
-                client.track("harness refinements changed", properties);
-            });
-        }
-        Ok(())
+        self.manager().set_harness_refinements(enabled)
     }
 
     fn compaction_threshold_percent(&self) -> f64 {
@@ -74,23 +62,7 @@ impl ClientSettings for CliClientSettings {
     }
 
     fn set_compaction_threshold_percent(&self, percent: f64) -> Result<()> {
-        self.manager().set_compaction_threshold_percent(percent)?;
-        let settings = self.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let manager = settings.manager();
-                if crate::mode::telemetry_disabled(&manager) {
-                    return;
-                }
-                let client =
-                    pa_core::session_engine::telemetry::build_client(&manager, &settings.agent_dir);
-                let mut properties = pa_telemetry::base_properties("interactive");
-                properties.set("threshold_percent", serde_json::json!(percent));
-                client.track("autocompact threshold changed", properties);
-                let _ = client.shutdown().await;
-            });
-        }
-        Ok(())
+        self.manager().set_compaction_threshold_percent(percent)
     }
 
     fn theme(&self) -> Option<String> {
@@ -275,33 +247,6 @@ impl ClientSettings for CliClientSettings {
             .wire_name()
             .to_string()
     }
-
-    fn telemetry_status(&self) -> String {
-        pa_core::session_engine::telemetry::telemetry_status_text(&self.manager(), &self.agent_dir)
-    }
-
-    fn set_telemetry_enabled(&self, enabled: bool) -> Result<String> {
-        pa_core::session_engine::telemetry::set_telemetry_enabled_text(
-            &mut self.manager(),
-            &self.agent_dir,
-            enabled,
-        )
-    }
-
-    fn telemetry_notice_due(&self) -> bool {
-        // TS agent-session-services: telemetry enabled, onboarding
-        // already shown (a first interactive launch belongs to the
-        // onboarding screen; the notice surfaces on the next launch),
-        // and the notice not yet shown.
-        let manager = self.manager();
-        pa_core::session_engine::telemetry::telemetry_switch(&manager).enabled()
-            && manager.get_onboarding_shown()
-            && !manager.get_telemetry_notice_shown()
-    }
-
-    fn set_telemetry_notice_shown(&self) -> Result<()> {
-        self.manager().set_telemetry_notice_shown(true)
-    }
 }
 
 #[cfg(test)]
@@ -320,7 +265,21 @@ mod tests {
         assert!(!settings.quiet_startup());
         assert_eq!(settings.idle_eviction_minutes(), "90");
         assert_eq!(settings.mermaid_rendering_mode(), "streaming");
+        // An unset store uses the core default; a user preference must be saved.
+        assert_eq!(settings.tree_filter_mode(), "default");
+        settings
+            .set_tree_filter_mode("user-only")
+            .expect("user-only preference");
         assert_eq!(settings.tree_filter_mode(), "user-only");
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(agent_dir.join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["treeFilterMode"], "user-only");
+        assert_eq!(
+            CliClientSettings::new(dir.path().to_path_buf(), agent_dir.clone()).tree_filter_mode(),
+            "user-only"
+        );
         assert!(settings.warnings_anthropic_extra_usage());
 
         settings.set_theme("dark").expect("theme");
@@ -374,5 +333,39 @@ mod tests {
             std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
         assert_eq!(value["factory"]["enabled"], false);
+    }
+    #[test]
+    fn tree_filter_global_writes_preserve_project_override_precedence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join(".prime/agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            agent.join("settings.json"),
+            r#"{"treeFilterMode":"user-only"}"#,
+        )
+        .unwrap();
+        let project_content = r#"{"treeFilterMode":"all","quietStartup":true}"#;
+        std::fs::write(project.join("settings.json"), project_content).unwrap();
+        let settings = CliClientSettings::new(dir.path().to_path_buf(), agent.clone());
+        assert_eq!(settings.tree_filter_mode(), "all");
+        settings.set_tree_filter_mode("no-tools").unwrap();
+        let global: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(agent.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(global["treeFilterMode"], "no-tools");
+        assert_eq!(
+            std::fs::read_to_string(project.join("settings.json")).unwrap(),
+            project_content
+        );
+        assert_eq!(
+            CliClientSettings::new(dir.path().to_path_buf(), agent.clone()).tree_filter_mode(),
+            "all"
+        );
+        std::fs::write(project.join("settings.json"), r#"{"quietStartup":true}"#).unwrap();
+        let reopened = CliClientSettings::new(dir.path().to_path_buf(), agent);
+        assert_eq!(reopened.tree_filter_mode(), "no-tools");
+        assert!(reopened.quiet_startup());
     }
 }

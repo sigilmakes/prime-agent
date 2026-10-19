@@ -436,6 +436,7 @@ pub(crate) fn parse_chunk_usage(
     // OpenAI completion_tokens already includes reasoning_tokens.
     let output_tokens = raw_usage.get("completion_tokens").map_or(0, get_u64);
     let mut usage = Usage {
+        rest: pa_types::JsonMap::new(),
         input,
         output: output_tokens,
         cache_read: cache_read_tokens,

@@ -16,7 +16,6 @@ use crate::menu_panel::{
 use crate::provider_auth::ProviderAuthOutcome;
 use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
-use crate::traces::TraceLoginOutcome;
 use crate::{Line, Span};
 
 mod render;
@@ -117,12 +116,6 @@ pub enum AuthPanelRequest {
     },
     /// A `/mcp` view auth command settled: its status line applies.
     McpSettled { note: String },
-    /// The `/traces` login settled: the login's outcome applies. `gen` is matched against the
-    /// run loop's counter so a superseded run's late settle cannot clear a newer login.
-    TracesSettled {
-        outcome: TraceLoginOutcome,
-        gen: u64,
-    },
 }
 
 /// A login flow's cooperative cancel signal: the flag the blocking body polls before its
@@ -321,7 +314,9 @@ impl AuthPanelHandle {
         }
     }
 
-    async fn cancelled_wait(&self) {
+    /// Wait for the panel to cancel this flow, including a cancel before the wait started.
+    /// Network login flows race this future against every step, not only panel prompts.
+    pub async fn cancelled_wait(&self) {
         self.cancel.wait().await;
     }
 }
@@ -388,6 +383,8 @@ pub struct AuthPanel {
     /// The flow's cooperative cancel signal: Esc/ctrl+c on a URL screen with no mounted input
     /// cancels the running login (the cancel hint is never a dead key).
     flow_cancel: Option<FlowCancel>,
+    /// The MCP command belongs to the mounted panel; dropping it must not detach its task.
+    flow_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -426,6 +423,7 @@ impl AuthPanel {
             input: PanelInput::Working,
             copy_status: None,
             flow_cancel: None,
+            flow_task: None,
         }
     }
 
@@ -441,6 +439,13 @@ impl AuthPanel {
     /// just a mounted input.
     pub fn set_cancel_signal(&mut self, cancel: FlowCancel) {
         self.flow_cancel = Some(cancel);
+    }
+
+    /// Keep the MCP command task owned by its panel until success or cancellation.
+    pub(crate) fn set_flow_task(&mut self, task: tokio::task::JoinHandle<()>) {
+        if let Some(previous) = self.flow_task.replace(task) {
+            previous.abort();
+        }
     }
 
     /// Whether the team picker owns the panel: its Esc answers the picker and keeps the dialog
@@ -667,6 +672,16 @@ impl AuthPanel {
     fn mark_flow_cancelled(&mut self) {
         if let Some(cancel) = &self.flow_cancel {
             cancel.mark();
+        }
+    }
+}
+
+impl Drop for AuthPanel {
+    fn drop(&mut self) {
+        // Replacing a panel or leaving its view is cancellation too, even without a key press.
+        self.mark_flow_cancelled();
+        if let Some(task) = &self.flow_task {
+            task.abort();
         }
     }
 }

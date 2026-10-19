@@ -149,6 +149,47 @@ impl AuthStorageData {
         }
     }
 
+    /// Change a credential without discarding fields this build does not model.
+    /// Call only after validating that this is an update of the same grant.
+    pub(crate) fn insert_preserving_metadata(
+        &mut self,
+        provider: &str,
+        credential: &AuthCredential,
+    ) {
+        let Ok(serde_json::Value::Object(mut next)) = serde_json::to_value(credential) else {
+            return;
+        };
+        if let Some(serde_json::Value::Object(previous)) = self.0.get(provider) {
+            if previous.get("type") == next.get("type") {
+                let known: &[&str] = match credential {
+                    AuthCredential::ApiKey { .. } => &["type", "key", "primeTeam"],
+                    AuthCredential::McpStaticToken { .. } => &["type", "bearer", "endpoint"],
+                    AuthCredential::Oauth { .. } => &[
+                        "type",
+                        "access",
+                        "refresh",
+                        "expires",
+                        "accountId",
+                        "enterpriseUrl",
+                        "endpoint",
+                        "tokenEndpoint",
+                        "clientId",
+                        "resource",
+                        "issuer",
+                        "audienceMode",
+                    ],
+                };
+                for (key, value) in previous {
+                    if !known.contains(&key.as_str()) {
+                        next.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        self.0
+            .insert(provider.to_string(), serde_json::Value::Object(next));
+    }
+
     pub fn remove(&mut self, provider: &str) {
         self.0.remove(provider);
     }

@@ -190,12 +190,14 @@ fn usage(rng: &mut Rng) -> Usage {
     let total = input + output + cache_read + cache_write;
     let cost = |n: u64| pa_types::JsNumber::from(n as f64 / 1000.0);
     Usage {
+        rest: pa_types::JsonMap::new(),
         input,
         output,
         cache_read,
         cache_write,
         total_tokens: total,
         cost: UsageCost {
+            rest: pa_types::JsonMap::new(),
             input: cost(input),
             output: cost(output),
             cache_read: cost(cache_read),
@@ -307,6 +309,7 @@ pub(crate) fn write_session_file(
         "session_state",
         serde_json::to_value(SessionStateEntry {
             state: SessionState {
+                rest: pa_types::JsonMap::new(),
                 status: SessionStateStatus::Active,
             },
         })?,
@@ -337,6 +340,7 @@ pub(crate) fn write_session_file(
                     usage: Some(usage(rng)),
                     harness_digest: None,
                     harness_state_fingerprint: None,
+                    context_archive: None,
                 })?,
                 rng,
             )?;

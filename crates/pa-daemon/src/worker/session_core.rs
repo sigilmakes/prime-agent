@@ -15,6 +15,9 @@ pub(crate) struct SessionCore {
     pub(crate) generation: String,
     pub(crate) last_event_sequence: u64,
     pub(crate) store: Option<SessionFile>,
+    /// A canonical selection append may have reached disk before reporting an
+    /// error. Refuse inference on this lease epoch until its store is replaced.
+    pub(crate) context_selection_uncertain: Option<std::sync::Weak<crate::lease::SessionLease>>,
     pub(crate) cwd: String,
     pub(crate) steering: VecDeque<QueuedItem>,
     pub(crate) follow_up: VecDeque<QueuedItem>,
@@ -111,6 +114,7 @@ impl SessionCore {
             generation: String::new(),
             last_event_sequence: 0,
             store,
+            context_selection_uncertain: None,
             cwd,
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),

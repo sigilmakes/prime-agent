@@ -463,9 +463,10 @@ mod tests {
             details: Some(json!({ "readFiles": ["a.rs"], "modifiedFiles": ["b.rs"] })),
             from_hook: Some(false),
             custom_instructions: None,
-            usage: result.usage,
+            usage: result.usage.clone(),
             harness_digest: None,
             harness_state_fingerprint: None,
+            context_archive: None,
         };
         // The TS `compact` response dataKeys (the live golden,
         // `tests/goldens/compaction-live-ts.json`): summary,

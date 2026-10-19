@@ -59,7 +59,8 @@ impl MockSupervisor {
         let hello = json!({
             "type": "daemon_hello",
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
+            "serverCapabilities": ["plugin_commands"],
+            "schemaRevision": 32,
             "clientId": "mock",
         });
         write_json(&mut writer, &hello);
@@ -300,12 +301,9 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -634,7 +632,7 @@ fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered()
             },
             HeadlessStep::Submit("/reload".to_string()),
             HeadlessStep::WaitRender {
-                needle: "Reloaded keybindings, skills, prompts, themes".to_string(),
+                needle: "Reloaded plugins, keybindings, skills, prompts, themes".to_string(),
                 timeout_ms: 5000,
             },
             HeadlessStep::WaitGone {
@@ -756,4 +754,233 @@ fn a_failed_rebuild_reports_cancelled_incomplete_history() {
     let last = frames.last().unwrap();
     assert!(last.contains("msg-15"), "loaded tail stays visible");
     assert!(!last.contains("msg-00"), "the held prefix was never loaded");
+}
+
+/// Wire-level display-transcript peer. Unlike `SessionFile` tests this drives the real
+/// TUI dispatch, background history loader, viewport and production replay writer.
+// Keep the fixture's ordered wire exchanges together so their request/response sequence is visible.
+#[allow(clippy::too_many_lines)]
+fn run_display_peer(
+    steps: Vec<HeadlessStep>,
+    reject_selected_once: bool,
+) -> pa_tui::interactive::InteractiveOutcome {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("display.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        write_json(
+            &mut writer,
+            &json!({"type":"daemon_hello", "protocol":{"name":"prime-agent.daemon","version":7}, "serverCapabilities":["display_transcript","plugin_commands"], "schemaRevision":32, "clientId":"display-test"}),
+        );
+        let mut selected = false;
+        let mut reject = reject_selected_once;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let envelope: Value = serde_json::from_str(line.trim()).unwrap();
+            let command = &envelope["command"];
+            let kind = command["type"].as_str().unwrap();
+            let id = envelope["id"].as_str().unwrap();
+            let leaf = if selected {
+                "selected-leaf"
+            } else {
+                "old-leaf"
+            };
+            let state = json!({"sessionId":"saved", "activeSessionId":"active", "leafId":leaf, "compactionCount":1, "cwd":"/isolated", "isStreaming":false});
+            let prefix = if selected { "selected" } else { "restore" };
+            let history: Vec<_> = (0..1205).map(|index| json!({"role":"user", "content":format!("{prefix}-{index:04}-end"),"timestamp":index+1})).collect();
+            let data = match kind {
+                "attach" => {
+                    assert!(command["capabilities"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|cap| cap == "display_transcript"));
+                    json!({"activeSessionId":"active", "snapshot": {"activeSessionId":"active", "state":state, "summary":{"id":"active","cwd":"/isolated"}, "messages":history[1200..], "historyBefore":1200, "displayTranscript":true,"lastEventCursor":{"generation":"display-g","sequence":0}}, "replay":{"status":"complete","toSequence":0}})
+                }
+                "get_connection_state" => state,
+                "get_messages" => {
+                    assert_eq!(command["historyGeneration"], "display-g");
+                    if selected && reject && command.get("before").is_none() {
+                        reject = false;
+                        write_json(&mut writer, &history_failure(id));
+                        continue;
+                    }
+                    assert!(command["capabilities"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|cap| cap == "display_transcript"));
+                    let messages = if command.get("before").is_some() {
+                        history[..1200].to_vec()
+                    } else {
+                        history
+                    };
+                    let mut data = json!({"messages":messages,"displayTranscript":true,"sessionId":"saved","leafId":leaf,"generation":"display-g"});
+                    if let Some(anchor) = command.get("historyLeafId") {
+                        data["historyLeafId"] = anchor.clone();
+                    }
+                    data
+                }
+                "get_session_context" => {
+                    json!({"context":{"messages":[{"role":"user","content":"selected-1204-end","timestamp":1205}]}})
+                }
+                "get_session_tree" => json!({"leafId":"old-leaf", "flatNodes":[
+                    {"entry":{"type":"message","id":"root","parentId":null,"timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"shared-root","timestamp":1}}},
+                    {"entry":{"type":"message","id":"old-leaf","parentId":"root","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"old branch","timestamp":2}}},
+                    {"entry":{"type":"message","id":"selected-leaf","parentId":"root","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"selected destination","timestamp":3}}}
+                ]}),
+                "navigate_tree" => {
+                    assert_eq!(command["targetId"], "selected-leaf");
+                    selected = true;
+                    json!({"editorText":""})
+                }
+                "get_session_stats" => {
+                    json!({"sessionId":"saved","contextUsage":{"tokens":1,"contextWindow":200_000}})
+                }
+                _ => json!({}),
+            };
+            write_json(&mut writer, &success_response(id, kind, &data));
+        }
+    });
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut options = options(socket);
+    options.session = SessionSelection::Attach("active".to_string());
+    options.branch_summary_skip_prompt = true;
+    let result = runtime.block_on(run_interactive(
+        options,
+        UiMode::Headless(HeadlessPlan {
+            steps,
+            width: 100,
+            height: 30,
+        }),
+    ));
+    handle.join().unwrap();
+    let outcome = result.unwrap();
+    assert!(
+        !outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("timed out waiting")),
+        "{:?}",
+        outcome.frames.last()
+    );
+    outcome
+}
+
+#[test]
+fn issue_19_saved_display_history_replays_every_message_once_and_keeps_redraws_incremental() {
+    let outcome = run_display_peer(
+        vec![
+            HeadlessStep::WaitNativeReplay {
+                needle: "restore-0000-end".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "restore-1204-end".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::ScrollTop,
+            HeadlessStep::WaitRender {
+                needle: "restore-0000-end".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('o'),
+                crossterm::event::KeyModifiers::CONTROL,
+            )),
+            HeadlessStep::Submit("/reload".into()),
+            HeadlessStep::WaitRender {
+                needle: "Reloaded plugins, keybindings, skills, prompts, themes".into(),
+                timeout_ms: 5000,
+            },
+        ],
+        false,
+    );
+    let replay = String::from_utf8(outcome.native_scrollback).unwrap();
+    for index in [0, 600, 1204] {
+        assert_eq!(
+            replay.matches(&format!("restore-{index:04}-end")).count(),
+            1,
+            "restore marker {index} must replay once"
+        );
+    }
+    assert!(
+        !replay.contains("\x1b[3J"),
+        "native history is never erased"
+    );
+}
+
+#[test]
+fn issue_19_same_session_branch_failure_shows_selected_context_then_retries_full_native_history() {
+    let outcome = run_display_peer(
+        vec![
+            HeadlessStep::WaitNativeReplay {
+                needle: "restore-0000-end".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "restore-1204-end".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::Submit("/tree".into()),
+            HeadlessStep::WaitRender {
+                needle: "Session Tree".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::Type("selected".into()),
+            HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            HeadlessStep::WaitRender {
+                needle: "selected-1204-end".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "Full session history unavailable".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::Submit("/reload".into()),
+            HeadlessStep::WaitRender {
+                needle: "Reloaded plugins, keybindings, skills, prompts, themes".into(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::ScrollTop,
+            HeadlessStep::WaitRender {
+                needle: "selected-0000-end".into(),
+                timeout_ms: 5000,
+            },
+        ],
+        true,
+    );
+    let fallback = outcome
+        .frames
+        .iter()
+        .find(|frame| frame.contains("Full session history unavailable"))
+        .unwrap();
+    assert!(fallback.contains("selected-1204-end"));
+    assert!(
+        !fallback.contains("restore-"),
+        "old branch must not survive the failed selected-branch fetch: {fallback}"
+    );
+    let replay = String::from_utf8(outcome.native_scrollback).unwrap();
+    for index in [0, 600, 1204] {
+        assert_eq!(
+            replay.matches(&format!("selected-{index:04}-end")).count(),
+            1
+        );
+    }
 }

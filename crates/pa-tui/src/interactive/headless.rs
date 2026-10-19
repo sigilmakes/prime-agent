@@ -54,6 +54,9 @@ pub enum HeadlessStep {
     /// Hold until the newest frame no longer contains `needle` (bounded by `timeout_ms`): the
     /// verifier's condition wait for a surface closing.
     WaitGone { needle: String, timeout_ms: u64 },
+    /// Hold until the production native replay writer captured `needle`. This does not
+    /// depend on viewport position and does not generate any replay bytes itself.
+    WaitNativeReplay { needle: String, timeout_ms: u64 },
     /// Hold the plan for `ms` before the next step: the verifier's timing window (queue prompts
     /// deterministically inside a scripted `delayMs` hold, where the turn is provably busy).
     WaitMs(u64),
@@ -81,6 +84,8 @@ pub enum HeadlessStep {
 #[derive(Debug, Default)]
 pub(super) struct HeadlessSettle {
     pub(super) pending_inputs: usize,
+    /// Notes already in the receiver queue must reach the frame before exit.
+    pub(super) pending_background_notes: usize,
     pub(super) turn_active: bool,
     pub(super) submits_in_flight: usize,
     pub(super) queued: usize,
@@ -88,9 +93,7 @@ pub(super) struct HeadlessSettle {
     pub(super) dirty: bool,
     pub(super) share_pending: bool,
     pub(super) reload_pending: bool,
-    pub(super) traces_upload_pending: bool,
     pub(super) auth_panel_open: bool,
-    pub(super) traces_login_pending: bool,
     pub(super) mcp_auth_pending: bool,
     /// The Anthropic subscription warning's `mark_anthropic_warning_shown`
     /// write is still in flight (fire-and-forget in the product — the run
@@ -110,6 +113,7 @@ impl HeadlessSettle {
     ) -> Self {
         Self {
             pending_inputs,
+            pending_background_notes: 0,
             turn_active: session.turn_active,
             submits_in_flight: session.prompt_submits_in_flight(),
             queued: view.queued.steering.len() + view.queued.follow_ups.len(),
@@ -117,12 +121,20 @@ impl HeadlessSettle {
             dirty: session.dirty,
             share_pending: session.share_pending(),
             reload_pending: session.reload_pending(),
-            traces_upload_pending: session.traces_upload_pending(),
             auth_panel_open: view.auth_panel.is_some(),
-            traces_login_pending: session.pending_traces_login(),
             mcp_auth_pending: session.pending_mcp_auth(),
             anthropic_warning_mark_pending: session.anthropic_warning_mark_pending(),
         }
+    }
+
+    /// Include only notes already queued at this exit decision. An open sender,
+    /// future timer, or future background task is not itself pending work.
+    pub(super) fn with_background_notes(
+        mut self,
+        notes: &tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Self {
+        self.pending_background_notes = notes.len();
+        self
     }
 
     /// Whether every settle member drained (the exit gate).
@@ -137,6 +149,12 @@ impl HeadlessSettle {
             blockers.push(format!(
                 "{} queued plan input(s) behind a barrier",
                 self.pending_inputs
+            ));
+        }
+        if self.pending_background_notes > 0 {
+            blockers.push(format!(
+                "{} background note(s) waiting to render",
+                self.pending_background_notes
             ));
         }
         if self.turn_active {
@@ -163,14 +181,8 @@ impl HeadlessSettle {
         if self.reload_pending {
             blockers.push("a reload in flight".to_string());
         }
-        if self.traces_upload_pending {
-            blockers.push("a traces upload in flight".to_string());
-        }
         if self.auth_panel_open {
             blockers.push("the inline auth panel open".to_string());
-        }
-        if self.traces_login_pending {
-            blockers.push("a pending traces login".to_string());
         }
         if self.mcp_auth_pending {
             blockers.push("a pending MCP auth flow".to_string());

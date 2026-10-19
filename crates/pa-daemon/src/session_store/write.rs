@@ -44,9 +44,6 @@ impl SessionFile {
                 pa_core::session::window::AppendOwnership::Unleased,
             )?,
         }
-        if let Some(traces) = &self.trace_upload {
-            traces.persisted(&self.path);
-        }
         Ok(())
     }
 
@@ -139,9 +136,6 @@ impl SessionFile {
         }
         pa_core::platform::rename_onto(&temp, path)
             .with_context(|| format!("persist {}", path.display()))?;
-        if let Some(traces) = &self.trace_upload {
-            traces.persisted(&self.path);
-        }
         Ok(())
     }
 
@@ -271,9 +265,6 @@ impl SessionFile {
             // The line is in the file now: index it so the in-memory leaf matches what a
             // reload sees.
             self.push_index(entry);
-            if let Some(traces) = &self.trace_upload {
-                traces.persisted(&self.path);
-            }
         } else {
             // The rewrite path serializes the whole index, so the entry must be
             // indexed first; a failed rewrite rolls the index back. The live

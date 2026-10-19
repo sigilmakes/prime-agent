@@ -261,28 +261,38 @@ mod tests {
         (sender, Answer::Gate(receiver))
     }
 
-    /// One provider-catalog aggregate entry riding a compiled transport
-    /// tuple (probe ids must stay outside the compiled catalog).
+    /// A complete trusted aggregate plus probe IDs outside the compiled catalog.
+    /// Runtime publication requires coverage of every bundled non-Prime model.
     fn catalog_aggregate(ids: &[&str]) -> String {
         let anthropic = pa_models::transports::compiled_models()
             .iter()
             .find(|model| model.provider == "anthropic")
-            .expect("compiled anthropic tuple")
-            .clone();
-        let models: Vec<Value> = ids
+            .expect("compiled anthropic tuple");
+        let mut entries: Vec<_> = pa_models::transports::compiled_models()
             .iter()
-            .map(|id| {
+            .filter(|model| model.provider != "prime-inference")
+            .cloned()
+            .collect();
+        entries.extend(ids.iter().map(|id| {
+            let mut model = anthropic.clone();
+            model.id = (*id).to_string();
+            model.name = (*id).to_string();
+            model
+        }));
+        let models: Vec<Value> = entries
+            .iter()
+            .map(|model| {
                 json!({
-                    "id": id,
-                    "name": id,
-                    "api": anthropic.api,
-                    "provider": anthropic.provider,
-                    "baseUrl": anthropic.base_url,
-                    "reasoning": false,
-                    "input": ["text"],
-                    "cost": {"input": 1.0, "output": 1.0, "cacheRead": 0.0, "cacheWrite": 0.0},
-                    "contextWindow": 128_000,
-                    "maxTokens": 4_096,
+                    "id": model.id,
+                    "name": model.name,
+                    "api": model.api,
+                    "provider": model.provider,
+                    "baseUrl": model.base_url,
+                    "reasoning": model.reasoning,
+                    "input": model.input,
+                    "cost": model.cost,
+                    "contextWindow": model.context_window,
+                    "maxTokens": model.max_tokens,
                 })
             })
             .collect();
@@ -713,11 +723,18 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let refresh_heads = fixture.server.recorded_requests();
         assert_eq!(
-            fixture.server.request_count() - requests_before,
+            refresh_heads[requests_before..]
+                .iter()
+                .filter(|head| head.starts_with("GET /catalog "))
+                .count(),
             1,
-            "only the one running refresh reached the server: {:?}",
-            fixture.server.recorded_requests()
+            "concurrent opens must coalesce to one curated fetch: {refresh_heads:?}"
+        );
+        assert!(
+            refresh_heads.len() - requests_before <= 2,
+            "at most one curated and one concurrent Prime fetch may start: {refresh_heads:?}"
         );
 
         // Release the held fetch: the one refresh cycle lands (provider +
@@ -823,6 +840,15 @@ mod tests {
             .unwrap(),
         )
         .expect("age the cache");
+        let revisioned_path = fixture
+            .agent_dir
+            .join("models/prime-inference-private-models.v2.json");
+        let mut revisioned: Value =
+            serde_json::from_slice(&std::fs::read(&revisioned_path).expect("revisioned cache"))
+                .unwrap();
+        revisioned["fetchedAt"] = json!(1u64);
+        revisioned["checkedAt"] = json!(1u64);
+        std::fs::write(&revisioned_path, revisioned.to_string()).expect("age authoritative cache");
         // The catalog chain stays hourly-gated from the create path; only the
         // private entitlement fetch runs. Its answer is a held gate: the
         // malformed body is released only after this test starts watching

@@ -331,6 +331,7 @@ mod tests {
         let messages = vec![
             text_assistant("answer", StopReason::Stop),
             AgentMessage::CompactionSummary(CompactionSummaryMessage {
+                rest: pa_types::JsonMap::new(),
                 summary: "prior".to_string(),
                 tokens_before: 0,
                 retained_message_count: None,

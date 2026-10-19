@@ -148,6 +148,10 @@ async fn handshake_channel_stays_private_until_auth_answers() {
         resident.cmd_tx.lock().await.is_some(),
         "the answered handshake installs the channel for routing"
     );
+    assert!(
+        !resident.supports_model_refresh(),
+        "an old worker remains routable without the optional refresh capability"
+    );
 }
 
 /// A tombstoned stop's entire silent-peer authentication uses the strict
@@ -501,4 +505,78 @@ async fn a_lost_worker_connection_fails_its_in_flight_route() {
         .expect("the route task lives")
         .expect_err("the drained route fails");
     assert_eq!(error.to_string(), super::routing::WORKER_SOCKET_CLOSED);
+}
+
+/// New supervisors must not send optional commands to old or partial workers.
+#[tokio::test]
+async fn model_refresh_requires_negotiated_worker_capability_and_revision() {
+    for (data, expected) in [
+        (
+            json!({"capabilities":["model_refresh"],"schemaRevision":31}),
+            false,
+        ),
+        (json!({"capabilities":[],"schemaRevision":32}), false),
+        (json!({"capabilities":["model_refresh"]}), false),
+        (
+            json!({"capabilities":["model_refresh"],"schemaRevision":32}),
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("worker.sock");
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("supervisor.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .unwrap(),
+        );
+        let descriptor = serde_json::from_value(json!({
+            "version":2,"workerId":"refresh-handshake","pid":std::process::id(),
+            "socketPath":socket_path,"recoveryJournalPath":dir.path().join("recovery.jsonl"),
+            "supervisorSocketPath":dir.path().join("supervisor.sock"),
+            "authenticationToken":"isolated","rootActiveSessionId":"refresh-handshake",
+            "createdAt":"t","updatedAt":"t","lifecycle":"ready","createCommand":{},
+            "consecutiveFailures":0,
+        }))
+        .unwrap();
+        let resident = ResidentWorker::new(
+            "refresh-handshake".into(),
+            descriptor,
+            dir.path().join("descriptor.json"),
+        );
+        let listener = bind_fake_worker(&socket_path).await;
+        let connect = {
+            let supervisor = Arc::clone(&supervisor);
+            let resident = Arc::clone(&resident);
+            tokio::spawn(async move {
+                supervisor
+                    .connect_worker(&resident, worker_connect_deadline())
+                    .await
+            })
+        };
+        let mut fake = accept_fake_worker(listener).await;
+        let frame = read_supervisor_frame(&mut fake).await;
+        let payload = crate::protocol::response_line_bytes(&response_success(
+            None,
+            "worker_auth",
+            Some(data),
+        ));
+        write_frame(
+            &mut fake.write_half,
+            &json!({
+                "kind":"outbound","requestId":frame.header["requestId"],"outboundType":"response",
+            }),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await
+        .unwrap();
+        connect.await.unwrap().unwrap();
+        assert_eq!(resident.supports_model_refresh(), expected);
+        assert!(
+            resident.cmd_tx.lock().await.is_some(),
+            "optional features cannot block normal attachment"
+        );
+    }
 }

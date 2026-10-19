@@ -2,9 +2,7 @@
 //! listening, pick the session from the CLI session flags, and hand off to the
 //! pa-tui interactive loop; the session keeps running in the worker after exit.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -23,11 +21,7 @@ mod onboarding;
 
 use onboarding::onboarding_task;
 #[cfg(test)]
-use onboarding::{SettingsOnboardingSink, StartupModelProbe};
-
-mod telemetry;
-
-use telemetry::CliInteractionTelemetry;
+use onboarding::SettingsOnboardingSink;
 
 #[cfg(test)]
 mod tests;
@@ -35,99 +29,19 @@ mod tests;
 /// Run the interactive TUI attached to the daemon. Returns the exit code.
 pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
-    let configuration_load_started = std::time::Instant::now();
-    let (tui_options, pending_onboarding_stages) = build_tui_options(
+    let tui_options = build_tui_options(
         options,
         socket_path,
         std::sync::Arc::new(std::sync::Mutex::new(
             pa_tui::prompt_stash::PromptStashStore::default(),
         )),
     )?;
-    let configuration_load_ms = configuration_load_started.elapsed().as_millis() as u64;
-    // The telemetry disclosure renders inside the TUI (TS
-    // agent-session-services' session diagnostic): the interactive
-    // attach pushes the info row once per installation, deferred behind
-    // onboarding — a pre-TUI stderr print would be hidden by the alt
-    // screen.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("build the interactive runtime")?;
-    let startup_started = std::time::Instant::now();
     runtime.block_on(async {
-        // The `agent startup stage` telemetry: the configuration-load and
-        // session-attach stages measured on the same one-shot client as `startup`.
-        let startup_kind: &'static str =
-            if options.session.resume.is_some() || options.session.continue_recent {
-                "resumed"
-            } else {
-                "cold"
-            };
-        let mut startup_telemetry = (!options.config.telemetry_disabled).then(|| {
-            let agent_dir = options.config.agent_dir.clone();
-            let settings =
-                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
-            pa_core::session_engine::telemetry::build_client(&settings, &agent_dir)
-        });
-        // The onboarding `entry`/`ready` stages defer to here: an inert client
-        // before the runtime exists would drop the events.
-        if !pending_onboarding_stages.is_empty() {
-            let agent_dir = options.config.agent_dir.clone();
-            let settings =
-                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
-            if !crate::mode::telemetry_disabled(&settings) {
-                let client =
-                    pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
-                for stage in &pending_onboarding_stages {
-                    stage.track(&client);
-                }
-            }
-        }
-        if let Some(client) = startup_telemetry.as_ref() {
-            pa_telemetry::AgentStartupStage {
-                stage: "configuration_load",
-                outcome: "completed",
-                duration_ms: Some(configuration_load_ms),
-                startup_kind: Some(startup_kind),
-                timing_scope: Some("system_work"),
-            }
-            .track(client);
-        }
-        let attach_started = std::time::Instant::now();
         ensure_daemon_running(&tui_options.socket_path, &tui_options.cwd).await?;
-        if let Some(client) = startup_telemetry.as_ref() {
-            pa_telemetry::AgentStartupStage {
-                stage: "session_attach",
-                outcome: "completed",
-                duration_ms: Some(attach_started.elapsed().as_millis() as u64),
-                startup_kind: Some(startup_kind),
-                timing_scope: Some("system_work"),
-            }
-            .track(client);
-        }
-        // `startup` (schema v1): process entry to a ready interactive
-        // session environment (daemon listening). Emitted through a
-        // one-shot client; the session's own telemetry rides the daemon
-        // worker. The flush handle rides to the end of the run — the
-        // quick-exit join below bounds delivery on a fast quit.
-        let startup_flush = startup_telemetry.take().map(|client| {
-            let daemon_ready_ms = startup_started.elapsed().as_millis() as u64;
-            let mut properties = pa_telemetry::base_properties("interactive");
-            properties.set("duration_ms", serde_json::Value::from(daemon_ready_ms));
-            let mut phase_timings = pa_telemetry::Properties::new();
-            phase_timings.set("daemon_ready", serde_json::Value::from(daemon_ready_ms));
-            properties.set_map("phase_timings", &phase_timings);
-            client.track("startup", properties);
-            pa_telemetry::AgentStartupStage {
-                stage: "ui_ready",
-                outcome: "completed",
-                duration_ms: Some(daemon_ready_ms),
-                startup_kind: Some(startup_kind),
-                timing_scope: Some("system_work"),
-            }
-            .track(&client);
-            flush_startup_telemetry(client)
-        });
         // `prime-agent agents` and bare `--resume` open the agents view
         // (TS `agentsViewRequested`); the view then opens sessions, and a
         // session exits back into the view until the user exits it. TS gates
@@ -143,9 +57,6 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             tui_options.onboarding.is_some(),
             continue_view.is_some(),
         );
-        // The interactive dispatch, one future so EVERY exit — the view
-        // loop's, the session run's, a failed open's error return —
-        // passes the quick-exit join below.
         let run = async {
             if agents_view {
                 let (anchor, notice) = continue_view.map_or((None, None), |view| {
@@ -173,47 +84,12 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 }
             }
         };
-        let result = run.await;
-        // The quick-exit join: the runtime that owns the handed-off drain
-        // dies with this block, so a run that ends inside the delivery
-        // window (a fast quit — the sink allows up to 1.5s) would lose
-        // the startup events to the teardown. The same shared exit bound
-        // `tui exit` and the agents-view exit report already join under
-        // applies here: the drain delivers (typical ~150ms) or drops,
-        // bounded — never cut mid-POST.
-        if let Some(flush) = startup_flush {
-            let _ = tokio::time::timeout(
-                Duration::from_millis(pa_tui::interactive::TELEMETRY_EXIT_TIMEOUT_MS),
-                flush,
-            )
-            .await;
-        }
-        result
+        run.await
     })?;
     // tmux (verified on 3.2a) can drop the pane's final output when the process
     // dies immediately after writing it; holding briefly lets the terminal apply it.
     std::thread::sleep(Duration::from_millis(300));
     Ok(0)
-}
-
-/// The one-shot startup client's final flush, handed to the runtime:
-/// fire-and-forget from the paint path's perspective — the tracked
-/// `startup` events' delivery belongs to the background worker (the
-/// sink's bounded request timeout; a re-sent batch keeps its event ids,
-/// so the backend dedupes), never to the first frame. The returned
-/// handle is the quick-exit seam: the composition root joins it under
-/// the shared exit bound when the run ends inside the delivery window,
-/// so a fast quit delivers (or drops, bounded) instead of the runtime
-/// teardown cutting the worker mid-POST.
-/// `the_startup_flush_never_blocks_the_first_frame` guards the boundary
-/// with a hanging sink: the flush hand-off must complete while delivery
-/// is still blocked.
-pub(super) fn flush_startup_telemetry(
-    client: pa_telemetry::TelemetryClient,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let _ = client.shutdown().await;
-    })
 }
 
 /// TS `shutdown` prints the dim resume hint (`formatResumeHint`) to stdout
@@ -283,18 +159,7 @@ async fn run_agents_view_flow(
             roster_link.take(),
         )
         .await?;
-        let mut view = view_run.outcome;
-        let actions_report = {
-            let telemetry = base.telemetry.clone();
-            let actions = std::mem::take(&mut view.actions);
-            async move {
-                for action in actions {
-                    if let Some(telemetry) = telemetry.as_ref() {
-                        telemetry.agents_view_action(action).await;
-                    }
-                }
-            }
-        };
+        let view = view_run.outcome;
         roster_link = view_run.link;
         // A dropped scope root or the view's parent key pops the frame;
         // both clear the query.
@@ -303,14 +168,8 @@ async fn run_agents_view_flow(
             frames.pop();
         }
         let Some(selection) = view.selection else {
-            let _ = tokio::time::timeout(
-                Duration::from_millis(pa_tui::interactive::TELEMETRY_EXIT_TIMEOUT_MS),
-                actions_report,
-            )
-            .await;
             return Ok(());
         };
-        tokio::spawn(actions_report);
         expanded_ancestors = view.expanded_ancestors.clone();
         selected_row_identity = view.selected_row_identity.clone();
         selected_key = view.selected_key.clone();
@@ -399,7 +258,7 @@ fn build_tui_options(
     options: &RunOptions,
     socket_path: PathBuf,
     prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>>,
-) -> Result<(InteractiveOptions, Vec<pa_telemetry::OnboardingStage>)> {
+) -> Result<InteractiveOptions> {
     let config = &options.config;
     let session_dir = options
         .session
@@ -465,8 +324,7 @@ fn build_tui_options(
     let provider_auth = pa_tui::provider_auth::ProviderAuthCommandsHandle(std::sync::Arc::new(
         crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone()),
     ));
-    let (onboarding, pending_onboarding_stages) =
-        onboarding_task(options, Some(provider_auth.clone()));
+    let onboarding = onboarding_task(options, Some(provider_auth.clone()));
     let tui_options_value = InteractiveOptions {
         code_block_indent,
         tree_filter_mode,
@@ -505,7 +363,6 @@ fn build_tui_options(
         )),
         version: crate::config::version().to_string(),
         onboarding,
-        telemetry_disabled: crate::mode::create_telemetry_disabled(config),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
         // this process (the TS interactive client's placement) and persist
         // through the shared auth store the daemon's sessions read.
@@ -515,19 +372,12 @@ fn build_tui_options(
                 config.agent_dir.clone(),
             )),
         )),
-        traces: Some(pa_tui::traces::TracesCommandsHandle(std::sync::Arc::new(
-            crate::client_traces::ClientTraces::new(config.cwd.clone(), config.agent_dir.clone()),
-        ))),
         // `/update`: the same body `prime-agent update` runs, output
         // captured — the TUI stays mounted.
         update_commands: Some(pa_tui::update_command::UpdateCommandsHandle(
             std::sync::Arc::new(crate::client_update::ClientUpdate),
         )),
         provider_auth: Some(provider_auth),
-        telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry::new(
-            config.cwd.clone(),
-            config.agent_dir.clone(),
-        ))),
         keybindings,
         // One process-wide prompt stash store, so the agents-view loop
         // keeps stashed drafts alive across its chat runs.
@@ -538,7 +388,7 @@ fn build_tui_options(
         session_has_children: false,
         restore_dock_focus: false,
     };
-    Ok((tui_options_value, pending_onboarding_stages))
+    Ok(tui_options_value)
 }
 
 /// Map the CLI session flags onto the TUI session selection: explicit `--resume`

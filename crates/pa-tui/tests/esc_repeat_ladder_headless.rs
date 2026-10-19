@@ -358,12 +358,6 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_update_channel(&self, _channel: &str) -> Result<()> {
         Ok(())
     }
-    fn telemetry_status(&self) -> String {
-        String::new()
-    }
-    fn set_telemetry_enabled(&self, _enabled: bool) -> Result<String> {
-        Ok(String::new())
-    }
     fn effective_update_channel(&self, _version: &str) -> String {
         "stable".to_string()
     }
@@ -392,12 +386,9 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),

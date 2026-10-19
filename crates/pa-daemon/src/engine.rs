@@ -27,8 +27,30 @@ pub use wire::{
 
 mod scripted;
 
+/// One native plugin command response. Only plugin execution contributes durable rows;
+/// management commands return text without changing canonical history.
+#[derive(Debug)]
+pub struct PluginCommandOutcome {
+    pub text: String,
+    pub messages: Vec<pa_types::session::CustomMessage>,
+    pub error: Option<String>,
+}
+
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
+    /// Execute a native plugin or management command without submitting a model prompt.
+    /// A supplied target must match the current generation. Engines without a plugin
+    /// host reject explicitly rather than treating the input as ordinary conversation.
+    fn plugin_command<'a>(
+        &'a self,
+        _text: &'a str,
+        _target: Option<&'a Value>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PluginCommandOutcome>> + Send + 'a>,
+    > {
+        Box::pin(async { anyhow::bail!("This session does not support plugin commands") })
+    }
+
     /// The session's shared MCP manager, when the engine owns one: the
     /// `replace_acp_mcp_servers` command writes through it.
     fn acp_mcp_manager(
@@ -138,19 +160,6 @@ pub trait SessionEngine: Send + Sync {
     /// also aborts the auto controller, not just the manual run.
     fn abort_auto_compaction(&self) {}
 
-    /// Consume a pending compact-trigger auto-refine review: the engine
-    /// resolves the model and runs the gated round. `Ok(None)` is every
-    /// silent outcome — no trigger armed, a gate drop, cooldown, or decline.
-    ///
-    /// # Errors
-    ///
-    /// Errors when the armed round itself fails (its model call).
-    fn consume_compact_auto_refine(
-        &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
-        Ok(None)
-    }
-
     /// Run one branch summary (`navigate_tree` with `summarize`): summarize
     /// the abandoned branch's entries; the engine owns the model call.
     fn run_branch_summary(
@@ -197,22 +206,6 @@ pub trait SessionEngine: Send + Sync {
     /// release prompt tasks spawned mid-turn, so the parent's continuation
     /// request always reaches the provider before a child's first turn.
     fn on_turn_done(&self) {}
-
-    /// Finalize session telemetry at session close: emit `agent session
-    /// ended` and flush once. Best-effort: never fail or block shutdown.
-    fn end_telemetry(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(std::future::ready(()))
-    }
-
-    /// The daemon `kill` path: emit `session archived` then finalize, after
-    /// the turn settles. Best-effort like `end_telemetry`.
-    fn archive_session_telemetry(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(std::future::ready(()))
-    }
 
     /// The `(provider, model id)` pair the session will run on; fresh
     /// daemon sessions record it in their creation prefix (`model_change`).
@@ -431,21 +424,6 @@ pub trait SessionEngine: Send + Sync {
         _name: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send + '_>> {
         Box::pin(async { None })
-    }
-
-    /// Run one refinement (the daemon `refine` command): plan, apply, and
-    /// persist the harness state.
-    ///
-    /// # Errors
-    ///
-    /// Errors when the engine does not support refinement, or model
-    /// resolution, the session build, or the round fails.
-    fn run_refinement(
-        &self,
-        options: pa_core::session_engine::refine::RefineOptions,
-    ) -> Result<Value> {
-        let _ = options;
-        anyhow::bail!("This session does not support refinement")
     }
 
     /// The session's RLM max-depth status `{ maxDepth, source }`, with the

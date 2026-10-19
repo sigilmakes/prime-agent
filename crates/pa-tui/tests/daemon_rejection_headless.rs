@@ -248,6 +248,16 @@ impl SharedAnswers {
                         }),
                     );
                 }
+                "get_commands" => write_json(
+                    &mut writer,
+                    &json!({
+                        "type": "response",
+                        "id": id,
+                        "command": "get_commands",
+                        "success": true,
+                        "data": {"commands": [{"name": "saved-task", "source": "prompt"}]},
+                    }),
+                ),
                 "attach" => {
                     let mut data = attach_data(id);
                     if self.rebind_before_close && !self.prompt_requests.lock().unwrap().is_empty()
@@ -481,12 +491,9 @@ fn options_with_session(socket: PathBuf, session: SessionSelection) -> Interacti
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: Arc::default(),
@@ -735,12 +742,12 @@ fn close_after_rebind_keeps_the_outlived_prompt_consumed() {
 }
 
 #[test]
-fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
+fn prompt_template_follow_up_keeps_the_follow_up_lane() {
     let steps = vec![
         HeadlessStep::Type("first turn".to_string()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(200),
-        HeadlessStep::Type("/qqzz-not-a-command".to_string()),
+        HeadlessStep::Type("/saved-task details".to_string()),
         HeadlessStep::Key(alt_enter()),
         HeadlessStep::WaitMs(400),
     ];
@@ -759,14 +766,14 @@ fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
     assert_eq!(
         lane(1).as_deref(),
         Some("followUp"),
-        "the slash fallthrough keeps the submit's follow-up lane: {lane1:?}",
+        "the prompt template keeps the submit's follow-up lane: {lane1:?}",
         lane1 = lane(1)
     );
     assert_eq!(
         run.prompt_requests[1]
             .get("message")
             .and_then(Value::as_str),
-        Some("/qqzz-not-a-command")
+        Some("/saved-task details")
     );
 }
 

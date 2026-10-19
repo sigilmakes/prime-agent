@@ -353,7 +353,7 @@ impl SessionManager {
             payload: pa_types::session::ChildUsageAttributionEntry {
                 target_id: target_id.to_string(),
                 child_usage,
-                aggregate_usage,
+                aggregate_usage: aggregate_usage.clone(),
                 origin,
             },
             base,
@@ -425,7 +425,10 @@ impl SessionManager {
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionState {
             payload: pa_types::session::SessionStateEntry {
-                state: SessionState { status },
+                state: SessionState {
+                    rest: pa_types::JsonMap::new(),
+                    status,
+                },
             },
             base,
         })?;

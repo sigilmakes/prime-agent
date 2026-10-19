@@ -21,6 +21,9 @@ pub struct GitContext {
     pub commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Unrecognized repository metadata retained through session repair and rewrite.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 /// First line of a session file (`type: "session"`).
@@ -84,6 +87,9 @@ pub struct BashExecutionMessage {
     /// True excludes this message from LLM context (`!!` prefix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_from_context: Option<bool>,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 /// `role: "custom"`: bookkeeping message with a `customType` tag.
@@ -109,6 +115,9 @@ pub struct BranchSummaryMessage {
     pub from_id: String,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 /// `role: "compactionSummary"`: compaction result presented as a user turn.
@@ -132,12 +141,18 @@ pub struct CompactionSummaryMessage {
     pub harness_state_fingerprint: Option<String>,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 /// Conversation message stored in `message` entries: the provider-facing
 /// messages from [`crate::ai`] plus the coding-agent-only roles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
+// Keep the public variants unboxed: lossless usage maps grow the assistant
+// payload, but boxing would change existing constructor and match APIs.
+#[allow(clippy::large_enum_variant)]
 pub enum AgentMessage {
     User(UserMessage),
     Assistant(AssistantMessage),
@@ -184,10 +199,60 @@ pub struct ModelChangeEntry {
     pub model_id: String,
 }
 
+/// Durable context representation, separate from the canonical conversation.
+/// Archive strings keep provider-native item bytes outside generic JSON values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextRepresentation {
+    Standard {
+        #[serde(default, flatten)]
+        rest: JsonMap,
+    },
+    Responses {
+        provider: String,
+        endpoint: String,
+        model: String,
+        archive: String,
+        #[serde(default, flatten)]
+        rest: JsonMap,
+    },
+    Snapcompact {
+        archive: String,
+        #[serde(default, flatten)]
+        rest: JsonMap,
+    },
+}
+
+/// Session-wide strategy choice, recorded independently of any compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextSelection {
+    pub version: u32,
+    pub strategy: String,
+}
+
+pub const CONTEXT_SELECTION_CUSTOM_TYPE: &str = "context_strategy_selection";
+
+/// One accepted context transaction. Creator generation is provenance only:
+/// restoration validates the schema with the currently selected strategy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextArchive {
+    pub version: u32,
+    pub strategy: String,
+    pub compactor: String,
+    pub creator_generation: String,
+    pub prepared_leaf: String,
+    pub covered_entry_ids: Vec<String>,
+    pub representation: ContextRepresentation,
+}
+
 /// `type: "compaction"`: compaction performed at this point in the tree.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_archive: Option<ContextArchive>,
     pub summary: String,
     pub first_kept_entry_id: String,
     pub tokens_before: u64,
@@ -276,6 +341,9 @@ pub struct SessionInfoEntry {
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
     pub status: SessionStateStatus,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 /// Lifecycle status of a session file.

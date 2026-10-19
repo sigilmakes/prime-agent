@@ -320,7 +320,7 @@ struct Guarded {
     /// settle and the connections view ride it, and a slow server must
     /// never hold the execution queue a python cell needs).
     mcp_status_waiters: HashMap<String, oneshot::Sender<Value>>,
-    host_inflight: Vec<tokio::task::JoinHandle<()>>,
+    host_inflight: HashMap<String, Arc<AbortSignal>>,
     active_execution: Option<Arc<ActiveExecution>>,
     ready_tx: Option<oneshot::Sender<anyhow::Result<i64>>>,
 }
@@ -355,6 +355,7 @@ pub(crate) struct Inner {
     guarded: Mutex<Guarded>,
     child: Mutex<Option<ChildHandle>>,
     busy_notify: Notify,
+    host_settled: Notify,
     /// Serializes `execute()` calls — the runtime runs one request at a time.
     execution_queue: tokio::sync::Mutex<()>,
     start_memo: Mutex<Option<Arc<MemoSlot>>>,
@@ -456,12 +457,13 @@ impl ReplKernelManager {
                 bash_activity_waiters: HashMap::new(),
                 factory_activity_waiters: HashMap::new(),
                 mcp_status_waiters: HashMap::new(),
-                host_inflight: Vec::new(),
+                host_inflight: HashMap::new(),
                 active_execution: None,
                 ready_tx: None,
             }),
             child: Mutex::new(None),
             busy_notify: Notify::new(),
+            host_settled: Notify::new(),
             execution_queue: tokio::sync::Mutex::new(()),
             start_memo: Mutex::new(None),
             shutdown_memo: Mutex::new(None),

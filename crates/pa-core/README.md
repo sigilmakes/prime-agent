@@ -111,3 +111,69 @@ revocation/errors; bytes already sent cannot be recalled. Recovery belongs to al
 live hosts sharing the agent directory and cancels when the last host disappears.
 Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
 and releases upload capacity during retry waits; exhaustion retains durable intent.
+
+## Plugin host foundation
+
+`plugins::PluginHost` is a session-local deep module with three lifecycle operations:
+`reconcile(Vec<PluginSource>)`, `snapshot()`, and
+`invoke(&Contribution, JSON, CancellationToken)`. This is a new public core interface
+and embedded-VM dependency. It is not engine, kernel, prompt, settings, or TUI integration,
+and it does not make the continual harness optional by itself. A native test consumer
+is provisional until those integration slices replace their current policies.
+
+Each enabled source returns a declaration table with optional dense `exports`,
+`commands`, and `hooks` arrays. Each entry has `name`, optional `description`, optional
+`mode` (`unary` by default, or `streaming`), and a `run(input, ctx)` Lua function.
+Exports map to `plugin.<plugin>.<name>` when a kernel adapter is added; commands map
+to `/<name>`. Hooks are plugin-scoped named callbacks. The future engine adapter
+must define stage inputs, outcomes, and ordering; this host does not invent stage
+policy or claim context/compaction/provider contributions are implemented.
+Unknown declaration fields and unsupported modes are errors, not ignored stubs.
+Names are lowercase ASCII identifiers, at most 64 bytes. Duplicate plugins,
+per-kind callbacks, and global command names are rejected. The composition root
+supplies the reserved command inventory. No optional plugin command (for example
+`/refine`) is permanently reserved by the host.
+
+Reconcile loads changed sources outside the registry lock, validates the whole
+inventory, then commits once. Any failure preserves the old snapshot and live Lua
+state. Concurrent reconciles cannot overwrite a newer commit. Unchanged sources
+retain their generation. Successful replacements and omitted (disabled) plugins
+retire previous generations, remove every callback registration, and cancel work.
+The host has no persistence or data-deletion capability: disabling never deletes
+saved plugin data. Each generation owns one VM; hosts do not share mutable Lua
+state. Snapshot descriptors contain opaque generation IDs and cannot retarget a
+replacement or cross to another host/session. No global provider registry changes.
+
+`invoke` returns a native asynchronous `Invocation`. Its `next()` produces bounded,
+backpressured JSON updates and one typed terminal `Unary`/`Streamed` outcome or error.
+Unary callbacks cannot emit updates. Cancellation, consumer drop, host drop, disable,
+and reload drop pending capability futures. Delivery checks retirement/cancellation
+again, so buffered predecessor results cannot regain authority. Pure Lua callbacks
+yield cooperatively at instruction intervals, allowing native cancellation to run.
+Cancelled/retired work is never treated as a fallback candidate.
+
+A callback receives only invocation-scoped `ctx.call(operation, JSON)` and
+`ctx.emit(JSON)`. `HostCapabilities` is a dynamically supplied async adapter for
+explicit host operations, including future auxiliary inference. Requests carry the
+session, plugin, and generation identity. Adapters must authorize operations, honor
+cancellation, and use explicit private runtime paths. They must not block while
+constructing or polling their future. Registry locks are not held during callbacks;
+mlua VM locks release on each pending coroutine poll. Retained Lua contexts lose
+capability authority when their originating invocation ends. There are no default
+filesystem, network, credential, storage, or inference-provider adapters.
+
+The reviewed dependency is `mlua` 0.11.6 (MIT), with `lua54`, `vendored`, `async`,
+`send`, and `serialize`: an actual embedded Lua VM plus coroutine/JSON support that
+existing workspace crates cannot supply. Vendored Lua avoids ambient system-Lua ABI
+selection. Lua values and functions stay private to generation/runtime files.
+Only table/string/math/UTF-8 standard libraries are loaded; ambient OS, IO, package
+loading, and console output are absent. Local plugins are trusted code, not a
+hostile-code sandbox. A 16 MiB VM allocation limit, 1 MiB source limit, callback
+inventory limits, and initialization instruction budget bound common mistakes;
+these are not a complete security/resource isolation promise.
+
+Future contribution forms should add an explicit declaration validator, typed
+inventory descriptor, and generation-bound invocation adapter together. They must
+use this same retirement and capability lifecycle, not add a parallel registry or
+leak Lua values to the engine. Context strategy selection and ordered compaction
+policy remain separate from this generic callback host.

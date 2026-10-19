@@ -159,9 +159,14 @@ impl SessionFile {
         self.window.as_ref()?.boundary_model.clone()
     }
 
+    /// Scalar restore projection for model, thinking level, and service tier.
+    /// The windowed arm mirrors core's `WindowedSessionStore::settings`: it is
+    /// not a model-facing context. The accepted archive stays on the retained
+    /// compaction entry and is reconstructed by core's context builder.
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {
         if let Some(window) = &self.window {
             let mut context = pa_core::session::SessionContext {
+                archive: None,
                 messages: Vec::new(),
                 thinking_level: window.thinking_level.clone(),
                 service_tier: window.service_tier,
@@ -411,98 +416,12 @@ impl SessionFile {
 
     #[must_use]
     pub fn windowed_messages(&self, tail_budget: usize) -> WindowedTranscript {
-        let mut visited: Vec<std::borrow::Cow<'_, Value>> = Vec::new();
-        let mut last_user_prompt_ms = None;
+        let mut visited = Vec::new();
         self.walk_message_values(|_, message| {
-            if message.get("role").and_then(Value::as_str) == Some("user") {
-                // The prompt scalar mirrors the TUI's numeric/ISO timestamp
-                // contract without changing the roster's activity-time fold.
-                let prompt_timestamp_ms = match message.get("timestamp") {
-                    Some(Value::Number(number)) => number.as_u64().or_else(|| {
-                        number
-                            .as_f64()
-                            .filter(|value| value.is_finite())
-                            .map(|value| value.max(0.0) as u64)
-                    }),
-                    Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
-                        .filter(|ms| *ms > 0)
-                        .map(|ms| ms as u64),
-                    _ => None,
-                };
-                if let Some(timestamp) = prompt_timestamp_ms {
-                    last_user_prompt_ms = Some(timestamp);
-                }
-            }
             visited.push(message);
             true
         });
-        let mut cut = visited.len().saturating_sub(tail_budget);
-        while cut > 0
-            && matches!(
-                visited[cut].get("role").and_then(Value::as_str),
-                Some("toolResult" | "custom")
-            )
-        {
-            cut -= 1;
-        }
-        // User bash and other message rows can land between a call and its
-        // result. Match the same last-pending call as transcript replay, then
-        // move only across pairs intersecting the cut. Reverse result order
-        // also catches an earlier pair exposed by moving the boundary back.
-        let mut pending: std::collections::HashMap<&str, Vec<usize>> =
-            std::collections::HashMap::new();
-        let mut pairs = Vec::new();
-        for (index, message) in visited.iter().enumerate() {
-            match message.get("role").and_then(Value::as_str) {
-                Some("assistant") => {
-                    if let Some(content) = message.get("content").and_then(Value::as_array) {
-                        for block in content {
-                            if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
-                                block.get("type").and_then(Value::as_str) == Some("toolCall")
-                            }) {
-                                pending.entry(id).or_default().push(index);
-                            }
-                        }
-                    }
-                }
-                Some("toolResult") => {
-                    if let Some(call) = message
-                        .get("toolCallId")
-                        .and_then(Value::as_str)
-                        .and_then(|id| pending.get_mut(id))
-                        .and_then(Vec::pop)
-                    {
-                        pairs.push((call, index));
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (call, result) in pairs.into_iter().rev() {
-            if call < cut && result >= cut {
-                cut = call;
-            }
-        }
-        if let Some(retained) = visited
-            .first()
-            .filter(|first| first.get("role").and_then(Value::as_str) == Some("compactionSummary"))
-            .and_then(|first| first.get("retainedMessageCount"))
-            .and_then(Value::as_u64)
-            .and_then(|retained| usize::try_from(retained).ok())
-        {
-            if cut > 0 && cut <= retained {
-                cut = 0;
-            }
-        }
-        let messages = visited.split_off(cut);
-        WindowedTranscript {
-            messages: messages
-                .into_iter()
-                .map(std::borrow::Cow::into_owned)
-                .collect(),
-            omitted: cut,
-            last_user_prompt_ms,
-        }
+        windowed_transcript(visited, tail_budget)
     }
 
     /// The durable entry id the compaction cut keeps: the engine's
@@ -635,5 +554,103 @@ pub(super) fn normalize_state_status(status: &str) -> String {
     match status {
         "hidden" | "sleep" => "archived".to_string(),
         other => other.to_string(),
+    }
+}
+
+/// Shared borrowed window selection: only the final suffix becomes owned.
+pub(super) fn windowed_transcript(
+    mut visited: Vec<std::borrow::Cow<'_, Value>>,
+    tail_budget: usize,
+) -> WindowedTranscript {
+    let mut last_user_prompt_ms = None;
+    for message in &visited {
+        if message.get("role").and_then(Value::as_str) == Some("user") {
+            // The prompt scalar mirrors the TUI's numeric/ISO timestamp
+            // contract without changing the roster's activity-time fold.
+            let prompt_timestamp_ms = match message.get("timestamp") {
+                Some(Value::Number(number)) => number.as_u64().or_else(|| {
+                    number
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .map(|value| value.max(0.0) as u64)
+                }),
+                Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+                    .filter(|ms| *ms > 0)
+                    .map(|ms| ms as u64),
+                _ => None,
+            };
+            if let Some(timestamp) = prompt_timestamp_ms {
+                last_user_prompt_ms = Some(timestamp);
+            }
+        }
+    }
+    let mut cut = visited.len().saturating_sub(tail_budget);
+    while cut > 0
+        && matches!(
+            visited
+                .get(cut)
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str),
+            Some("toolResult" | "custom")
+        )
+    {
+        cut -= 1;
+    }
+    // User bash and other message rows can land between a call and its
+    // result. Match the same last-pending call as transcript replay, then
+    // move only across pairs intersecting the cut. Reverse result order
+    // also catches an earlier pair exposed by moving the boundary back.
+    let mut pending: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    let mut pairs = Vec::new();
+    for (index, message) in visited.iter().enumerate() {
+        match message.get("role").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    for block in content {
+                        if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
+                            block.get("type").and_then(Value::as_str) == Some("toolCall")
+                        }) {
+                            pending.entry(id).or_default().push(index);
+                        }
+                    }
+                }
+            }
+            Some("toolResult") => {
+                if let Some(call) = message
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| pending.get_mut(id))
+                    .and_then(Vec::pop)
+                {
+                    pairs.push((call, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (call, result) in pairs.into_iter().rev() {
+        if call < cut && result >= cut {
+            cut = call;
+        }
+    }
+    if let Some(retained) = visited
+        .first()
+        .filter(|first| first.get("role").and_then(Value::as_str) == Some("compactionSummary"))
+        .and_then(|first| first.get("retainedMessageCount"))
+        .and_then(Value::as_u64)
+        .and_then(|retained| usize::try_from(retained).ok())
+    {
+        if cut > 0 && cut <= retained {
+            cut = 0;
+        }
+    }
+    let messages = visited.split_off(cut);
+    WindowedTranscript {
+        messages: messages
+            .into_iter()
+            .map(std::borrow::Cow::into_owned)
+            .collect(),
+        omitted: cut,
+        last_user_prompt_ms,
     }
 }

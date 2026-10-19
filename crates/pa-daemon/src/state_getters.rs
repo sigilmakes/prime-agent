@@ -155,8 +155,8 @@ impl Worker {
         );
     }
 
-    /// `get_commands` (TS `createAgentConnectionCommands`): prompt
-    /// templates, then skills.
+    /// `get_commands`: prompt templates, skills, then active generation-bound
+    /// plugin commands. Disabled plugins contribute no discovery entries.
     pub(crate) async fn handle_get_commands(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_commands") {
             return response;

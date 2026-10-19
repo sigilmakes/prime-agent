@@ -33,7 +33,8 @@ impl SessionManager {
         let path = self
             .window
             .as_ref()
-            .map(|window| window.source_path().to_owned());
+            .map(|window| window.source_path().to_owned())
+            .or_else(|| self.session_file.clone().filter(|path| path.exists()));
         let retained = self.file_entries.clone();
         // Full-history fast path: the retained copy is exactly the file's rows
         // plus the unpersisted tail; without the lease the gate stays closed.
@@ -98,7 +99,7 @@ impl SessionManager {
                     _ => None,
                 })
                 .collect(),
-            refinement_history: crate::session_engine::refine::session_refinement_history(
+            refinement_history: crate::session_engine::harness_digest::session_refinement_history(
                 &self.file_entries,
             ),
         });
@@ -113,7 +114,7 @@ impl SessionManager {
                 .expect("the read arm always carries its snapshot")
                 .await?;
             let refinement_history =
-                crate::session_engine::refine::session_refinement_history(&entries);
+                crate::session_engine::harness_digest::session_refinement_history(&entries);
             let messages = entries
                 .into_iter()
                 .filter_map(|entry| match entry {
@@ -125,6 +126,40 @@ impl SessionManager {
                 messages,
                 refinement_history,
             })
+        }
+    }
+
+    /// Capture the session-wide strategy choice, including a choice outside the
+    /// retained window. Await the returned history future without the session lock.
+    pub(crate) fn context_selection_snapshot(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<pa_types::session::ContextSelection>>>
+           + Send
+           + 'static {
+        let selection=self.file_entries.iter().rev().find(|entry|matches!(entry,FileEntry::Custom{payload,..} if payload.custom_type==pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE)).cloned();
+        let complete = self.window.is_none() || selection.is_some();
+        let snapshot = self.history_snapshot();
+        async move {
+            let entries = if complete {
+                selection.into_iter().collect()
+            } else {
+                snapshot.await?
+            };
+            for entry in entries.iter().rev() {
+                if let FileEntry::Custom { payload, .. } = entry {
+                    if payload.custom_type == pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE {
+                        let selection: pa_types::session::ContextSelection =
+                            serde_json::from_value(payload.data.clone().ok_or_else(|| {
+                                anyhow::anyhow!("context strategy selection lacks data")
+                            })?)?;
+                        if selection.version != 1 || selection.strategy.split_once('/').is_none() {
+                            anyhow::bail!("unsupported session context selection schema");
+                        }
+                        return Ok(Some(selection));
+                    }
+                }
+            }
+            Ok(None)
         }
     }
 
@@ -296,15 +331,10 @@ impl SessionManager {
         self.window
             .as_ref()
             .is_some_and(super::window::WindowedSessionStore::has_non_bootstrap_entries)
-            || self.file_entries.iter().any(|entry| {
-                !matches!(
-                    entry,
-                    FileEntry::Header { .. }
-                        | FileEntry::ModelChange { .. }
-                        | FileEntry::ThinkingLevelChange { .. }
-                        | FileEntry::ServiceTierChange { .. }
-                )
-            })
+            || self
+                .file_entries
+                .iter()
+                .any(|entry| !super::super::is_bootstrap_entry(entry))
     }
 
     pub fn refinement_history(&self) -> Vec<crate::refinement::RefinementResult> {
@@ -314,11 +344,11 @@ impl SessionManager {
                 .iter()
                 .filter_map(|line| serde_json::from_str(line).ok())
                 .collect();
-            crate::session_engine::refine::session_refinement_history(&entries)
+            crate::session_engine::harness_digest::session_refinement_history(&entries)
         });
-        history.extend(crate::session_engine::refine::session_refinement_history(
-            &self.file_entries,
-        ));
+        history.extend(
+            crate::session_engine::harness_digest::session_refinement_history(&self.file_entries),
+        );
         history
     }
 

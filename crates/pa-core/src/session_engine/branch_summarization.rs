@@ -125,6 +125,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
         }
         FileEntry::BranchSummary { payload, .. } => Some(AgentMessage::BranchSummary(
             pa_types::session::BranchSummaryMessage {
+                rest: pa_types::JsonMap::new(),
                 summary: payload.summary.clone(),
                 from_id: payload.from_id.clone(),
                 timestamp: super::super::session::timestamp_to_millis(entry.timestamp()),
@@ -132,6 +133,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
         )),
         FileEntry::Compaction { payload, .. } => {
             Some(AgentMessage::CompactionSummary(CompactionSummaryMessage {
+                rest: pa_types::JsonMap::new(),
                 summary: payload.summary.clone(),
                 tokens_before: payload.tokens_before,
                 retained_message_count: None,
@@ -155,7 +157,7 @@ pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> Branc
 fn prepare_branch_entries_with_refinements(
     entries: &[FileEntry],
     token_budget: u64,
-    enabled: bool,
+    _enabled: bool,
 ) -> BranchPreparation {
     let mut file_ops = FileOperations::default();
     // Cumulative tracking from prior branch summaries (never hooked ones).
@@ -178,13 +180,9 @@ fn prepare_branch_entries_with_refinements(
             continue;
         };
         // Disabled harness content must not consume budget or terminate selection.
-        let message = if enabled {
-            Some(message)
-        } else {
-            super::refinement_gate::without_refinements(vec![message])
-                .into_iter()
-                .next()
-        };
+        let message = super::refinement_gate::without_refinements(vec![message])
+            .into_iter()
+            .next();
         let Some(message) = message else {
             continue;
         };
@@ -238,9 +236,9 @@ fn build_branch_summary_request_with_refinements(
     token_budget: u64,
     custom_instructions: Option<&str>,
     replace_instructions: bool,
-    enabled: bool,
+    _enabled: bool,
 ) -> (Vec<AgentMessage>, BranchPreparation) {
-    let preparation = prepare_branch_entries_with_refinements(entries, token_budget, enabled);
+    let preparation = prepare_branch_entries_with_refinements(entries, token_budget, false);
     let messages = if preparation.messages.is_empty() {
         Vec::new()
     } else {
@@ -406,25 +404,12 @@ pub async fn generate_branch_summary(
         128_000
     };
     let token_budget = context_window.saturating_sub(reserve_tokens);
-    let enabled = match auxiliary {
-        Some(context) => {
-            let context = context.clone();
-            tokio::task::spawn_blocking(move || {
-                let settings =
-                    crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
-                super::refinement_gate::enabled(Some(&settings))
-            })
-            .await
-            .unwrap_or(false)
-        }
-        None => true,
-    };
     let (request_messages, preparation) = build_branch_summary_request_with_refinements(
         entries,
         token_budget,
         custom_instructions,
         replace_instructions,
-        enabled,
+        false,
     );
     if request_messages.is_empty() {
         let (read_files, modified_files) = compute_file_lists(&preparation.file_ops);
@@ -545,6 +530,7 @@ mod tests {
                 None,
             )
             .unwrap();
+        let canonical = serde_json::to_value(session.retained_entries()).unwrap();
         let (request, preparation) = build_branch_summary_request_with_refinements(
             session.retained_entries(),
             50,
@@ -554,16 +540,19 @@ mod tests {
         );
         assert_eq!(preparation.messages, vec![conversation]);
         assert!(!request.is_empty());
-        let (enabled_request, _) = build_branch_summary_request_with_refinements(
+        let (enabled_request, enabled_preparation) = build_branch_summary_request_with_refinements(
             session.retained_entries(),
             50,
             None,
             /*replace_instructions*/ false,
             /*enabled*/ true,
         );
-        assert!(
-            enabled_request.is_empty(),
-            "the enabled legacy budget path selects no older rows"
+        assert_eq!(enabled_request, request);
+        assert_eq!(enabled_preparation.messages, preparation.messages);
+        assert_eq!(
+            serde_json::to_value(session.retained_entries()).unwrap(),
+            canonical,
+            "legacy notice rows remain in canonical history"
         );
     }
 
@@ -629,6 +618,7 @@ mod tests {
     fn compaction_entries_become_summary_messages() {
         let compaction = FileEntry::Compaction {
             payload: pa_types::session::CompactionEntry {
+                context_archive: None,
                 summary: "prior state".to_string(),
                 first_kept_entry_id: "x".to_string(),
                 tokens_before: 10,

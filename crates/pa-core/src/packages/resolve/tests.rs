@@ -935,6 +935,50 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
 }
 
 #[test]
+fn bundled_refine_skill_is_disabled_even_when_force_included() {
+    let fixture = Fixture::new();
+    let bundled = fixture.temp_dir.join("bundled-skills");
+    skill_md(&bundled, "refine", "Obsolete host refinement");
+    skill_md(&bundled, "ordinary", "Ordinary bundled skill");
+    for harness_refinements in [false, true] {
+        write(
+            &fixture.agent_dir.join("settings.json"),
+            &serde_json::json!({
+                "harnessRefinements": harness_refinements,
+                "skills": ["+refine/SKILL.md"],
+            })
+            .to_string(),
+        );
+        let mut manager = PackageManager::with_options(PackageManagerOptions {
+            cwd: fixture.manager.cwd().to_path_buf(),
+            agent_dir: fixture.agent_dir.clone(),
+            settings: SettingsManager::create(fixture.manager.cwd(), &fixture.agent_dir),
+            bundled_skills_dir: BundledSkillsDir::Directory(bundled.clone()),
+            extra_builtin_skill_overrides: vec!["+refine/SKILL.md".to_string()],
+        });
+        let result = manager.resolve().unwrap();
+        let enabled = result
+            .skills
+            .iter()
+            .filter(|resource| {
+                resource.metadata.source == MetadataSource::Builtin && resource.enabled
+            })
+            .map(|resource| resource.path.strip_prefix(&bundled).unwrap().to_path_buf())
+            .collect::<Vec<_>>();
+        assert_eq!(enabled, vec![PathBuf::from("ordinary/SKILL.md")]);
+        let legacy = result
+            .skills
+            .iter()
+            .find(|resource| {
+                resource.metadata.source == MetadataSource::Builtin
+                    && resource.path == bundled.join("refine/SKILL.md")
+            })
+            .expect("the old resource remains discoverable as disabled metadata");
+        assert!(!legacy.enabled);
+    }
+}
+
+#[test]
 fn empty_bundled_skills_dir_warns() {
     let fixture = Fixture::new();
     let settings = SettingsManager::create(fixture.manager.cwd(), &fixture.agent_dir);

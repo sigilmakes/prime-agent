@@ -41,7 +41,10 @@ impl AgentSessionEngine {
         registry.load_private_authorization_from_cache();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
-        let candidates = pa_core::models::failover_candidates(model, &available);
+        let candidates: Vec<_> = pa_core::models::failover_candidates(model, &available)
+            .iter()
+            .map(|model| self.configure_fresh_ollama_model(model))
+            .collect();
         match crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir) {
             DaemonAllowlist::Unrestricted => candidates,
             DaemonAllowlist::Allowed(patterns) => candidates

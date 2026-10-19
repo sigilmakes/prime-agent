@@ -41,23 +41,6 @@ fn now_epoch_ms() -> i64 {
         .map_or(i64::MAX, |d| d.as_millis() as i64)
 }
 
-/// One OAuth refresh in flight per provider: the token fetch runs outside every
-/// lock, so TS's single-threaded single-flight needs its own gate.
-fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
-    static FLIGHTS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, &'static std::sync::Mutex<()>>>,
-    > = std::sync::OnceLock::new();
-    let registry = FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let lock = {
-        let mut registry = registry.lock().expect("auth refresh-flight registry");
-        *registry
-            .entry(provider.to_string())
-            .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
-    };
-    lock.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 #[derive(Clone)]
 struct AuthSourceCandidate {
     source: AuthSource,
@@ -647,6 +630,70 @@ impl AuthStorage {
         }
     }
 
+    /// Local status probe for catalog/UI paths. Never invokes command keys, OAuth adapters,
+    /// or fallback resolvers. A stale deferred identity stays stale until request-time
+    /// resolution proves a new value; this probe cannot infer the deferred secret.
+    pub(crate) fn get_auth_status_local(&self, provider: &str) -> AuthStatus {
+        let stored = match self.data.credential(provider) {
+            Some(AuthCredential::ApiKey { key, .. }) if !key.starts_with('!') => {
+                self.stored_candidate(provider)
+            }
+            Some(AuthCredential::McpStaticToken { .. }) => self.stored_candidate(provider),
+            Some(AuthCredential::ApiKey { .. } | AuthCredential::Oauth { .. }) => {
+                Some(AuthSourceCandidate {
+                    source: AuthSource::Stored,
+                    configured: true,
+                    label: None,
+                    identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
+                    value_fingerprint: None,
+                    resolve_value_fingerprint: None,
+                })
+            }
+            None => None,
+        };
+        let candidates = if provider == PRIME_INFERENCE_PROVIDER_ID {
+            [
+                self.runtime_candidate(provider),
+                self.environment_candidate(provider),
+                stored,
+            ]
+        } else {
+            [
+                self.runtime_candidate(provider),
+                stored,
+                self.environment_candidate(provider),
+            ]
+        };
+        let mut has_stale = false;
+        for candidate in candidates.into_iter().flatten() {
+            let matching = self.matching_stale(provider, &candidate);
+            let stale = !matching.is_empty()
+                && candidate.value_fingerprint.as_ref().is_none_or(|value| {
+                    matching
+                        .iter()
+                        .any(|token| &token.value_fingerprint == value)
+                });
+            if stale {
+                has_stale = true;
+                continue;
+            }
+            return AuthStatus {
+                configured: candidate.configured,
+                source: Some(candidate.source),
+                label: candidate.label,
+            };
+        }
+        if has_stale {
+            AuthStatus {
+                configured: false,
+                source: Some(AuthSource::Stale),
+                label: Some("expired".to_string()),
+            }
+        } else {
+            AuthStatus::default()
+        }
+    }
+
     pub fn get_all(&self) -> AuthStorageData {
         self.data.clone()
     }
@@ -709,7 +756,11 @@ impl AuthStorage {
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
             match next_credential.take() {
-                Some(credential) => data.insert(provider, &credential),
+                Some(credential) => {
+                    if data.credential(provider).as_ref() != Some(&credential) {
+                        data.insert(provider, &credential);
+                    }
+                }
                 None => data.remove(provider),
             }
             let content = serde_json::to_string_pretty(&data.0)?;

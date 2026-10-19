@@ -53,7 +53,7 @@ fn existing_retry_returns_current_aggregate_after_other_child() {
         ..Usage::default()
     };
     assert!(
-        matches!(result, ChildUsageAppendResult::Existing(usage) if usage == expected),
+        matches!(result, ChildUsageAppendResult::Existing(ref usage) if usage == &expected),
         "the retry reuses the current aggregate: {result:?}"
     );
     assert_eq!(attribution_rows(&store).len(), 2);
@@ -62,7 +62,7 @@ fn existing_retry_returns_current_aggregate_after_other_child() {
         .append_child_usage_once("a", &target, child(), None)
         .unwrap();
     assert!(
-        matches!(result, ChildUsageAppendResult::Existing(usage) if usage == expected),
+        matches!(result, ChildUsageAppendResult::Existing(ref usage) if usage == &expected),
         "the reopened store answers from its durable index: {result:?}"
     );
     assert_eq!(attribution_rows(&reopened).len(), 2);
@@ -160,8 +160,12 @@ fn hydration_after_an_uncertain_append_does_not_lose_child_usage() {
         ..Usage::default()
     };
     FAIL_AFTER_CHILD_APPEND.with(|fault| fault.set(true));
-    let result =
-        live.append_child_usage_once("report-a-0", &target, a, Some(ChildUsageOrigin::SpawnTask));
+    let result = live.append_child_usage_once(
+        "report-a-0",
+        &target,
+        a.clone(),
+        Some(ChildUsageOrigin::SpawnTask),
+    );
     assert!(result.is_err());
     assert_eq!(
         attribution_rows(&live).len(),
@@ -171,7 +175,7 @@ fn hydration_after_an_uncertain_append_does_not_lose_child_usage() {
     live.append_child_usage_once(
         "report-b-0",
         &target,
-        b,
+        b.clone(),
         Some(ChildUsageOrigin::AgentMessage),
     )
     .unwrap();
@@ -180,7 +184,12 @@ fn hydration_after_an_uncertain_append_does_not_lose_child_usage() {
     // snapshot while the same worker's frozen report A remains retryable.
     live.install_full_history(SessionFile::open(&live.path).unwrap());
     let result = live
-        .append_child_usage_once("report-a-0", &target, a, Some(ChildUsageOrigin::SpawnTask))
+        .append_child_usage_once(
+            "report-a-0",
+            &target,
+            a.clone(),
+            Some(ChildUsageOrigin::SpawnTask),
+        )
         .unwrap();
     let confirmed = match result {
         ChildUsageAppendResult::Created(usage) | ChildUsageAppendResult::Existing(usage) => usage,
@@ -432,7 +441,7 @@ fn nonzero_cost_hydration_confirms_the_complete_wire_decoded_owned_row() {
     };
     FAIL_AFTER_CHILD_APPEND.with(|fault| fault.set(true));
     assert!(live
-        .append_child_usage_once("cost-a", &target, spend, None)
+        .append_child_usage_once("cost-a", &target, spend.clone(), None)
         .is_err());
     let before = std::fs::read(&live.path).unwrap();
     let full = SessionFile::open(&live.path).unwrap();

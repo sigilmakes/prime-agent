@@ -155,7 +155,7 @@ impl SessionUi {
             self.note("Navigation cancelled", view);
             return Ok(());
         }
-        self.rebuild_transcript(view).await;
+        self.restore_branch_transcript();
         // A user-message target re-enters its text in the editor when it is empty.
         if let Some(editor_text) = data.get("editorText").and_then(Value::as_str) {
             if view.editor.get_text().trim().is_empty() {
@@ -262,7 +262,7 @@ impl SessionUi {
         if data.get("cancelled").and_then(Value::as_bool) == Some(true) {
             return Ok(());
         }
-        self.rebuild_transcript(view).await;
+        self.restore_branch_transcript();
         let selected_text = data.get("selectedText").and_then(Value::as_str);
         match selected_text {
             Some(text) => view.editor.set_text(text),
@@ -337,7 +337,6 @@ impl SessionUi {
             no_session: false,
             session: SessionSelection::New,
             initial_message: None,
-            telemetry_disabled: self.telemetry_disabled,
             theme: String::new(),
             code_block_indent: self.code_block_indent.clone(),
             show_images: self.show_images,
@@ -347,10 +346,8 @@ impl SessionUi {
             version: String::new(),
             onboarding: None,
             client_auth: self.client_auth.clone(),
-            traces: self.traces.clone(),
             provider_auth: self.provider_auth.clone(),
             update_commands: self.update_commands.clone(),
-            telemetry: self.telemetry.clone(),
             keybindings: self.keybindings.clone(),
             // The `/new` run keeps this process's stash store: a draft stashed for the fresh
             // session survives into the next chat view that binds it.
@@ -415,7 +412,6 @@ impl SessionUi {
         }
         rows.push(raw("switch with /switch <n|id>".to_string()));
         self.open_info_panel(view, Some("Sessions".to_string()), InfoContent::Rows(rows));
-        self.track_menu_opened("list", "command");
         Ok(())
     }
 
@@ -531,7 +527,8 @@ pub(super) async fn create_session(
             no_session: options.no_session.then_some(true),
             name: None,
             config: Some(options.create_config()),
-            telemetry_disabled: options.telemetry_disabled.filter(|disabled| *disabled),
+            // Keep legacy daemons opted out when this client creates a session.
+            telemetry_disabled: Some(true),
             runtime_metadata: None,
             // TS `clientOwned: parsed.noSession`: only a noSession
             // create is client-owned.

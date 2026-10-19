@@ -7,7 +7,6 @@ use super::{
     HeadlessSettle, Instant, InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect,
     ReconnectLoop, RecoveryKind, Renderer, Result, SessionReconnect, SessionSelection, SessionUi,
     TerminalHandoff, UiInput, UiMode, VecDeque, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
-    TELEMETRY_EXIT_TIMEOUT_MS,
 };
 use crate::suspend::SuspendTerminal;
 use anyhow::Context;
@@ -189,8 +188,6 @@ async fn run_interactive_surface(
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<crate::session_ui::UpdateNote>();
     let (reload_tx, mut reload_rx) = mpsc::unbounded_channel::<crate::session_ui::ReloadNote>();
-    let (traces_upload_tx, mut traces_upload_rx) =
-        mpsc::unbounded_channel::<crate::session_ui::TracesUploadNote>();
     let (catalog_tx, mut catalog_rx) =
         mpsc::unbounded_channel::<crate::session_ui::ModelCatalogUpdate>();
     let (heartbeats_tx, mut heartbeats_rx) =
@@ -217,7 +214,36 @@ async fn run_interactive_surface(
 
     // The view and the terminal surface come up BEFORE the session attach: the pane paints the
     // startup chrome immediately, and the transcript renders when the snapshot lands.
-    let theme = crate::app::load_theme(&options.theme);
+    let color_mode = crate::theme::detect_color_mode();
+    let theme_name = if options.theme.is_empty() {
+        "prime"
+    } else {
+        &options.theme
+    };
+    // Builtins do not touch disk. Custom files load off the paint/input path;
+    // the default palette keeps the surface usable even on a stalled filesystem.
+    let mut startup_theme_load = if pa_types::themes::builtin_theme_json(theme_name).is_some() {
+        None
+    } else {
+        let source = crate::theme::ThemeSource::resolve(theme_name);
+        let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
+        // A filesystem read cannot be cancelled, including a regular file on a
+        // stalled mount. Detach from Tokio's blocking pool so runtime shutdown
+        // never joins this read. The captured source cannot discover new paths.
+        drop(
+            std::thread::Builder::new()
+                .name("startup-theme".into())
+                .spawn(move || {
+                    let loaded = source.and_then(|source| source.load(color_mode));
+                    // A dropped receiver means the surface retired; abandon publication.
+                    let _ = loaded_tx.send(loaded);
+                })
+                .context("starting the startup theme reader")?,
+        );
+        Some(loaded_rx)
+    };
+    let theme = crate::theme::Theme::builtin(theme_name, color_mode);
+    let mut startup_theme_retired = false;
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
     // The file-completion provider browses the SESSION cwd, not the process cwd: the completion
@@ -302,7 +328,6 @@ async fn run_interactive_surface(
         let prompt_tx = prompt_tx.clone();
         let share_tx = share_tx.clone();
         let reload_tx = reload_tx.clone();
-        let traces_upload_tx = traces_upload_tx.clone();
         let update_tx = update_tx.clone();
         let catalog_tx = catalog_tx.clone();
         let auth_panel_tx = auth_panel_tx.clone();
@@ -330,7 +355,6 @@ async fn run_interactive_surface(
                     let prompt_tx = prompt_tx.clone();
                     let share_tx = share_tx.clone();
                     let reload_tx = reload_tx.clone();
-                    let traces_upload_tx = traces_upload_tx.clone();
                     let update_tx = update_tx.clone();
                     let catalog_tx = catalog_tx.clone();
                     let auth_panel_tx = auth_panel_tx.clone();
@@ -357,7 +381,6 @@ async fn run_interactive_surface(
                             share_tx,
                             reload_tx,
                             update_tx,
-                            traces_upload_tx,
                             catalog_tx,
                             auth_panel_tx,
                             crate::session_ui::ActivityUpdates {
@@ -700,11 +723,6 @@ async fn run_interactive_surface(
             )
             .await;
     }
-    // The once-per-installation telemetry disclosure (TS
-    // agent-session-services): rendered as an info row here — the alt
-    // screen hides any pre-TUI stderr print, so the row is the only
-    // shape the user actually sees.
-    session.maybe_show_telemetry_notice(&mut view);
     // TS `restorePromptStashOnOpen`: a draft stashed on the way out (a
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.
@@ -741,6 +759,7 @@ async fn run_interactive_surface(
                 resume_hint: None,
                 last_assistant_text: None,
                 frames: Vec::new(),
+                native_scrollback: Vec::new(),
                 clipboard_emissions: Vec::new(),
                 agents_view_scope: None,
                 return_to_agents_view: false,
@@ -777,11 +796,6 @@ async fn run_interactive_surface(
     // queued behind the open dispatch first, in order.
     let mut last_bash_refresh = Instant::now();
     let mut last_factory_refresh = Instant::now();
-    // The enhanced-key modes settle once (kitty answer or fallback) and
-    // report one adoption event; headless runs hold pipes and never probe.
-    let mut enhanced_keys_pending = renderer.is_terminal();
-    // The hyperlink capability is env-based, settles at run start; terminal runs report it once.
-    let mut hyperlinks_pending = renderer.is_terminal();
     // State changes coalesce into at most one frame per MIN_RENDER_INTERVAL_MS; `render_deadline`
     // is armed while a dirty frame waits out the interval.
     let mut last_render_at: Option<Instant> = None;
@@ -828,31 +842,13 @@ async fn run_interactive_surface(
     let mut session_reconnect: Option<SessionReconnect> = None;
 
     'run: while running {
+        if session.take_native_replay() {
+            renderer.replay_loaded_transcript(&mut view)?;
+            session.dirty = true;
+        }
         if !session.dirty {
             session.spawn_pending_backfill();
         }
-        if enhanced_keys_pending {
-            if let Some((kitty, modify_other_keys)) = crate::enhanced_keys::settle_state() {
-                if let Some(telemetry) = &session.telemetry {
-                    telemetry.enhanced_keys(kitty, modify_other_keys).await;
-                }
-                enhanced_keys_pending = false;
-            }
-        }
-
-        // The OSC 8 hyperlink capability settles once per run: one adoption event reports the gate.
-        // The flush shutdown can wait out a slow endpoint, so the event is spawned instead of
-        // awaited.
-        if hyperlinks_pending {
-            if let Some(telemetry) = session.telemetry.clone() {
-                let enabled = crate::hyperlinks::hyperlinks_enabled();
-                tokio::spawn(async move {
-                    telemetry.hyperlinks_active(enabled).await;
-                });
-            }
-            hyperlinks_pending = false;
-        }
-
         // Drain the whole queued input batch in this one iteration (TS dispatches every event of
         // a stdin chunk): a burst applies as one batch instead of one render pass per event. A
         // WaitIdle step is a barrier: it holds at the queue head until the turn finishes.
@@ -917,6 +913,22 @@ async fn run_interactive_surface(
                     settle_target = None;
                     pending.pop_front();
                 } else {
+                    inputs_pending = false;
+                }
+            } else if let Some(UiInput::WaitNativeReplay { needle, timeout_ms }) = pending.front() {
+                let satisfied = renderer
+                    .headless_replay_bytes()
+                    .is_some_and(|bytes| String::from_utf8_lossy(bytes).contains(needle.as_str()));
+                if satisfied {
+                    wait_render_deadline = None;
+                    pending.pop_front();
+                } else if wait_render_deadline.is_some_and(|deadline| Instant::now() > deadline) {
+                    wait_render_deadline = None;
+                    pending.pop_front();
+                    session.note("timed out waiting for native history replay", &mut view);
+                } else {
+                    wait_render_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(*timeout_ms));
                     inputs_pending = false;
                 }
             } else if let Some((needle, timeout_ms, present)) = match pending.front() {
@@ -1010,9 +1022,6 @@ async fn run_interactive_surface(
                         // continues here once the user foregrounds the process, where the cycle
                         // re-applies raw mode, the alt screen, and SGR mouse tracking. Headless
                         // runs keep no terminal renderer, so the request is observed and dropped.
-                        if session.pending_traces_login() {
-                            session.run_traces_login(&mut view);
-                        }
                         if session.take_suspend_request() && renderer.is_terminal_mut().is_some() {
                             match crate::suspend::suspend_cycle(
                                 &mut crate::suspend::ProcessSignals,
@@ -1021,9 +1030,8 @@ async fn run_interactive_surface(
                                     view: &mut view,
                                 },
                             ) {
-                                Ok(()) => session.track_suspend_used("resumed"),
+                                Ok(()) => {}
                                 Err(error) => {
-                                    session.track_suspend_used("failed");
                                     session.error_row(&format!("{error:#}"), &mut view);
                                     // Try to take the terminal back so the run stays usable; if
                                     // that also fails, the draw below surfaces the broken frame.
@@ -1134,13 +1142,12 @@ async fn run_interactive_surface(
                             view.editor.set_text(&text);
                             session.dirty = true;
                         }
-                        if session.pending_traces_login() {
-                            session.run_traces_login(&mut view);
-                        }
                     }
                     UiInput::Timestamp(_) => unreachable!("timing marker handled above"),
                     UiInput::HeadlessDone => headless_done = true,
-                    UiInput::WaitRender { .. } | UiInput::WaitGone { .. } => {
+                    UiInput::WaitRender { .. }
+                    | UiInput::WaitGone { .. }
+                    | UiInput::WaitNativeReplay { .. } => {
                         unreachable!("render barrier handled above")
                     }
                     UiInput::ScrollTop => {
@@ -1157,6 +1164,10 @@ async fn run_interactive_surface(
                         unreachable!("barrier handled above")
                     }
                 }
+                // Opening settings hands theme ownership to its preview/restore flow.
+                // Track each input, including a terminal batch that opens and closes
+                // the menu before the next select, so a late read cannot override it.
+                startup_theme_retired |= view.settings_menu.is_some();
                 // Paint the handled input in this iteration: the select below can otherwise wait
                 // out its 50ms tick before the next draw, felt as keystroke-to-render lag. A
                 // handoff paints nothing: the next surface owns the pane.
@@ -1190,11 +1201,9 @@ async fn run_interactive_surface(
                     && session.exit_requested
                     && (session.open_agents_view || session.pending_selection.is_some())
                 {
-                    session.exit_reason = "session_request";
                     break 'run;
                 }
                 if session.exit_requested && renderer.is_terminal() {
-                    session.exit_reason = "session_request";
                     break;
                 }
                 // Headless input keeps the one-step-per-iteration order the plans were written
@@ -1216,6 +1225,7 @@ async fn run_interactive_surface(
         // so the bound below can name what stuck.
         let settle = headless_done.then(|| {
             HeadlessSettle::snapshot(&session, &view, pending.len(), wait_idle_deadline.is_some())
+                .with_background_notes(&notes_rx)
         });
         if let Some(settle) = settle {
             if settle.settled() {
@@ -1311,6 +1321,34 @@ async fn run_interactive_surface(
             None
         };
         tokio::select! {
+            loaded = async {
+                match startup_theme_load.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            }, if startup_theme_load.is_some() => {
+                startup_theme_load = None;
+                match loaded.context("startup theme reader stopped").and_then(std::convert::identity) {
+                    Ok(theme) => {
+                        if !startup_theme_retired {
+                            view.theme = theme;
+                            session.dirty = true;
+                        }
+                    }
+                    Err(error) => {
+                        let fallback = if view.theme.name == "prime" {
+                            "using prime theme".to_string()
+                        } else {
+                            format!("keeping {} theme", view.theme.name)
+                        };
+                        view.push_entry(crate::chat::ChatEntry::Status {
+                            text: format!("\u{26a0} {error:#}; {fallback}."),
+                            kind: crate::chat::StatusKind::Warning,
+                        });
+                        session.dirty = true;
+                    }
+                }
+            }
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and forever; while the
                 // reconnect driver owns the run (§10.2) that always-ready arm would hot-spin the
@@ -1558,11 +1596,6 @@ async fn run_interactive_surface(
                     session.apply_reload_outcome(outcome, &mut view).await;
                 }
             }
-            maybe_traces_upload = traces_upload_rx.recv() => {
-                if let Some(note) = maybe_traces_upload {
-                    session.apply_traces_upload_note(note, &mut view);
-                }
-            }
             maybe_catalog = catalog_rx.recv() => {
                 if let Some(update) = maybe_catalog {
                     session.apply_model_catalog(update, &mut view);
@@ -1626,21 +1659,18 @@ async fn run_interactive_surface(
                                 "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
                                 &mut view,
                             );
-                            session.exit_reason = "daemon_closed";
                         }
                         RecoveryKind::Lost => {
                             session.note(
                                 "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
                                 &mut view,
                             );
-                            session.exit_reason = "daemon_reconnect_failed";
                         }
                         RecoveryKind::Update => {
                             session.note(
                                 "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
                                 &mut view,
                             );
-                            session.exit_reason = "update_reconnect_failed";
                         }
                     }
                     reconnect = None;
@@ -1697,21 +1727,18 @@ async fn run_interactive_surface(
                                 "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
                                 &mut view,
                             );
-                            session.exit_reason = "daemon_closed";
                         }
                         RecoveryKind::Lost => {
                             session.note(
                                 "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
                                 &mut view,
                             );
-                            session.exit_reason = "daemon_reconnect_failed";
                         }
                         RecoveryKind::Update => {
                             session.note(
                                 "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
                                 &mut view,
                             );
-                            session.exit_reason = "update_reconnect_failed";
                         }
                     }
                     reconnect = None;
@@ -1775,7 +1802,6 @@ async fn run_interactive_surface(
                                         &format!("reattach after the update failed: {error:#} — run `prime-agent attach` to resume"),
                                         &mut view,
                                     );
-                                    session.exit_reason = "update_reattach_failed";
                                     session.dirty = true;
                                     running = false;
                                 }
@@ -2018,7 +2044,6 @@ async fn run_interactive_surface(
             render_deadline = None;
         }
         if session.exit_requested {
-            session.exit_reason = "session_request";
             running = false;
         }
     }
@@ -2074,25 +2099,6 @@ async fn run_interactive_surface(
     } else {
         session.detach_for_exit().await;
     }
-    // `tui exit` (schema v1): how the run ended. Bounded the same way as the detach — telemetry
-    // must never hold the exit path open. The handoff still emits the event but does not wait for
-    // the flush.
-    let exit_reason = session.exit_reason();
-    let turn_active_at_exit = session.turn_active;
-    if let Some(telemetry) = session.telemetry.clone() {
-        let exit_event = async move {
-            let () = telemetry
-                .client_exit(exit_reason, turn_active_at_exit)
-                .await;
-        };
-        if session.open_agents_view {
-            tokio::spawn(exit_event);
-        } else {
-            let _ =
-                tokio::time::timeout(Duration::from_millis(TELEMETRY_EXIT_TIMEOUT_MS), exit_event)
-                    .await;
-        }
-    }
     // Agents-back and `/resume` hand the pane to the agents view; the alternate screen stays in
     // place for it (TS `stop({ preserveAltScreen: true })`).
     let preserve_alt_screen = session.open_agents_view;
@@ -2101,6 +2107,10 @@ async fn run_interactive_surface(
         session_id: session.session_id.clone(),
         resume_hint,
         last_assistant_text: session.last_assistant_text.clone(),
+        native_scrollback: renderer
+            .headless_replay_bytes()
+            .unwrap_or_default()
+            .to_vec(),
         frames: renderer.finish(&mut view, preserve_alt_screen),
         // The headless OSC 52 capture (terminal runs wrote the sequences to stdout as they
         // happened).

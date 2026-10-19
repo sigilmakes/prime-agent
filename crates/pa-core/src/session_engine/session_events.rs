@@ -182,12 +182,13 @@ pub fn agent_event_json(event: &AgentEvent) -> Option<serde_json::Value> {
             tool_call_id,
             tool_name,
             result,
-            ..
+            is_error,
         } => serde_json::json!({
             "type": "tool_execution_end",
             "toolCallId": tool_call_id,
             "toolName": tool_name,
             "result": json_round_trip(result).unwrap_or(serde_json::Value::Null),
+            "isError": is_error,
         }),
     };
     Some(value)

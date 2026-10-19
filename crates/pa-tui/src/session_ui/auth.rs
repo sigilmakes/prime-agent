@@ -320,13 +320,6 @@ impl SessionUi {
                 view.auth_panel = None;
                 self.note(&note, view);
             }
-            AuthPanelRequest::TracesSettled { outcome, gen } => {
-                // A superseded run's late settle cannot clear a newer login: the generation guard.
-                if gen == self.traces_login_gen {
-                    view.auth_panel = None;
-                    self.finish_traces_login(outcome, view).await;
-                }
-            }
         }
         self.dirty = true;
     }
@@ -348,7 +341,6 @@ impl SessionUi {
             return Ok(());
         }
         self.open_mcp_view("/mcp", view, "").await?;
-        self.track_menu_opened("mcp", "command");
         Ok(())
     }
 
@@ -367,12 +359,13 @@ impl SessionUi {
         mcp_dialog.set_cancel_signal(panel.cancel_signal());
         view.auth_panel = Some(mcp_dialog);
         let args = intent.args;
-        tokio::spawn(async move {
-            let note =
-                crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), &args, panel.clone())
-                    .await;
-            panel.send(crate::auth_panel::AuthPanelRequest::McpSettled { note });
+        let task = tokio::spawn(async move {
+            run_mcp_panel_auth(auth.0.as_ref(), &args, panel).await;
         });
+        view.auth_panel
+            .as_mut()
+            .expect("the MCP panel was mounted")
+            .set_flow_task(task);
     }
 
     /// Open the inline `/mcp` connections view over the daemon's `get_mcp_connections` roster, its
@@ -568,4 +561,186 @@ impl SessionUi {
 pub(crate) struct McpAuthIntent {
     pub(crate) args: String,
     pub(crate) title: String,
+}
+
+/// The spawned MCP task owns its command future; cancelling the panel drops every pending step.
+async fn run_mcp_panel_auth(
+    auth: &dyn crate::client_auth::ClientAuthCommands,
+    args: &str,
+    panel: crate::auth_panel::AuthPanelHandle,
+) {
+    tokio::select! {
+        biased;
+        () = panel.cancelled_wait() => {},
+        note = crate::client_auth::run_mcp_auth_command(auth, args, panel.clone()) => {
+            if !panel.cancelled() {
+                panel.send(crate::auth_panel::AuthPanelRequest::McpSettled { note });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::client_auth::{AuthFuture, ClientAuthCommands};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct TestAuth {
+        dropped: Arc<AtomicBool>,
+        complete: bool,
+    }
+    impl ClientAuthCommands for TestAuth {
+        fn login(&self, _server: &str, _panel: crate::auth_panel::AuthPanelHandle) -> AuthFuture {
+            let dropped = Arc::clone(&self.dropped);
+            let complete = self.complete;
+            Box::pin(async move {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(dropped);
+                if complete {
+                    return Ok("Connected fixture.".to_string());
+                }
+                std::future::pending().await
+            })
+        }
+        fn paste_token(
+            &self,
+            server: &str,
+            panel: crate::auth_panel::AuthPanelHandle,
+        ) -> AuthFuture {
+            self.login(server, panel)
+        }
+        fn api_key(
+            &self,
+            credential: &str,
+            panel: crate::auth_panel::AuthPanelHandle,
+        ) -> AuthFuture {
+            self.login(credential, panel)
+        }
+        fn logout(&self, _server: &str) -> AuthFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn escape_drops_pending_mcp_command_without_a_stale_settle() {
+        for args in ["login fixture", "paste fixture", "key fixture"] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let panel = crate::auth_panel::AuthPanelHandle::new(tx);
+            let mut dialog = crate::auth_panel::AuthPanel::new("MCP login");
+            dialog.set_cancel_signal(panel.cancel_signal());
+            let dropped = Arc::new(AtomicBool::new(false));
+            let auth = TestAuth {
+                dropped: Arc::clone(&dropped),
+                complete: false,
+            };
+            let mut flow = Box::pin(run_mcp_panel_auth(&auth, args, panel.clone()));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(flow.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            dialog.handle_key(
+                "escape",
+                &crate::keybindings::KeybindingsManager::new(),
+                &mut crate::clipboard::OscSink::Buffer(Vec::new()),
+            );
+            tokio::time::timeout(Duration::from_secs(1), flow)
+                .await
+                .unwrap();
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "Escape must drop pending work"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "cancelled flow must not close a replacement panel"
+            );
+            assert!(panel.cancelled());
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_panel_cancels_its_work_without_cancelling_successor() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let panel = crate::auth_panel::AuthPanelHandle::new(tx.clone());
+        let successor = crate::auth_panel::AuthPanelHandle::new(tx);
+        let mut dialog = crate::auth_panel::AuthPanel::new("Old login");
+        dialog.set_cancel_signal(panel.cancel_signal());
+        let mut next_dialog = crate::auth_panel::AuthPanel::new("Next login");
+        next_dialog.set_cancel_signal(successor.cancel_signal());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let auth = TestAuth {
+            dropped: Arc::clone(&dropped),
+            complete: false,
+        };
+        let mut flow = Box::pin(run_mcp_panel_auth(&auth, "login fixture", panel.clone()));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(flow.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(dialog);
+        tokio::time::timeout(Duration::from_secs(1), flow)
+            .await
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(panel.cancelled());
+        assert!(!successor.cancelled());
+        assert!(rx.try_recv().is_err());
+        // A completed flow's old panel unmount must likewise leave the successor live.
+        let (completed_tx, mut completed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let completed = crate::auth_panel::AuthPanelHandle::new(completed_tx);
+        let mut completed_dialog = crate::auth_panel::AuthPanel::new("Completed login");
+        completed_dialog.set_cancel_signal(completed.cancel_signal());
+        let auth = TestAuth {
+            dropped: Arc::new(AtomicBool::new(false)),
+            complete: true,
+        };
+        run_mcp_panel_auth(&auth, "login fixture", completed.clone()).await;
+        assert!(matches!(completed_rx.try_recv().unwrap(),
+            crate::auth_panel::AuthPanelRequest::McpSettled { note } if note == "Connected fixture."));
+        drop(completed_dialog);
+        assert!(completed.cancelled());
+        assert!(!successor.cancelled());
+        drop(next_dialog);
+        assert!(successor.cancelled());
+    }
+
+    #[tokio::test]
+    async fn dropped_panel_aborts_owned_task_without_waiting_for_cooperation() {
+        struct Guard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let panel = crate::auth_panel::AuthPanelHandle::new(tx);
+        let mut dialog = crate::auth_panel::AuthPanel::new("MCP login");
+        dialog.set_cancel_signal(panel.cancel_signal());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = Guard(Some(finished));
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        dialog.set_flow_task(task);
+        ready.await.unwrap();
+        drop(dialog);
+        tokio::time::timeout(Duration::from_secs(1), done)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(panel.cancelled());
+    }
 }

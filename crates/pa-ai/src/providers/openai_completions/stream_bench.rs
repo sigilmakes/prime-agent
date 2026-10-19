@@ -1,9 +1,9 @@
 use super::*;
 use std::time::Instant;
 
-#[test]
+#[tokio::test]
 #[ignore = "run with cargo test -p pa-ai --release stream_delta_benchmark -- --ignored --nocapture"]
-fn stream_delta_benchmark() {
+async fn stream_delta_benchmark() {
     let model: Model = serde_json::from_value(json!({
         "id": "benchmark", "name": "benchmark", "api": "openai-completions",
         "provider": "benchmark", "baseUrl": "http://localhost", "reasoning": false,
@@ -24,7 +24,9 @@ fn stream_delta_benchmark() {
         let (writer, mut reader) = create_assistant_message_event_stream();
         let started = Instant::now();
         for _ in 0..count {
-            handle_chunk(&chunk, &model, None, &mut state, &writer);
+            handle_chunk(&chunk, &model, None, &mut state, &writer)
+                .await
+                .unwrap();
             let waker = futures::task::noop_waker_ref();
             let mut cx = std::task::Context::from_waker(waker);
             while let std::task::Poll::Ready(Some(_)) = reader.poll_next_event(&mut cx) {}
@@ -41,8 +43,8 @@ fn stream_delta_benchmark() {
     }
 }
 
-#[test]
-fn stream_event_snapshots() {
+#[tokio::test]
+async fn stream_event_snapshots() {
     let model: Model = serde_json::from_value(json!({
         "id": "parity", "name": "parity", "api": "openai-completions",
         "provider": "parity", "baseUrl": "http://localhost", "reasoning": true,
@@ -61,9 +63,11 @@ fn stream_event_snapshots() {
         json!({"choices":[{"delta":{"content":" world","tool_calls":[{"index":0,"function":{"arguments":"1}"}}],"reasoning_details":[{"index":0,"type":"reasoning.encrypted","id":"call-1","data":"secret"}]}}]}),
         json!({"choices":[{"finish_reason":"stop","delta":{}}]}),
     ] {
-        handle_chunk(&chunk, &model, None, &mut state, &writer);
+        handle_chunk(&chunk, &model, None, &mut state, &writer)
+            .await
+            .unwrap();
     }
-    finish_blocks(&mut state, &writer);
+    finish_blocks(&mut state, &writer).await.unwrap();
     let mut snapshots = Vec::new();
     let waker = futures::task::noop_waker_ref();
     let mut cx = std::task::Context::from_waker(waker);
@@ -87,8 +91,8 @@ fn stream_event_snapshots() {
     }
 }
 
-#[test]
-fn reasoning_details_merge_by_index() {
+#[tokio::test]
+async fn reasoning_details_merge_by_index() {
     let model: Model = serde_json::from_value(json!({
         "id": "parity", "name": "parity", "api": "openai-completions",
         "provider": "parity", "baseUrl": "http://localhost", "reasoning": true,
@@ -114,7 +118,9 @@ fn reasoning_details_merge_by_index() {
             None,
             &mut state,
             &writer,
-        );
+        )
+        .await
+        .unwrap();
     }
     encode_reasoning_details_signature(&mut state);
     let Some(AssistantContent::Thinking(block)) = state.output.content.last() else {

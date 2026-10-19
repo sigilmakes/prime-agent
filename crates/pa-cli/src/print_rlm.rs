@@ -283,7 +283,6 @@ pub(crate) async fn drive_to_quiescence(
     boundary: &mut TurnBoundary,
     model: &Model,
     api_key: Option<String>,
-    global_harness_dir: std::path::PathBuf,
 ) -> Result<bool, String> {
     let mut drained = false;
     loop {
@@ -308,7 +307,7 @@ pub(crate) async fn drive_to_quiescence(
                 .map_err(|error| format!("{error:#}"))?;
             agent.wait_for_idle().await;
             boundary
-                .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+                .run_at_settled_turn(engine, model, api_key.clone())
                 .await?;
             drained = true;
             continue;
@@ -333,9 +332,6 @@ pub(crate) async fn drive_to_quiescence(
 /// keep listening — a settled child re-runs on a later message until it
 /// is disposed or deleted (TS `child.isSessionActive`).
 async fn drive_child(child: Arc<InlineChild>) {
-    let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(
-        &child.node.recipe.options.config.agent_dir,
-    );
     loop {
         let mut boundary = TurnBoundary::new(/*json_mode*/ false);
         let run_error = drive_to_quiescence(
@@ -344,7 +340,6 @@ async fn drive_child(child: Arc<InlineChild>) {
             &mut boundary,
             &child.model,
             child.api_key.clone(),
-            global_harness_dir.clone(),
         )
         .await
         .err();
@@ -511,6 +506,13 @@ async fn dispose_child(child: &Arc<InlineChild>) {
         }
         current.node.activity.notify_waiters();
         current.engine.session.agent().abort();
+        // Child jobs cannot outlive their print host or lose their kernel during teardown.
+        // Retained failures are diagnostics, never failures of a parent's later prompt.
+        for job in current.engine.drain_plugin_jobs().await {
+            if job["state"]["status"] == "failed" {
+                eprintln!("Plugin job diagnostic: {}", job["state"]["error"]);
+            }
+        }
         current.engine.dispose_kernel().await;
         if let Some(driver) = current.driver.lock().await.take() {
             let _ = driver.await;
@@ -715,7 +717,6 @@ impl RlmSubagentHost for InlineHost {
                 &recipe.options,
                 recipe.faux.as_ref(),
                 Some(child_manager),
-                "subagent",
                 &HeadlessEmbedding::Child(Box::new(overrides)),
             )
             .await
@@ -1220,7 +1221,6 @@ mod tests {
             &options,
             Some(&script),
             Some(manager),
-            "print",
             &HeadlessEmbedding::Root {
                 node: Arc::clone(&node),
             },

@@ -13,6 +13,7 @@ pub fn get_api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
                 "openai" => "OPENAI_API_KEY",
                 "azure-openai-responses" => "AZURE_OPENAI_API_KEY",
                 "prime-inference" => "PRIME_API_KEY",
+                "ollama-cloud" => "OLLAMA_API_KEY",
                 "deepseek" => "DEEPSEEK_API_KEY",
                 "google" => "GEMINI_API_KEY",
                 "google-vertex" => "GOOGLE_CLOUD_API_KEY",
@@ -128,6 +129,10 @@ mod tests {
         assert_eq!(
             get_api_key_env_vars("anthropic").unwrap(),
             vec!["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        );
+        assert_eq!(
+            get_api_key_env_vars("ollama-cloud"),
+            Some(vec!["OLLAMA_API_KEY"])
         );
         assert!(get_api_key_env_vars("unknown-provider").is_none());
     }

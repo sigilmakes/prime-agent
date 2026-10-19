@@ -632,9 +632,48 @@ impl PrimeInferenceCatalog {
         self.cache.get(&self.scope_for(credentials))
     }
 
+    /// Unauthenticated public catalog; protected views never fall back across credential scopes.
+    pub fn get_public(&self) -> Option<Vec<Model>> {
+        self.cache.get(crate::cache::PUBLIC_SCOPE)
+    }
+
+    /// Explicit refresh may refresh the public endpoint even without a configured credential.
+    pub async fn refresh_public_report(
+        &self,
+        force: bool,
+    ) -> crate::cache::CatalogRefreshReport<Vec<Model>> {
+        self.cache
+            .refresh_report(
+                crate::cache::PUBLIC_SCOPE,
+                RefreshOptions {
+                    force,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    pub fn reload_public_from_disk(&self) -> (bool, Option<u64>) {
+        (
+            self.cache
+                .reload_from_disk(crate::cache::PUBLIC_SCOPE)
+                .is_some(),
+            self.cache.status(crate::cache::PUBLIC_SCOPE).checked_at,
+        )
+    }
+
     /// Clear one scope's cache (revocation, logout).
     pub fn clear(&self, credentials: &PrimeInferenceCredentials) {
         self.cache.clear(&self.scope_for(credentials));
+    }
+
+    /// Reload a sibling process's validated snapshot without network work.
+    pub fn reload_from_disk(&self, credentials: &PrimeInferenceCredentials) -> (bool, Option<u64>) {
+        let scope = self.scope_for(credentials);
+        (
+            self.cache.reload_from_disk(&scope).is_some(),
+            self.cache.status(&scope).checked_at,
+        )
     }
 
     /// Live credentialed refresh: coalesced, hourly gated, scope-isolated;
@@ -644,6 +683,15 @@ impl PrimeInferenceCatalog {
         credentials: &PrimeInferenceCredentials,
         force: bool,
     ) -> Option<Vec<Model>> {
+        self.refresh_report(credentials, force).await.models
+    }
+
+    /// Refresh with a credential-free outcome for explicit refresh reports.
+    pub async fn refresh_report(
+        &self,
+        credentials: &PrimeInferenceCredentials,
+        force: bool,
+    ) -> crate::cache::CatalogRefreshReport<Vec<Model>> {
         let mut headers = vec![(
             "Authorization".to_string(),
             format!("Bearer {}", credentials.api_key),
@@ -652,12 +700,13 @@ impl PrimeInferenceCatalog {
             headers.push(("X-Prime-Team-ID".to_string(), team_id.clone()));
         }
         self.cache
-            .refresh(
+            .refresh_report(
                 &self.scope_for(credentials),
                 RefreshOptions {
                     force,
                     headers,
                     is_current: None,
+                    ..Default::default()
                 },
             )
             .await

@@ -3,38 +3,31 @@
 /// Whether the catalog subsystem must avoid every network request.
 #[must_use]
 pub fn is_catalog_offline() -> bool {
-    offline_flag().is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    std::env::var("PI_OFFLINE").is_ok_and(|value| is_offline_value(&value))
 }
 
-fn offline_flag() -> Option<String> {
-    std::env::var("PI_OFFLINE")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
+fn is_offline_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // NOTE: process-global env mutation in tests is unsafe in Rust 2024 and
-    // racy across the test binary; the parsing rule is covered through the
-    // private helper instead.
     #[test]
-    fn parses_offline_values() {
-        let yes = |raw: &str| {
-            std::env::remove_var("PI_OFFLINE");
-            // SAFETY: single-threaded test runtime before tokio starts.
-            std::env::set_var("PI_OFFLINE", raw);
-            is_catalog_offline()
-        };
-        assert!(yes("1"));
-        assert!(yes("true"));
-        assert!(yes("YES"));
-        assert!(yes(" Yes "));
-        assert!(!yes("0"));
-        assert!(!yes("no"));
-        assert!(!yes("maybe"));
-        std::env::remove_var("PI_OFFLINE");
-        assert!(!is_catalog_offline());
+    fn parses_offline_values_without_changing_the_process_environment() {
+        // Test the production predicate, not process-global set_var/remove_var:
+        // parallel catalog tests may rely on the caller's offline policy.
+        let before = std::env::var_os("PI_OFFLINE");
+        for value in ["1", "true", "YES", " Yes "] {
+            assert!(is_offline_value(value), "{value}");
+        }
+        for value in ["0", "no", "maybe", "", "  "] {
+            assert!(!is_offline_value(value), "{value}");
+        }
+        assert_eq!(std::env::var_os("PI_OFFLINE"), before);
     }
 }

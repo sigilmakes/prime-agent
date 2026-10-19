@@ -1163,3 +1163,194 @@ async fn unregisters_the_provider() {
         "expected no API provider registered for api: {api}"
     );
 }
+
+#[tokio::test]
+async fn bounded_delivery_preserves_each_block_event_and_terminal_message() {
+    let registration = register_faux_provider(RegisterFauxProviderOptions {
+        token_size_min: Some(1),
+        token_size_max: Some(1),
+        ..Default::default()
+    });
+    let content = vec![
+        faux_thinking("go"),
+        faux_text("ok"),
+        faux_tool_call("echo", &serde_json::json!({}), Some("tool-1")),
+    ];
+    registration.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+        content.clone(),
+        FauxAssistantMessageOptions {
+            stop_reason: Some(StopReason::ToolUse),
+            ..Default::default()
+        },
+    ))]);
+    let request_context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream(
+            &registration.get_model(),
+            &request_context,
+            Some(StreamOptions {
+                event_buffer_capacity: Some(1),
+                ..Default::default()
+            }),
+        )
+        .unwrap()
+        .collect(),
+    )
+    .await
+    .expect("bounded stream must finish while the reader drains");
+    assert_eq!(
+        events
+            .iter()
+            .map(AssistantMessageEventExt::event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            "start",
+            "thinking_start",
+            "thinking_delta",
+            "thinking_end",
+            "text_start",
+            "text_delta",
+            "text_end",
+            "toolcall_start",
+            "toolcall_delta",
+            "toolcall_end",
+            "done",
+        ]
+    );
+    let AssistantMessageEvent::Done { message, .. } = events.last().unwrap() else {
+        panic!("expected done event");
+    };
+    assert_eq!(message.content, content);
+    assert_eq!(message.stop_reason, StopReason::ToolUse);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn bounded_completion_passes_capacity_to_factories_without_draining_events() {
+    let registration = register();
+    registration.set_responses(vec![FauxResponseStep::Factory(Arc::new(
+        |_context, options, _count, _model| {
+            assert_eq!(
+                options.and_then(|options| options.event_buffer_capacity),
+                Some(16)
+            );
+            Ok(faux_assistant_message(
+                vec![faux_text(&"long response ".repeat(100))],
+                FauxAssistantMessageOptions::default(),
+            ))
+        },
+    ))]);
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        complete(
+            &registration.get_model(),
+            &context,
+            Some(StreamOptions {
+                event_buffer_capacity: Some(16),
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .expect("completion must not stall behind undelivered intermediate events")
+    .unwrap();
+    assert_eq!(
+        message.content,
+        vec![faux_text(&"long response ".repeat(100))]
+    );
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn bounded_constructor_rejects_zero_before_consuming_a_response() {
+    let registration = register();
+    registration.set_responses(vec![text_msg("still queued")]);
+    let model = registration.get_model();
+    let provider = get_api_provider(&model.api).unwrap();
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let events = provider
+        .stream(
+            &model,
+            &context,
+            Some(&StreamOptions {
+                event_buffer_capacity: Some(0),
+                ..Default::default()
+            }),
+        )
+        .collect()
+        .await;
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        AssistantMessageEvent::Error {
+            reason: ErrorStopReason::Error,
+            ..
+        }
+    ));
+    assert_eq!(registration.call_count(), 0);
+    assert_eq!(registration.get_pending_response_count(), 1);
+    registration.unregister();
+}
+
+#[tokio::test]
+async fn bounded_delivery_cancels_a_full_queue_and_keeps_one_terminal_error() {
+    let registration = register_faux_provider(RegisterFauxProviderOptions {
+        token_size_min: Some(1),
+        token_size_max: Some(1),
+        ..Default::default()
+    });
+    registration.set_responses(vec![text_msg(&"x".repeat(4000))]);
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi")],
+        tools: None,
+    };
+    let signal = tokio_util::sync::CancellationToken::new();
+    let mut reader = stream(
+        &registration.get_model(),
+        &context,
+        Some(StreamOptions {
+            signal: Some(signal.clone()),
+            event_buffer_capacity: Some(1),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        reader.next_event().await,
+        Some(AssistantMessageEvent::Start { .. })
+    ));
+    // On the single-thread test runtime the producer filled capacity one and blocked before
+    // this reader resumed. Cancellation must wake that send, not require another HTTP chunk.
+    signal.cancel();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(2), reader.collect())
+        .await
+        .expect("terminal error must survive cancellation and wait for reader capacity");
+    assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Error {
+            reason: ErrorStopReason::Aborted,
+            ..
+        })
+    ));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AssistantMessageEvent::TextEnd { .. })));
+    registration.unregister();
+}

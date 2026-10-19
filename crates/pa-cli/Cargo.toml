@@ -6,13 +6,12 @@ license.workspace = true
 description = "The prime-agent binary."
 
 [dependencies]
-pa-types = { path = "../pa-types" }
-pa-core = { path = "../pa-core" }
-pa-ai = { path = "../pa-ai" }
-pa-agent = { path = "../pa-agent" }
-pa-daemon = { path = "../pa-daemon" }
-pa-tui = { path = "../pa-tui" }
-pa-telemetry = { path = "../pa-telemetry" }
+pa-types = { path = "../pa-types", version = "0.10.0" }
+pa-core = { path = "../pa-core", version = "0.10.0" }
+pa-ai = { path = "../pa-ai", version = "0.10.0" }
+pa-agent = { path = "../pa-agent", version = "0.10.0" }
+pa-daemon = { path = "../pa-daemon", version = "0.10.0" }
+pa-tui = { path = "../pa-tui", version = "0.10.0" }
 uuid = { version = "1", features = ["v4", "v7"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }
@@ -32,7 +31,7 @@ base64 = "0.22"
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 tar = "0.4"
 flate2 = "1"
-# The traces login tests encrypt the challenge result with the flow's own
+# The inference login tests encrypt the challenge result with the flow's own
 # public key (same versions the workspace resolves for the engine).
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 sha2 = "0.10"

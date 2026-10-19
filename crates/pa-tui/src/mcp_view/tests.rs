@@ -657,7 +657,7 @@ fn narrow_rows_shorten_the_trailing_status() {
     );
 }
 
-/// A prefill from a typed partial (`/mcp lin` + Tab or `/plugins lin`) filters the view,
+/// A prefill from a typed partial (`/mcp lin` + Tab) filters the view,
 /// the caret at the partial's end so typing extends it.
 #[test]
 fn set_search_filters_to_the_typed_partial() {

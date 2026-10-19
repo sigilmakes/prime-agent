@@ -56,6 +56,7 @@ impl Inner {
                 }
             }
             Event::HostRequest { id, data } => self.start_host_request(&id, data),
+            Event::HostCancel { id } => self.cancel_host_request(&id),
             Event::Stdout { id, text } => {
                 self.route_stream(id.as_deref(), StreamName::Stdout, &text);
             }

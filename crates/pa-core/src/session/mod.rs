@@ -149,7 +149,7 @@ fn apply_child_usage_attributions(entries: &mut [FileEntry]) {
             if let Some(&target_index) =
                 Some(payload.target_id.as_str()).and_then(|id| assistant_index.get(id))
             {
-                updates.push((target_index, payload.aggregate_usage));
+                updates.push((target_index, payload.aggregate_usage.clone()));
             }
         }
     }
@@ -286,8 +286,20 @@ pub fn get_latest_compaction_entry(entries: &[FileEntry]) -> Option<&CompactionE
     })
 }
 
+pub(super) fn is_bootstrap_entry(entry: &FileEntry) -> bool {
+    matches!(
+        entry,
+        FileEntry::Header { .. }
+            | FileEntry::ModelChange { .. }
+            | FileEntry::ThinkingLevelChange { .. }
+            | FileEntry::ServiceTierChange { .. }
+    ) || matches!(entry,FileEntry::Custom{payload,..} if payload.custom_type==pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE)
+}
+
 /// Reconstructed conversation state at a leaf.
 pub struct SessionContext {
+    /// Accepted archive to validate and expand before a model call.
+    pub archive: Option<pa_types::session::ContextArchive>,
     pub messages: Vec<AgentMessage>,
     pub thinking_level: String,
     pub service_tier: Option<pa_types::ai::ServiceTier>,
@@ -394,6 +406,7 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
         compaction_path_idx.is_some_and(|compaction_idx| digest_idx > compaction_idx)
     });
 
+    let mut archive = None;
     let mut messages: Vec<AgentMessage> = Vec::new();
     let append_message =
         |entry: &FileEntry, target: &mut Vec<AgentMessage>, keep_digest_entry_id: Option<&str>| {
@@ -411,6 +424,7 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
                 FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => {
                     target.push(AgentMessage::BranchSummary(
                         pa_types::session::BranchSummaryMessage {
+                            rest: pa_types::JsonMap::new(),
                             summary: payload.summary.clone(),
                             from_id: payload.from_id.clone(),
                             timestamp: timestamp_to_millis(entry.timestamp()),
@@ -426,6 +440,20 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
             FileEntry::Compaction { payload, .. } => payload.clone(),
             _ => unreachable!("compaction index checked above"),
         };
+        archive.clone_from(&payload.context_archive);
+        let portable = archive.as_ref().is_none_or(|archive| {
+            matches!(
+                archive.representation,
+                pa_types::session::ContextRepresentation::Standard { .. }
+            )
+        });
+        let covered = archive.as_ref().map(|archive| {
+            archive
+                .covered_entry_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        });
         let first_kept_id = payload.first_kept_entry_id.clone();
         let mut retained: Vec<AgentMessage> = Vec::new();
         let mut found_first_kept = false;
@@ -435,7 +463,12 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
             {
                 found_first_kept = true;
             }
-            if found_first_kept {
+            let retain = if let Some(covered) = &covered {
+                entries[index].id().is_some_and(|id| !covered.contains(id))
+            } else {
+                found_first_kept
+            };
+            if retain {
                 append_message(&entries[index], &mut retained, keep_digest_entry_id);
             }
         }
@@ -449,15 +482,18 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
         } else {
             payload.harness_state_fingerprint
         };
-        messages.push(AgentMessage::CompactionSummary(CompactionSummaryMessage {
-            summary: payload.summary,
-            tokens_before: payload.tokens_before,
-            retained_message_count: Some(retained.len() as u64),
-            custom_instructions: payload.custom_instructions,
-            harness_digest: summary_harness_digest,
-            harness_state_fingerprint: summary_harness_state_fingerprint,
-            timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
-        }));
+        if portable {
+            messages.push(AgentMessage::CompactionSummary(CompactionSummaryMessage {
+                rest: pa_types::JsonMap::new(),
+                summary: payload.summary,
+                tokens_before: payload.tokens_before,
+                retained_message_count: Some(retained.len() as u64),
+                custom_instructions: payload.custom_instructions,
+                harness_digest: summary_harness_digest,
+                harness_state_fingerprint: summary_harness_state_fingerprint,
+                timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
+            }));
+        }
         messages.extend(retained);
         for &index in &path[path.partition_point(|&i| i <= compaction_index)..] {
             append_message(&entries[index], &mut messages, keep_digest_entry_id);
@@ -469,6 +505,7 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
     }
 
     SessionContext {
+        archive,
         messages,
         thinking_level,
         service_tier,
@@ -492,6 +529,7 @@ pub(crate) fn create_custom_message(
 
 fn empty_context() -> SessionContext {
     SessionContext {
+        archive: None,
         messages: Vec::new(),
         thinking_level: "off".to_string(),
         service_tier: None,

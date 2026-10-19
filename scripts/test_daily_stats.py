@@ -22,7 +22,7 @@ DAY = date(2026, 10, 5)
 class DeliveryLookupTests(unittest.TestCase):
     def lookup(self, ids="", status=0, error=""):
         workflow = (Path(__file__).resolve().parents[1] /
-                    ".github/workflows/daily-stats.yml").read_text()
+                    ".github/upstream-workflows/daily-stats.yml").read_text()
         step = workflow.split("      - name: Check previous delivery attempt\n", 1)[1]
         script = textwrap.dedent(step.split("        run: |\n", 1)[1]
                                  .split("      - name:", 1)[0])

@@ -15,5 +15,6 @@ pub mod download;
 pub mod homebrew;
 pub mod install;
 pub mod installer;
+pub mod managed;
 pub mod release;
 pub mod version;

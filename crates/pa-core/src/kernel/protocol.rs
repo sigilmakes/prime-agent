@@ -130,6 +130,9 @@ pub enum Event {
         id: String,
         data: Value,
     },
+    HostCancel {
+        id: String,
+    },
     Error {
         id: Option<String>,
         ename: String,
@@ -152,6 +155,7 @@ impl Event {
             Event::Result { .. } => "result",
             Event::Display { .. } => "display",
             Event::HostRequest { .. } => "host_request",
+            Event::HostCancel { .. } => "host_cancel",
             Event::Error { .. } => "error",
             Event::Done { .. } => "done",
         }
@@ -193,7 +197,15 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
         .ok_or_else(|| format!("unknown protocol event: {}", clip(line)))?;
     let known = matches!(
         kind,
-        "ready" | "stdout" | "stderr" | "result" | "display" | "host_request" | "error" | "done"
+        "ready"
+            | "stdout"
+            | "stderr"
+            | "result"
+            | "display"
+            | "host_request"
+            | "host_cancel"
+            | "error"
+            | "done"
     );
     if !known {
         return Err(format!("unknown protocol event: {}", clip(line)));
@@ -231,6 +243,12 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
             let rid =
                 id("id").ok_or_else(|| format!("host_request frame without id: {}", clip(line)))?;
             Ok(Event::HostRequest { id: rid, data })
+        }
+        "host_cancel" => {
+            let rid = id("id")
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| format!("host_cancel frame without id: {}", clip(line)))?;
+            Ok(Event::HostCancel { id: rid })
         }
         "error" => Ok(Event::Error {
             id: id("id"),
@@ -301,6 +319,21 @@ mod tests {
     #[test]
     fn host_request_requires_id() {
         assert!(parse_event(r#"{"event":"host_request","data":{}}"#).is_err());
+    }
+
+    #[test]
+    fn host_cancel_requires_exact_nonempty_id() {
+        assert_eq!(
+            parse_event(r#"{"event":"host_cancel","id":"one"}"#).unwrap(),
+            Event::HostCancel { id: "one".into() }
+        );
+        for line in [
+            r#"{"event":"host_cancel"}"#,
+            r#"{"event":"host_cancel","id":""}"#,
+            r#"{"event":"host_cancel","id":3}"#,
+        ] {
+            assert!(parse_event(line).is_err());
+        }
     }
 
     #[test]

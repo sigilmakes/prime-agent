@@ -41,11 +41,15 @@ struct HeldSummarizer {
 }
 
 fn held_summarizer(holds: usize, follow_ups: Vec<pa_ai::faux::FauxResponseStep>) -> HeldSummarizer {
+    static NEXT_API: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let (started, started_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release, release_rx) = std::sync::mpsc::channel();
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
     // The registration must be unique so concurrent tests never share a queue.
-    let api = format!("faux-held-{:?}", std::time::SystemTime::now());
+    let api = format!(
+        "faux-held-{}",
+        NEXT_API.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let registration =
         pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
             api: Some(api),
@@ -213,10 +217,13 @@ async fn a_branch_move_mid_summarize_conflicts_and_commits_against_the_new_tree(
         .and_then(FileEntry::id)
         .expect("the moved-to leaf")
         .to_string();
+    // Simulate an external canonical branch departure, not a live-view
+    // replacement: public replacements now serialize with compaction_flight.
     engine
-        .rebuild_branch_context(branch_entries)
+        .shared_persistence()
+        .lock()
         .await
-        .expect("the branch context rebuilt");
+        .adopt_entries(branch_entries);
 
     release(&summarizer);
     compact
@@ -294,9 +301,10 @@ async fn repeated_branch_conflicts_fail_the_compaction_after_three_attempts() {
     for tree in 0..3 {
         wait_for_held_summarizer(&mut summarizer).await;
         engine
-            .rebuild_branch_context(trees[tree % 2].clone())
+            .shared_persistence()
+            .lock()
             .await
-            .expect("the branch context rebuilt");
+            .adopt_entries(trees[tree % 2].clone());
         release(&summarizer);
     }
     let error = compact
@@ -318,5 +326,45 @@ async fn repeated_branch_conflicts_fail_the_compaction_after_three_attempts() {
         .iter()
         .any(|entry| matches!(entry, FileEntry::Compaction { .. }));
     assert!(!committed, "the capped compaction never committed");
+    summarizer.registration.unregister();
+}
+
+/// Public branch replacement waits for the pending transaction, rather than
+/// publishing a live view assembled against an unfinished compaction window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_branch_replacement_waits_for_the_compaction_transaction() {
+    let (engine, _tmp) = held_engine(false, 6).await;
+    let entries = engine.entries().await;
+    let branch = entries[..entries.len() - 4].to_vec();
+    let leaf = branch.last().and_then(FileEntry::id).unwrap().to_owned();
+    let mut summarizer = held_summarizer(1, Vec::new());
+    let compact = spawn_compact(&engine, &summarizer.model);
+    wait_for_held_summarizer(&mut summarizer).await;
+    let replacement = engine.rebuild_branch_context(branch);
+    tokio::pin!(replacement);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut replacement)
+            .await
+            .is_err()
+    );
+    release(&summarizer);
+    compact.await.unwrap().unwrap();
+    replacement.await.unwrap();
+    assert_eq!(
+        engine.shared_persistence().lock().await.get_leaf_id(),
+        Some(leaf.as_str())
+    );
+    assert_eq!(summarizer.registration.call_count(), 1);
+    let canonical = engine
+        .shared_persistence()
+        .lock()
+        .await
+        .active_context()
+        .messages;
+    let expected: Vec<_> = canonical
+        .iter()
+        .filter_map(super::session_message_to_loop)
+        .collect();
+    assert_eq!(engine.agent().state().await.messages, expected);
     summarizer.registration.unregister();
 }

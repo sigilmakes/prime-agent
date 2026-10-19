@@ -1,5 +1,7 @@
-//! Continual harness state: entries, refinement events, persistence,
-//! merge, history, and prompt rendering.
+//! Passive legacy harness records and read-only compatibility helpers.
+//! Product builds expose historical codecs, paths, state/history reads, and
+//! factory settings reads. Legacy mutation and prompt-planning code exists
+//! only in unit-test builds; the optional Lua plugin owns active harness policy.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -276,10 +278,8 @@ pub fn merge_harness_states(
 /// # Errors
 ///
 /// Error when the directory cannot be created, serialization fails, or the atomic write fails.
-pub fn save_harness_state(
-    harness_state_dir: &Path,
-    state: &HarnessState,
-) -> anyhow::Result<PathBuf> {
+#[cfg(test)]
+fn save_harness_state(harness_state_dir: &Path, state: &HarnessState) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(harness_state_dir)?;
     let state_path = get_harness_state_path(harness_state_dir);
     let content = format!("{}\n", serde_json::to_string_pretty(state)?);
@@ -297,7 +297,8 @@ pub fn save_harness_state(
 /// # Errors
 ///
 /// Error when the directory cannot be created, the state lock cannot be acquired, or the atomic write fails.
-pub fn update_harness_state<R>(
+#[cfg(test)]
+fn update_harness_state<R>(
     harness_state_dir: &Path,
     scope: HarnessScope,
     update: impl FnOnce(&mut HarnessState) -> R,
@@ -306,7 +307,8 @@ pub fn update_harness_state<R>(
 }
 
 /// A rejected update must exit before saving, including an apply-time setting gate.
-pub(crate) fn try_update_harness_state<R>(
+#[cfg(test)]
+fn try_update_harness_state<R>(
     harness_state_dir: &Path,
     scope: HarnessScope,
     update: impl FnOnce(&mut HarnessState) -> anyhow::Result<R>,
@@ -379,6 +381,7 @@ pub struct AppliedRefinementEdit {
     pub reason: Option<String>,
 }
 
+#[cfg(test)]
 impl AppliedRefinementEdit {
     /// Start one applied-edit row from a planned edit (the TS wire shape
     /// carries the plan's own fields); the applying branch fills the
@@ -435,7 +438,8 @@ pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<Harnes
 ///
 /// Error when the directory cannot be created, serialization fails, or the
 /// history append fails.
-pub fn append_global_refinement(
+#[cfg(test)]
+fn append_global_refinement(
     harness_state_dir: &Path,
     result: &RefinementResult,
 ) -> anyhow::Result<PathBuf> {
@@ -571,11 +575,16 @@ fn scope_prefix(scope: HarnessScope, id: &str) -> String {
     )
 }
 
+// Historical policy is available only to this crate's unit-test fixtures.
+// No planner, executor, or digest renderer is present in product artifacts.
+#[cfg(test)]
 pub mod executor;
+#[cfg(test)]
 pub mod planner;
+#[cfg(test)]
 pub mod ranking;
 
-// Export the compact-text helper for the digest formatter.
+#[cfg(test)]
 pub(crate) use compact_text as compact_harness_text;
 
 #[cfg(test)]

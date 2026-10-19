@@ -15,6 +15,8 @@ use crate::types::{
     Usage, UsageCost,
 };
 
+use crate::utils_inner::stream_failure::ProviderError;
+
 /// Streaming state shared by the Gemini and Vertex providers.
 pub struct GoogleStreamState {
     /// Currently open block kind ("text" or "thinking").
@@ -30,47 +32,48 @@ impl GoogleStreamState {
         }
     }
 
-    fn close_current_block(
+    async fn close_current_block(
         &mut self,
         output: &AssistantMessage,
         writer: &AssistantMessageEventWriter,
-    ) {
+    ) -> Result<(), ProviderError> {
         let Some(kind) = self.current_kind.take() else {
-            return;
+            return Ok(());
         };
         let Some(index) = output.content.len().checked_sub(1) else {
-            return;
+            return Ok(());
         };
-        match kind {
-            "text" => writer.push(AssistantMessageEvent::TextEnd {
+        let event = match kind {
+            "text" => AssistantMessageEvent::TextEnd {
                 content_index: index as u64,
                 content: match &output.content[index] {
                     AssistantContent::Text(text) => text.text.clone(),
                     _ => String::new(),
                 },
                 partial: output.clone(),
-            }),
-            _ => writer.push(AssistantMessageEvent::ThinkingEnd {
+            },
+            _ => AssistantMessageEvent::ThinkingEnd {
                 content_index: index as u64,
                 content: match &output.content[index] {
                     AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
                     _ => String::new(),
                 },
                 partial: output.clone(),
-            }),
-        }
+            },
+        };
+        writer.send(event).await
     }
 
     /// Process one streamed `GenerateContentResponse` chunk.
     // Long by design: mirrors the provider's stream shape.
     #[allow(clippy::too_many_lines)]
-    pub fn handle_chunk(
+    pub async fn handle_chunk(
         &mut self,
         chunk: &Value,
         model: &Model,
         output: &mut AssistantMessage,
         writer: &AssistantMessageEventWriter,
-    ) -> Result<(), String> {
+    ) -> Result<(), ProviderError> {
         use AssistantMessageEvent;
         if output.response_id.is_none() {
             if let Some(id) = chunk.get("responseId").and_then(|value| value.as_str()) {
@@ -100,7 +103,7 @@ impl GoogleStreamState {
                             None => false,
                         };
                         if !matches_kind {
-                            self.close_current_block(output, writer);
+                            self.close_current_block(output, writer).await?;
                             if is_thinking {
                                 output
                                     .content
@@ -111,10 +114,12 @@ impl GoogleStreamState {
                                         rest: Map::default(),
                                     }));
                                 self.current_kind = Some("thinking");
-                                writer.push(AssistantMessageEvent::ThinkingStart {
-                                    content_index: (output.content.len() - 1) as u64,
-                                    partial: output.clone(),
-                                });
+                                writer
+                                    .send(AssistantMessageEvent::ThinkingStart {
+                                        content_index: (output.content.len() - 1) as u64,
+                                        partial: output.clone(),
+                                    })
+                                    .await?;
                             } else {
                                 output.content.push(AssistantContent::Text(TextContent {
                                     text: String::new(),
@@ -122,10 +127,12 @@ impl GoogleStreamState {
                                     rest: Map::default(),
                                 }));
                                 self.current_kind = Some("text");
-                                writer.push(AssistantMessageEvent::TextStart {
-                                    content_index: (output.content.len() - 1) as u64,
-                                    partial: output.clone(),
-                                });
+                                writer
+                                    .send(AssistantMessageEvent::TextStart {
+                                        content_index: (output.content.len() - 1) as u64,
+                                        partial: output.clone(),
+                                    })
+                                    .await?;
                             }
                         }
                         let index = output.content.len() - 1;
@@ -142,11 +149,13 @@ impl GoogleStreamState {
                                     signature,
                                 );
                             }
-                            writer.push(AssistantMessageEvent::ThinkingDelta {
-                                content_index: index as u64,
-                                delta: text.to_string(),
-                                partial: output.clone(),
-                            });
+                            writer
+                                .send(AssistantMessageEvent::ThinkingDelta {
+                                    content_index: index as u64,
+                                    delta: text.to_string(),
+                                    partial: output.clone(),
+                                })
+                                .await?;
                         } else {
                             if let Some(AssistantContent::Text(text_block)) =
                                 output.content.get_mut(index)
@@ -157,16 +166,18 @@ impl GoogleStreamState {
                                     signature,
                                 );
                             }
-                            writer.push(AssistantMessageEvent::TextDelta {
-                                content_index: index as u64,
-                                delta: text.to_string(),
-                                partial: output.clone(),
-                            });
+                            writer
+                                .send(AssistantMessageEvent::TextDelta {
+                                    content_index: index as u64,
+                                    delta: text.to_string(),
+                                    partial: output.clone(),
+                                })
+                                .await?;
                         }
                     }
 
                     if part.get("functionCall").is_some() {
-                        self.close_current_block(output, writer);
+                        self.close_current_block(output, writer).await?;
                         let function_call =
                             part.get("functionCall").cloned().unwrap_or(Value::Null);
                         let provided_id = function_call.get("id").and_then(|value| value.as_str());
@@ -215,20 +226,26 @@ impl GoogleStreamState {
                             .content
                             .push(AssistantContent::ToolCall(tool_call.clone()));
                         let index = (output.content.len() - 1) as u64;
-                        writer.push(AssistantMessageEvent::ToolcallStart {
-                            content_index: index,
-                            partial: output.clone(),
-                        });
-                        writer.push(AssistantMessageEvent::ToolcallDelta {
-                            content_index: index,
-                            delta: arguments_json,
-                            partial: output.clone(),
-                        });
-                        writer.push(AssistantMessageEvent::ToolcallEnd {
-                            content_index: index,
-                            tool_call,
-                            partial: output.clone(),
-                        });
+                        writer
+                            .send(AssistantMessageEvent::ToolcallStart {
+                                content_index: index,
+                                partial: output.clone(),
+                            })
+                            .await?;
+                        writer
+                            .send(AssistantMessageEvent::ToolcallDelta {
+                                content_index: index,
+                                delta: arguments_json,
+                                partial: output.clone(),
+                            })
+                            .await?;
+                        writer
+                            .send(AssistantMessageEvent::ToolcallEnd {
+                                content_index: index,
+                                tool_call,
+                                partial: output.clone(),
+                            })
+                            .await?;
                     }
                 }
             }
@@ -237,7 +254,8 @@ impl GoogleStreamState {
                 .get("finishReason")
                 .and_then(|value| value.as_str())
             {
-                output.stop_reason = map_google_stop_reason(finish_reason)?;
+                output.stop_reason =
+                    map_google_stop_reason(finish_reason).map_err(ProviderError::Message)?;
                 let has_tool_call = output
                     .content
                     .iter()
@@ -261,6 +279,7 @@ impl GoogleStreamState {
             let prompt_tokens = get("promptTokenCount");
             let cached_tokens = get("cachedContentTokenCount");
             output.usage = Usage {
+                rest: pa_types::JsonMap::new(),
                 input: prompt_tokens.saturating_sub(cached_tokens),
                 output: get("candidatesTokenCount") + get("thoughtsTokenCount"),
                 cache_read: cached_tokens,
@@ -275,8 +294,12 @@ impl GoogleStreamState {
     }
 
     /// Close any remaining open block at end of stream.
-    pub fn finish(&mut self, output: &AssistantMessage, writer: &AssistantMessageEventWriter) {
-        self.close_current_block(output, writer);
+    pub async fn finish(
+        &mut self,
+        output: &AssistantMessage,
+        writer: &AssistantMessageEventWriter,
+    ) -> Result<(), ProviderError> {
+        self.close_current_block(output, writer).await
     }
 }
 

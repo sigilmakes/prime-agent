@@ -119,9 +119,15 @@ impl SessionManager {
         }
         let is_session_state_or_info = matches!(
             self.file_entries[index],
-            FileEntry::SessionState { .. } | FileEntry::SessionInfo { .. }
-        );
-        if !self.has_assistant_entry && !is_session_state_or_info {
+            FileEntry::SessionState { .. }
+                | FileEntry::SessionInfo { .. }
+                | FileEntry::Compaction { .. }
+        ) || matches!(&self.file_entries[index], FileEntry::Custom {payload,..} if payload.custom_type==pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE);
+        let has_compaction = self
+            .file_entries
+            .iter()
+            .any(|entry| matches!(entry, FileEntry::Compaction { .. }));
+        if !self.has_assistant_entry && !is_session_state_or_info && !has_compaction {
             self.flushed = false;
             return Ok(());
         }

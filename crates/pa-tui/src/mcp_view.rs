@@ -372,7 +372,7 @@ impl McpView {
         McpViewAction::None
     }
 
-    /// Prefill the filter (`/mcp <partial>` + Tab or `/plugins <q>`), the caret at the partial's
+    /// Prefill the filter (`/mcp <partial>` + Tab), the caret at the partial's
     /// end.
     pub fn set_search(&mut self, query: &str) {
         self.search.prefill(query);

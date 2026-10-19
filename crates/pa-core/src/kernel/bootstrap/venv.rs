@@ -19,6 +19,7 @@ use super::{
 // composition root).
 mod layout;
 mod probe;
+pub(super) mod recovery;
 mod runtime_source;
 mod skills;
 mod uv;
@@ -52,7 +53,6 @@ use uv::windows_executable_candidates;
 use version::{
     bootstrap_base_version_current, bootstrap_skill_key, bootstrap_version_current,
     read_bootstrap_version, read_bootstrap_version_raw, write_bootstrap_version,
-    STATE_SNAPSHOT_REQUIREMENT,
 };
 #[cfg(test)]
 use version::{recorded_skills_cover, BOOTSTRAP_SCHEMA};
@@ -62,6 +62,7 @@ pub(crate) const BOOTSTRAP_LOCK_NAME: &str = ".bootstrap.lock";
 pub(crate) const BOOTSTRAP_LOCK_RETRY_MS: u64 = 100;
 pub(crate) const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS: u64 = 30_000;
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BootstrapVersion {
     schema: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,18 +70,32 @@ pub(crate) struct BootstrapVersion {
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "extra_uv_args")]
     extra_uv_args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "python_skills")]
     python_skills: Option<Vec<BootstrapPythonSkill>>,
 }
 
 async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
+    run_async_in_venv(command, args, None).await
+}
+
+async fn run_async_in_venv(
+    command: &str,
+    args: &[String],
+    venv: Option<&Path>,
+) -> anyhow::Result<()> {
     // Run on a blocking thread: the bootstrap is an IO-bound child process.
     let command = command.to_string();
     let args = args.to_vec();
+    let venv = venv.map(Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new(&command);
         child.args(&args).stdin(Stdio::null());
+        if let Some(venv) = venv {
+            child.env("UV_PROJECT_ENVIRONMENT", venv);
+        }
         // Hidden window on Windows (TS `spawnHidden`).
         crate::platform::process::set_no_window(&mut child);
         // CPython must read UTF-8 .pth files even under a Windows legacy
@@ -106,62 +121,121 @@ async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
     .map_err(|e| anyhow!("bootstrap task join failed: {e}"))?
 }
 
-pub(crate) async fn bootstrap_venv(
+#[derive(Clone, Copy)]
+enum SyncMode {
+    Fresh,
+    PreserveInstalled,
+}
+
+async fn sync_locked_runtime(
+    uv: &str,
+    venv: &Path,
+    source: &Path,
+    mode: SyncMode,
+) -> anyhow::Result<()> {
+    let mut args = vec!["sync".to_string(), "--locked".to_string()];
+    if matches!(mode, SyncMode::PreserveInstalled) {
+        args.extend(
+            ["--inexact", "--reinstall-package", "prime-agent-runtime"].map(str::to_string),
+        );
+    }
+    args.extend(
+        [
+            "--no-default-groups",
+            "--group",
+            "kernel",
+            "--no-config",
+            "--project",
+        ]
+        .map(str::to_string),
+    );
+    args.push(source.to_string_lossy().to_string());
+    args.extend(["--python", PYTHON_VERSION].map(str::to_string));
+    run_async_in_venv(uv, &args, Some(venv)).await
+}
+
+/// Build a replacement at the original absolute path; never mutate its archive.
+pub(super) async fn rebuild_kernel_venv(
+    uv: &str,
     venv: &Path,
     source_dir: &Path,
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
     options: &EnsureKernelPythonOptions,
 ) -> anyhow::Result<()> {
-    std::fs::create_dir_all(venv.parent().unwrap_or(Path::new("/")))?;
-    let uv = ensure_uv()?;
-    let python = kernel_venv_python(venv);
-
-    let venv_str = venv.to_string_lossy().to_string();
-    let python_str = python.to_string_lossy().to_string();
-    let mut install_args = vec![
-        "pip".to_string(),
-        "install".to_string(),
-        "--python".to_string(),
-        python_str,
-        source_dir.to_string_lossy().to_string(),
-    ];
-    install_args.push(STATE_SNAPSHOT_REQUIREMENT.to_string());
-    for uv_arg in default_rlm_extra_uv_args() {
-        install_args.push(uv_arg.to_string());
+    std::fs::create_dir_all(venv.parent().context("kernel venv has no parent")?)?;
+    let previous = if venv.try_exists()? {
+        Some(recovery::archive_for_upgrade(venv, runtime_identity)?)
+    } else {
+        None
+    };
+    let result = async {
+        if let Some(previous) = previous.as_ref().filter(|p| kernel_venv_python(p).exists()) {
+            recovery::copy_venv(previous, venv)?;
+            sync_locked_runtime(uv, venv, source_dir, SyncMode::PreserveInstalled).await?;
+        } else {
+            run_async(
+                uv,
+                &[
+                    "python".to_string(),
+                    "install".to_string(),
+                    PYTHON_VERSION.to_string(),
+                ],
+            )
+            .await?;
+            run_async(
+                uv,
+                &[
+                    "venv".to_string(),
+                    venv.to_string_lossy().to_string(),
+                    "--python".to_string(),
+                    PYTHON_VERSION.to_string(),
+                ],
+            )
+            .await?;
+            sync_locked_runtime(uv, venv, source_dir, SyncMode::Fresh).await?;
+        }
+        let recorded = previous
+            .as_ref()
+            .and_then(|archive| read_bootstrap_version(archive))
+            .and_then(|v| v.python_skills)
+            .unwrap_or_default();
+        recovery::sync_tree(venv)?;
+        // Checkpoint the base before installing skills, so a killed skill sync
+        // resumes without rebuilding or discarding user packages.
+        write_bootstrap_version(venv, runtime_identity, &recorded)?;
+        sync_python_skills(
+            uv,
+            venv,
+            &kernel_venv_python(venv),
+            source_dir,
+            runtime_identity,
+            python_skills,
+            options,
+        )
+        .await?;
+        if !kernel_base_ready(
+            &kernel_venv_python(venv).to_string_lossy(),
+            venv,
+            runtime_identity,
+        ) {
+            anyhow::bail!("locked Python runtime failed its readiness check");
+        }
+        Ok(())
     }
-
-    run_async(
-        &uv,
-        &[
-            "python".to_string(),
-            "install".to_string(),
-            PYTHON_VERSION.to_string(),
-        ],
-    )
-    .await?;
-    run_async(
-        &uv,
-        &[
-            "venv".to_string(),
-            venv_str,
-            "--python".to_string(),
-            PYTHON_VERSION.to_string(),
-            "--seed".to_string(),
-        ],
-    )
-    .await?;
-    run_async(&uv, &install_args).await?;
-    sync_python_skills(
-        &uv,
-        venv,
-        &python,
-        source_dir,
-        runtime_identity,
-        python_skills,
-        options,
-    )
-    .await
+    .await;
+    if let Err(error) = result {
+        if let Some(previous) = previous {
+            recovery::rollback(venv, &previous)
+                .context(format!("upgrade failed ({error:#}); restoring predecessor"))?;
+        } else if venv.try_exists()? {
+            // Preserve even a partial fresh environment for diagnosis/recovery.
+            recovery::archive(venv)?;
+        }
+        return Err(error);
+    }
+    // Keep upgrade intent until the next successful startup validates this copy.
+    Ok(())
 }
 
 /// Install/refresh the editable Python skills recorded in the version file. Only skills missing or
@@ -199,54 +273,88 @@ pub(crate) async fn sync_python_skills(
         }
         missing.push(skill);
     }
-    if !missing.is_empty() {
-        // One uv invocation installs the whole batch of missing skills: a fresh bootstrap otherwise
-        // pays one process plus build-backend startup per install. A batch failure falls back to
-        // the per-skill loop.
+    // Install one skill at a time and checkpoint it immediately. A killed
+    // process must not lose completed installs or records not yet visited.
+    let mut pending = missing;
+    while !pending.is_empty() {
+        let index = pending
+            .iter()
+            .position(|skill| {
+                let dependencies = skills::read_python_skill_dependency_names(skill);
+                !pending.iter().any(|other| {
+                    bootstrap_skill_key(other) != bootstrap_skill_key(skill)
+                        && dependencies.contains(
+                            &skills::read_python_skill_project_name(other)
+                                .replace('_', "-")
+                                .to_lowercase(),
+                        )
+                })
+            })
+            .unwrap_or(0);
+        let skill = pending.remove(index);
         let mut install_args = vec![
             "pip".to_string(),
             "install".to_string(),
             "--python".to_string(),
             python_str.clone(),
-            // Skills may depend on the runtime too. Keep their resolver
-            // pinned to the same local source, including per-skill retries.
             source_dir.to_string_lossy().to_string(),
+            "--editable".to_string(),
+            skill.package_path.clone(),
         ];
-        for skill in &missing {
-            install_args.push("--editable".to_string());
-            install_args.push(skill.package_path.clone());
+        // Cyclic local dependencies cannot be ordered; offer their trusted
+        // editable source too rather than resolving a namesake from an index.
+        let dependencies = skills::read_python_skill_dependency_names(skill);
+        let local_dependencies: Vec<_> = python_skills
+            .iter()
+            .filter(|other| {
+                bootstrap_skill_key(other) != bootstrap_skill_key(skill)
+                    && dependencies.contains(
+                        &skills::read_python_skill_project_name(other)
+                            .replace('_', "-")
+                            .to_lowercase(),
+                    )
+                    && !installed
+                        .get(&bootstrap_skill_key(other))
+                        .is_some_and(|recorded| {
+                            recorded.pyproject_path == other.pyproject_path
+                                && recorded.pyproject_hash == other.pyproject_hash
+                        })
+            })
+            .collect();
+        for dependency in &local_dependencies {
+            install_args.extend(["--editable".to_string(), dependency.package_path.clone()]);
         }
-        if run_async(uv, &install_args).await.is_ok() {
-            // A changed pyproject (hash moved) replaces the stale record.
-            for skill in &missing {
-                installed.insert(bootstrap_skill_key(skill), (*skill).clone());
-            }
-        } else {
-            for skill in &missing {
-                let result = run_async(
-                    uv,
-                    &[
-                        "pip".to_string(),
-                        "install".to_string(),
-                        "--python".to_string(),
-                        python_str.clone(),
-                        source_dir.to_string_lossy().to_string(),
-                        "--editable".to_string(),
-                        skill.package_path.clone(),
-                    ],
-                )
-                .await;
-                match result {
-                    Ok(()) => {
-                        installed.insert(bootstrap_skill_key(skill), (*skill).clone());
-                    }
-                    Err(error) => options.report(&format!(
-                        "Warning: Python skill {} failed to install and will be unavailable: {error}",
-                        skill.import_name
-                    )),
+        match run_async(uv, &install_args).await {
+            Ok(()) => {
+                installed.insert(bootstrap_skill_key(skill), skill.clone());
+                for dependency in local_dependencies {
+                    installed.insert(bootstrap_skill_key(dependency), dependency.clone());
                 }
+                let mut checkpoint: Vec<_> = installed.values().cloned().collect();
+                checkpoint.sort_by(|a, b| {
+                    a.package_path
+                        .cmp(&b.package_path)
+                        .then(a.import_name.cmp(&b.import_name))
+                });
+                recovery::sync_tree(venv)?;
+                write_bootstrap_version(venv, runtime_identity, &checkpoint)?;
+            }
+            Err(error) => {
+                installed.remove(&bootstrap_skill_key(skill));
+                options.report(&format!(
+                    "Warning: Python skill {} failed to install and will be unavailable: {error}",
+                    skill.import_name
+                ));
             }
         }
+        pending.retain(|skill| {
+            !installed
+                .get(&bootstrap_skill_key(skill))
+                .is_some_and(|recorded| {
+                    recorded.pyproject_path == skill.pyproject_path
+                        && recorded.pyproject_hash == skill.pyproject_hash
+                })
+        });
     }
     let mut merged: Vec<BootstrapPythonSkill> = installed.into_values().collect();
     merged.sort_by(|a, b| {

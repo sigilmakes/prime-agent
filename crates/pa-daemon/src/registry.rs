@@ -114,6 +114,10 @@ pub(crate) struct ResidentWorker {
     pub(crate) monitor_epoch: AtomicU64,
     /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
+    /// The optional refresh gate belongs to one authenticated connection generation.
+    model_refresh_capability: std::sync::Mutex<Option<(u64, bool)>>,
+    /// Native plugin command support is authenticated per worker connection.
+    plugin_command_capability: std::sync::Mutex<Option<(u64, bool)>>,
     /// The last-good heartbeats catalog answer, tagged with its generation: served when the worker
     /// is too busy for a fresh list (fresh only while current).
     pub(crate) heartbeat_snapshot: Mutex<Option<WorkerHeartbeatSnapshot>>,
@@ -187,6 +191,8 @@ impl ResidentWorker {
             spawned_at_ms: AtomicU64::new(0),
             monitor_epoch: AtomicU64::new(0),
             peer_transport_capable: AtomicBool::new(false),
+            model_refresh_capability: std::sync::Mutex::new(None),
+            plugin_command_capability: std::sync::Mutex::new(None),
             heartbeat_snapshot: Mutex::new(None),
             cron_snapshot: Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),
@@ -267,6 +273,40 @@ impl ResidentWorker {
             return;
         }
         *guard = Some(cmd_tx);
+    }
+
+    pub(crate) fn set_model_refresh_capability(&self, epoch: u64, capable: bool) {
+        let mut capability = self
+            .model_refresh_capability
+            .lock()
+            .expect("model refresh capability lock");
+        if self.connection_is_current(epoch) {
+            *capability = Some((epoch, capable));
+        }
+    }
+
+    pub(crate) fn supports_model_refresh(&self) -> bool {
+        self.model_refresh_capability
+            .lock()
+            .expect("model refresh capability lock")
+            .is_some_and(|(epoch, capable)| capable && self.connection_is_current(epoch))
+    }
+
+    pub(crate) fn set_plugin_command_capability(&self, epoch: u64, capable: bool) {
+        let mut capability = self
+            .plugin_command_capability
+            .lock()
+            .expect("plugin capability lock");
+        if self.connection_is_current(epoch) {
+            *capability = Some((epoch, capable));
+        }
+    }
+
+    pub(crate) fn supports_plugin_commands(&self) -> bool {
+        self.plugin_command_capability
+            .lock()
+            .expect("plugin capability lock")
+            .is_some_and(|(epoch, capable)| capable && self.connection_is_current(epoch))
     }
 
     pub(crate) fn note_connection_lost(&self, epoch: u64) {

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+    push:
+        branches:
+            - "**"
+    workflow_dispatch:
+    schedule:
+        - cron: "23 3 * * *"
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    NIX_CONFIG: |
+        max-jobs = 2
+        cores = 2
+    CARGO_BUILD_JOBS: "2"
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+    check:
+        runs-on: gaia-runner
+        timeout-minutes: 120
+        container:
+            image: fleet-ci:latest
+        steps:
+            - name: Checkout
+              uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+              with:
+                  persist-credentials: false
+            - name: Build and audited offline checks
+              run: nix flake check --no-update-lock-file --print-build-logs --keep-going

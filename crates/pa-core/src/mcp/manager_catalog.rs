@@ -462,21 +462,6 @@ fn disabled_config(config: McpServerConfig) -> McpServerConfig {
     }
 }
 
-impl McpManager {
-    /// The telemetry usage reporter hook (server name only): the paste
-    /// install and connect flows report through it.
-    pub(crate) fn report_usage(&self, action: &str, server: &str) {
-        if let Some(report) = &self.usage_report {
-            report(action, server);
-        }
-    }
-
-    /// Report a usage action (daemon-side telemetry surface).
-    pub fn note_usage(&self, action: &str, server: &str) {
-        self.report_usage(action, server);
-    }
-}
-
 /// The async handles for one connection's install/remove flow.
 #[derive(Clone)]
 pub struct McpConnectionHandles {

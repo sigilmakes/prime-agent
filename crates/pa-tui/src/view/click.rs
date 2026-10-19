@@ -287,6 +287,7 @@ impl AgentView {
                 | ChatEntry::AgentMessage(_)
                 | ChatEntry::ShellCompletion(_)
                 | ChatEntry::CompactionSummary { .. }
+                | ChatEntry::BranchSummary { .. }
                 | ChatEntry::RefinementOutcome(_)
                 | ChatEntry::SkillInvocation(_)
                 | ChatEntry::InjectedPrompt(_)
@@ -375,6 +376,12 @@ mod tests {
             InjectedPromptKind, InjectedPromptRow, RefinementOutcomeRow, SkillInvocationRow,
         };
         let rows = [
+            (
+                ChatEntry::BranchSummary {
+                    summary: "branch body".to_string(),
+                },
+                "branch body",
+            ),
             (
                 ChatEntry::CompactionSummary {
                     summary: "kept the plan".to_string(),

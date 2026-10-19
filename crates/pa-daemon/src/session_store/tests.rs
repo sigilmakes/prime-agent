@@ -1112,6 +1112,97 @@ fn skips_malformed_lines() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Scalar settings restoration must not consume or clear an accepted context
+/// archive. The real core model-context builders still recover it afterwards.
+#[test]
+fn windowed_settings_projection_preserves_the_accepted_context_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archived-context.jsonl");
+    let mut file = SessionFile::create("/project", None, 0);
+    file.set_path(path.clone());
+    file.append_model_change("test", "archive-model");
+    file.append_thinking_level_change("high");
+    file.append_entry("service_tier_change", json!({"serviceTier":"flex"}));
+    let covered = file.append_message(&json!({"role":"user","content":"archive me","timestamp":1}));
+    let kept = file.append_message(&json!({"role":"user","content":"keep me","timestamp":2}));
+    let archive = pa_types::session::ContextArchive {
+        version: 1,
+        strategy: "standard".to_string(),
+        compactor: "standard".to_string(),
+        creator_generation: "generation".to_string(),
+        prepared_leaf: kept.clone(),
+        covered_entry_ids: vec![covered],
+        representation: pa_types::session::ContextRepresentation::Standard {
+            rest: pa_types::JsonMap::new(),
+        },
+    };
+    file.append_entry(
+        "compaction",
+        json!({
+            "summary":"accepted summary","firstKeptEntryId":kept,"tokensBefore":100,
+            "contextArchive":archive,
+        }),
+    );
+    file.append_message(&json!({"role":"user","content":"after archive","timestamp":3}));
+    file.rewrite().unwrap();
+    let before_bytes = fs::read(&path).unwrap();
+    let windowed = SessionFile::open_windowed(&path).unwrap();
+    assert!(
+        windowed.window.is_some(),
+        "the settings projection must use its windowed arm"
+    );
+    let branch_before = windowed.branch_file_entries();
+    let context_before =
+        pa_core::session::build_session_context(&branch_before, windowed.leaf_id());
+    assert_eq!(context_before.archive.as_ref(), Some(&archive));
+    let settings = windowed.restored_settings();
+    assert_eq!(
+        (
+            settings.model,
+            settings.thinking_level,
+            settings.service_tier
+        ),
+        (
+            Some(("test".to_string(), "archive-model".to_string())),
+            "high".to_string(),
+            Some(pa_types::ai::ServiceTier::Flex)
+        )
+    );
+    assert!(
+        settings.archive.is_none() && settings.messages.is_empty(),
+        "this is a settings-only projection"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before_bytes);
+    let retained = windowed
+        .entries()
+        .iter()
+        .find(|entry| entry.type_ == "compaction")
+        .unwrap();
+    assert_eq!(
+        retained.fields["contextArchive"],
+        serde_json::to_value(&archive).unwrap()
+    );
+    let context_after = pa_core::session::build_session_context(
+        &windowed.branch_file_entries(),
+        windowed.leaf_id(),
+    );
+    assert_eq!(context_after.archive.as_ref(), Some(&archive));
+    assert_eq!(
+        serde_json::to_value(context_after.messages).unwrap(),
+        serde_json::to_value(context_before.messages).unwrap()
+    );
+    let core_window = pa_core::session::window::WindowedSessionStore::open(&path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(core_window.context().archive.as_ref(), Some(&archive));
+    let reopened = SessionFile::open(&path).unwrap();
+    let full_context = pa_core::session::build_session_context(
+        &reopened.branch_file_entries(),
+        reopened.leaf_id(),
+    );
+    assert_eq!(full_context.archive, Some(archive));
+}
+
 /// The durable compaction row must byte-serialize in the TS key order
 /// (verified against the TS binary's session file, battery run
 /// 20260921T140248Z): type, id, parentId, timestamp, summary, firstKeptEntryId,
@@ -1134,6 +1225,7 @@ fn durable_compaction_row_serializes_in_the_ts_key_order() {
         from_hook: Some(false),
         custom_instructions: None,
         usage: Some(pa_types::ai::Usage {
+            rest: pa_types::JsonMap::new(),
             input: 20,
             output: 10,
             cache_read: 80,
@@ -1143,6 +1235,7 @@ fn durable_compaction_row_serializes_in_the_ts_key_order() {
         }),
         harness_digest: Some("# Continual Harness State".to_string()),
         harness_state_fingerprint: None,
+        context_archive: None,
     };
     let fields = serde_json::to_value(&entry).unwrap();
     let mut session = SessionFile::create("/tmp", None, 0);
@@ -1261,30 +1354,6 @@ fn session_header_line_leads_with_the_type_tag() {
     };
     let line = serde_json::to_string(&session_header_line(&header)).unwrap();
     assert!(line.starts_with("{\"type\":\"session\",\"version\":3,\"id\":\"abc\""));
-}
-
-#[cfg(unix)] // Windows uses the full reader rather than windowed hydration.
-#[test]
-fn hydrating_full_history_preserves_the_trace_controller() {
-    let dir = temp_dir();
-    let path = dir.join("trace-hydration.jsonl");
-    let mut original = SessionFile::create(dir.to_str().unwrap(), None, 0);
-    original.append_message(&json!({"role":"user", "content":"synthetic", "timestamp":1u64}));
-    original.set_path(path.clone());
-    original.rewrite().unwrap();
-    let mut windowed = SessionFile::open_windowed(&path).unwrap();
-    assert!(windowed.window.is_some());
-    let (_, consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(&dir, &dir);
-    let controller =
-        pa_core::agent_traces::ContinuousTraceUpload::install(&dir, &dir, Some(&path), consent)
-            .unwrap();
-    windowed.trace_upload = Some(controller.clone());
-    windowed.ensure_full_history().unwrap();
-    assert!(windowed.window.is_none());
-    assert!(std::sync::Arc::ptr_eq(
-        windowed.trace_upload.as_ref().unwrap(),
-        &controller
-    ));
 }
 
 #[test]

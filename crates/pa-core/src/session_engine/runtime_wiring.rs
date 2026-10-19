@@ -210,8 +210,8 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// plus the pre-imported skills. The session's agent dir is propagated into the kernel env
 /// (`PRIME_AGENT_CODING_AGENT_DIR`): an embedding host whose ambient env differs must not
 /// leak its own paths into the kernel (#109). A persistent session's artifact dir is
-/// likewise propagated (`RLM_SESSION_DIR` + `RLM_HARNESS_STATE_DIR`), so kernel-side
-/// harness writes land in the session-local store. `cwd` is the SESSION's working directory.
+/// likewise propagated (`RLM_SESSION_DIR`). Optional plugins own their storage
+/// bindings. `cwd` is the SESSION's working directory.
 /// `shell_path` is the session-start-resolved kernel shell: an invalid `shellPath` fails
 /// `create_session`, not the kernel boot.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
@@ -229,23 +229,17 @@ pub fn kernel_provisioner(
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
-    on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
 ) -> Arc<KernelProvisioner> {
     let mut env = HashMap::with_capacity(3);
     env.insert(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),
     );
-    for (key, value) in [
-        ("RLM_SESSION_DIR", session_artifact_dir.clone()),
-        (
-            "RLM_HARNESS_STATE_DIR",
-            crate::refinement::get_local_harness_state_dir(session_artifact_dir.as_deref()),
-        ),
-    ] {
-        if let Some(value) = value {
-            env.insert(key.to_string(), value.to_string_lossy().to_string());
-        }
+    if let Some(value) = &session_artifact_dir {
+        env.insert(
+            "RLM_SESSION_DIR".to_string(),
+            value.to_string_lossy().to_string(),
+        );
     }
     if let Some(serper_api_key) = serper_api_key {
         env.insert("SERPER_API_KEY".to_string(), serper_api_key);
@@ -267,7 +261,6 @@ pub fn kernel_provisioner(
             on_restore,
             on_background_work_settled,
             on_unavailable_skills,
-            on_bootstrap_result,
         },
     ))
 }

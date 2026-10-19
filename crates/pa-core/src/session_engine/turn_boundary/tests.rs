@@ -1,5 +1,5 @@
 //! The turn-boundary unit battery: the model-info reports, the compact
-//! family round trips, the refine scheduling, and the context usage.
+//! family round trips and the context usage.
 use super::*;
 use crate::kernel::shared::{HostRequestHandlers, HostRequestPayload};
 use crate::session::manager::SessionManager;
@@ -62,6 +62,7 @@ fn assistant_entry(text: &str) -> SessionMessage {
         response_id: None,
         diagnostics: None,
         usage: Usage {
+            rest: pa_types::JsonMap::new(),
             input: 40,
             output: 10,
             cache_read: 0,
@@ -126,7 +127,6 @@ fn registered(requests: &Arc<TurnBoundaryRequests>) -> HostRequestHandlers {
     // A tiny keep-recent budget: a short conversation has history to
     // summarize above it.
     requests.register_compact_handlers(&mut handlers, 1);
-    requests.register_refine_handlers(&mut handlers);
     handlers
 }
 
@@ -342,196 +342,6 @@ async fn compact_run_schedules_inside_a_tool_call_and_status_sees_it() {
 }
 
 #[tokio::test]
-async fn refine_run_and_status_round_trip_inside_a_tool_call() {
-    let requests = Arc::new(TurnBoundaryRequests::new());
-    let handlers = registered(&requests);
-    let session = Arc::new(Mutex::new(session_with_history(false)));
-    let provider = Arc::new(ScriptedProvider::new(agent_model()));
-    provider.push_tool_call_turn(None, vec![("call-1", "probe", json!({}))]);
-    provider.push_text_turn("done");
-    let probe = probe_tool(
-        &requests,
-        "probe",
-        "refine.run",
-        json!({ "instructions": "create a memory about the failing gate", "global": true }),
-    );
-    let agent = Arc::new(Agent::new(AgentOptions {
-        initial_state: AgentInitialState {
-            system_prompt: Some("s".to_string()),
-            model: Some(agent_model()),
-            thinking_level: Some(ThinkingLevel::Off),
-            tools: Some(vec![probe.tool.clone()]),
-            messages: None,
-        },
-        stream_fn: Some(provider.stream_fn()),
-        ..Default::default()
-    }));
-    requests.bind(TurnBoundaryRuntime {
-        agent,
-        session,
-        context_window: Some(100_000),
-        model_info: model_info(),
-    });
-    // refine.status before the turn: not pending, never in flight (the
-    // consumption runs synchronously between turns).
-    let status = handler(&handlers, "refine.status")(payload(json!({})))
-        .await
-        .unwrap();
-    assert_eq!(status["pending"], false);
-    assert_eq!(status["in_flight"], false);
-
-    let agent = requests.bound().expect("bound").agent.clone();
-    agent.prompt("run the probe tool").await.unwrap();
-    agent.wait_for_idle().await;
-
-    let response = probe.result().await;
-    assert_eq!(response["scheduled"], true);
-    assert_eq!(
-        response["note"],
-        "Refinement runs when the current turn ends; applied edits are appended to your context as a refinement notice and you resume automatically. Continue working normally."
-    );
-    let status = handler(&handlers, "refine.status")(payload(json!({})))
-        .await
-        .unwrap();
-    assert_eq!(status["pending"], true);
-    assert_eq!(
-        requests.take_refine().await,
-        Some(PendingRefine {
-            instructions: Some("create a memory about the failing gate".to_string()),
-            global: true,
-        })
-    );
-    assert!(requests.take_refine().await.is_none());
-}
-
-#[tokio::test]
-async fn disabled_refine_run_reports_refusal_and_does_not_schedule() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut settings =
-        crate::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
-    settings.set_harness_refinements(false).unwrap();
-    let requests = Arc::new(TurnBoundaryRequests::new());
-    assert!(requests.refinement_settings.set(settings.reopen()).is_ok());
-    let provider = Arc::new(ScriptedProvider::new(agent_model()));
-    let probe = probe_tool(
-        &requests,
-        "probe",
-        "refine.run",
-        json!({"instructions":"remember this"}),
-    );
-    let agent = Arc::new(Agent::new(AgentOptions {
-        initial_state: AgentInitialState {
-            system_prompt: Some("s".to_string()),
-            model: Some(agent_model()),
-            tools: Some(vec![probe.tool.clone()]),
-            ..Default::default()
-        },
-        stream_fn: Some(provider.stream_fn()),
-        ..Default::default()
-    }));
-    requests.bind(TurnBoundaryRuntime {
-        agent: Arc::clone(&agent),
-        session: Arc::new(Mutex::new(session_with_history(false))),
-        context_window: Some(100_000),
-        model_info: model_info(),
-    });
-    provider.push_tool_call_turn(None, vec![("disabled-call", "probe", json!({}))]);
-    provider.push_text_turn("done");
-    agent.prompt("request a refinement").await.unwrap();
-    agent.wait_for_idle().await;
-    assert_eq!(
-        probe.result().await,
-        json!({
-            "scheduled":false,
-            "reason":"Harness refinements are disabled in /settings"
-        })
-    );
-    assert_eq!(requests.take_refine().await, None);
-    // The already-registered handler observes the live setting on the next turn.
-    settings.set_harness_refinements(true).unwrap();
-    provider.push_tool_call_turn(None, vec![("enabled-call", "probe", json!({}))]);
-    provider.push_text_turn("done");
-    agent.prompt("request a refinement again").await.unwrap();
-    agent.wait_for_idle().await;
-    assert_eq!(
-        requests.take_refine().await,
-        Some(PendingRefine {
-            instructions: Some("remember this".to_string()),
-            global: false
-        })
-    );
-}
-
-#[tokio::test]
-async fn refine_run_validates_and_merges_into_a_pending_request() {
-    let requests = Arc::new(TurnBoundaryRequests::new());
-    let handlers = registered(&requests);
-    let error = handler(&handlers, "refine.run")(payload(json!({ "instructions": 5 })))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "refine.run instructions must be a string when provided"
-    );
-    let error = handler(&handlers, "refine.run")(payload(json!({ "global": "yes" })))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "refine.run global must be a boolean when provided"
-    );
-    // Merge semantics through the real handler path: two `refine.run` calls inside one
-    // turn — the second without instructions keeps the first ones and ORs the global
-    // flag (TS merge).
-    let session = Arc::new(Mutex::new(session_with_history(false)));
-    let provider = Arc::new(ScriptedProvider::new(agent_model()));
-    provider.push_tool_call_turn(None, vec![("call-1", "probe-a", json!({}))]);
-    provider.push_tool_call_turn(None, vec![("call-2", "probe-b", json!({}))]);
-    provider.push_text_turn("done");
-    let probe = probe_tool(
-        &requests,
-        "probe-a",
-        "refine.run",
-        json!({ "instructions": "first observation" }),
-    );
-    let probe_again = probe_tool(
-        &requests,
-        "probe-b",
-        "refine.run",
-        json!({ "global": true }),
-    );
-    let agent = Arc::new(Agent::new(AgentOptions {
-        initial_state: AgentInitialState {
-            system_prompt: Some("s".to_string()),
-            model: Some(agent_model()),
-            thinking_level: Some(ThinkingLevel::Off),
-            tools: Some(vec![probe.tool.clone(), probe_again.tool.clone()]),
-            messages: None,
-        },
-        stream_fn: Some(provider.stream_fn()),
-        ..Default::default()
-    }));
-    requests.bind(TurnBoundaryRuntime {
-        agent,
-        session,
-        context_window: Some(100_000),
-        model_info: model_info(),
-    });
-    let agent = requests.bound().expect("bound").agent.clone();
-    agent.prompt("run both probes").await.unwrap();
-    agent.wait_for_idle().await;
-    assert_eq!(probe.result().await["scheduled"], true);
-    assert_eq!(probe_again.result().await["scheduled"], true);
-    assert_eq!(
-        requests.take_refine().await,
-        Some(PendingRefine {
-            instructions: Some("first observation".to_string()),
-            global: true,
-        })
-    );
-}
-
-#[tokio::test]
 async fn clear_pending_drops_scheduled_requests() {
     let requests = Arc::new(TurnBoundaryRequests::new());
     registered(&requests);
@@ -542,7 +352,7 @@ async fn clear_pending_drops_scheduled_requests() {
     let probe = probe_tool(
         &requests,
         "probe",
-        "refine.run",
+        "compact.run",
         json!({ "instructions": "x" }),
     );
     let agent = Arc::new(Agent::new(AgentOptions {
@@ -566,9 +376,8 @@ async fn clear_pending_drops_scheduled_requests() {
     agent.prompt("run the probe tool").await.unwrap();
     agent.wait_for_idle().await;
     assert_eq!(probe.result().await["scheduled"], true);
-    assert!(requests.refine_pending().await);
+    assert!(requests.compaction_scheduled().await);
     requests.clear_pending().await;
-    assert!(requests.take_refine().await.is_none());
     assert!(requests.take_compaction().await.is_none());
 }
 
@@ -630,6 +439,7 @@ fn context_usage_anchors_on_the_last_valid_assistant_usage() {
         unreachable!();
     };
     message.usage = Usage {
+        rest: pa_types::JsonMap::new(),
         input: 100,
         output: 20,
         cache_read: 0,
@@ -708,7 +518,6 @@ fn probe_tool(
         let mut handlers = HostRequestHandlers::default();
         requests.register_model_info_handler(&mut handlers, model_info());
         requests.register_compact_handlers(&mut handlers, 1);
-        requests.register_refine_handlers(&mut handlers);
         handlers.get(request_type).expect("registered").clone()
     };
     let slot: Arc<std::sync::Mutex<Option<Value>>> = Arc::new(std::sync::Mutex::new(None));

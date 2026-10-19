@@ -116,14 +116,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Show background service status",
     ),
     CommandSpec::new(
-        &["telemetry"],
-        "telemetry [status|on|off]",
-        "Show or change usage telemetry",
-    )
-    .description(
-        "Prime Agent sends pseudonymous usage and performance metrics, never prompts, responses, tool content, file paths, or repository data. status (the default) shows whether telemetry is on and why, where it sends, and the installation id; on and off save the choice in settings.",
-    ),
-    CommandSpec::new(
         &["doctor"],
         "doctor [--fix] [--json]",
         "Inspect and safely clean up background services",
@@ -330,6 +322,10 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
             ),
             ("--cwd <dir>", "Use a specific working directory"),
             ("--offline", "Disable startup network operations"),
+            (
+                "--refresh",
+                "Refresh model catalogs and exit without starting a session",
+            ),
             ("--verbose", "Force verbose startup"),
             ("--daemon-socket <path>", "Use a specific daemon socket"),
         ],

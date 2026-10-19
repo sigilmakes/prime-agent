@@ -622,14 +622,21 @@ impl Worker {
                     .to_string();
                 // The roster capability is always granted; the peer
                 // transport capability rides on the worker instance id.
-                let mut capabilities = vec!["agent_roster".to_string()];
+                let mut capabilities = vec![
+                    "agent_roster".to_string(),
+                    "model_refresh".to_string(),
+                    "plugin_commands".to_string(),
+                ];
                 if !self.config.worker_instance_id.is_empty() {
                     capabilities.push("direct_peer_transport".to_string());
                 }
                 let success = response_success(
                     Some(request_id),
                     "worker_auth",
-                    Some(json!({ "capabilities": capabilities })),
+                    Some(json!({
+                        "capabilities": capabilities,
+                        "schemaRevision": DAEMON_SCHEMA_REVISION,
+                    })),
                 );
                 *role.lock().unwrap() = ConnectionRole::Supervisor { generation };
                 self.supervisor_claims
@@ -767,8 +774,29 @@ impl Worker {
 
 const ATTACH_TAIL_MESSAGE_BUDGET: usize = 512;
 
+/// Routed requests carry the original client's capabilities separately.
+pub(super) fn wants_display_transcript(payload: &Value) -> bool {
+    payload
+        .get("clientCapabilities")
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("capabilities").and_then(Value::as_array))
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability.as_str() == Some("display_transcript"))
+        })
+}
+
 impl Worker {
     pub(crate) fn handle_attach(&self, payload: &Value) -> DaemonResponse {
+        self.handle_attach_projection(payload, /*display_error*/ None)
+    }
+
+    pub(super) fn handle_attach_projection(
+        &self,
+        payload: &Value,
+        mut display_error: Option<String>,
+    ) -> DaemonResponse {
         if let Err(response) = self.require_created("attach") {
             return response;
         }
@@ -838,8 +866,40 @@ impl Worker {
             .clone()
             .unwrap_or_else(|| capabilities.clone());
         let windowed = crate::snapshot_stream::wants_windowed(&client_capabilities);
-        let (mut messages, omitted, last_user_prompt_ms) = match core.store.as_ref() {
-            Some(store) if windowed => {
+        let display_requested = wants_display_transcript(payload);
+        let display = core
+            .store
+            .as_ref()
+            .filter(|_| display_requested && display_error.is_none())
+            .and_then(|store| {
+                let result = if windowed {
+                    store.windowed_display_messages(ATTACH_TAIL_MESSAGE_BUDGET)
+                } else {
+                    store.display_messages().map(|messages| {
+                        crate::session_store::WindowedTranscript {
+                            messages,
+                            omitted: 0,
+                            last_user_prompt_ms: None,
+                        }
+                    })
+                };
+                match result {
+                    Ok(transcript) => Some(transcript),
+                    Err(error) => {
+                        display_error = Some(error.to_string());
+                        None
+                    }
+                }
+            });
+        let display_transcript = display.is_some();
+        let (mut messages, omitted, last_user_prompt_ms) = match (display, core.store.as_ref()) {
+            (Some(transcript), _) => (
+                transcript.messages,
+                transcript.omitted,
+                transcript.last_user_prompt_ms,
+            ),
+            (None, Some(store)) if display_requested => (store.messages(), 0, None),
+            (None, Some(store)) if windowed => {
                 let windowed = store.windowed_messages(ATTACH_TAIL_MESSAGE_BUDGET);
                 (
                     windowed.messages,
@@ -847,8 +907,8 @@ impl Worker {
                     windowed.last_user_prompt_ms,
                 )
             }
-            Some(store) => (store.messages(), 0, None),
-            None => (Vec::new(), 0, None),
+            (None, Some(store)) => (store.messages(), 0, None),
+            (None, None) => (Vec::new(), 0, None),
         };
         // The image-payload elision: `elide_snapshot_images` clients read the
         // transcript without base64 payloads; the client's set is
@@ -880,6 +940,12 @@ impl Worker {
             "children": [],
         });
         snapshot["messages"] = Value::Array(messages);
+        if display_transcript {
+            snapshot["displayTranscript"] = json!(true);
+        }
+        if let Some(error) = display_error {
+            snapshot["displayTranscriptError"] = json!(error);
+        }
         if omitted > 0 {
             snapshot["historyBefore"] = json!(omitted);
             if let Some(last_user_prompt_ms) = last_user_prompt_ms {

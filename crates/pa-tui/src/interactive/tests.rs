@@ -112,12 +112,9 @@ pub(crate) fn options(selection: ModelSelection) -> InteractiveOptions {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: crate::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -137,15 +134,6 @@ fn create_config_carries_the_requested_thinking_level() {
     assert_eq!(config["thinking"], "max");
 }
 
-/// The daemon worker stamps the client's mode on the session's telemetry
-/// (TS `executionMode: appMode`): interactive sessions report
-/// `interactive`, never the worker's own `daemon` context.
-#[test]
-fn create_config_names_the_interactive_execution_mode() {
-    let config = options(ModelSelection::default()).create_config();
-    assert_eq!(config["executionMode"], "interactive");
-}
-
 #[test]
 fn create_config_omits_thinking_when_no_flag_was_given() {
     let config = options(ModelSelection::default()).create_config();
@@ -163,7 +151,6 @@ fn create_config_binds_a_new_child_to_its_parent() {
         opts.create_config(),
         json!({
             "cwd": "/tmp",
-            "executionMode": "interactive",
             "parentSessionPath": "/x/p.jsonl",
             "rlmDepth": 2
         })
@@ -220,6 +207,10 @@ fn the_headless_settle_names_every_stuck_member() {
             ..Default::default()
         },
         HeadlessSettle {
+            pending_background_notes: 1,
+            ..Default::default()
+        },
+        HeadlessSettle {
             turn_active: true,
             ..Default::default()
         },
@@ -248,15 +239,7 @@ fn the_headless_settle_names_every_stuck_member() {
             ..Default::default()
         },
         HeadlessSettle {
-            traces_upload_pending: true,
-            ..Default::default()
-        },
-        HeadlessSettle {
             auth_panel_open: true,
-            ..Default::default()
-        },
-        HeadlessSettle {
-            traces_login_pending: true,
             ..Default::default()
         },
         HeadlessSettle {
@@ -288,6 +271,7 @@ fn the_headless_settle_names_every_stuck_member() {
     // Everything stuck at once: every member is reported.
     let all = HeadlessSettle {
         pending_inputs: 1,
+        pending_background_notes: 1,
         turn_active: true,
         submits_in_flight: 1,
         queued: 1,
@@ -295,19 +279,79 @@ fn the_headless_settle_names_every_stuck_member() {
         dirty: true,
         share_pending: true,
         reload_pending: true,
-        traces_upload_pending: true,
         auth_panel_open: true,
-        traces_login_pending: true,
         mcp_auth_pending: true,
         anthropic_warning_mark_pending: true,
     };
-    assert_eq!(all.blockers().len(), 13);
+    assert_eq!(all.blockers().len(), 12);
     assert!(
         all.blockers()
             .iter()
             .any(|blocker| blocker.contains("a turn still active")),
         "the joined failure keeps the member names readable"
     );
+}
+
+/// The exit decision uses the same receiver-aware snapshot as the run loop.
+/// Already queued notes must be consumed and painted. Neither an open sender
+/// nor a future send is work that may hold an otherwise idle run open.
+#[test]
+fn queued_background_notes_must_be_consumed_and_rendered_before_headless_exit() {
+    let (sender, mut notes) = mpsc::unbounded_channel::<String>();
+    let mut view = AgentView::new(crate::theme::Theme::builtin(
+        "prime",
+        crate::theme::ColorMode::TrueColor,
+    ));
+    let diagnostic = "Custom working messages disabled: invalid test resource";
+    assert!(HeadlessSettle::default()
+        .with_background_notes(&notes)
+        .settled());
+    sender
+        .send(diagnostic.to_string())
+        .expect("queue startup diagnostic");
+    let queued = HeadlessSettle::default().with_background_notes(&notes);
+    assert!(
+        !queued.settled(),
+        "the actual exit gate must keep a queued note"
+    );
+    assert_eq!(
+        queued.blockers(),
+        vec!["1 background note(s) waiting to render"]
+    );
+
+    let note = notes
+        .try_recv()
+        .expect("consume the queued startup diagnostic");
+    assert_eq!(note, diagnostic);
+    view.push_entry(crate::chat::ChatEntry::Status {
+        text: note,
+        kind: crate::chat::StatusKind::Info,
+    });
+    let unpainted = HeadlessSettle {
+        dirty: true,
+        ..Default::default()
+    }
+    .with_background_notes(&notes);
+    assert_eq!(unpainted.pending_background_notes, 0);
+    assert!(!unpainted.settled(), "consumed is not yet rendered");
+    let frame = view.render_frame(100, 30);
+    let rendered: String = frame
+        .iter()
+        .flatten()
+        .map(|span| span.content.as_str())
+        .collect();
+    assert!(
+        rendered.contains(diagnostic),
+        "the actual renderer must paint the note: {rendered}"
+    );
+
+    // The sender stays open. Even a future send is not in the queue yet.
+    let future_note = Box::pin(async { sender.send("future note".to_string()) });
+    assert!(!notes.is_closed());
+    assert!(HeadlessSettle::default()
+        .with_background_notes(&notes)
+        .settled());
+    drop(future_note);
 }
 
 /// The pre-attach placeholder (painted for a NEW chat before the attach

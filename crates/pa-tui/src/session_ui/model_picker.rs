@@ -14,9 +14,16 @@ const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from
 
 /// A landed `get_model_catalog` refresh: the full catalog and the providers
 /// with configured auth.
-pub(crate) struct ModelCatalogUpdate {
-    pub models: Vec<pa_types::ai::Model>,
-    pub configured_providers: std::collections::HashSet<String>,
+pub(crate) enum ModelCatalogUpdate {
+    Snapshot {
+        active_session_id: String,
+        models: Vec<pa_types::ai::Model>,
+        configured_providers: std::collections::HashSet<String>,
+    },
+    Refresh {
+        active_session_id: String,
+        outcome: Result<pa_types::model_refresh::ModelRefreshReport, String>,
+    },
 }
 
 impl SessionUi {
@@ -117,15 +124,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(ModelPickerAction::None) | None => {}
-            Some(ModelPickerAction::ScopeToggled { scoped }) => {
-                // The picker stays mounted; only the adoption event rides out.
-                if let Some(telemetry) = self.telemetry.clone() {
-                    tokio::spawn(async move {
-                        telemetry.scoped_models_used("toggle_scope", scoped).await;
-                    });
-                }
-            }
+            Some(ModelPickerAction::None | ModelPickerAction::ScopeToggled { .. }) | None => {}
             Some(ModelPickerAction::Cancel) => {
                 view.model_picker = None;
                 self.picker_restored_draft = false;
@@ -187,7 +186,7 @@ impl SessionUi {
             let Ok(value) = client
                 .request_ok(DaemonCommand::GetModelCatalog {
                     id: None,
-                    active_session_id,
+                    active_session_id: active_session_id.clone(),
                     rest: Map::default(),
                 })
                 .await
@@ -211,7 +210,8 @@ impl SessionUi {
                         .collect()
                 })
                 .unwrap_or_default();
-            let _ = updates.send(ModelCatalogUpdate {
+            let _ = updates.send(ModelCatalogUpdate::Snapshot {
+                active_session_id,
                 models,
                 configured_providers,
             });
@@ -230,8 +230,46 @@ impl SessionUi {
 
     /// Fold a landed catalog refresh into the session and any open picker.
     pub(crate) fn apply_model_catalog(&mut self, update: ModelCatalogUpdate, view: &mut AgentView) {
-        self.model_catalog = update.models;
-        self.model_configured_providers = update.configured_providers;
+        let (models, configured_providers) = match update {
+            ModelCatalogUpdate::Snapshot {
+                active_session_id,
+                models,
+                configured_providers,
+            } => {
+                if active_session_id != self.active_session_id {
+                    return;
+                }
+                (models, configured_providers)
+            }
+            ModelCatalogUpdate::Refresh {
+                active_session_id,
+                outcome,
+            } => {
+                if active_session_id != self.active_session_id {
+                    return;
+                }
+                match outcome {
+                    Ok(report) => {
+                        self.models_fetched_at = None;
+                        self.spawn_model_catalog_refresh();
+                        for line in format_refresh_report(&report) {
+                            self.note(&line, view);
+                        }
+                        if refresh_failed(&report) {
+                            self.note_as(
+                                "Some model catalogs failed to refresh.",
+                                StatusKind::Warning,
+                                view,
+                            );
+                        }
+                    }
+                    Err(message) => self.error_row(&message, view),
+                }
+                return;
+            }
+        };
+        self.model_catalog = models;
+        self.model_configured_providers = configured_providers;
         self.models_fetched_at = Some(std::time::Instant::now());
         let current = self.current_model(view);
         if let Some(picker) = view.model_picker.as_mut() {
@@ -376,21 +414,6 @@ impl SessionUi {
                 self.model_selection.model = Some(model_id.clone());
                 self.refresh_model_label(&provider, &model_id, view).await;
                 self.note(&format!("Model: {provider}/{model_id}"), view);
-                if let Some(telemetry) = self.telemetry.clone() {
-                    // TS has no scoped-models telemetry: the adoption event reports the
-                    // cycle's lane (the response's `isScoped`).
-                    let action = match direction {
-                        CycleDirection::Forward => "cycle_forward",
-                        CycleDirection::Backward => "cycle_backward",
-                    };
-                    let scoped = data
-                        .get("isScoped")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    tokio::spawn(async move {
-                        telemetry.scoped_models_used(action, scoped).await;
-                    });
-                }
             }
             Err(error) => {
                 self.error_row(&format!("{error:#}"), view);
@@ -515,6 +538,70 @@ fn find_current_model_entry<'a>(
             .find(|model| model.provider == provider && model.id == model_id),
         None => catalog.iter().find(|model| model.id == model_id),
     }
+}
+
+/// Only credential-free fixed fields can reach the terminal, matching the fork's summary.
+fn format_refresh_report(report: &pa_types::model_refresh::ModelRefreshReport) -> Vec<String> {
+    use pa_types::model_refresh::{ModelRefreshReason, ModelRefreshStatus};
+    report
+        .sources
+        .iter()
+        .map(|result| {
+            let source = if !result.source.is_empty()
+                && result.source.len() <= 64
+                && result
+                    .source
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                result.source.as_str()
+            } else {
+                "unknown-source"
+            };
+            let status = match result.status {
+                ModelRefreshStatus::Updated => "updated",
+                ModelRefreshStatus::Unchanged => "unchanged",
+                ModelRefreshStatus::Skipped => "skipped",
+                ModelRefreshStatus::Stale => "stale",
+                ModelRefreshStatus::Failed => "failed",
+            };
+            let count = result
+                .model_count
+                .filter(|count| (*count as u128) <= 9_007_199_254_740_991)
+                .map(|count| format!(" ({count} models)"))
+                .unwrap_or_default();
+            let reason = result
+                .reason
+                .map(|reason| match reason {
+                    ModelRefreshReason::Offline => "offline",
+                    ModelRefreshReason::Unconfigured => "unconfigured",
+                    ModelRefreshReason::AuthRejected => "auth-rejected",
+                    ModelRefreshReason::Network => "network",
+                    ModelRefreshReason::InvalidCatalog => "invalid-catalog",
+                    ModelRefreshReason::Cancelled => "cancelled",
+                    ModelRefreshReason::Superseded => "superseded",
+                    ModelRefreshReason::Unsupported => "unsupported",
+                    ModelRefreshReason::CacheWrite => "cache-write",
+                    ModelRefreshReason::WorkerUnavailable => "worker-unavailable",
+                })
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default();
+            format!("{source}: {status}{count}{reason}")
+        })
+        .collect()
+}
+
+fn refresh_failed(report: &pa_types::model_refresh::ModelRefreshReport) -> bool {
+    use pa_types::model_refresh::{ModelRefreshReason, ModelRefreshStatus};
+    report
+        .workers
+        .as_ref()
+        .is_some_and(|workers| workers.failed != 0)
+        || report.sources.iter().any(|source| {
+            source.status == ModelRefreshStatus::Failed
+                || (source.status == ModelRefreshStatus::Stale
+                    && source.reason != Some(ModelRefreshReason::Offline))
+        })
 }
 
 #[cfg(test)]

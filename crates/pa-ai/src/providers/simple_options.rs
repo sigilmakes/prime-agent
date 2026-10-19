@@ -60,6 +60,8 @@ pub fn build_base_options(
         headers: base.headers,
         timeout_ms: base.timeout_ms,
         metadata: base.metadata,
+        native_responses_input: base.native_responses_input,
+        event_buffer_capacity: base.event_buffer_capacity,
     }
 }
 

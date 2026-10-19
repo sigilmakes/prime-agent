@@ -405,7 +405,7 @@ pub struct Model {
     pub name: String,
     pub api: String,
     pub provider: String,
-    #[serde(default)]
+    #[serde(default, alias = "baseUrl")]
     pub base_url: String,
     #[serde(default)]
     pub reasoning: bool,
@@ -457,6 +457,10 @@ pub struct AgentToolResult {
     pub content: Vec<ToolResultContent>,
     #[serde(default)]
     pub details: serde_json::Value,
+    /// Internal execution status. Wire status lives on the outer execution-end
+    /// event and the canonical tool-result message, not this nested payload.
+    #[serde(skip)]
+    pub is_error: bool,
     /// Hint that the agent should stop after the current tool batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminate: Option<bool>,
@@ -467,6 +471,7 @@ impl AgentToolResult {
         AgentToolResult {
             content: vec![ToolResultContent::text(s)],
             details: serde_json::Value::Null,
+            is_error: false,
             terminate: None,
         }
     }
@@ -475,6 +480,7 @@ impl AgentToolResult {
         AgentToolResult {
             content: vec![ToolResultContent::text(s)],
             details: serde_json::Value::Object(serde_json::Map::new()),
+            is_error: true,
             terminate: None,
         }
     }

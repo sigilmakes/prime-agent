@@ -48,7 +48,6 @@ impl SessionUi {
         }
         match pressed.action {
             ClickAction::ToggleCardExpansion(entry) => {
-                self.track_click("transcript");
                 view.toggle_card_expansion(entry);
                 self.dirty = true;
             }
@@ -57,26 +56,22 @@ impl SessionUi {
                 col,
                 content_width,
             } => {
-                self.track_click("editor");
                 view.editor.place_cursor_from_click(content_width, row, col);
                 self.dirty = true;
             }
             ClickAction::SelectModelRow(position) => {
                 if let Some(picker) = view.model_picker.as_mut() {
-                    self.track_click("picker");
                     picker.select_filtered(position);
                     self.dirty = true;
                 }
             }
             ClickAction::SelectChoiceRow(position) => {
                 if let Some(picker) = view.choice_picker.as_mut() {
-                    self.track_click("picker");
                     picker.select_position(position);
                     self.dirty = true;
                 }
             }
             ClickAction::OpenDockGroup(group) => {
-                self.track_click("dock");
                 self.open_dock_group_from_click(group, view);
             }
             ClickAction::OpenAgentsView => {
@@ -84,7 +79,6 @@ impl SessionUi {
                 // hands off only while the editor is empty — so a draft
                 // never rides a stray click out of the session.
                 if view.editor.get_text().trim().is_empty() {
-                    self.track_click("hint");
                     self.open_agents_view_from_hint(view);
                 }
             }

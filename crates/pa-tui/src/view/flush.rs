@@ -1,14 +1,13 @@
 //! The streaming main-screen flush (TS `exitFullscreen`'s inline
-//! repaint): the exit path that renders the inline frame section by
-//! section and writes the changed rows into the user's native
-//! scrollback in bounded chunks.
+//! repaint) and authoritative restored-transcript replay. Both render the inline frame section
+//! by section and append rows to native scrollback in bounded writes.
 
 use super::AgentView;
 use crate::Line;
 
 impl AgentView {
     /// Stream the changed rows of the inline layout to `out` as the main-screen flush: the one
-    /// output path that writes into the user's native scrollback, so its byte stream is
+    /// shared output path that writes into the user's native scrollback, so its byte stream is
     /// parity-frozen. `self.flushed_frame` is the diff base.
     ///
     /// - rows extending the flushed frame append into scrollback;
@@ -26,31 +25,73 @@ impl AgentView {
         width: usize,
         screen_height: usize,
     ) -> std::io::Result<()> {
+        self.stream_inline_to(out, width, screen_height, FlushMode::Changed)
+    }
+
+    /// Append the complete restored inline transcript to native scrollback, regardless of the
+    /// previous flush. Only authoritative restores request this; ordinary draws and resizes do not.
+    /// The cursor moves below the existing primary-screen contents without erasing them. A
+    /// successful replay becomes the next ordinary flush's diff base, preventing a duplicate exit.
+    ///
+    /// # Errors
+    ///
+    /// Propagates writer errors. Output may already have scrolled; callers must not retry a failed
+    /// replay automatically. The complete diff base is retained even after a partial write error,
+    /// so the ordinary exit flush does not silently retry it.
+    pub fn stream_replay_to(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        width: usize,
+        screen_height: usize,
+    ) -> std::io::Result<()> {
+        write!(out, "\x1b[{};1H\r\n", screen_height.max(1))?;
+        self.stream_inline_to(out, width, screen_height, FlushMode::Replay)
+    }
+
+    fn stream_inline_to(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        width: usize,
+        screen_height: usize,
+        mode: FlushMode,
+    ) -> std::io::Result<()> {
         let layout = self.layout_pass(width);
+        let previous = std::mem::take(&mut self.flushed_frame);
         let mut sink = FlushSink {
-            flushed: std::mem::take(&mut self.flushed_frame),
+            flushed: match mode {
+                FlushMode::Changed => previous,
+                FlushMode::Replay => Vec::new(),
+            },
             texts: Vec::new(),
             ring: std::collections::VecDeque::new(),
             chunk: String::new(),
             screen_height,
             appending: false,
             repaint: false,
+            write_error: None,
         };
-        sink.feed(out, &layout.splash)?;
+        sink.feed(out, &layout.splash);
         let mut preceded_by_tool_activity = false;
         for (index, entry) in self.chat.iter().enumerate() {
             let rows =
                 self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
-            sink.feed(out, &rows)?;
+            sink.feed(out, &rows);
             preceded_by_tool_activity = Self::is_compact_neighbor(entry);
         }
-        sink.feed(out, &layout.tail)?;
+        sink.feed(out, &layout.tail);
         let dock = self.render_dock(width);
-        sink.feed(out, &dock)?;
-        sink.finish(out)?;
+        sink.feed(out, &dock);
+        let result = sink.finish(out);
         self.flushed_frame = std::mem::take(&mut sink.texts);
-        Ok(())
+        result
     }
+}
+
+/// Whether the caller is flushing changes or replaying an authoritative restored transcript.
+#[derive(Clone, Copy)]
+enum FlushMode {
+    Changed,
+    Replay,
 }
 
 /// The encoded flush rows leave the process in slices of at most this many bytes: each PTY
@@ -74,11 +115,13 @@ struct FlushSink {
     /// Set when a row inside the flushed frame changed: every row lands
     /// in the repaint ring instead.
     repaint: bool,
+    /// The first failed write. Later rows still establish the diff base, but never retry output.
+    write_error: Option<std::io::Error>,
 }
 
 impl FlushSink {
     /// Feed one section of the inline frame.
-    fn feed(&mut self, out: &mut dyn std::io::Write, rows: &[crate::Line]) -> std::io::Result<()> {
+    fn feed(&mut self, out: &mut dyn std::io::Write, rows: &[crate::Line]) {
         for row in rows {
             let index = self.texts.len();
             let text = row_text_of(row);
@@ -86,11 +129,7 @@ impl FlushSink {
                 crate::interactive::write_flush_rows(&mut self.chunk, std::slice::from_ref(row));
                 self.texts.push(text);
                 if self.chunk.len() >= CHUNK_BYTES {
-                    out.write_all(self.chunk.as_bytes())?;
-                    self.chunk.clear();
-                    // A completed chunk write is exit-path progress for
-                    // the exit guard's force-quit hold.
-                    crate::exit_guard::note_exit_progress();
+                    self.drain_chunk(out);
                 }
             } else if self.repaint || index >= self.flushed.len() {
                 // A changed row turns the write into a repaint; a row
@@ -113,7 +152,20 @@ impl FlushSink {
                 self.texts.push(text);
             }
         }
-        Ok(())
+    }
+
+    /// Submit pending bytes in bounded writes, stopping permanently on the first error.
+    fn drain_chunk(&mut self, out: &mut dyn std::io::Write) {
+        if self.write_error.is_none() {
+            for chunk in self.chunk.as_bytes().chunks(CHUNK_BYTES) {
+                if let Err(error) = out.write_all(chunk) {
+                    self.write_error = Some(error);
+                    break;
+                }
+                crate::exit_guard::note_exit_progress();
+            }
+        }
+        self.chunk.clear();
     }
 
     /// Keep the repaint ring at one screenful.
@@ -129,21 +181,20 @@ impl FlushSink {
     fn finish(&mut self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
         if self.appending {
             if !self.chunk.is_empty() {
-                out.write_all(self.chunk.as_bytes())?;
-                self.chunk.clear();
-                crate::exit_guard::note_exit_progress();
+                self.drain_chunk(out);
             }
         } else if self.repaint || self.texts.len() < self.flushed.len() {
             // A frame that shrank never rewinds into a rewrite of
             // scrollback: the changed region repaints the visible window.
-            let mut buffer = String::from("\x1b[2J\x1b[H");
+            self.chunk.push_str("\x1b[2J\x1b[H");
             let ring: Vec<crate::Line> = std::mem::take(&mut self.ring).into_iter().collect();
-            crate::interactive::write_flush_rows(&mut buffer, &ring);
-            out.write_all(buffer.as_bytes())?;
-            self.chunk.clear();
-            crate::exit_guard::note_exit_progress();
+            crate::interactive::write_flush_rows(&mut self.chunk, &ring);
+            self.drain_chunk(out);
         }
-        Ok(())
+        match self.write_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 

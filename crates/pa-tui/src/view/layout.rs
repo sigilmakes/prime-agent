@@ -210,6 +210,7 @@ impl AgentView {
             | ChatEntry::User { .. }
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. }
+            | ChatEntry::BranchSummary { .. }
             | ChatEntry::SkillInvocation(_)
             // Spacing-driven rows lean on the scan over PRECEDING entries; a preceding mutation
             // propagates through `mark_entry_stale`.
@@ -253,6 +254,7 @@ impl AgentView {
             ChatEntry::SkillInvocation(_)
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. } => !first,
+            ChatEntry::BranchSummary { .. } => true,
             ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_) => {
                 self.conversation_leading(index, self.entry_detail(index).tool_output_expanded())
             }

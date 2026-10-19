@@ -16,6 +16,13 @@ fn merge_values(base: &mut Value, overrides: &Value) {
     match (base, overrides) {
         (Value::Object(base_obj), Value::Object(overrides_obj)) => {
             for (key, value) in overrides_obj {
+                // Plugin JSON preserves explicit null (including malformed map/config
+                // replacements), so reload can reject it without retiring active work.
+                if key == "plugins" {
+                    let existing = base_obj.entry(key.clone()).or_insert(Value::Null);
+                    merge_plugin_values(existing, value);
+                    continue;
+                }
                 // `null` means the key is unset (TS documents omit undefined
                 // keys); it must never override a real value.
                 if value.is_null() {
@@ -39,8 +46,19 @@ fn merge_values(base: &mut Value, overrides: &Value) {
     }
 }
 
+fn merge_plugin_values(base: &mut Value, overrides: &Value) {
+    match (base, overrides) {
+        (Value::Object(base), Value::Object(overrides)) => {
+            for (key, value) in overrides {
+                merge_plugin_values(base.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+        (base, value) => *base = value.clone(),
+    }
+}
+
 /// Migrate legacy settings shapes (queueMode, websockets, skills object,
-/// retry.maxDelayMs, telemetry bool, bad markdown).
+/// retry.maxDelayMs, bad markdown).
 pub fn migrate(document: &mut serde_json::Map<String, Value>) {
     if let Some(queue_mode) = document.remove("queueMode") {
         document.entry("steeringMode").or_insert(queue_mode);
@@ -87,17 +105,6 @@ pub fn migrate(document: &mut serde_json::Map<String, Value>) {
             }
         }
     }
-    match document.get_mut("telemetry") {
-        Some(Value::Bool(enabled)) => {
-            let mut map = serde_json::Map::new();
-            map.insert("enabled".into(), Value::Bool(*enabled));
-            document.insert("telemetry".into(), Value::Object(map));
-        }
-        Some(other) if !other.is_object() => {
-            document.remove("telemetry");
-        }
-        _ => {}
-    }
     if let Some(markdown) = document.get("markdown") {
         if !markdown.is_object() {
             document.remove("markdown");
@@ -109,6 +116,31 @@ pub fn migrate(document: &mut serde_json::Map<String, Value>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn plugin_merge_distinguishes_absence_from_explicit_null() {
+        let base: Settings = serde_json::from_value(json!({
+            "plugins":{"alpha":{"enabled":true,"path":"alpha.lua","config":{"keep":true,"nullable":1}}}
+        })).unwrap();
+        let empty = deep_merge(&base, &Settings::default());
+        assert_eq!(empty.plugins, base.plugins);
+        let overrides: Settings = serde_json::from_value(json!({
+            "plugins":{"alpha":{"config":{"nullable":null}}}
+        }))
+        .unwrap();
+        assert_eq!(
+            deep_merge(&base, &overrides).plugins,
+            Some(json!({
+                "alpha":{"enabled":true,"path":"alpha.lua","config":{"keep":true,"nullable":null}}
+            }))
+        );
+        let malformed: Settings = serde_json::from_value(json!({"plugins":null})).unwrap();
+        assert_eq!(deep_merge(&base, &malformed).plugins, Some(Value::Null));
+        assert_eq!(
+            deep_merge(&Settings::default(), &Settings::default()).plugins,
+            None
+        );
+    }
 
     #[test]
     fn merge_prefers_overrides_and_merges_nested() {
@@ -135,8 +167,7 @@ mod tests {
             "queueMode": "all",
             "websockets": true,
             "skills": { "enableSkillCommands": false, "customDirectories": ["/x"] },
-            "retry": { "maxDelayMs": 5 },
-            "telemetry": true
+            "retry": { "maxDelayMs": 5 }
         });
         let mut map = doc.as_object_mut().unwrap().clone();
         migrate(&mut map);
@@ -147,6 +178,5 @@ mod tests {
             map.get("retry"),
             Some(&json!({ "provider": { "maxRetryDelayMs": 5 } }))
         );
-        assert_eq!(map.get("telemetry"), Some(&json!({ "enabled": true })));
     }
 }

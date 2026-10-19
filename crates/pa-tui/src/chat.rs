@@ -97,6 +97,8 @@ pub enum ChatEntry {
         /// `/compact <instructions>` focus guidance.
         custom_instructions: Option<String>,
     },
+    /// The restored branch-point summary (TS `BranchSummaryMessageComponent`).
+    BranchSummary { summary: String },
     /// One assistant message: ordered content blocks.
     Assistant(Box<AssistantMessage>),
     /// One tool call and its execution state (rendered by

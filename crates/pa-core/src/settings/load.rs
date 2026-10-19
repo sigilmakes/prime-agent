@@ -27,9 +27,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "compaction",
     "autoRefine",
     "harnessRefinements",
-    "agentTraces",
     "factory",
-    "telemetry",
     "branchSummary",
     "retry",
     "providerBackupModel",
@@ -40,6 +38,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "shellCommandPrefix",
     "npmCommand",
     "mcpServers",
+    "plugins",
     "packages",
     "skills",
     "prompts",
@@ -90,7 +89,7 @@ pub fn from_value_lenient(value: &Value) -> Settings {
                 for (k, v) in merged_obj {
                     // Partial serializations emit explicit nulls for every unset field; a null must
                     // not erase a value collected from an earlier partial.
-                    if v.is_null() {
+                    if v.is_null() && !(key == "plugins" && k == "plugins") {
                         continue;
                     }
                     map.insert(k.clone(), v.clone());
@@ -124,6 +123,15 @@ mod tests {
             settings.extra.get("unknownKey"),
             Some(&serde_json::json!({ "kept": true }))
         );
+    }
+
+    #[test]
+    fn malformed_plugin_null_survives_lenient_unrelated_fields() {
+        let settings = from_value_lenient(&serde_json::json!({
+            "plugins":null,"defaultProvider":42
+        }));
+        assert_eq!(settings.plugins, Some(Value::Null));
+        assert_eq!(settings.default_provider, None);
     }
 
     #[test]

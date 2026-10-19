@@ -45,17 +45,11 @@ impl AgentSessionEngine {
                 .map(|link_config| link_config.socket_path.clone())
                 .unwrap_or_default(),
         ));
-        let model_refusal_telemetry =
-            std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
-                config.agent_dir.clone(),
-                config.telemetry_disabled == Some(true),
-            ));
         let children = config.supervisor_link.as_ref().map(|link_config| {
             Arc::new(SupervisorChildSessions::new(
                 Arc::clone(&link),
                 config.agent_dir.clone(),
                 link_config.active_session_id.clone(),
-                std::sync::Arc::clone(&model_refusal_telemetry),
             ))
         });
         let autonomous_driver = std::sync::RwLock::new(std::sync::Arc::new(
@@ -150,10 +144,12 @@ impl AgentSessionEngine {
             registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
+            ollama_cloud: Arc::default(),
             restored_model: std::sync::Mutex::new(None),
             startup_scope: std::sync::Mutex::new(None),
             initial_selection: std::sync::RwLock::new(selection),
             effective_thinking: std::sync::RwLock::new(None),
+            model_metadata_refresh_pending: std::sync::atomic::AtomicBool::new(false),
             service_tier: std::sync::RwLock::new(None),
             session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             threshold_yielded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -175,6 +171,7 @@ impl AgentSessionEngine {
             children,
             usage_producer: std::sync::Mutex::new(None),
             rlm_usage_store: std::sync::Mutex::new(None),
+            initial_context_selection_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
             quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             autonomous_driver,
@@ -196,7 +193,6 @@ impl AgentSessionEngine {
             compaction_summary_sink: std::sync::Mutex::new(None),
             progress_notes: std::sync::Mutex::new(None),
             progress_note_emit: std::sync::Mutex::new(None),
-            model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
         })
     }
@@ -561,6 +557,37 @@ impl AgentSessionEngine {
                 }),
             );
         }
+        let startup_boundary = match prompt_context_boundary.as_ref() {
+            None => pa_core::session_engine::ContextStartupBoundary::Current,
+            Some(PromptContextBoundary::Empty) => {
+                pa_core::session_engine::ContextStartupBoundary::Empty
+            }
+            Some(PromptContextBoundary::Leaf(leaf)) => {
+                pa_core::session_engine::ContextStartupBoundary::Leaf(leaf.clone())
+            }
+        };
+        let canonical_leaf = shared_window
+            .as_ref()
+            .map(pa_core::session::window::WindowedSessionStore::leaf_id)
+            .or_else(|| {
+                entries.and_then(|entries| {
+                    entries
+                        .iter()
+                        .rev()
+                        .find_map(pa_types::session::FileEntry::id)
+                })
+            });
+        admitted_user_ids = match entries {
+            Some(entries) => super::context_selection::admitted_user_ids(
+                entries,
+                canonical_leaf,
+                &startup_boundary,
+            )?,
+            None => Vec::new(),
+        };
+        // The SDK publishes the selected strategy's projected prefix. A raw
+        // message reset here would bypass that strategy and its native scope.
+        drop(prompt_context);
         if let Some(state) = seed {
             // The restore-resurrection guard: an active seed whose
             // trailing turn settled as a terminal provider failure adopts
@@ -617,20 +644,16 @@ impl AgentSessionEngine {
             }
         }
         if let Some(entries) = pending_branch {
-            built.session.rebuild_branch_context(entries).await?;
+            built
+                .session
+                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_user_ids)
+                .await?;
             built
                 .session
                 .shared_persistence()
                 .lock()
                 .await
                 .replay_admitted_user_rows(admitted_user_ids)?;
-            if let Some(messages) = prompt_context {
-                built
-                    .session
-                    .agent()
-                    .set_messages(messages.iter().filter_map(json_round_trip).collect())
-                    .await;
-            }
             // A moved branch restores its own park (the early return would leave the previous
             // branch's park armed).
             self.restore_quota_park(built).await;
@@ -640,7 +663,10 @@ impl AgentSessionEngine {
         }
         // Restore the retained context and certified metadata without loading discarded bodies.
         if let Some(window) = shared_window {
-            built.session.restore_windowed_context(window).await;
+            built
+                .session
+                .restore_windowed_context_at(window, &startup_boundary, &admitted_user_ids)
+                .await?;
             // This worker holds the runtime lease: exactly one writer per
             // lease certifies the window cache; the release flushes the
             // snapshot.
@@ -652,7 +678,10 @@ impl AgentSessionEngine {
                 .set_append_ownership(pa_core::session::window::AppendOwnership::SessionLeaseHeld);
             self.flush_pending_stale_goal_terminal().await;
         } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
-            built.session.rebuild_branch_context(entries).await?;
+            built
+                .session
+                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_user_ids)
+                .await?;
             self.flush_pending_stale_goal_terminal().await;
         }
         built
@@ -661,19 +690,26 @@ impl AgentSessionEngine {
             .lock()
             .await
             .replay_admitted_user_rows(admitted_user_ids)?;
-        if let Some(messages) = prompt_context {
-            built
-                .session
-                .agent()
-                .set_messages(messages.iter().filter_map(json_round_trip).collect())
-                .await;
-        }
         self.restore_quota_park(built).await;
         // The walk and replay allocated transient trees several times the
         // retained size: release the freed heap.
         pa_types::memory_release::trim_freed_heap();
         self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
         Ok(())
+    }
+
+    fn context_startup_boundary(&self) -> pa_core::session_engine::ContextStartupBoundary {
+        use pa_core::session_engine::ContextStartupBoundary;
+        match self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock")
+            .as_ref()
+        {
+            None => ContextStartupBoundary::Current,
+            Some(PromptContextBoundary::Empty) => ContextStartupBoundary::Empty,
+            Some(PromptContextBoundary::Leaf(leaf)) => ContextStartupBoundary::Leaf(leaf.clone()),
+        }
     }
 
     /// Clear only the boundary this completed adoption observed. A failed
@@ -782,12 +818,6 @@ impl AgentSessionEngine {
         // CURRENT model.
         *self.provider_target.write().expect("provider target lock") = None;
         if let Some(engine) = built {
-            // The teardown drops the compact-trigger state with a version bump: an in-flight
-            // review round never applies its edits.
-            engine.session.discard_compact_auto_refine();
-            if let Some(telemetry) = &engine.telemetry {
-                let _ = telemetry.end().await;
-            }
             engine.dispose_kernel().await;
         }
     }
@@ -907,7 +937,6 @@ impl AgentSessionEngine {
         let mut params = SessionCommandParams {
             model: &model,
             api_key,
-            global_harness_dir: self.config.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
         // The lock covers the clone only: the command below can run a summarizer call, so the
@@ -1053,44 +1082,26 @@ impl AgentSessionEngine {
         // The engine session stays non-persisted (the worker owns the
         // durable file); the configured session dir leads, the file's
         // parent is the fallback.
-        let session_manager = match self
-            .config
-            .session_dir
-            .as_deref()
-            .or_else(|| session_file.as_deref().and_then(std::path::Path::parent))
-        {
-            Some(session_dir) => {
-                pa_core::session::manager::SessionManager::in_memory_in_session_dir(
-                    &cwd,
-                    session_dir,
-                )
-            }
-            None => pa_core::session::manager::SessionManager::in_memory(&cwd),
-        };
+        let session_dir = self.config.session_dir.clone().or_else(|| {
+            session_file
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(std::path::Path::to_owned)
+        });
+        let (session_manager, on_initial_context_selection) = self
+            .build_session_mirror(cwd.clone(), session_dir, session_file.clone())
+            .await?;
+        // Capture after the verified mirror: prompt admission sets its boundary
+        // before appending any user row, including a create/prewarm race.
+        let context_startup_boundary = self.context_startup_boundary();
+        let context_startup_admitted_user_ids = super::context_selection::admitted_user_ids(
+            session_manager.retained_entries(),
+            session_manager.get_leaf_id(),
+            &context_startup_boundary,
+        )?;
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
         }
-        // Session telemetry: the composition root is this worker; the
-        // create's opt-out rides the engine config. Sinks resolve in
-        // `build_client`.
-        let telemetry = (self.config.telemetry_disabled != Some(true)).then(|| {
-            let settings =
-                pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
-            pa_core::session_engine::telemetry::TelemetryWiring {
-                client: pa_core::session_engine::telemetry::build_client(
-                    &settings,
-                    &self.config.agent_dir,
-                ),
-                execution_mode: create_resources.execution_mode.clone(),
-                now: None,
-                telemetry_enabled: Some(
-                    pa_core::session_engine::telemetry::telemetry_enabled_switch(
-                        &self.cwd(),
-                        &self.config.agent_dir,
-                    ),
-                ),
-            }
-        });
         // Bound before the awaited build: the purge-clone must not hold the lock guard across the
         // await.
         let queued_goal_context_purge = self
@@ -1140,7 +1151,6 @@ impl AgentSessionEngine {
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             on_late_sent_agent_message,
             semantic_edges,
-            telemetry,
             cwd,
             // TS settings.imageModel routing: the daemon owns the routing;
             // the headless surfaces pass `None` to keep their own.
@@ -1150,6 +1160,7 @@ impl AgentSessionEngine {
             model: Some(agent_model),
             thinking_level: Some(map_thinking_level(self.effective_thinking())),
             stream_fn: Some(stream_fn),
+            ollama_cloud: Some(Arc::clone(&self.ollama_cloud)),
             // Model tools: `python_repl` only; the engine adds the kernel-backed `python_repl` tool itself.
             tools: vec![],
             custom_system_prompt: create_resources.system_prompt,
@@ -1157,6 +1168,9 @@ impl AgentSessionEngine {
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager: Some(session_manager),
+            context_startup_boundary,
+            context_startup_admitted_user_ids,
+            on_initial_context_selection,
             extra_host_handlers: self.extra_host_handlers(),
             conversation_log_path: session_file,
             additional_skill_paths: create_resources.skills,

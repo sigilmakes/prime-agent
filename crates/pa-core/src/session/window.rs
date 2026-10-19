@@ -285,10 +285,13 @@ impl WindowedSessionStore {
                 header = serde_json::from_slice::<FileEntry>(&line).ok();
                 break;
             }
-            if !matches!(
+            if !(matches!(
                 meta.kind.as_str(),
                 "model_change" | "thinking_level_change" | "service_tier_change"
-            ) {
+            ) || meta.kind == "custom"
+                && meta.custom_type.as_deref()
+                    == Some(pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE))
+            {
                 non_bootstrap = true;
             }
             if meta.kind == "compaction" {
@@ -315,7 +318,11 @@ impl WindowedSessionStore {
                     (meta.kind.as_str(), meta.custom_type.as_deref()),
                     (
                         "custom",
-                        Some("provider_quota_park" | "provider_quota_resume")
+                        Some(
+                            "provider_quota_park"
+                                | "provider_quota_resume"
+                                | pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE
+                        )
                     )
                 ))
             {
@@ -501,7 +508,11 @@ impl WindowedSessionStore {
                 "custom"
                     if matches!(
                         value["customType"].as_str(),
-                        Some("provider_quota_park" | "provider_quota_resume")
+                        Some(
+                            "provider_quota_park"
+                                | "provider_quota_resume"
+                                | pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE
+                        )
                     ) =>
                 {
                     keep.insert(index);
@@ -572,6 +583,7 @@ impl WindowedSessionStore {
             first_user_message,
             leaf_id,
             settings: SessionContext {
+                archive: None,
                 messages: Vec::new(),
                 thinking_level: thinking.unwrap_or_else(|| "off".to_owned()),
                 service_tier: tier.flatten(),
@@ -649,6 +661,7 @@ impl WindowedSessionStore {
             first_user_message: snapshot.first_user.clone(),
             leaf_id: snapshot.leaf.clone(),
             settings: SessionContext {
+                archive: None,
                 messages: Vec::new(),
                 thinking_level: snapshot.thinking.clone(),
                 service_tier: snapshot.tier,
@@ -753,7 +766,7 @@ impl WindowedSessionStore {
                             ..
                         } = retained
                         {
-                            assistant.usage = payload.aggregate_usage;
+                            assistant.usage = payload.aggregate_usage.clone();
                         }
                         break;
                     }
@@ -921,7 +934,7 @@ fn apply_attributions(entries: &mut [FileEntry], metadata: &[String]) {
                         ..
                     } = entry
                     {
-                        message.usage = payload.aggregate_usage;
+                        message.usage = payload.aggregate_usage.clone();
                     }
                 }
             }
@@ -929,13 +942,7 @@ fn apply_attributions(entries: &mut [FileEntry], metadata: &[String]) {
     }
 }
 pub(super) fn update_snapshot(snapshot: &mut Snapshot, entry: &FileEntry) {
-    if !matches!(
-        entry,
-        FileEntry::Header { .. }
-            | FileEntry::ModelChange { .. }
-            | FileEntry::ThinkingLevelChange { .. }
-            | FileEntry::ServiceTierChange { .. }
-    ) {
+    if !super::is_bootstrap_entry(entry) {
         snapshot.non_bootstrap = true;
     }
     if let Some(goal) = valid_goal(entry) {

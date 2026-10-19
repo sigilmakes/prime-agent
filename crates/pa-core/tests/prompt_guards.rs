@@ -156,6 +156,8 @@ fn prompt_token_for_host_request(request: &str) -> Option<String> {
         match request {
             "rlm.run" => "rlm.spawn",
             "rlm.progress.note" => "rlm.progress_note",
+            "plugin.catalog" => "plugin.refresh",
+            "plugin.invoke" => "plugin",
             "agent_observe.list" | "agent_message.list_agents" => "agent_observe.list_agents",
             "agent_observe.get" => "agent_observe.get_agent",
             "agent_observe.recent" => "agent_observe.recent_messages",
@@ -174,26 +176,13 @@ const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.describe_tool",
 ];
 
-/// The harness-state API of the vendored runtime (`rlm.harness` CRUD and
-/// `rlm.get_harness_state`). Update together with the runtime sidecar.
-const HARNESS_TOKENS: &[&str] = &[
-    "rlm.harness.create_memory",
-    "rlm.harness.update_memory",
-    "rlm.harness.delete_memory",
-    "rlm.harness.create_prompt_note",
-    "rlm.harness.update_prompt_note",
-    "rlm.harness.delete_prompt_note",
-    "rlm.harness.create_skill",
-    "rlm.harness.update_skill",
-    "rlm.harness.delete_skill",
-    "rlm.harness.create_subagent",
-    "rlm.harness.update_subagent",
-    "rlm.harness.delete_subagent",
-    "rlm.harness.record_refinement",
-    "rlm.harness.plan_refinement",
-    "rlm.harness.overview",
-    "rlm.harness.search",
-    "rlm.get_harness_state",
+/// Session-bound generic plugin namespace; actual plugin exports are optional and dynamic.
+const PLUGIN_NAMESPACE_TOKENS: &[&str] = &[
+    "plugin",
+    "plugin.refresh",
+    "plugin.inventory",
+    "plugin.session",
+    "plugin.revision",
 ];
 
 /// A host-request type literal: lowercase dotted name (`rlm.collect`).
@@ -294,6 +283,9 @@ fn kernel_bound_names() -> BTreeSet<String> {
         if line.starts_with("bash = ") {
             names.insert("bash".to_string());
         }
+        if line.starts_with("plugin = ") {
+            names.insert("plugin".to_string());
+        }
         if let Some(rest) = line.strip_prefix("import rlm.mcp as ") {
             names.insert(rest.trim().to_string());
         }
@@ -337,6 +329,41 @@ fn python_skill_functions(package_path: &Path) -> Vec<String> {
     functions
 }
 
+/// Public methods in one column-zero Python class. Four-space method indentation excludes
+/// nested helpers and methods on the next class, unlike the module-level skill scanner above.
+fn python_namespace_functions(source: &str, class_name: &str) -> BTreeSet<String> {
+    let header = format!("class {class_name}:");
+    let mut inside = false;
+    let mut functions = BTreeSet::new();
+    for line in source.lines() {
+        if !inside {
+            inside = line == header;
+            continue;
+        }
+        if !line.is_empty() && !line.starts_with(' ') {
+            break;
+        }
+        let signature = line
+            .strip_prefix("    async def ")
+            .or_else(|| line.strip_prefix("    def "));
+        if let Some(name) = signature.and_then(|signature| signature.split('(').next()) {
+            if !name.starts_with('_') {
+                functions.insert(name.to_string());
+            }
+        }
+    }
+    functions
+}
+
+const RUNTIME_NAMESPACE: &str = include_str!("../../../prime-agent-runtime/src/rlm/__init__.py");
+
+fn factory_namespace_tokens() -> BTreeSet<String> {
+    python_namespace_functions(RUNTIME_NAMESPACE, "_RLMFactoryNamespace")
+        .into_iter()
+        .map(|method| format!("rlm.factory.{method}"))
+        .collect()
+}
+
 /// Bundled skills that are auth-gated builtin MCP integrations: they are disabled in sessions whose
 /// user is not logged into the integration, so the prompt documents them only through the dynamic
 /// skills inventory (and its generic "additional skills may exist" note), not as API surface.
@@ -353,6 +380,9 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
     let gated = auth_gated_bundled_skills();
     sorted_bundled_skills()
         .into_iter()
+        // The resolver force-disables this obsolete host-request skill even on explicit opt-in.
+        // Raw packaged-set parity below still includes its historical source asset.
+        .filter(|skill| skill.name != "refine")
         .filter(|skill| {
             skill
                 .python
@@ -372,10 +402,11 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
 }
 
 /// The surface tokens the prompt is allowed to document: kernel-bound names, registered host
-/// requests, bundled Python skills, and the runtime-package (harness + generic MCP) API.
+/// requests, bundled Python skills, and the runtime-package generic MCP and plugin namespace API.
 fn allowed_surface_tokens() -> BTreeSet<String> {
     let mut allowed = BTreeSet::new();
     allowed.extend(kernel_bound_names());
+    allowed.extend(factory_namespace_tokens());
     for request in registered_host_requests() {
         if let Some(token) = prompt_token_for_host_request(&request) {
             allowed.insert(token);
@@ -387,7 +418,7 @@ fn allowed_surface_tokens() -> BTreeSet<String> {
             allowed.insert(format!("{import}.{function}"));
         }
     }
-    for token in KERNEL_LOCAL_TOKENS.iter().chain(HARNESS_TOKENS) {
+    for token in KERNEL_LOCAL_TOKENS.iter().chain(PLUGIN_NAMESPACE_TOKENS) {
         allowed.insert(token.to_string());
     }
     allowed
@@ -397,6 +428,7 @@ fn allowed_surface_tokens() -> BTreeSet<String> {
 /// (`run`/`status`) are callable through the module itself, so the module bullet suffices for them.
 fn required_surface_tokens() -> BTreeSet<String> {
     let mut required = BTreeSet::new();
+    required.extend(factory_namespace_tokens());
     for request in registered_host_requests() {
         if let Some(token) = prompt_token_for_host_request(&request) {
             required.insert(token);
@@ -411,7 +443,7 @@ fn required_surface_tokens() -> BTreeSet<String> {
             required.insert(format!("{import}.{function}"));
         }
     }
-    for token in KERNEL_LOCAL_TOKENS.iter().chain(HARNESS_TOKENS) {
+    for token in KERNEL_LOCAL_TOKENS.iter().chain(PLUGIN_NAMESPACE_TOKENS) {
         required.insert(token.to_string());
     }
     required
@@ -485,6 +517,50 @@ fn core_layer_documents_the_real_tool_surface() {
     }
 }
 
+/// Optional plugin-owned state must not return as an unconditional cached API contract.
+#[test]
+fn core_layer_does_not_advertise_removed_hardwired_harness() {
+    for removed in ["rlm.harness", "rlm.get_harness_state", "plugin.harness"] {
+        assert!(
+            !CORE_LAYER.contains(removed),
+            "static core layer advertises removed or optional harness API {removed:?}; discover active plugin exports instead"
+        );
+    }
+}
+
+/// Derive the real class-local namespace, not the internal executor's larger API.
+#[test]
+fn factory_public_namespace_matches_documented_methods() {
+    let methods = factory_namespace_tokens();
+    let expected: BTreeSet<String> = ["run", "status", "stop", "resume", "graph", "watch", "help"]
+        .into_iter()
+        .map(|method| format!("rlm.factory.{method}"))
+        .collect();
+    assert_eq!(
+        methods, expected,
+        "review any change to the public factory namespace"
+    );
+    assert!(RUNTIME_NAMESPACE.contains("    factory = _RLMFactoryNamespace()"));
+    let documented: BTreeSet<String> = documented_surface_tokens()
+        .into_iter()
+        .filter(|token| token.starts_with("rlm.factory."))
+        .collect();
+    assert_eq!(
+        documented, methods,
+        "document every public factory method, and only those methods"
+    );
+    for removed in [
+        "rlm.factory.run_machine",
+        "rlm.factory.activity",
+        "create_factory",
+    ] {
+        assert!(
+            !CORE_LAYER.contains(removed),
+            "internal or obsolete factory API {removed:?}"
+        );
+    }
+}
+
 // Packaged-set parity (TS packages/coding-agent/skills)
 
 /// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): 12 skills — the
@@ -505,17 +581,21 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "websearch",
 ];
 
-/// The bundled skills directory matches the TS packaged set name-for-name: the generic `mcp` skill
-/// is present and markdown-only, and the retired per-service pair (linear/notion) is gone.
+/// Explicitly reviewed native-only addition. The historical TS set above stays unchanged.
+const NATIVE_ADDED_SKILL_SET: &[&str] = &["factory"];
+
+/// The loadable skill set is exactly the historical TS set plus reviewed native additions.
+/// The generic `mcp` skill stays markdown-only, and the retired per-service pair stays gone.
 #[test]
 fn bundled_skills_match_the_ts_packaged_set() {
     let skills = sorted_bundled_skills();
     let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
     let mut expected = TS_PACKAGED_SKILL_SET.to_vec();
+    expected.extend_from_slice(NATIVE_ADDED_SKILL_SET);
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "the packaged skill set must match the TS packaged set"
+        "the loadable skill set must be exactly TS12 union the reviewed native-only factory skill"
     );
     assert!(
         !names.contains(&"linear") && !names.contains(&"notion"),
@@ -532,6 +612,58 @@ fn bundled_skills_match_the_ts_packaged_set() {
     assert_eq!(
         mcp_skill.description,
         "Use external MCP services generically from Python - search the supported-service catalog, inspect the user's connections, discover live tool schemas, and call tools on any connection (Notion, Linear, Slack, and the rest of the catalog) without per-service packages."
+    );
+}
+
+/// Exercise actual frontmatter parsing and inventory rendering; a physical file is not discovery.
+#[test]
+fn factory_skill_loads_with_valid_description_and_public_api() {
+    let skills = sorted_bundled_skills();
+    let factory = skills
+        .iter()
+        .find(|skill| skill.name == "factory")
+        .expect("the native factory skill must load through actual markdown discovery");
+    assert_eq!(factory.description, "Run and monitor state-machine workflows of child agents. Use when the user wants fan-out, joins, bounded review loops, or progress control through rlm.factory.");
+    assert!(
+        factory.python.is_none(),
+        "factory is a doc skill for the pre-imported namespace"
+    );
+    let source = std::fs::read_to_string(bundled_skills_dir().join("factory/SKILL.md"))
+        .expect("factory skill source");
+    for method in factory_namespace_tokens() {
+        assert!(
+            source.contains(&method),
+            "factory skill omits public method {method:?}"
+        );
+    }
+    for obsolete in [
+        "rlm.harness",
+        "rlm.get_harness_state",
+        "create_factory",
+        "rlm.factory.run_machine",
+        "rlm.factory.activity",
+    ] {
+        assert!(
+            !source.contains(obsolete),
+            "factory skill documents obsolete API {obsolete:?}"
+        );
+    }
+    let options = BuildSystemPromptOptions {
+        cwd: "/w".to_string(),
+        skills,
+        selected_tools: Some(vec!["python_repl"]),
+        ..Default::default()
+    };
+    let rendered = system_prompt_breakdown(&options);
+    assert!(
+        rendered.segments.iter().any(|segment| {
+            matches!(segment.kind, SegmentKind::Dynamic)
+                && segment.text.contains("<name>factory</name>")
+                && segment
+                    .text
+                    .contains("Run and monitor state-machine workflows of child agents.")
+        }),
+        "the discovered factory skill must reach the dynamic prompt inventory"
     );
 }
 

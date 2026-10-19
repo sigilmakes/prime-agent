@@ -26,7 +26,15 @@ impl AgentSessionEngine {
             headers: Option<std::collections::BTreeMap<String, String>>,
             session_restored: bool,
         }
-        let model = match self.resolve_model() {
+        if let Err(error) = self.apply_scheduled_model_metadata_refresh() {
+            return TurnResult::Error {
+                error: error.to_string(),
+                assistant: None,
+            };
+        }
+        // The built target pins the session identity even if the refreshed
+        // catalog removes it or changes the startup default.
+        let model = match self.session_model() {
             Ok(model) => model,
             Err(error) => {
                 return TurnResult::Error {
@@ -35,6 +43,14 @@ impl AgentSessionEngine {
                 };
             }
         };
+        let selector = format!("{}/{}", model.provider, model.id);
+        let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+        if let Err(error) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
+            return TurnResult::Error {
+                error: error.to_string(),
+                assistant: None,
+            };
+        }
         // The preflight validates the model SERVING the run: a model whose
         // provider has no configured credential fails the run before the
         // provider request, with the login-guidance message — a routed
@@ -123,20 +139,12 @@ impl AgentSessionEngine {
             guard.as_ref().cloned()
         };
         let persistence = core.as_ref().map(|core| core.session.shared_persistence());
-        // Retry/failover adoption telemetry (TS `auto_retry_start` counting):
-        // retries increment `retry_count`, provider switches `failover_count`.
-        // The semantic-edge recorder rides the same snapshot (TS
-        // `prepareTurnRetry` / `clearTurnRetry` ride the retry events: the
-        // parked id makes the retried call reuse the failed attempt's
-        // idempotency key).
-        let (telemetry, semantic_edges) = {
+        // Keep retries on the failed attempt's semantic request identity.
+        let semantic_edges = {
             let guard = self.session.blocking_lock();
-            (
-                guard.as_deref().and_then(|engine| engine.telemetry.clone()),
-                guard
-                    .as_deref()
-                    .and_then(|engine| engine.session.semantic_edges()),
-            )
+            guard
+                .as_deref()
+                .and_then(|engine| engine.session.semantic_edges())
         };
         // The failover-captured primary target state (TS `_backupModel`):
         // Session state restores at successful message_end; request auth
@@ -182,6 +190,9 @@ impl AgentSessionEngine {
             let agent_weak = std::sync::Arc::downgrade(&agent);
             let core = core.clone();
             let persistence = persistence.clone();
+            let ollama_cloud = self.ollama_cloud.clone();
+            let cwd = self.cwd();
+            let agent_dir = self.config.agent_dir.clone();
             agent
                 .subscribe(move |event, _signal| {
                     let primary_state = primary_state.clone();
@@ -189,6 +200,9 @@ impl AgentSessionEngine {
                     let agent_weak = agent_weak.clone();
                     let core = core.clone();
                     let persistence = persistence.clone();
+                    let ollama_cloud = ollama_cloud.clone();
+                    let cwd = cwd.clone();
+                    let agent_dir = agent_dir.clone();
                     Box::pin(async move {
                         let pa_agent::types::AgentEvent::MessageEnd {
                             message:
@@ -209,13 +223,15 @@ impl AgentSessionEngine {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone();
-                        let Some(primary) = primary.filter(|primary| !primary.session_restored)
+                        let Some(mut primary) = primary.filter(|primary| !primary.session_restored)
                         else {
                             return Ok(());
                         };
                         let Some(agent) = agent_weak.upgrade() else {
                             return Ok(());
                         };
+                        primary.model =
+                            ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
                         let model = json_round_trip(&primary.model)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                         agent
@@ -272,6 +288,7 @@ impl AgentSessionEngine {
                 else {
                     return Ok(None);
                 };
+                let primary_model = self.configure_ollama_model(&primary_model);
                 let agent_model = json_round_trip(&primary_model)
                     .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                 {
@@ -397,10 +414,7 @@ impl AgentSessionEngine {
                             // would lose its explicit stop and goal-continuation semantics.
                             let core = self.session.lock().await.clone();
                             let pending = match core {
-                                Some(core) => {
-                                    core.turn_boundary.compaction_scheduled().await
-                                        || core.turn_boundary.refine_pending().await
-                                }
+                                Some(core) => core.turn_boundary.compaction_scheduled().await,
                                 None => false,
                             };
                             if aborted() {
@@ -449,7 +463,6 @@ impl AgentSessionEngine {
                 },
                 |event| {
                     let mut emit = emit_cell.borrow_mut();
-                    let telemetry = telemetry.clone();
                     let semantic_edges = semantic_edges.clone();
                     async move {
                         // TS parks the id at `auto_retry_start` and clears
@@ -468,10 +481,6 @@ impl AgentSessionEngine {
                                     recorder.clear_turn_retry();
                                 }
                             }
-                        }
-                        if let Some(telemetry) = &telemetry {
-                            // One retry event in, one telemetry seam out.
-                            telemetry.note_auto_retry_event(&event);
                         }
                         let engine_event = retry_event_to_engine_event(event);
                         if !emit(engine_event) {
@@ -520,7 +529,7 @@ impl AgentSessionEngine {
                             primary.session_restored = false;
                         }
                     }
-                    let next = next.clone();
+                    let next = self.configure_ollama_model(next);
                     async move {
                         let agent_model = json_round_trip(&next)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;

@@ -8,9 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier: the turn-boundary host-request contract (`model.info`, `compact.*`, `refine.*`) over a
+//! Verifier: the turn-boundary host-request contract (`model.info`, `compact.*`) over a
 //! REAL kernel: one turn's `ipython` cell calls the `rlm.host_request` bridge directly; the raw
-//! handler responses are asserted, then the scheduled refinement reaches the boundary seam.
+//! handler responses and the compaction scheduling boundary are asserted.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -19,7 +19,6 @@ use pa_agent::scripted::{tool_call_turn_steps, ScriptStep, ScriptedProvider, Scr
 use pa_agent::stream::AssistantMessageEvent;
 use pa_core::session::manager::SessionManager;
 use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
-use pa_core::session_engine::turn_boundary::PendingRefine;
 use pa_core::session_engine::PromptOptions;
 use serde_json::{json, Value};
 
@@ -83,12 +82,12 @@ impl Drop for EnvOverride {
     }
 }
 
-/// The kernel cell: the raw host requests the `refine`/`compact` skill modules
+/// The kernel cell: the raw host requests the `compact` skill module
 /// issue, recorded on disk for the verifier (and printed so the tool result
 /// carries the same proof into the session transcript).
 fn harness_cell(receipt_path: &Path) -> String {
     format!(
-        "import json\nfrom rlm import host_request\npayload = {{}}\npayload[\"model_info\"] = await host_request(\"model.info\", {{}})\npayload[\"compact_status\"] = await host_request(\"compact.status\", {{}})\npayload[\"refine_status_before\"] = await host_request(\"refine.status\", {{}})\npayload[\"refine_run\"] = await host_request(\"refine.run\", {{\"instructions\": \"persist the kernel round-trip contract observation\", \"global\": True}})\npayload[\"refine_status_after\"] = await host_request(\"refine.status\", {{}})\npayload[\"compact_run\"] = await host_request(\"compact.run\", {{\"instructions\": \"keep the observation\"}})\nopen({receipt_path:?}, \"w\").write(json.dumps(payload))\nprint(\"HARNESS_CELL_OK\")",
+        "import json\nfrom rlm import host_request\npayload = {{}}\npayload[\"model_info\"] = await host_request(\"model.info\", {{}})\npayload[\"compact_status\"] = await host_request(\"compact.status\", {{}})\npayload[\"compact_run\"] = await host_request(\"compact.run\", {{\"instructions\": \"keep the observation\"}})\nopen({receipt_path:?}, \"w\").write(json.dumps(payload))\nprint(\"HARNESS_CELL_OK\")",
         receipt_path = receipt_path.display().to_string(),
     )
 }
@@ -138,8 +137,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         ("PRIME_API_KEY", None),
     ]);
 
-    // A persisted session: the refine handlers register only for depth-0
-    // sessions with a local harness state dir (TS `_autoRefineAllowedForSession`).
+    // Persist the session so the cell output can be verified in canonical history.
     let mut session = SessionManager::in_memory(&cwd);
     session.materialize_session_file(Some(sessions_dir));
 
@@ -176,6 +174,10 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
 
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
+        context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
+        context_startup_admitted_user_ids: Vec::new(),
+        on_initial_context_selection: None,
+        ollama_cloud: None,
         semantic_edges: None,
         cron_store: None,
         queued_steering_probe: None,
@@ -204,7 +206,6 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,
-        telemetry: None,
         model_info: Some(registry_model()),
         mcp_manager: None,
         prewarm_ipython_kernel: None,
@@ -240,21 +241,6 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
     // The usage anchor (the faux turn's 120 tokens) with nothing trailing it.
     assert_eq!(compact_status["tokens"], 120, "{payload}");
     assert_eq!(compact_status["percent"], 0.06, "{payload}");
-    assert_eq!(
-        payload["refine_status_before"],
-        json!({ "pending": false, "in_flight": false }),
-        "{payload}"
-    );
-    assert_eq!(payload["refine_run"]["scheduled"], true, "{payload}");
-    assert_eq!(
-        payload["refine_run"]["note"],
-        "Refinement runs when the current turn ends; applied edits are appended to your context as a refinement notice and you resume automatically. Continue working normally."
-    );
-    assert_eq!(
-        payload["refine_status_after"],
-        json!({ "pending": true, "in_flight": false }),
-        "{payload}"
-    );
     assert_eq!(payload["compact_run"]["scheduled"], false, "{payload}");
     assert_eq!(
         payload["compact_run"]["reason"],
@@ -272,20 +258,6 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         "no kernel cell output in the session rows"
     );
 
-    // The scheduled refinement reached the turn-boundary seam: the runtime
-    // consumes exactly this request after the settled turn (the daemon
-    // worker's boundary pass; unit-tested at the registry level).
-    assert_eq!(
-        engine.turn_boundary.take_refine().await,
-        Some(PendingRefine {
-            instructions: Some("persist the kernel round-trip contract observation".to_string()),
-            global: true,
-        })
-    );
-    assert!(
-        engine.turn_boundary.take_refine().await.is_none(),
-        "the refinement request must be consumed exactly once"
-    );
     assert!(
         engine.turn_boundary.take_compaction().await.is_none(),
         "the skipped compact.run must not schedule anything"

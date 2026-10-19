@@ -101,6 +101,8 @@ pub fn resolve_auxiliary_model(
         warn_fallback(&selector, purpose);
         return fallback();
     };
+    let model = crate::models::OllamaCloudConfig::load(&context.cwd, &context.agent_dir)
+        .configure_model(&model);
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
     if !resolved.ok {
         warn_fallback(&selector, purpose);
@@ -117,6 +119,52 @@ pub fn resolve_auxiliary_model(
         api_key: resolved.api_key,
         headers: resolved.headers,
     }
+}
+
+/// Resolve an explicitly selected auxiliary model from this session's catalog.
+/// Unlike the settings-based resolver, this never falls back to another model.
+///
+/// # Errors
+///
+/// Returns a sanitized error if the selector is absent, disallowed, or unavailable.
+pub(crate) fn resolve_selected_auxiliary_model(
+    context: &AuxiliaryModelContext,
+    selector: &str,
+) -> anyhow::Result<ResolvedAuxiliaryModel> {
+    let unavailable = || anyhow::anyhow!("Requested auxiliary model is unavailable.");
+    let selector = selector.trim().to_lowercase();
+    if selector.is_empty() {
+        return Err(unavailable());
+    }
+    let settings = crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
+    if settings
+        .get_allowed_models()
+        .as_ref()
+        .is_some_and(|allowlist| !crate::models::model_allowed(&selector, allowlist))
+    {
+        return Err(unavailable());
+    }
+    let auth = crate::auth::AuthStorage::create(&context.agent_dir);
+    let mut registry =
+        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    registry.load_private_authorization_from_cache();
+    let model = registry
+        .get_rlm_searchable_models()
+        .into_iter()
+        .find(|model| format!("{}/{}", model.provider, model.id).to_lowercase() == selector)
+        .cloned()
+        .ok_or_else(unavailable)?;
+    let model = crate::models::OllamaCloudConfig::load(&context.cwd, &context.agent_dir)
+        .configure_model(&model);
+    let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
+    if !resolved.ok {
+        return Err(unavailable());
+    }
+    Ok(ResolvedAuxiliaryModel {
+        model,
+        api_key: resolved.api_key,
+        headers: resolved.headers,
+    })
 }
 
 #[cfg(test)]
@@ -141,7 +189,10 @@ mod tests {
           "baseUrl": "http://localhost:9",
           "apiKey": "aux-key",
           "api": "openai-completions",
-          "models": [ { "id": "aux-model", "name": "Aux Model", "contextWindow": 128000 } ]
+          "models": [
+            { "id": "aux-model", "name": "Aux Model", "contextWindow": 128000 },
+            { "id": "selected-model", "name": "Selected Model", "contextWindow": 64000 }
+          ]
         }
       }
     }"#;
@@ -191,6 +242,74 @@ mod tests {
             headers.get("X-Prime-Team-ID").map(String::as_str),
             Some("team-1"),
             "the stored team ships on the fallback summarizer call"
+        );
+    }
+
+    #[test]
+    fn an_explicit_selector_is_distinct_from_the_top_level_auxiliary_setting() {
+        let (_dir, context) = context_with_settings(&serde_json::json!({
+            "auxiliaryModel": "testaux/aux-model",
+            "allowedModels": ["testaux/aux-model", "testaux/selected-model"],
+        }));
+        let session = model("session-model", "faux", 8_000);
+        let default = resolve_auxiliary_model(&context, "plugin inference", &session, None, None);
+        let selected = resolve_selected_auxiliary_model(&context, " TESTAUX/SELECTED-MODEL ")
+            .expect("the explicit model is in this session's catalog");
+        assert_eq!(
+            (
+                default.model.provider.as_str(),
+                default.model.id.as_str(),
+                default.model.base_url.as_str(),
+                default.api_key.as_deref(),
+                default.headers.as_ref(),
+            ),
+            (
+                "testaux",
+                "aux-model",
+                "http://localhost:9",
+                Some("aux-key"),
+                None
+            ),
+        );
+        assert_eq!(
+            (
+                selected.model.provider.as_str(),
+                selected.model.id.as_str(),
+                selected.model.base_url.as_str(),
+                selected.api_key.as_deref(),
+                selected.headers.as_ref(),
+            ),
+            (
+                "testaux",
+                "selected-model",
+                "http://localhost:9",
+                Some("aux-key"),
+                None
+            ),
+        );
+    }
+
+    #[test]
+    fn unavailable_explicit_models_return_sanitized_errors_instead_of_falling_back() {
+        let (_dir, context) = context_with_settings(&serde_json::json!({
+            "auxiliaryModel": "testaux/aux-model",
+            "allowedModels": ["testaux/aux-model"],
+        }));
+        for selector in ["testaux/selected-model", "not-a-provider/aux-key", ""] {
+            let error = resolve_selected_auxiliary_model(&context, selector).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Requested auxiliary model is unavailable."
+            );
+        }
+        // An allowed spelling does not make an unavailable catalog entry resolvable.
+        let (_dir, context) = context_with_settings(&serde_json::json!({
+            "auxiliaryModel": "testaux/aux-model",
+        }));
+        let error = resolve_selected_auxiliary_model(&context, "testaux/missing").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Requested auxiliary model is unavailable."
         );
     }
 

@@ -419,11 +419,24 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
     let first = &events[agent_ends[0]];
     assert_eq!(
         roles_of(first),
-        ["custom", "user", "assistant"],
-        "the failed run's message set (the deferred digest rides first): {events:?}"
+        ["user", "assistant"],
+        "the failed run carries its accepted user and terminal assistant: {events:?}"
+    );
+    assert!(
+        !first["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["customType"] == "harness_digest"),
+        "the optional harness must not inject a legacy digest row"
     );
     assert_eq!(
-        first["messages"][2]["stopReason"],
+        first["messages"][0]["content"],
+        json!([{ "type": "text", "text": "retried turn for the agent end probe" }]),
+        "the failed run keeps its exact accepted user"
+    );
+    assert_eq!(
+        first["messages"][1]["stopReason"],
         json!("error"),
         "the failed run ends on the error row"
     );

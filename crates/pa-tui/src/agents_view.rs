@@ -170,9 +170,6 @@ pub struct AgentsViewOutcome {
     pub opened_cwd: Option<std::path::PathBuf>,
     /// A status message the session opener left (the unattachable-child fallback).
     pub status_message: Option<String>,
-    /// The view actions this run performed (`program_shown`, `renamed`): the composition root
-    /// emits the `tui agents action` adoption events at the run's end.
-    pub actions: Vec<&'static str>,
     pub incident_notice_state: crate::incident_notices::IncidentNoticeState,
 }
 
@@ -407,9 +404,6 @@ struct AgentsViewMode {
     /// The left press a release may fire: the pressed row and whether it turned into a drag —
     /// a dragged release never opens.
     pressed_click: Option<PressedMouseClick>,
-    /// The view actions this run performed (`program_shown`, `renamed`), reported on the outcome
-    /// for the composition root's adoption events.
-    actions: Vec<&'static str>,
     /// The daemon's heartbeat catalog (the dock's source, TS
     /// `heartbeats`): each row counts its own session's jobs.
     heartbeats: Vec<crate::heartbeats_picker::HeartbeatEntry>,
@@ -511,7 +505,6 @@ impl AgentsViewMode {
             click_rows: Vec::new(),
             hover_row: None,
             pressed_click: None,
-            actions: Vec::new(),
             heartbeats: Vec::new(),
         }
     }
@@ -1138,9 +1131,7 @@ async fn run_agents_view_surface(
             UiInput::RenameResult { rename, outcome } => {
                 mode.rename_result(rename, outcome);
             }
-            // The reply outcomes apply on the exit path too (an Enter-then-exit): the
-            // statuses paint nothing on a run that ended, but the adoption actions
-            // (`reply_sent`, `killed`) must still reach the outcome.
+            // Apply any reply outcomes received before the view exited.
             UiInput::HeadlineResult { key, result } => {
                 mode.headline_result(&key, result);
             }
@@ -1200,7 +1191,6 @@ async fn run_agents_view_surface(
                 .and_then(|row| row.cwd.clone())
                 .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
-            actions: std::mem::take(&mut mode.actions),
             incident_notice_state: mode.incident_notice_state,
         },
     })

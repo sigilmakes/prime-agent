@@ -1,7 +1,6 @@
 //! First-run onboarding surface: the brand mark over its animated lab field, the welcome line, and
-//! the flow panels the first-run flow mounts inside the block. [`OnboardingChoice`] is the reusable
-//! question panel. A startup model that is ready skips to the question (TS `immediate: true`); no
-//! usable model runs the full flow (TS `runOnboardingFlow`).
+//! the provider-auth panels mounted inside the block. [`OnboardingChoice`] renders the account
+//! question. A startup model that is ready skips the flow; no usable model runs the full flow.
 
 use crate::keybindings::KeybindingsManager;
 use crate::keys::KeyId;
@@ -10,31 +9,6 @@ use crate::onboarding_flow::{welcome_action_row, welcome_rows, OnboardingPanel};
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier, Style};
-
-pub const TRACE_OPT_IN_PROMPT: &str = "Share agent traces with Prime Intellect?";
-const TRACE_OPT_IN_DESCRIPTION: &str = "Trace sharing helps us train better open-source models and improve the open agent ecosystem for everyone.";
-const TRACE_OPT_IN_NOTE: &str = "You can change this anytime with /traces.";
-/// Choice rows: `Share` opts in (index 0), `Not now` keeps traces off.
-const CHOICES: [&str; 2] = ["Share", "Not now"];
-
-pub(crate) fn trace_question_options() -> Vec<OnboardingChoiceOption> {
-    CHOICES
-        .iter()
-        .map(|label| OnboardingChoiceOption {
-            label: (*label).to_string(),
-            detail: None,
-        })
-        .collect()
-}
-
-pub(crate) fn trace_question_config() -> OnboardingChoiceOptions {
-    OnboardingChoiceOptions {
-        prompt: Some(TRACE_OPT_IN_PROMPT.to_string()),
-        description: Some(TRACE_OPT_IN_DESCRIPTION.to_string()),
-        note: Some(TRACE_OPT_IN_NOTE.to_string()),
-        row_width: None,
-    }
-}
 
 pub const TEAM_QUESTION_PROMPT: &str = "Which account should Prime Agent use?";
 pub const PERSONAL_ACCOUNT_LABEL: &str = "Personal account";
@@ -100,10 +74,6 @@ fn cell(character: char, tone: ThemeColor, priority: u8) -> SplashCell {
 
 /// The outcome of one onboarding key press.
 pub enum OnboardingDecision {
-    /// Enter on a choice row: the index of the selected option.
-    Selected(usize),
-    /// Cancel: the flow completed without an answer.
-    Cancelled,
     /// Exit keys while onboarding owns the pane: quit the app.
     Exit,
     /// Enter on the welcome screen's login action: the full flow starts.
@@ -114,7 +84,7 @@ pub enum OnboardingDecision {
 
 /// The onboarding pane state: the animation frame, the started flag (the welcome text never returns
 /// once a flow owns the block), and the mounted flow panel.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct OnboardingScreen {
     frame: u64,
     flow_started: bool,
@@ -123,23 +93,8 @@ pub struct OnboardingScreen {
     panel: Option<OnboardingPanel>,
 }
 
-impl Default for OnboardingScreen {
-    fn default() -> Self {
-        Self {
-            frame: 0,
-            flow_started: true,
-            panel: Some(OnboardingPanel::Question(OnboardingChoice::new(
-                trace_question_options(),
-                None,
-                trace_question_config(),
-            ))),
-        }
-    }
-}
-
 impl OnboardingScreen {
-    /// The model-ready branch's splash (TS `immediate: true`): the trace
-    /// question mounts directly under the brand mark.
+    /// The provider onboarding splash starts with the welcome screen.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -149,11 +104,7 @@ impl OnboardingScreen {
     /// flow.
     #[must_use]
     pub fn welcome() -> Self {
-        Self {
-            frame: 0,
-            flow_started: false,
-            panel: None,
-        }
+        Self::default()
     }
 
     /// Mount one flow panel — the flow has started, and the welcome text never comes back.
@@ -258,9 +209,7 @@ impl OnboardingScreen {
                     reply: Some(reply),
                 });
             }
-            AuthPanelRequest::ProviderSettled { .. }
-            | AuthPanelRequest::McpSettled { .. }
-            | AuthPanelRequest::TracesSettled { .. } => {}
+            AuthPanelRequest::ProviderSettled { .. } | AuthPanelRequest::McpSettled { .. } => {}
         }
     }
 
@@ -566,18 +515,6 @@ mod tests {
     fn custom_theme(json: &str, mode: ColorMode) -> Theme {
         let json: ThemeJson = serde_json::from_str(json).expect("valid theme json");
         Theme::from_json(&json, mode)
-    }
-
-    /// The trace-question pane at 80x24, byte-identical to the pre-PR-C render: the golden was
-    /// captured from the base commit's `OnboardingScreen::render` Debug output in the CI VM, so the
-    /// parameterized choice panel must not move a single styled cell.
-    #[test]
-    fn trace_question_render_is_unchanged() {
-        const GOLDEN: &str = r#"[[], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "·   " }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "                 " }, Span { style: Style::new().fg(Color::Reset), content: "▗▄▄█▀" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "              ·   " }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "╌" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "                         ·        " }], [Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "███▄" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Reset), content: "▗▄███▀" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "· " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "      " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "    · " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Reset), content: "▗█▛▐█▙" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▗▄█▀▗█▀" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "╌·" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▗█▛" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▟██▙▄██▛" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▟▛" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }], [Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▗▟▌" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▐███▛▘▗▄█▖" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "─ " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "···" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(245, 158, 11)), content: "◆" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·─" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "· " }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "─·" }], [Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "▟███▄" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Reset), content: "▄▄▟███▀" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "▎" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "··" }, Span { style: Style::new().fg(Color::Rgb(56, 189, 248)), content: "┃" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "    " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Reset), content: "▜█▛▀▘" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "  " }, Span { style: Style::new().fg(Color::Reset), content: "▜█▛▀▘" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "   · " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(82, 82, 91)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "•" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " ·   " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "     " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }, Span { style: Style::new().fg(Color::Rgb(124, 111, 175)), content: "·" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " " }], [], [Span { style: Style::new(), content: " " }, Span { style: Style::new().fg(Color::Reset), content: "Welcome to " }, Span { style: Style::new().fg(Color::Reset).bold(), content: "PRIME" }, Span { style: Style::new().fg(Color::Reset).italic(), content: " Agent" }], [], [Span { style: Style::new().fg(Color::Reset), content: " Share agent traces with Prime Intellect?" }], [], [Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: " Trace sharing helps us train better open-source" }], [Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: " models and improve the open agent ecosystem for" }], [Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: " everyone." }], [], [Span { style: Style::new(), content: " " }, Span { style: Style::new().fg(Color::Reset).bg(Color::Rgb(35, 35, 35)).bold(), content: "> Share" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)).bg(Color::Rgb(35, 35, 35)), content: "                       " }], [Span { style: Style::new(), content: " " }, Span { style: Style::new().fg(Color::Rgb(161, 161, 170)), content: "  Not now" }, Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: "                     " }], [], [Span { style: Style::new().fg(Color::Rgb(113, 113, 122)), content: " You can change this anytime with /traces." }], [], [], []]"#;
-        let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let kb = crate::keybindings::KeybindingsManager::new();
-        let lines = OnboardingScreen::new().render(&theme, 80, 24, &kb);
-        assert_eq!(format!("{lines:?}"), GOLDEN);
     }
 
     #[test]

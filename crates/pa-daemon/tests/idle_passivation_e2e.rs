@@ -272,10 +272,6 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
         Arc::clone(&link),
         agent_dir.clone(),
         parent_active_session_id.clone(),
-        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
-            agent_dir.clone(),
-            /*telemetry_disabled*/ true,
-        )),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,
@@ -588,10 +584,6 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
         Arc::clone(&link),
         agent_dir.clone(),
         parent_active_session_id.clone(),
-        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
-            agent_dir.clone(),
-            /*telemetry_disabled*/ true,
-        )),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,

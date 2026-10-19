@@ -22,6 +22,19 @@ use super::{AgentSession, PromptOptions, PromptOutcome};
 /// keeps the background task from outliving a wedged server forever).
 const MCP_SETTLE_PER_SERVER_TIMEOUT_MS: u64 = 10_000;
 
+/// Acknowledges the already validated and pinned context strategy through an
+/// external canonical writer. The callback cannot replace the selected route.
+/// It runs without the SDK session mutex, before initial strategy work, for
+/// both fresh choices and saved-choice revalidation.
+pub type InitialContextSelectionCommit = Arc<
+    dyn Fn(
+            pa_types::session::ContextSelection,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'static>,
+        > + Send
+        + Sync,
+>;
+
 /// Everything needed to assemble a session.
 #[derive(Default)]
 pub struct SessionEngineConfig {
@@ -30,6 +43,8 @@ pub struct SessionEngineConfig {
     pub model: Option<Model>,
     pub thinking_level: Option<ThinkingLevel>,
     pub stream_fn: Option<StreamFn>,
+    /// Shared session-local uncapped baselines for host-owned model targets.
+    pub ollama_cloud: Option<Arc<super::ollama_cloud::SessionOllamaCloud>>,
     pub tools: Vec<Arc<dyn pa_agent::types::AgentTool>>,
     pub custom_system_prompt: Option<String>,
     /// Explicit append-system-prompt sources from the host; overrides file discovery.
@@ -38,6 +53,16 @@ pub struct SessionEngineConfig {
     pub allow_recursion: Option<bool>,
     /// In-memory when None.
     pub session_manager: Option<SessionManager>,
+    /// Restrict initial strategy work to the verified pre-admission prefix.
+    /// The complete canonical manager and durable strategy selection stay intact.
+    pub context_startup_boundary: super::ContextStartupBoundary,
+    /// Exact ordered canonical user-row IDs after a non-Current boundary.
+    /// These prove admission identity; content and timestamps are not deduplicated.
+    pub context_startup_admitted_user_ids: Vec<String>,
+    /// Acknowledge fresh or saved selection through the embedding's canonical
+    /// writer before initial strategy work. When set, the SDK does not mint a
+    /// provisional selection row; the host must adopt its verified real row.
+    pub on_initial_context_selection: Option<InitialContextSelectionCommit>,
     /// Merged over the built-in goal/heartbeat registrations.
     pub extra_host_handlers: Option<crate::kernel::shared::HostRequestHandlers>,
     /// Conversation-log path for the system prompt when the caller owns
@@ -63,9 +88,6 @@ pub struct SessionEngineConfig {
     /// The full registry model (input modalities for `model.info`); the
     /// engine derives minimal facts from `model` when absent.
     pub model_info: Option<pa_types::ai::Model>,
-    /// Session telemetry wiring (the telemetry client + execution mode). `None`
-    /// (opt-out) installs nothing; non-depth-0 sessions never install.
-    pub telemetry: Option<super::telemetry::TelemetryWiring>,
     /// Invoked at the goal pause/clear/start command sites and after a
     /// kernel `goal.complete` settles the goal.
     pub queued_goal_context_purge: Option<super::runtime::QueuedGoalContextPurge>,
@@ -121,16 +143,9 @@ pub struct SessionEngine {
     /// against; `replace_acp_mcp_servers` reaches it through this handle.
     pub mcp_manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
     pub turn_boundary: std::sync::Arc<super::turn_boundary::TurnBoundaryRequests>,
-    /// `None` when telemetry is disabled or the session is not depth 0.
-    pub telemetry: Option<std::sync::Arc<super::telemetry::SessionTelemetry>>,
     /// The kernel `rlm.spawn` handler registers spawn targets into it; the
     /// embedding wires the child-observation sink onto it after the build.
     pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
-    /// The factory host bridge (`/factory` view lane): the daemon/TUI
-    /// request surface over the kernel's factory runs, built from the
-    /// session facts captured in `create_session` (the #3184 capture
-    /// pattern) and reached through [`SessionEngine::factory_activity`].
-    pub factory_host: super::factory_host::FactoryHost,
     /// The progress-note store the `rlm.progress.note` handler throttles
     /// into; the embedding mirrors the Arc for sync reads.
     pub rlm_progress_notes: std::sync::Arc<super::rlm_host::RlmProgressNotes>,
@@ -186,15 +201,21 @@ fn mcp_gating_blocking(
 ///
 /// # Panics
 ///
-/// Panics if the MCP manager mutex is poisoned while wiring telemetry
-/// reporting.
-pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+/// Panics if the shared MCP manager mutex is poisoned.
+pub async fn create_session(config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+    // Keep the startup state machine off every embedding caller's future stack.
+    Box::pin(create_session_inner(config)).await
+}
+
+async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager.
-    let mut session_manager = config
+    let session_manager = config
         .session_manager
         .unwrap_or_else(|| SessionManager::in_memory(&cwd));
+    // This future captures retained state and hydrates any old selection off lock.
+    let stored_context_selection = session_manager.context_selection_snapshot().await?;
     let conversation_log = {
         let session = &session_manager;
         session
@@ -207,8 +228,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .map(|path| path.display().to_string())
             })
     };
-    let (settings, trace_consent) =
-        crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
+    let settings = crate::settings::SettingsManager::create(&cwd, &config.agent_dir);
     // Resolve the kernel shell once, before any side effects: an invalid
     // `shellPath` must fail session creation with a clear config error
     // naming the setting, not every kernel `bash()` call later.
@@ -222,20 +242,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         .shell_command_prefix
         .clone()
         .filter(|prefix| !prefix.is_empty());
-    let traces = session_manager
-        .is_persisted()
-        .then(|| {
-            crate::agent_traces::ContinuousTraceUpload::install(
-                &cwd,
-                &config.agent_dir,
-                session_manager.get_session_file(),
-                trace_consent,
-            )
-        })
-        .flatten();
-    if let Some(traces) = traces {
-        session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
-    }
     let wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
@@ -249,21 +255,17 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.cron_store.clone(),
     );
 
-    let refinement_settings = settings.reopen();
     let service_tier_preference = settings.get_default_service_tier();
     // Captured before `settings` moves into the resource loader: the
-    // compaction budget and the auto-refine gates.
+    // compaction budget.
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
     let compaction_threshold_percent = settings.get_compaction_threshold_percent();
-    let auto_refine_gates =
-        super::refine::AutoRefineGates::from_settings(settings.settings().auto_refine.as_ref());
     // Request timing: the settings half of the flag is read once here
     // (`settings` moves into the loader); the `PI_REQUEST_TIMING` half stays live.
     let request_timing_settings = settings.get_request_timing();
     // Captured before `settings` moves into the resource loader: the
     // factory host bridge's preflight facts (the daemon `allowedModels`
     // pin), like the request-timing snapshot above.
-    let factory_allowed_models = settings.get_allowed_models();
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -293,9 +295,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         ..Default::default()
     })?;
 
+    let ollama_cloud = config.ollama_cloud.take().unwrap_or_default();
     let model = config
         .model
         .ok_or_else(|| anyhow::anyhow!("a resolved model is required"))?;
+    let model = ollama_cloud.configure_agent_model(&cwd, &config.agent_dir, &model);
+    config.model_info = config
+        .model_info
+        .map(|model| ollama_cloud.configure_model(&cwd, &config.agent_dir, &model));
     let stream_fn = config
         .stream_fn
         .ok_or_else(|| anyhow::anyhow!("a provider stream_fn is required"))?;
@@ -316,47 +323,97 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 
     let python_skills = super::runtime_wiring::kernel_python_skills(&resources.skills);
     let session_id = wiring.session.lock().await.get_session_id().to_string();
+    let plugins = Arc::new(super::plugins::SessionPlugins::new(
+        session_id.clone(),
+        cwd.clone(),
+        config.agent_dir.clone(),
+        config.rlm_depth.unwrap_or(0),
+    ));
+    plugins.register_optional_builtin("optchat", include_str!("../plugins/builtins/optchat.lua"));
+    let optchat_artifacts = wiring.session.lock().await.get_session_artifact_dir();
+    plugins.set_capability_delegate(
+        "optchat.",
+        Arc::new(super::optchat::OptChatServices::new(
+            wiring.session.clone(),
+            &plugins.host(),
+            optchat_artifacts,
+        )),
+    );
+    plugins.pin_context_strategy(
+        stored_context_selection
+            .as_ref()
+            .map(|selection| selection.strategy.clone()),
+    );
+    let inference_capabilities = Arc::new(
+        super::inference_capabilities::InferenceCapabilities::new(session_id.clone()),
+    );
+    plugins.set_native_capabilities(inference_capabilities.clone());
+    let auxiliary_inference = Arc::new(super::inference_router::AuxiliaryInference::new(
+        plugins.host(),
+        Arc::clone(&inference_capabilities),
+    ));
+    let stream_fn =
+        super::inference_router::wrap_stream_fn(plugins.host(), inference_capabilities, stream_fn);
+    if let Err(error) = plugins.reload().await {
+        let activation_settings = crate::settings::SettingsManager::create(&cwd, &config.agent_dir);
+        let settings = activation_settings.settings();
+        if stored_context_selection.is_none()
+            && settings
+                .extra
+                .get("contextStrategy")
+                .is_some_and(|requested| {
+                    requested.as_str() != Some(crate::plugins::context::DEFAULT_STRATEGY)
+                })
+        {
+            return Err(error.context("selected context strategy activation failed; re-enable or repair its plugin, select another strategy, or start a new session"));
+        }
+        tracing::warn!(%error, "plugin activation failed; keeping ordinary session startup");
+    }
+    let selected = plugins.context_selection()?;
+    let selected_route = format!("{}/{}", selected.plugin, selected.name);
+    if stored_context_selection
+        .as_ref()
+        .is_some_and(|selection| selection.strategy != selected_route)
+    {
+        anyhow::bail!("the session's recorded context strategy is unavailable");
+    }
+    plugins.pin_context_strategy(Some(selected_route.clone()));
+    // Validate and capture the explicit prefix before asking an external owner
+    // to commit. No SDK session lock may cross the acknowledged writer await.
+    // The default SDK path retains its original later snapshot and append.
+    let acknowledged_context = if let Some(commit) = &config.on_initial_context_selection {
+        let snapshot = {
+            let session = wiring.session.lock().await;
+            super::context_strategy::startup::snapshot_at(
+                &plugins,
+                &session,
+                &config.context_startup_boundary,
+                &config.context_startup_admitted_user_ids,
+            )?
+        };
+        let captured = snapshot.await?;
+        commit(pa_types::session::ContextSelection {
+            version: 1,
+            strategy: selected_route.clone(),
+        })
+        .await?;
+        if !plugins.context_is_current(&selected) {
+            return Err(crate::plugins::PluginError::Retired.into());
+        }
+        Some(captured)
+    } else {
+        None
+    };
     let mut handlers = wiring.handlers.clone();
     if let Some(extra) = config.extra_host_handlers.clone() {
         handlers.merge(extra);
     }
-    // Per-session counters (MCP connector use, kernel boots, skills, RLM
-    // child usage, feature outcomes) ride `agent session ended`; the seams
-    // below count into them instead of emitting their own events.
-    let session_counters = std::sync::Arc::new(super::telemetry::SessionCounters::default());
-    // The counters gate from the very creation: the MCP and kernel setup
-    // below starts counting (prewarm boots, connector use) long before
-    // the first turn installs the session telemetry, so an off switch
-    // must already be live — otherwise the pre-install window records
-    // what a later enable would send.
-    if let Some(telemetry_switch) = config
-        .telemetry
-        .as_ref()
-        .and_then(|telemetry| telemetry.telemetry_enabled.as_ref())
-    {
-        session_counters.set_telemetry_enabled(telemetry_switch.enabled.clone());
-    }
-    // The `mcp.*` host requests (config/refresh/begin_login) the kernel's
-    // generic MCP registry sends while listing or calling generic servers.
-    // Telemetry counts connector use (never the server name) when the
-    // session is telemetry-enabled; set before the handlers register so
-    // their closures capture the reporter.
-    if config.telemetry.is_some() {
-        let counters = std::sync::Arc::clone(&session_counters);
-        mcp_manager
-            .lock()
-            .unwrap()
-            .set_usage_report(Some(std::sync::Arc::new(move |_action, _server| {
-                counters.note_mcp_connector_use();
-            })));
-    }
+    // Plugin routes cannot be replaced by an extra handler that bypasses generation fences.
+    handlers.merge(plugins.handlers());
     // The registration takes the shared manager: the inventory handlers
     // serve live views per request.
     crate::mcp::McpManager::register_host_handlers(&mcp_manager, &mut handlers);
     let turn_boundary = Arc::new(super::turn_boundary::TurnBoundaryRequests::new());
-    let _ = turn_boundary
-        .refinement_settings
-        .set(refinement_settings.reopen());
     turn_boundary.register_model_info_handler(&mut handlers, model_info.clone());
     let keep_recent_tokens = compaction_settings
         .keep_recent_tokens
@@ -377,31 +434,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 .as_deref()
                 .and_then(super::harness_digest::session_artifact_dir_for_log)
         });
-    let local_harness_dir =
-        crate::refinement::get_local_harness_state_dir(session_artifact_dir.as_deref());
-    // The only sessions whose `refine.*` host requests register and the
-    // compact-trigger auto-refine may run for.
-    let auto_refine_allowed = config.rlm_depth.unwrap_or(0) == 0 && local_harness_dir.is_some();
-    if auto_refine_allowed {
-        turn_boundary.register_refine_handlers(&mut handlers);
-    }
-    // Kernel boots (duration, cold/revived, outcome) count into the
-    // session counters.
-    let on_bootstrap_result = config.telemetry.as_ref().map(|_| {
-        let counters = std::sync::Arc::clone(&session_counters);
-        std::sync::Arc::new(
-            move |stats: crate::kernel::provisioner::KernelBootstrapStats| {
-                counters.note_kernel_bootstrap(
-                    stats.cold,
-                    matches!(
-                        stats.outcome,
-                        crate::kernel::provisioner::KernelBootstrapOutcome::Ready
-                    ),
-                    stats.duration_ms,
-                );
-            },
-        ) as crate::kernel::provisioner::KernelBootstrapResultHandler
-    });
     // A snapshot in the artifact dir revives the namespace on the next boot
     // of the same session; `has_snapshot` drives the resume prewarm below.
     let has_snapshot = session_artifact_dir
@@ -470,11 +502,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         kernel_shell_path,
         kernel_command_prefix,
         serper_api_key,
-        session_artifact_dir,
+        session_artifact_dir.clone(),
         on_restore,
         config.on_background_work_settled.clone(),
         on_unavailable_skills,
-        on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
     if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
@@ -569,38 +600,35 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         },
     );
 
-    // Captured before the digest context moves the local harness dir and
-    // the loop wiring moves the session model: the factory host bridge's
-    // config (the #3184 capture pattern).
-    let factory_local_harness_dir = local_harness_dir.clone();
-    let factory_session_model = Some(model.clone());
-    // Harness digest inputs: global state from the agent dir, local state
-    // from the session artifacts (or the daemon-owned conversation log), and
-    // the interfaces the digest may reference.
-    let digest_context = super::harness_digest::HarnessDigestContext {
-        global_dir: crate::refinement::get_global_harness_state_dir(&config.agent_dir),
-        local_dir: local_harness_dir,
-        include_ipython: active_tool_names
-            .iter()
-            .any(|name| name == PYTHON_TOOL_NAME),
-        include_shell_examples: active_tool_names.iter().any(|name| name == "bash"),
-        include_refine: resources.skills.iter().any(|skill| {
-            !skill.disable_model_invocation
-                && skill.name == crate::prompts::system_prompt::REFINE_SKILL_NAME
-        }),
-    };
-    let (existing_messages, has_thinking_entry, has_service_tier_entry) = {
+    let (context_snapshot, has_thinking_entry, has_service_tier_entry) = {
         let session = wiring.session.lock().await;
-        let messages = super::compact_session::rebuilt_context_after_compaction(&session);
-        let messages = if super::refinement_gate::enabled(Some(&refinement_settings)) {
-            messages
-        } else {
-            super::refinement_gate::without_refinements(messages)
-        };
-        let has_thinking_entry = session.has_thinking_level();
-        let has_service_tier_entry = session.has_service_tier();
-        (messages, has_thinking_entry, has_service_tier_entry)
+        (
+            if acknowledged_context.is_none() {
+                Some(super::context_strategy::startup::snapshot_at(
+                    &plugins,
+                    &session,
+                    &config.context_startup_boundary,
+                    &config.context_startup_admitted_user_ids,
+                )?)
+            } else {
+                None
+            },
+            session.has_thinking_level(),
+            session.has_service_tier(),
+        )
     };
+    let (context, startup_leaf) = match (acknowledged_context, context_snapshot) {
+        (Some(captured), None) => captured,
+        (None, Some(snapshot)) => snapshot.await?,
+        _ => unreachable!("one initial context snapshot"),
+    };
+    let context_archive = context.archive;
+    let existing_messages = super::refinement_gate::without_refinements(context.messages);
+    let full_model: Option<pa_types::ai::Model> = config
+        .model_info
+        .clone()
+        .or_else(|| super::provider_adapter::native_model(&model).ok());
+    let context_archive_state = Arc::new(std::sync::RwLock::new(context_archive.clone()));
     let thinking_level = config.thinking_level.unwrap_or(ThinkingLevel::Off);
     {
         let mut session = wiring.session.lock().await;
@@ -621,11 +649,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     } else {
         Some(
             existing_messages
-                .into_iter()
-                .filter_map(|message| {
-                    let value = serde_json::to_value(&message).ok()?;
-                    serde_json::from_value(value).ok()
-                })
+                .iter()
+                .filter_map(super::provider_adapter::json_round_trip)
                 .collect(),
         )
     };
@@ -650,7 +675,22 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // question keeps the pre-semantic fn, so its calls carry no id.
     let timing_stream_fn = super::request_timing::instrument_stream_fn(
         std::sync::Arc::clone(&request_timing_wiring),
-        stream_fn,
+        super::ollama_cloud::wrap_stream_fn(
+            cwd.clone(),
+            config.agent_dir.clone(),
+            Arc::clone(&ollama_cloud),
+            super::plugin_context::wrap_stream_fn(
+                Arc::clone(&plugins),
+                super::plugins::wrap_stream_fn(
+                    Arc::clone(&plugins),
+                    super::context_strategy::wrap_stream_fn(
+                        Arc::clone(&plugins),
+                        Arc::clone(&context_archive_state),
+                        stream_fn,
+                    ),
+                ),
+            ),
+        ),
     );
     let side_question_stream_fn = std::sync::Arc::clone(&timing_stream_fn);
     let semantic_recorder = config.semantic_edges.take().map(|identity| {
@@ -672,11 +712,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         },
         stream_fn: Some(agent_stream_fn),
         // The session conversion rules apply at the loop's LLM boundary
-        // (TS `convertToLlm`): bookkeeping custom rows drop, everything
-        // else (the harness digest included) becomes a user turn.
+        // (TS `convertToLlm`): bookkeeping and legacy harness rows drop.
+        // Active plugin context arrives through explicit contributions.
         convert_to_llm: Some(super::request_timing::instrument_convert_to_llm(
             std::sync::Arc::clone(&request_timing_wiring),
-            super::refinement_gate::convert_to_llm(refinement_settings.reopen()),
+            super::refinement_gate::convert_to_llm(),
         )),
         // The Rust engine wires no transform, so the instrumented seam
         // wraps a pass-through that marks the turn's dispatch moment.
@@ -708,6 +748,72 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     });
 
     let agent = Arc::new(agent);
+    let services = Arc::new(super::plugin_services::PluginServices::new(
+        wiring.session.clone(),
+        &agent,
+        cwd.clone(),
+        config.agent_dir.clone(),
+        &auxiliary_inference,
+    ));
+    plugins.set_capability_delegate("session.snapshot", services.clone());
+    plugins.set_capability_delegate("inference.", services);
+    let plugin_command_barrier = Arc::new(tokio::sync::Mutex::new(()));
+    let jobs = Arc::new(super::plugin_jobs::PluginJobs::new(
+        &plugins.host(),
+        &agent,
+        wiring.session.clone(),
+        Arc::clone(&plugin_command_barrier),
+    ));
+    plugins.set_capability_delegate("jobs.", jobs.clone());
+    plugins.set_capability_delegate(
+        "harness.store.",
+        Arc::new(crate::harness_plugin::HarnessStorage::new(
+            &config.agent_dir,
+            session_artifact_dir
+                .as_ref()
+                .map(|path| path.join("harness")),
+            wiring.session.lock().await.get_session_id().to_owned(),
+            wiring.session.clone(),
+            &plugins.host(),
+            &agent,
+        )),
+    );
+    // Install native/auxiliary services that need AgentWeak here. This Agent
+    // remains private until its selected strategy has built a valid live view.
+    let startup_leaf = if matches!(
+        config.context_startup_boundary,
+        super::ContextStartupBoundary::Current
+    ) {
+        wiring.session.lock().await.get_leaf_id().map(str::to_owned)
+    } else {
+        startup_leaf
+    };
+    let assembled_messages = super::context_strategy::assemble_at(
+        &plugins,
+        existing_messages,
+        context_archive.as_ref(),
+        full_model.as_ref(),
+        startup_leaf.as_deref(),
+    )
+    .await?;
+    if stored_context_selection.is_none() && config.on_initial_context_selection.is_none() {
+        let selection = pa_types::session::ContextSelection {
+            version: 1,
+            strategy: selected_route,
+        };
+        wiring.session.lock().await.append_custom_entry(
+            pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE,
+            Some(serde_json::to_value(selection)?),
+        )?;
+    }
+    agent
+        .set_messages(
+            assembled_messages
+                .into_iter()
+                .filter_map(|message| super::provider_adapter::json_round_trip(&message))
+                .collect(),
+        )
+        .await;
     // TS `_startRlmChildRun`'s spawn anchor: the `rlm.spawn` host handler
     // names the parent's in-flight turn through this weak seam (the
     // bridge is built before the agent exists, and a strong edge would
@@ -721,27 +827,21 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 recorder: std::sync::Arc::clone(recorder),
             });
     }
-    let telemetry_agent = std::sync::Arc::clone(&agent);
     let mut session = AgentSession::from_session_arc(
         agent.clone(),
         wiring.session.clone(),
         resources.prompts.clone(),
-        super::refinement_gate::enabled(Some(&refinement_settings))
-            .then_some(digest_context.clone()),
     )
     .await?;
-    session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
+    session.plugins = Some(Arc::clone(&plugins));
+    session.plugin_command_barrier = plugin_command_barrier;
+    session.plugin_jobs = Some(jobs);
+    session.context_archive = Arc::clone(&context_archive_state);
+    session.context_model = std::sync::RwLock::new(full_model);
+    super::plugins::observe_turns(&agent, Arc::clone(&plugins)).await;
+    super::plugin_observers::observe_runs(&agent, plugins, Arc::clone(&wiring.session)).await;
+    session.ollama_cloud = ollama_cloud;
     session.set_agent_dir(config.agent_dir.clone());
-    // Keep the context descriptor even while disabled, so re-enabling can load it.
-    session.harness_digest = Some(digest_context);
-    session.refinement_settings = Some(refinement_settings);
-    // A disabled startup has never delivered its filtered digest. Defer that
-    // first delivery without re-arming digests already consumed in a live session.
-    if !session.harness_refinements_enabled() {
-        session
-            .digest_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
     // Every compaction path reads the session's resolved compaction
     // settings (TS `getCompactionSettings`): `/compact` matches the
     // `compact.*` turn-boundary tool's `keepRecentTokens`/`reserveTokens`.
@@ -778,6 +878,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // fn so its calls carry no id.
     session.set_semantic_edges(semantic_recorder);
     session.set_side_question_stream_fn(side_question_stream_fn);
+    session.auxiliary_inference = Some(auxiliary_inference);
     // The armed image route never outlives the run that armed it (TS
     // `_clearModelOverrideWhenIdle`: the override drops once the turn is
     // idle, so a picker switch between turns is live immediately — the
@@ -818,50 +919,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         model_info,
     });
 
-    // Installed only for depth-0 sessions: subagents never double-report.
-    let telemetry = match (config.telemetry.take(), config.rlm_depth.unwrap_or(0)) {
-        (Some(wiring), 0) => {
-            let skill_counts = super::telemetry::SkillCounts {
-                skill_count: resources.skills.len(),
-                python_skill_count: super::runtime_wiring::kernel_python_skills(&resources.skills)
-                    .len(),
-            };
-            let installed = super::telemetry::install_session_telemetry(
-                &telemetry_agent,
-                &wiring,
-                Some(skill_counts),
-                std::sync::Arc::clone(&session_counters),
-            )
-            .await?;
-            Some(std::sync::Arc::new(installed))
-        }
-        _ => None,
-    };
-
-    // The `skill_use_count` session counter counts through the session's
-    // telemetry handle (installed once the telemetry composition decided
-    // whether this session reports at all).
-    if let Some(telemetry) = telemetry.as_ref() {
-        session.set_skill_telemetry(telemetry.clone());
-        // Same lifetime for the `rlm_child_*` session counters: the
-        // producer's flush counts through this handle.
-        wiring.rlm_usage.set_telemetry(telemetry.clone());
-    }
     let goal_driver = wiring.runtime.goal_driver().clone();
-    // The factory host bridge: registered from `create_session` (the #3184
-    // pattern), so the daemon/TUI factory surface resolves against this
-    // session's harness dirs, model registry, and the allowlist pin. The
-    // kernel owns the runs; the bridge prefights and tunnels. Captured
-    // before the loop wiring moves the session model and the digest moves
-    // the local harness dir.
-    let factory_host =
-        super::factory_host::FactoryHost::new(super::factory_host::FactoryHostConfig {
-            agent_dir: config.agent_dir.clone(),
-            global_harness_dir: crate::refinement::get_global_harness_state_dir(&config.agent_dir),
-            local_harness_dir: factory_local_harness_dir,
-            session_model: factory_session_model,
-            allowed_models: factory_allowed_models,
-        });
     Ok(SessionEngine {
         session,
         skills: resources.skills,
@@ -873,9 +931,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         queued_goal_context_purge: config.queued_goal_context_purge.clone(),
         mcp_manager,
         turn_boundary,
-        telemetry,
         rlm_usage: wiring.rlm_usage,
-        factory_host,
         rlm_progress_notes: Arc::clone(&wiring.rlm.notes),
         provisioner,
     })
@@ -908,8 +964,7 @@ impl SessionEngine {
     /// the accepted-turn row (TS `_expandSkillCommand`; the row the daemon
     /// emits before admission must match the text the model turn
     /// receives). Non-skill inputs pass through unchanged; the admitted
-    /// turn's own expansion is idempotent over the block. The
-    /// `skill_use_count` counter counts at the admission, not here.
+    /// turn's own expansion is idempotent over the block.
     pub fn expand_skill_submission(&self, text: &str) -> String {
         crate::skills::expand_skill_command(text, &self.skills).0
     }
@@ -936,6 +991,19 @@ impl SessionEngine {
         self.session.prompt(text, options).await
     }
 
+    /// Opaque admitted job IDs for correlating one command or prompt's work.
+    pub fn plugin_job_checkpoint(&self) -> Vec<String> {
+        self.session.plugin_job_checkpoint()
+    }
+    /// Wait for admitted jobs; return only jobs admitted after this checkpoint.
+    pub async fn drain_plugin_jobs_since(&self, checkpoint: &[String]) -> Vec<serde_json::Value> {
+        self.session.drain_plugin_jobs_since(checkpoint).await
+    }
+    /// Wait for the current run, awaited observers, and admitted jobs.
+    pub async fn drain_plugin_jobs(&self) -> Vec<serde_json::Value> {
+        self.session.drain_plugin_jobs().await
+    }
+
     /// Tear the kernel down now with a final namespace snapshot, for a host that
     /// ends the session but keeps the engine alive; dropping the engine tears the kernel down too.
     pub async fn dispose_kernel(&self) {
@@ -953,18 +1021,12 @@ impl SessionEngine {
             .await;
     }
 
-    /// One factory activity over this session's live kernel: the `/factory`
-    /// view's bridge lane (graph/status/watch/run/stop/resume). A `run`
-    /// prefights the spec's declared models first (allowlist pin, request
-    /// auth) so a doomed run fails before any child spawns; then the
-    /// out-of-band frame carries the request into the kernel's executor,
-    /// which owns the run registry.
+    /// One factory activity over this session's live kernel. Named specs resolve
+    /// in the kernel's machine library. Every child spawn enforces model access.
     ///
     /// # Errors
-    ///
-    /// Returns an error when the arguments are invalid, the preflight
-    /// fails, the session has no running kernel, or the kernel request
-    /// fails or does not settle.
+    /// Returns an error for invalid arguments, an unavailable kernel, or a failed
+    /// kernel request. Legacy harness records are never loaded by this path.
     pub async fn factory_activity(
         &self,
         action: &str,
@@ -975,23 +1037,6 @@ impl SessionEngine {
         let request = super::factory_host::FactoryActivityRequest::parse(
             action, run_id, spec_id, timeout_ms,
         )?;
-        if request.action == "run" {
-            let spec_id = request
-                .spec_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("factory activity run requires specId"))?;
-            // The preflight reads the harness states, the model catalog,
-            // and the auth caches from disk — blocking work off the
-            // executor (the daemon's established settings-read posture:
-            // `spawn_blocking`, never the async lane), so a stalled
-            // filesystem can never stall the worker's other activity.
-            let host = self.factory_host.clone();
-            let spec_id = spec_id.to_string();
-            let preflight = tokio::task::spawn_blocking(move || host.preflight_run(&spec_id))
-                .await
-                .map_err(|join| anyhow::anyhow!("factory run preflight join failed: {join}"))?;
-            preflight?;
-        }
         let manager = self
             .provisioner
             .manager()

@@ -15,14 +15,14 @@ thiserror.workspace = true
 tracing.workspace = true
 pa-types.workspace = true
 pa-ai.workspace = true
-pa-models = { path = "../pa-models" }
+pa-models = { path = "../pa-models", version = "0.10.0" }
 pa-agent.workspace = true
-pa-telemetry.workspace = true
 base64 = "0.22"
 fancy-regex = "0.14"
-# The traces browser login's auth challenge (RSA-2048 keypair, OAEP-SHA256
-# result decrypt; sha2 matches the workspace's version, pem for the SPKI
-# wire form).
+# Snapcompact uses an isolated PNG renderer and bundled Unicode font rasterizer.
+fontdue = { version = "0.9.3", default-features = false }
+png = "0.18.1"
+# The provider browser login uses an RSA-2048 challenge (OAEP-SHA256).
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 libc = "0.2"
 nix = { version = "0.29", features = ["signal", "process", "user", "fs", "dir"] }
@@ -41,12 +41,13 @@ flate2 = "1"
 unicode-normalization = "0.1"
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 ignore = "0.4"
+# Embedded reloadable plugins: Lua 5.4 coroutines, Send futures and JSON values.
+# Vendoring fixes the VM implementation instead of linking a system Lua ABI.
+mlua = { version = "0.11.4", features = ["lua54", "vendored", "async", "send", "serialize"] }
 
 [dev-dependencies]
 tempfile = "3"
 proptest = { workspace = true }
-# The traces rate-gate test runs on paused tokio time (the 12s platform
-# interval auto-advances).
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints.clippy]

@@ -1,10 +1,8 @@
 """Validation and compilation for factory specifications.
 
-A continual-harness ``factory`` entry stores a declarative state machine of
-subagent states in ``arguments["machine"]``: entry states (which declare
+A library machine declares subagent states: entry states (which declare
 no inputs), guarded transitions between states, and bounded re-entry
-(``max_entries``). The original DAG form in ``arguments["dag"]`` stays as
-sugar: it compiles to machine form (each node becomes a state entered
+(``max_entries``). The DAG form stays as sugar: it compiles to machine form (each node becomes a state entered
 once; a node's full effective dependency set compiles to ONE join
 transition that waits for every predecessor, so fan-in nodes never start
 after a single parent settles with a blocked second transition). Wait
@@ -12,12 +10,12 @@ states are specified for the communication series but gated here:
 the watch host handlers (``rlm.watch.*``) do not exist yet, so a state
 carrying a ``wait`` block is rejected at write time.
 
-This module implements the write-time dry run for both forms -- the machine
+This module implements validation for both forms -- the machine
 validator, the dag-to-machine compiler, the unified entry point
 (``validate_factory_spec`` detects the form), and a canonicalizer that
 applies defaults and returns the canonical MACHINE form -- plus the
 executor (``FactoryExecutor`` and the ``rlm.factory`` namespace:
-run/status/stop/resume) that runs canonicalized machines through the
+run/status/stop/resume/graph/watch, plus synchronous help) that runs canonicalized machines through the
 existing RLM supervisor: states are admitted with ``rlm.spawn``, settled
 through ``rlm.collect``, and cancelled with ``rlm.delete_subagent``. The
 supervisor owns the children; the executor owns the run state in kernel
@@ -33,9 +31,10 @@ packaged kernels (where the repo layout is not adjacent) see the same
 guide.
 
 The namespace is opt-in: while the ``factory.enabled`` setting is off (the
-default; the user turns it on with ``/factory on``), every ``rlm.factory``
-call except ``help()`` and every factory harness write refuses with one
-clean message (``FACTORY_DISABLED_MESSAGE``), never a crash.
+default; the user turns it on with ``/factory on``), the six async
+``rlm.factory`` operations refuse with one clean message
+(``FACTORY_DISABLED_MESSAGE``). Synchronous ``help()`` stays available.
+The default executor needs no persistent entry store. Embeddings can explicitly inject a ``get``/``list`` adapter.
 """
 
 from __future__ import annotations
@@ -1548,17 +1547,18 @@ class FactoryExecutor:
 
         self._now_fn: Callable[[], float] = now or time.monotonic
         self._sleep_fn: Callable[[float], Any] = sleep or asyncio.sleep
+        # Optional entry storage must be supplied explicitly. The default
+        # executor runs library machines without activating a memory plugin.
         self._harness = harness
         self._runs: dict[str, FactoryRun] = {}
 
     # -- public API ---------------------------------------------------------
 
     async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
-        """Validate a stored factory spec and start a run of it.
+        """Validate a spec from an explicitly injected entry store and start a run.
 
-        The dry run happens in two halves. Write time (``create_factory``)
-        validated the machine; here ``run`` re-validates and canonicalizes
-        it (dag sugar compiles to machine form), then resolves every state's
+        This method validates and canonicalizes the stored machine (DAG sugar
+        compiles to machine form), then resolves every state's
         subagent reference, reporting ALL failures in one ``ValueError`` and
         starting nothing on any failure. The resolved state count and
         ``max_parallel`` are reported in the result; actual admission limits
@@ -1568,8 +1568,8 @@ class FactoryExecutor:
         background asyncio task continues the run, so the calling model turn
         ends immediately (nonblocking).
         """
-        harness = self._resolve_harness()
-        entry = harness.get("factory", spec_id)
+        harness = self._harness
+        entry = harness.get("factory", spec_id) if harness is not None else None
         if entry is None:
             raise ValueError(f"unknown factory spec {spec_id!r}")
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
@@ -1596,7 +1596,7 @@ class FactoryExecutor:
         fields so a caller can trace the run back to the library file.
         """
         canonical = canonicalize_factory_spec(machine.spec)
-        harness = self._resolve_harness()
+        harness = self._harness
         resolved, reference_errors = self._resolve_subagents(harness, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
@@ -2064,8 +2064,8 @@ class FactoryExecutor:
         run = self._runs.get(ref)
         if run is not None:
             return self._graph_snapshot(run, compact=compact)
-        harness = self._resolve_harness()
-        entry = harness.get("factory", ref)
+        harness = self._harness
+        entry = harness.get("factory", ref) if harness is not None else None
         if entry is None:
             raise ValueError(f"unknown factory run or spec {ref!r}")
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
@@ -2214,13 +2214,6 @@ class FactoryExecutor:
 
     # -- setup --------------------------------------------------------------
 
-    def _resolve_harness(self) -> Any:
-        if self._harness is not None:
-            return self._harness
-        from . import rlm as rlm_namespace
-
-        return rlm_namespace.harness
-
     def _require_run(self, run_id: str) -> FactoryRun:
         run = self._runs.get(run_id)
         if run is None:
@@ -2250,8 +2243,8 @@ class FactoryExecutor:
                 model = reference.get("model")
                 thinking = reference.get("thinking")
             else:
-                entry = harness.get("subagent", reference)
-                if entry is None:
+                entry = harness.get("subagent", reference) if harness is not None else None
+                if entry is None and harness is not None:
                     entry = next((row for row in harness.list("subagent") if row.title == reference), None)
                 if entry is None:
                     errors.append(f"state {state_id!r} references unknown subagent {reference!r}")
@@ -3762,11 +3755,7 @@ def factory_enabled() -> bool:
     means disabled -- the opt-in default is fail-closed, so an unreadable
     settings file refuses the factory instead of silently enabling it.
     """
-    # One home for the agent-dir resolution (harness.py owns it); imported
-    # lazily because harness imports this module at its own top.
-    from .harness import _agent_dir
-
-    path = _agent_dir() / _SETTINGS_FILE_NAME
+    path = user_machines_dir().parent / _SETTINGS_FILE_NAME
     try:
         with open(path, encoding="utf-8") as handle:
             document = json.load(handle)
@@ -3783,10 +3772,9 @@ def factory_enabled() -> bool:
 def require_factory_enabled() -> None:
     """Refuse with one clean error while the factory is disabled.
 
-    Every gated surface funnels through here -- the ``rlm.factory``
-    namespace calls (``run``/``status``/``stop``/``resume``, and the later
-    ``graph``/``watch``) and the factory harness writes -- so the refusal is
-    one message at every seam. ``help()`` is deliberately exempt: the
+    The six ``rlm.factory`` namespace operations -- run/status/stop/resume
+    and graph/watch -- funnel through here and use one refusal message.
+    Synchronous ``help()`` is deliberately exempt: the
     authoring reference must stay readable before opting in.
     """
     if not factory_enabled():
@@ -3821,8 +3809,8 @@ async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any
     """
     require_factory_enabled()
     executor = default_factory_executor()
-    harness = executor._resolve_harness()
-    if harness.get("factory", spec_id) is None:
+    harness = executor._harness
+    if harness is None or harness.get("factory", spec_id) is None:
         try:
             machine, path = resolve_machine(spec_id)
         except MachineResolutionError as error:
@@ -4810,8 +4798,8 @@ def export_machine(
     run specs render byte-pretty.
     """
     executor = default_factory_executor()
-    harness = executor._resolve_harness()
-    entry = harness.get("factory", target)
+    harness = executor._harness
+    entry = harness.get("factory", target) if harness is not None else None
     if entry is not None:
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
         spec = arguments.get("machine")
@@ -4889,9 +4877,9 @@ def cli_dispatch(payload: Any) -> "dict[str, Any]":
 
 FACTORY_HELP: str = r"""# Factory
 
-The factory runs state-machine workflows of spawned child agents. A stored
-factory entry declares the machine — states, each backed by a subagent
-spec, plus guarded transitions between them. `await rlm.factory.run('<spec_id>')`
+The factory runs state-machine workflows of spawned child agents. A library
+machine declares states, each backed by an inline subagent prompt, plus
+guarded transitions between them. `await rlm.factory.run('<name>')`
 spawns each state's subagent as an ordinary child, feeds captured outputs
 into the successors' prompts, and drives the run to quiescence in a
 background kernel task; the call returns immediately and the run continues
@@ -4903,27 +4891,27 @@ The factory is opt-in: it ships disabled, and the user turns it on with
 `/factory on` (`/factory off` disables it again, `/factory status` reports
 it; the persisted setting is `factory.enabled` in the agent dir's
 settings.json). While it is disabled, every `rlm.factory` call except
-`help()` — run, status, stop, and resume — plus every factory harness
-write (`create_factory` and updates of factory entries) refuses with one
+`help()` — run, status, stop, resume, graph, and watch — refuses with one
 clean error:
 "the factory is disabled; run /factory on to enable it". `help()` answers
 while disabled, so this guide stays readable before opting in.
 
 ## Store the spec
 
-A factory spec is a continual-harness entry of kind `factory`.
-`rlm.harness.create_factory(...)` validates at write time; an invalid spec
-is never stored (generic `create`/`update` funnel through the same check).
-The spec rides `machine=` (the native form) or `dag=` (sugar that compiles
-to machine form) — pass exactly one. This review/fix loop is the shipped
-pr-manager shape:
+The default executor uses the machine library, not a persistent harness
+store. Use inline subagent prompts so a machine needs no external entry
+lookup. Existing harness data stays passive; running or importing a machine
+does not activate a memory plugin. An embedding can explicitly supply
+`FactoryExecutor(harness=entry_store)` when it owns an entry store with
+`get(kind, id)` and `list(kind)` methods.
+
+Build a machine specification (the native form) or a DAG specification
+(sugar that compiles to machine form). Export and import it explicitly;
+validation rejects an invalid spec before writing its machine file.
+This review/fix loop is the shipped pr-manager shape:
 
 ```python
-rlm.harness.create_factory(
-    "pr-manager",
-    "Drive a PR through review/fix cycles, then keep a resident watcher on it.",
-    id="pr-manager",
-    machine={
+machine_spec = {
         "run": {"budget_ms": 1_800_000, "max_parallel": 8, "max_transitions": 24},
         "states": [
             {
@@ -4982,8 +4970,14 @@ rlm.harness.create_factory(
              "when": {"output": "verdict", "path": "approved", "op": "eq", "value": True}},
             {"from": "fixing", "to": "reviewing"},
         ],
-    },
+}
+
+from rlm.factory import export_factory_spec, import_machine
+export_factory_spec(
+    machine_spec, "pr-manager.MACHINE.md", name="pr-manager",
+    description="Drive a PR through bounded review/fix cycles.",
 )
+import_machine("pr-manager.MACHINE.md")
 ```
 
 The example exercises the core forms: `entry` is an entry state; the two
@@ -5002,10 +4996,10 @@ the cap, fails to capture, and fails the producing state through its
 
 - **States**: 1 to 1024, unique ids matching `^[a-z0-9][a-z0-9-]{0,63}$`; at
   least one state carries `"entry": true`, and entry states declare no
-  inputs. A state's `subagent` is a harness subagent entry id or title (its
-  content is the prompt template; `metadata.model`/`metadata.thinking` are
-  spawn settings) or an inline `{"prompt": ...}` object with optional
-  `name`/`model`/`thinking`. The optional `name` labels the spawned
+  inputs. A state's `subagent` is an inline `{"prompt": ...}` object with
+  optional `name`/`model`/`thinking`. A string id or title resolves only
+  against an explicitly injected entry store; without one it reports an
+  unknown subagent. The optional `name` labels the spawned
   children run-scoped (at most 64 characters, unique across the
   machine's states — a name another state's name can suffix onto, `foo`
   vs `foo-i1`, is rejected at write time): the spawn label is
@@ -5121,11 +5115,7 @@ to ONE join transition, so a fan-in node waits for every parent. The
 shipped review-sweep shape:
 
 ```python
-rlm.harness.create_factory(
-    "review-sweep",
-    "Sweep the branch's changed files for findings, then merge them into one list.",
-    id="review-sweep",
-    dag={
+dag_spec = {
         "run": {"budget_ms": 900_000, "max_parallel": 8},
         "nodes": [
             {
@@ -5158,8 +5148,12 @@ rlm.harness.create_factory(
                 "inputs": [{"name": "found", "type": "text", "from": "review.found"}],
             },
         ],
-    },
+}
+export_factory_spec(
+    dag_spec, "review-sweep.MACHINE.md", name="review-sweep",
+    description="Review changed files and merge the findings.",
 )
+import_machine("review-sweep.MACHINE.md")
 ```
 
 ## Run and steer
@@ -5200,7 +5194,6 @@ graph = await rlm.factory.graph(result["run_id"])
 #  "consumed_ms": ...}}  — structure fused with live state.
 
 every = await rlm.factory.graph()        # every live run ({"runs": [...]})
-spec = await rlm.factory.graph("pr-manager")  # a stored spec's static graph
 
 watched = await rlm.factory.watch(result["run_id"], 30)
 # the same fused snapshot plus "changed" — the call blocks until the
@@ -5211,11 +5204,12 @@ watched = await rlm.factory.watch(result["run_id"], 30)
 - `graph(ref)` fuses the machine's structure (states, guarded
   transitions, the declared order) with the live run's overlay (the
   node reports, active nodes, recently fired edges, the event tail,
-  usage, budget consumed); a stored spec id answers the static
-  structure, and no ref answers every live run.
-- `watch(run_id, timeout)` returns immediately with the snapshot when
-  nothing changed, blocks until the run's state/instance shape changes,
-  and answers `"changed": false` on the bounded timeout.
+  usage, budget consumed); with an explicitly injected entry store, a
+  stored spec id answers the static structure. No ref answers every live run.
+- `watch(run_id, timeout=0.0)` returns immediately with the snapshot and
+  `"changed": false` at the default zero timeout. A positive timeout waits
+  for a state/instance shape change or the deadline, capped at 60 seconds;
+  the reply reports whether a change ended the wait.
 
 - `run` re-validates the spec and resolves every subagent reference first,
   reporting all failures in one `ValueError` and starting nothing on any

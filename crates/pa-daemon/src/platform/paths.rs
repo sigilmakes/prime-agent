@@ -1,7 +1,6 @@
-//! Per-OS daemon endpoint naming: Unix socket files under
-//! `<tmpdir>/prime-agent-<uid>/`; Windows named pipes in the `\\.\\pipe\\`
-//! namespace (fixed daemon pipe, hashed worker pipes) - the TS product's
-//! exact split.
+//! Per-OS Rust daemon endpoint naming: Unix socket files under
+//! `<tmpdir>/prime-agent-rust-<uid>/`; Windows named pipes in the `\\.\\pipe\\`
+//! namespace. Rust defaults stay separate from the TypeScript runtime.
 use std::path::{Path, PathBuf};
 
 use crate::paths::hash_key;
@@ -18,7 +17,7 @@ pub fn socket_dir() -> PathBuf {
 /// can re-anchor deep paths through /proc; other Unix platforms need a short path.
 #[cfg(unix)]
 fn socket_dir_for(tmp: &Path, uid: u32) -> PathBuf {
-    let name = format!("prime-agent-{uid}");
+    let name = format!("prime-agent-rust-{uid}");
     let dir = tmp.join(&name);
     #[cfg(not(target_os = "linux"))]
     if std::os::unix::net::SocketAddr::from_pathname(
@@ -31,12 +30,12 @@ fn socket_dir_for(tmp: &Path, uid: u32) -> PathBuf {
     dir
 }
 
-/// The socket-dir half of a discovery state root on Windows: TS computes
-/// `<tmpdir>/prime-agent-user` so `DaemonStateRoot` keeps one shape.
+/// The socket-dir half of a discovery state root on Windows. Keep Rust
+/// discovery state separate from the TypeScript runtime.
 #[cfg(not(unix))]
 #[must_use]
 pub fn socket_dir() -> PathBuf {
-    std::env::temp_dir().join("prime-agent-user")
+    std::env::temp_dir().join("prime-agent-rust-user")
 }
 
 /// Default supervisor endpoint: `daemon.sock` in the socket dir (Unix) or
@@ -50,7 +49,7 @@ pub fn default_daemon_socket_path() -> PathBuf {
 #[cfg(not(unix))]
 #[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
-    PathBuf::from(r"\\.\pipe\prime-agent-daemon")
+    PathBuf::from(r"\\.\pipe\prime-agent-rust-daemon")
 }
 
 /// Worker endpoint next to the supervisor's: hashed supervisor key plus the
@@ -70,7 +69,7 @@ pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> Pat
 pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> PathBuf {
     let key = hash_key(&supervisor_socket_path.to_string_lossy(), 12);
     PathBuf::from(format!(
-        r"\\.\pipe\prime-agent-worker-{key}-{}",
+        r"\\.\pipe\prime-agent-rust-worker-{key}-{}",
         &worker_id[..12.min(worker_id.len())]
     ))
 }
@@ -87,18 +86,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn default_socket_uses_the_same_real_uid_as_the_typescript_daemon() {
-        let output = std::process::Command::new("id")
-            .arg("-ru")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let uid = String::from_utf8(output.stdout).unwrap();
+    fn default_endpoints_are_separate_from_typescript_for_the_real_uid() {
+        let uid = pa_core::platform::process::current_user_id();
         let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        let dir = socket_dir_for(&tmp, uid);
+        let ts_dir = tmp.join(format!("prime-agent-{uid}"));
+        let ts_daemon = ts_dir.join("daemon.sock");
+        let worker_id = "0123456789abcdef";
+        // Use the same supervisor input for both runtimes: namespace separation
+        // must not rely on their supervisor hashes happening to differ.
+        let key = hash_key(&ts_daemon.to_string_lossy(), 12);
+        let worker_name = format!("worker-{key}-0123456789ab.sock");
+        let daemon = default_daemon_socket_path();
+        let worker = worker_socket_path(&ts_daemon, worker_id);
+
         assert_eq!(
-            socket_dir(),
-            socket_dir_for(&tmp, uid.trim().parse().unwrap())
+            (socket_dir(), daemon.clone(), worker.clone()),
+            (dir.clone(), dir.join("daemon.sock"), dir.join(&worker_name))
         );
+        assert_ne!(dir, ts_dir);
+        assert_ne!(daemon, ts_daemon);
+        assert_ne!(worker, ts_dir.join(worker_name));
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -112,53 +120,67 @@ mod tests {
             let worker = dir.join("worker-000000000000-000000000000.sock");
             assert!(SocketAddr::from_pathname(&worker).is_ok());
             if length >= 65 {
-                assert_eq!(dir, Path::new("/tmp/prime-agent-501"));
+                assert_eq!(dir, Path::new("/tmp/prime-agent-rust-501"));
             } else {
-                assert_eq!(dir, tmp.join("prime-agent-501"));
+                assert_eq!(dir, tmp.join("prime-agent-rust-501"));
             }
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deep_tmpdir_is_preserved_for_linux_proc_reanchoring() {
+        let tmp = PathBuf::from(format!("/{}", "d".repeat(120)));
+        assert_eq!(socket_dir_for(&tmp, 501), tmp.join("prime-agent-rust-501"));
+    }
+
     #[cfg(unix)]
     #[test]
-    fn short_tmpdir_keeps_the_original_socket_directory() {
+    fn short_tmpdir_keeps_the_rust_socket_directory() {
         assert_eq!(
             socket_dir_for(Path::new("/tmp"), 501),
-            Path::new("/tmp/prime-agent-501")
+            Path::new("/tmp/prime-agent-rust-501")
         );
     }
 
     #[test]
-    fn worker_socket_names_are_deterministic() {
-        let supervisor = Path::new("/tmp/prime-agent-1/daemon.sock");
+    fn worker_socket_names_are_deterministic_and_supervisor_scoped() {
+        let supervisor = Path::new("/fixture/first/daemon.sock");
+        let other_supervisor = Path::new("/fixture/second/daemon.sock");
         let a = worker_socket_path(supervisor, "0123456789abcdef");
         let b = worker_socket_path(supervisor, "fedcba9876543210");
         assert_ne!(a, b);
+        assert_ne!(a, worker_socket_path(other_supervisor, "0123456789abcdef"));
         // Only the first 12 id characters key the name.
         assert_eq!(a, worker_socket_path(supervisor, "0123456789abffff"));
         #[cfg(unix)]
         assert!(a.starts_with(socket_dir()));
     }
 
-    /// The Windows endpoint names (TS win32 arms): the fixed daemon pipe
-    /// name and the hashed worker pipe name in the `\\.\\pipe\\` namespace.
     #[test]
     #[cfg(windows)]
-    fn windows_endpoints_are_the_ts_pipe_names() {
+    fn windows_default_endpoints_are_separate_from_typescript() {
+        let ts_dir = std::env::temp_dir().join("prime-agent-user");
+        let ts_daemon = Path::new(r"\\.\pipe\prime-agent-daemon");
+        let key = hash_key(&ts_daemon.to_string_lossy(), 12);
+        let daemon = default_daemon_socket_path();
+        let worker = worker_socket_path(ts_daemon, "0123456789abcdef");
+
         assert_eq!(
-            default_daemon_socket_path(),
-            PathBuf::from(r"\\.\pipe\prime-agent-daemon")
+            (socket_dir(), daemon.clone(), worker.clone()),
+            (
+                std::env::temp_dir().join("prime-agent-rust-user"),
+                PathBuf::from(r"\\.\pipe\prime-agent-rust-daemon"),
+                PathBuf::from(format!(
+                    r"\\.\pipe\prime-agent-rust-worker-{key}-0123456789ab"
+                ))
+            )
         );
-        let supervisor = Path::new(r"\\.\pipe\prime-agent-daemon");
-        let a = worker_socket_path(supervisor, "0123456789abcdef");
-        let rendered = a.to_string_lossy();
-        assert!(
-            rendered.starts_with(r"\\.\pipe\prime-agent-worker-"),
-            "the worker pipe namespace: {rendered}"
-        );
-        assert!(
-            rendered.ends_with("-0123456789ab"),
-            "the 12-char id suffix: {rendered}"
+        assert_ne!(socket_dir(), ts_dir);
+        assert_ne!(daemon, ts_daemon);
+        assert_ne!(
+            worker,
+            PathBuf::from(format!(r"\\.\pipe\prime-agent-worker-{key}-0123456789ab"))
         );
     }
 }

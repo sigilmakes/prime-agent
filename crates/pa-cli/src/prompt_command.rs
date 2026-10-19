@@ -1,5 +1,5 @@
 //! `prime-agent prompt`: dump the fully-assembled effective system prompt with
-//! its per-layer breakdown, without starting a session or a provider.
+//! its per-layer breakdown, without a provider call or persisted session.
 
 use pa_core::resources::{load_resources, ResourceLoaderOptions};
 use pa_core::settings::SettingsManager;
@@ -102,9 +102,9 @@ fn assemble_breakdown(
     let resources = load_resources(ResourceLoaderOptions {
         extra_builtin_skill_overrides: skill_overrides,
         system_prompt: None,
-        ..ResourceLoaderOptions::new(cwd.to_path_buf(), agent_dir)
+        ..ResourceLoaderOptions::new(cwd.to_path_buf(), agent_dir.clone())
     })?;
-    let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
+    let mut breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
             cwd: cwd.display().to_string(),
             // A dump has no session file; the tail states the value it uses.
@@ -123,10 +123,54 @@ fn assemble_breakdown(
             generic_mcp_servers: generic_servers,
             rlm_depth: Some(0),
             model_prompt_extras: model_prompts.extras.as_deref(),
+            vision_capable: Some(false),
+            append_system_prompt: Some(resources.append_system_prompt.join("\n\n")),
             ..Default::default()
         },
     );
-    Ok((breakdown, model_prompts.errors))
+    // Build an in-memory inspection session, not a provider registry or model turn. Reuse the
+    // resolved static prefix so --model affects only prompt rules, without requiring model auth.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let engine = runtime.block_on(pa_core::session_engine::engine::create_session(
+        pa_core::session_engine::engine::SessionEngineConfig {
+            cwd: cwd.to_path_buf(),
+            agent_dir,
+            model: Some(pa_agent::types::Model::unknown()),
+            stream_fn: Some(std::sync::Arc::new(|_, _, _| {
+                Box::pin(async { anyhow::bail!("prompt inspection cannot call a provider") })
+            })),
+            custom_system_prompt: Some(
+                breakdown.assembled[..breakdown.cached_prefix_len].to_string(),
+            ),
+            allow_recursion: Some(true),
+            rlm_depth: Some(0),
+            prewarm_ipython_kernel: Some(false),
+            ..Default::default()
+        },
+    ))?;
+    let assembled = engine.assembled_system_prompt();
+    // The inspection options above must describe the same base as the layer listing.
+    anyhow::ensure!(
+        assembled.starts_with(&breakdown.assembled),
+        "prompt inspection base differs from its layer breakdown"
+    );
+    let tail = assembled[breakdown.assembled.len()..].trim();
+    if !tail.is_empty() {
+        breakdown.segments.push(pa_core::prompts::PromptSegment {
+            name: "active-plugins",
+            kind: pa_core::prompts::SegmentKind::Dynamic,
+            source: "session plugin host",
+            text: tail.to_string(),
+        });
+    }
+    breakdown.assembled = assembled;
+    let mut errors = model_prompts.errors;
+    if let Some(error) = engine.plugin_diagnostic() {
+        errors.push(error);
+    }
+    Ok((breakdown, errors))
 }
 
 fn print_text(breakdown: &pa_core::prompts::SystemPromptBreakdown) {

@@ -5,7 +5,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
+    create_provider_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
 use crate::models::clamp_thinking_level;
@@ -148,9 +148,16 @@ pub fn stream_google_vertex(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: API_GOOGLE_VERTEX.to_string(),
@@ -170,10 +177,12 @@ pub fn stream_google_vertex(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -188,14 +197,19 @@ pub fn stream_google_vertex(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -373,9 +387,11 @@ async fn run_stream(
         return Err(error);
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
 
     let mut state = GoogleStreamState::new();
     let mut decoder = SseDecoder::new();
@@ -390,9 +406,7 @@ async fn run_stream(
             let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
                 ProviderError::Message(format!("Could not parse Vertex SSE chunk: {error}"))
             })?;
-            state
-                .handle_chunk(&parsed, model, output, writer)
-                .map_err(ProviderError::Message)?;
+            state.handle_chunk(&parsed, model, output, writer).await?;
         }
     }
     for sse in decoder.finish() {
@@ -402,11 +416,9 @@ async fn run_stream(
         let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
             ProviderError::Message(format!("Could not parse Vertex SSE chunk: {error}"))
         })?;
-        state
-            .handle_chunk(&parsed, model, output, writer)
-            .map_err(ProviderError::Message)?;
+        state.handle_chunk(&parsed, model, output, writer).await?;
     }
-    state.finish(output, writer);
+    state.finish(output, writer).await?;
 
     if options
         .base
@@ -486,6 +498,10 @@ pub struct GoogleVertexProvider;
 impl Provider for GoogleVertexProvider {
     fn api(&self) -> &str {
         API_GOOGLE_VERTEX
+    }
+
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
     }
 
     fn stream(

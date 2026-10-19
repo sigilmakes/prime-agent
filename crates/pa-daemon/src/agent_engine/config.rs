@@ -26,8 +26,7 @@ pub struct AgentEngineConfig {
     /// supervisor link. Present only inside a daemon worker (it enables
     /// the kernel's `agent_message/agent_observe` requests).
     pub supervisor_link: Option<SupervisorLinkConfig>,
-    /// Telemetry opt-out from the create command (Some(true) installs no
-    /// telemetry).
+    /// Inert legacy opt-out metadata. This build has no telemetry reporters.
     pub telemetry_disabled: Option<bool>,
     /// The worker's kernel cron wiring: the shared scheduled-jobs store
     /// the kernel `rlm_heartbeat.*` host requests read and write, so
@@ -87,8 +86,8 @@ pub(crate) struct CreateSessionResources {
     pub(crate) skills: Vec<String>,
     pub(crate) prompt_templates: Vec<String>,
     pub(crate) autonomous: Option<pa_core::autonomous::AgentAutonomousConfig>,
-    /// The creating client's mode (`interactive`, `acp`, ...) for the
-    /// session's telemetry; absent reports `unknown` (TS parity).
+    /// The creating client's mode (`interactive`, `acp`, ...), accepted for
+    /// compatibility with older create payloads.
     pub(crate) execution_mode: Option<String>,
 }
 
@@ -134,9 +133,8 @@ mod tests {
     use super::CreateSessionResources;
     use serde::Deserialize as _;
 
-    /// The create payload's `executionMode` reaches the session telemetry;
-    /// a create without one (an agent-spawned session) stays `None`
-    /// (reported as `unknown`, TS parity).
+    /// The create payload's legacy `executionMode` remains accepted;
+    /// a create without one (an agent-spawned session) stays `None`.
     #[test]
     fn create_resources_read_the_execution_mode() {
         let payload = serde_json::json!({ "cwd": "/tmp", "executionMode": "interactive" });

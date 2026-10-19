@@ -1679,6 +1679,46 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("ok", "'alive'")
         self.assertEqual(one(events, "result")["text"], "'alive'")
 
+    def test_host_request_task_cancel_uses_exact_id_and_cleans_pending(self):
+        self.repl.send({"type": "execute", "id": "task-cancel", "code": "\n".join([
+            "import asyncio", "from rlm.repl import host_request, _pending_host",
+            "pending = asyncio.create_task(host_request({'type': 'wait'}))",
+            "await host_request({'type': 'ready'})",
+            "pending.cancel()", "try:", "    await pending",
+            "except asyncio.CancelledError:", "    pass", "len(_pending_host)",
+        ])})
+        requests = []
+        while len(requests) < 2:
+            event = self.repl.read_event()
+            if event.get("event") == "host_request":
+                requests.append(event)
+        waiting = next(r for r in requests if r["data"]["type"] == "wait")
+        ready = next(r for r in requests if r["data"]["type"] == "ready")
+        reply_ok(self.repl, ready)
+        events = self.repl.until_done("task-cancel")
+        self.assertEqual(one(events, "host_cancel"), {"event": "host_cancel", "id": waiting["id"]})
+        self.assertEqual(one(events, "result")["text"], "0")
+        self.repl.send({"type": "host_reply", "id": waiting["id"], "data": {"status": "ok"}})
+        self.assertEqual(one(self.repl.execute("next", "6*7"), "result")["text"], "42")
+
+    def test_host_request_keyboard_interrupt_sends_cancel(self):
+        # Inject KeyboardInterrupt at the await seam, without killing asyncio's loop.
+        from rlm import repl
+        async def run():
+            sent = []
+            class Interrupted:
+                def __await__(self):
+                    raise KeyboardInterrupt
+                    yield
+            loop = mock.Mock()
+            loop.create_future.return_value = Interrupted()
+            with mock.patch.object(repl, "_loop", loop), mock.patch.object(repl, "_send", sent.append):
+                with self.assertRaises(KeyboardInterrupt):
+                    await repl.host_request({"type": "wait"})
+            self.assertEqual(sent[1], {"event": "host_cancel", "id": sent[0]["id"]})
+            self.assertEqual(repl._pending_host, {})
+        asyncio.run(run())
+
     def test_host_request_cancelled_cell_drops_pending_future(self):
         code = "\n".join(
             [
@@ -1692,6 +1732,7 @@ class ReplTest(unittest.TestCase):
             request = self.repl.read_event()
         self.repl.send({"type": "interrupt"})
         events = self.repl.until_done("hr-cancel")
+        self.assertEqual(one(events, "host_cancel"), {"event": "host_cancel", "id": request["id"]})
         self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
         # A reply arriving after the cancel must be dropped, not crash the runtime.
         self.repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok"}})
@@ -2582,14 +2623,12 @@ class SnapshotTempCleanupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")
 
-            real_dump = dill.dump
-
-            def interrupted_dump(value, fh):
+            def interrupted_dump(pickler, value):
                 # Interrupt mid-dump, after partial bytes landed in the staged temp.
-                fh.write(b"partial")
+                pickler._file_write(b"partial")
                 raise KeyboardInterrupt
 
-            with unittest_mock.patch.object(dill, "dump", interrupted_dump):
+            with unittest_mock.patch.object(dill.Pickler, "dump", interrupted_dump):
                 with self.assertRaises(KeyboardInterrupt):
                     _snapshot_state(
                         {"x": 1},
@@ -3001,14 +3040,14 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
 
         from rlm.repl import _SNAPSHOT_MAGIC
 
-        real_dump = dill.dump
+        real_dump = dill.Pickler.dump
         dumped: list[object] = []
 
-        def counting_dump(value, writer):
+        def counting_dump(pickler, value):
             dumped.append(value)
-            return real_dump(value, writer)
+            return real_dump(pickler, value)
 
-        with mock.patch.object(dill, "dump", counting_dump):
+        with mock.patch.object(dill.Pickler, "dump", counting_dump):
             result = self._snap({"a": 1, "b": 2, "c": 3})
         self.assertEqual(result["saved"], ["a", "b", "c"])
         self.assertEqual(dumped, [1, 2, 3])

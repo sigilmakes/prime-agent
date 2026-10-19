@@ -220,6 +220,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let store = own_canonical_store(&engine, store);
     let expected_content = json!([
         { "type": "text", "text": "repeat this exact prompt" },
         { "type": "image", "mimeType": "image/png", "data": "QUJD" },
@@ -228,7 +229,15 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         if prompt_index == 2 {
             engine.runtime.block_on(engine.retire_session_runtime());
         }
-        engine.set_prompt_context_boundary(store.leaf_id().map(str::to_string));
+        let boundary = store
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .leaf_id()
+            .map(str::to_owned);
+        engine.set_prompt_context_boundary(boundary);
         let mut accepted = false;
         let mut model_user_content = None;
         let mut result = None;
@@ -257,12 +266,22 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                         }
                         accepted = true;
                         store
+                            .lock()
+                            .unwrap()
+                            .store
+                            .as_mut()
+                            .unwrap()
                             .persist_entry("message", json!({ "message": message }))
                             .expect("worker persists accepted prompt");
                     }
                     EngineEvent::AssistantMessage(message)
                     | EngineEvent::ToolResultMessage(message) => {
                         store
+                            .lock()
+                            .unwrap()
+                            .store
+                            .as_mut()
+                            .unwrap()
                             .persist_entry("message", json!({ "message": message }))
                             .expect("worker persists settled message");
                     }
@@ -339,7 +358,16 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             "compact/refine context must retain each repeated prompt once"
         );
         assert_eq!(
-            store.branch_file_entries().iter().filter(is_user).count(),
+            store
+                .lock()
+                .unwrap()
+                .store
+                .as_ref()
+                .unwrap()
+                .branch_file_entries()
+                .iter()
+                .filter(is_user)
+                .count(),
             prompt_index + 1,
             "the worker-owned durable branch remains single-copy"
         );

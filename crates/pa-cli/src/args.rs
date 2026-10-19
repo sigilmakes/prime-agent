@@ -173,6 +173,7 @@ pub struct Args {
     /// Some(None) = the bare flag, Some(Some(x)) = with a value).
     #[allow(clippy::option_option)] // the CLI flag's tri-state is genuinely a double Option
     pub list_models: Option<Option<String>>,
+    pub refresh: bool,
     pub offline: bool,
     pub verbose: bool,
     pub messages: Vec<String>,
@@ -441,6 +442,7 @@ pub fn parse_args(args: &[String]) -> Args {
             }
             "--verbose" => result.verbose = true,
             "--offline" => result.offline = true,
+            "--refresh" => result.refresh = true,
             _ if arg.starts_with("--resume=") => {
                 let value = &arg["--resume=".len()..];
                 if value.is_empty() {

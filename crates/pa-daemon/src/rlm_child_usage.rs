@@ -239,7 +239,7 @@ mod tests {
         ];
         let (batches, cursor) = child_usage_batches(&entries, 0);
         assert_eq!(cursor, 3);
-        let [(origin, usage)] = batches[..] else {
+        let [(origin, ref usage)] = batches[..] else {
             panic!("one batch: {batches:?}");
         };
         assert_eq!(origin, ChildUsageOrigin::SpawnTask);

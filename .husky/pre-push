@@ -1,0 +1,4 @@
+#!/bin/sh
+# Read-only hooks; no npm, formatting, restaging, or automatic builds.
+export PYTHONDONTWRITEBYTECODE=1
+exec python3 "$(dirname "$0")/../scripts/downstream-hooks.py" pre-push "$@"

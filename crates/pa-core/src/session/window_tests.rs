@@ -808,6 +808,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
             "attr-1",
             "a1",
             pa_types::ai::Usage {
+                rest: pa_types::JsonMap::new(),
                 input: 5,
                 output: 1,
                 cache_read: 0,
@@ -816,6 +817,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
                 cost: pa_types::ai::UsageCost::default(),
             },
             pa_types::ai::Usage {
+                rest: pa_types::JsonMap::new(),
                 input: 15,
                 output: 3,
                 cache_read: 0,

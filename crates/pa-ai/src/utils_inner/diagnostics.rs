@@ -19,6 +19,7 @@ pub fn create_assistant_message_diagnostic(
     details: Option<serde_json::Value>,
 ) -> AssistantMessageDiagnostic {
     AssistantMessageDiagnostic {
+        rest: pa_types::JsonMap::new(),
         type_: diagnostic_type.to_string(),
         timestamp: now_ms(),
         error,

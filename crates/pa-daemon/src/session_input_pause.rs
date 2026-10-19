@@ -28,6 +28,25 @@ pub(crate) struct InputPauseTable {
     pauses: std::sync::Arc<Mutex<HashMap<String, InputPauseEntry>>>,
 }
 
+/// An internal command's admission hold. It cannot be released by a client
+/// detach, and cancellation of the command releases it through `Drop`.
+pub(crate) struct InternalInputPause {
+    table: InputPauseTable,
+    pause_id: String,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Drop for InternalInputPause {
+    fn drop(&mut self) {
+        self.table
+            .pauses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.pause_id);
+        self.notify.notify_one();
+    }
+}
+
 /// The release outcome (TS error strings surface through the arm).
 enum ReleaseOutcome {
     Released,
@@ -49,6 +68,21 @@ impl InputPauseTable {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    }
+
+    /// Hold turn pickup during a native command. Acquire while holding the
+    /// worker core lock, then check its idle state before releasing that lock.
+    pub(crate) fn hold_internal(
+        &self,
+        active_session_id: &str,
+        notify: std::sync::Arc<tokio::sync::Notify>,
+    ) -> InternalInputPause {
+        let owner = uuid::Uuid::new_v4().to_string();
+        InternalInputPause {
+            table: self.clone(),
+            pause_id: self.acquire(active_session_id, &owner, &owner),
+            notify,
+        }
     }
 
     /// `acquire_session_input_pause`: dedupe on (owner, session, lease key) —
@@ -231,6 +265,26 @@ mod tests {
             .await;
         assert!(created.success, "create failed: {created:?}");
         worker
+    }
+
+    #[tokio::test]
+    async fn internal_pause_releases_only_its_own_hold_on_drop() {
+        let table = InputPauseTable::new();
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let client_pause = table.acquire("session", "client", "lease");
+        let internal = table.hold_internal("session", std::sync::Arc::clone(&notify));
+        table.release_all_for_owner("client");
+        assert!(
+            table.paused(),
+            "client detach must not release an internal hold"
+        );
+        drop(internal);
+        assert!(!table.paused());
+        notify.notified().await;
+        assert!(matches!(
+            table.release(&client_pause, "client", "session"),
+            ReleaseOutcome::Unknown
+        ));
     }
 
     #[tokio::test]

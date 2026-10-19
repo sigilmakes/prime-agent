@@ -6,8 +6,8 @@ license.workspace = true
 description = "Live model catalog: fetch, no-cold-start chain, transport pinning, Prime Inference."
 
 [dependencies]
-pa-ai = { path = "../pa-ai" }
-pa-types = { path = "../pa-types" }
+pa-ai = { path = "../pa-ai", version = "0.10.0" }
+pa-types = { path = "../pa-types", version = "0.10.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Provider APIs, model registry, and streaming for Prime Agent."
 
 [dependencies]
-pa-types = { path = "../pa-types" }
+pa-types = { path = "../pa-types", version = "0.10.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

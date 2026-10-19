@@ -1,6 +1,6 @@
-//! Print-mode session slash-command execution: `/compact`, `/refine`,
-//! `/goal`, and `/autonomous` run through the pa-core session-command
-//! executor and stream the TS print-json shapes; a failed command rejects
+//! Print-mode session slash-command execution: `/compact`,
+//! `/goal`, `/autonomous`, `/reload`, and active Lua commands share the pa-core
+//! executor and stream the print-json shapes; a failed command rejects
 //! the prompt wait (stderr, exit 1, never the later prompts).
 
 use std::sync::Arc;
@@ -84,7 +84,6 @@ pub(crate) async fn execute_prompt_session_command(
     goal: &Arc<PrintGoalSurface>,
     model: &Model,
     api_key: Option<String>,
-    global_harness_dir: std::path::PathBuf,
     autonomous: &Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
@@ -103,15 +102,11 @@ pub(crate) async fn execute_prompt_session_command(
         }
         goal.emit_stream_event(&event);
     }
-    // The refinement rows the executor's refine run appends (streamed in TS order
-    // ahead of `refine_complete`).
-    let entries_before = engine.session.entries().await.len();
     let execution = {
         let mut autonomous = autonomous.lock().await;
         let mut params = SessionCommandParams {
             model,
             api_key,
-            global_harness_dir,
             autonomous: &mut autonomous,
         };
         execute_session_command(engine, &mut params, command, images).await
@@ -142,23 +137,6 @@ pub(crate) async fn execute_prompt_session_command(
             )
         };
         goal.emit_stream_event(&end);
-    }
-    // `/refine`: the durable refinement rows stream as message pairs, then
-    // `refine_complete` (or `refine_failed`), before the result row.
-    if command.name == "refine" {
-        for row in
-            crate::print_boundary::TurnBoundary::refinement_rows_since(engine, entries_before).await
-        {
-            goal.emit_row_pair(&row);
-        }
-        if let Some(error) = &execution.refinement_failed {
-            goal.emit_stream_event(&json!({ "type": "refine_failed", "error": error }));
-        } else if let Some(result) = &execution.refinement {
-            goal.emit_stream_event(&json!({
-                "type": "refine_complete",
-                "result": serde_json::to_value(result).unwrap_or(Value::Null),
-            }));
-        }
     }
     // `/goal`: the state change publishes unconditionally, before the queue frame of a scheduled
     // continuation.
@@ -253,8 +231,6 @@ mod tests {
                         )
                     }
                 }
-                "refine_complete" => "refine_complete".to_string(),
-                "refine_failed" => "refine_failed".to_string(),
                 other => other.to_string(),
             })
             .collect()
@@ -286,7 +262,6 @@ mod tests {
         goal: Arc<PrintGoalSurface>,
         autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
         frames: Frames,
-        harness_dir: std::path::PathBuf,
         /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
         /// weakly).
         _run: Arc<crate::headless_autonomous::HeadlessAutonomous>,
@@ -299,10 +274,11 @@ mod tests {
         bed_with_settings(script, json!({})).await
     }
 
-    async fn bed_with_settings(script: Value, settings: Value) -> Bed {
+    async fn bed_with_settings(script: Value, mut settings: Value) -> Bed {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
+        settings["plugins"] = json!({"harness":{"enabled":false}});
         std::fs::write(agent_dir.join("settings.json"), settings.to_string()).unwrap();
         let parsed = pa_ai::faux::script::parse_faux_script(&script).unwrap();
         let registration =
@@ -325,9 +301,13 @@ mod tests {
             pa_core::session_engine::engine::create_session(
                 pa_core::session_engine::engine::SessionEngineConfig {
                     on_late_sent_agent_message: None,
+                    context_startup_boundary:
+                        pa_core::session_engine::ContextStartupBoundary::Current,
+                    context_startup_admitted_user_ids: Vec::new(),
+                    on_initial_context_selection: None,
+                    ollama_cloud: None,
                     semantic_edges: None,
                     cron_store: None,
-                    telemetry: None,
                     cwd: dir.path().to_path_buf(),
                     agent_dir,
                     mcp_manager: None,
@@ -386,7 +366,6 @@ mod tests {
             goal,
             autonomous,
             frames,
-            harness_dir: dir.path().join("harness"),
             _run: run,
             _dir: dir,
         }
@@ -404,7 +383,6 @@ mod tests {
             &bed.goal,
             &bed.model,
             None,
-            bed.harness_dir.clone(),
             &bed.autonomous,
             &command(text),
             &[],
@@ -421,7 +399,6 @@ mod tests {
                     &mut boundary,
                     &bed.model,
                     None,
-                    bed.harness_dir.clone(),
                     &continuation,
                 )
                 .await
@@ -429,13 +406,7 @@ mod tests {
         }
         let mut boundary = TurnBoundary::new(false);
         bed.goal
-            .drive_boundary(
-                &bed.engine,
-                &mut boundary,
-                &bed.model,
-                None,
-                bed.harness_dir.clone(),
-            )
+            .drive_boundary(&bed.engine, &mut boundary, &bed.model, None)
             .await
             .unwrap();
         None
@@ -633,7 +604,7 @@ mod tests {
         let error = run_command(&test, "/compact focus").await;
         assert_eq!(
             error.as_deref(),
-            Some("Summarization failed: No more faux responses queued")
+            Some("compaction chain failed: Summarization failed: No more faux responses queued")
         );
         let rows = custom_rows(&test.engine).await;
         assert_eq!(rows.last().unwrap().0, "session_slash_command_result");

@@ -39,6 +39,7 @@ pub fn calculate_cost_values(
     #[allow(clippy::cast_precision_loss)]
     let cache_write = (cache_write_cost / 1_000_000.0) * usage.cache_write as f64;
     UsageCost {
+        rest: pa_types::JsonMap::new(),
         input: JsNumber::from(input),
         output: JsNumber::from(output),
         cache_read: JsNumber::from(cache_read),

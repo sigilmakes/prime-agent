@@ -22,6 +22,14 @@ either changes.
 - When code moves into a new module, its related tests and docs move with it.
 - Prefer private modules with an explicitly exported crate API; internals are `pub(crate)`. New traits need doc comments explaining their role and how implementations are expected to behave.
 
+## Plugin and context ownership
+
+- Read `GLOSSARY.md` when reviewing changes to sessions, plugins, providers, context, compaction, or the continual harness. Keep implementation decisions out of the glossary.
+- Review deep modules through their interfaces: lifecycle, registration cleanup, cancellation, and stale-generation rejection belong with plugin ownership, not scattered across callers.
+- The continual harness is an optional first-party plugin. Reject hardwired harness instructions, callables, jobs, or context when disabled; retain saved data. Willow authorized new `plugin.<name>.*` exports and plugin slash commands rather than exact legacy harness-call compatibility.
+- Distinguish canonical history from context views, a selected context strategy from its ordered compaction chain, and provider identity from transport protocol. OptChat-style summary-tree context is not a compaction fallback.
+- Require explicit compaction ordering, immutable preparation, one validated commit, and cancellation that does not start another fallback. Verify multimodal/provider-native archives reconstruct correctly after resume and model changes.
+
 ## File size (advisory)
 
 - Flag new or grown Rust files past ~2,000 lines (tests included) as advisory guidance: cite the growth and suggest splitting by responsibility. Size is ADVISORY per the operator's ruling - a soft cap that informs review and never blocks a merge; the repo's `codebase-health` PR check reports the same as warnings only.
@@ -38,7 +46,16 @@ either changes.
 
 - One logical change per PR: flag PRs that mix a feature with unrelated lint fixes or refactors, and fixes that do not ride with the change that introduced them.
 - If a change forces edits across many crate internals, the crate boundary is what needs fixing: flag that instead of the edits.
-- Risky raw APIs route through the in-house wrappers, not new raw call sites: process control (signals/process groups), file locking, permissions, and shell selection go through `pa-core`'s `platform` wall; durable renames go through `rename_onto`; TS-parity hashing (tool-call id normalization) uses `pa-ai`'s in-house `short_hash`; environment-variable resolution goes through its owning module (telemetry overrides in `pa-telemetry`, provider API keys in `pa-ai`), not duplicated ad-hoc parsing. Flag a raw call site that bypasses these walls.
+- Risky raw APIs route through the in-house wrappers, not new raw call sites: process control (signals/process groups), file locking, permissions, and shell selection go through `pa-core`'s `platform` wall; durable renames go through `rename_onto`; TS-parity hashing (tool-call id normalization) uses `pa-ai`'s in-house `short_hash`; environment-variable resolution goes through its owning module (provider API keys in `pa-ai`), not duplicated ad-hoc parsing. Flag a raw call site that bypasses these walls.
+
+## Privacy
+
+- Reject vendor analytics, installation identity generation, trace-only credentials,
+  and transcript uploaders in source or release artifacts. An opt-out default is not
+  equivalent to removal. Preserve local sessions, harness, ledgers, diagnostics, and
+  actual provider/MCP authentication.
+- Debug tests alone do not establish release privacy. Require artifact inspection and
+  lifecycle checks with old opt-in settings present.
 
 ## Tests
 

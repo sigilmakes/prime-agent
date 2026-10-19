@@ -382,6 +382,10 @@ pub fn stream_simple_openai_completions(
 pub struct OpenAICompletionsProvider;
 
 impl Provider for OpenAICompletionsProvider {
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
+    }
+
     fn api(&self) -> &str {
         API_OPENAI_COMPLETIONS
     }

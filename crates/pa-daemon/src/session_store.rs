@@ -32,6 +32,7 @@ mod child_usage;
 #[cfg(test)]
 #[path = "session_store/child_usage_tests.rs"]
 mod child_usage_tests;
+mod context_selection;
 mod index;
 
 use index::fold_child_usage_attributions;
@@ -55,6 +56,11 @@ pub use write::session_header_line;
 
 // The loaded-session view lives in session_store::view; the facade bindings keep callers in scope.
 mod view;
+
+// The display transcript never participates in model context assembly.
+mod display;
+#[cfg(test)]
+mod display_tests;
 
 use view::{message_text, normalize_state_status};
 
@@ -133,7 +139,6 @@ pub struct SessionFile {
     pub(crate) by_id: HashMap<String, usize>,
     pub(crate) leaf_id: Option<String>,
     pub(crate) window: Option<SessionWindow>,
-    pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
     child_usage_recovery: child_usage::ChildUsageRecovery,
     /// Rows the full reader skipped as unparsable (the TS loader's

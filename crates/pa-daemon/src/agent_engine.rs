@@ -46,6 +46,12 @@ pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) use tests::FAUX_TEST_LOCK;
 
+mod context_selection;
+pub(crate) use context_selection::{
+    canonical_mirror_header, ContextSelectionCommitFuture, ContextSelectionSource,
+    InitialContextSelectionStore,
+};
+
 mod goalcore;
 mod lifecycle;
 mod turn_types;
@@ -182,6 +188,8 @@ pub struct AgentSessionEngine {
     /// The authoritative model selection: the process fallback, re-bound when
     /// a create carries explicit wire flags.
     selection: std::sync::RwLock<EngineModelSelection>,
+    /// Uncapped snapshots shared with the core session, never the registry.
+    pub(crate) ollama_cloud: Arc<pa_core::session_engine::ollama_cloud::SessionOllamaCloud>,
     /// The restored-from-session decision, scoped to the file it was computed
     /// for: a revived session's saved model (or the fallback message); an
     /// explicit flag wins.
@@ -196,6 +204,8 @@ pub struct AgentSessionEngine {
     /// The resolved effective thinking level, computed once at create so
     /// summary/state polls during a live turn stay side-effect-free.
     effective_thinking: std::sync::RwLock<Option<pa_types::ai::ModelThinkingLevel>>,
+    /// Catalog metadata waits for the next turn; active provider requests keep their target.
+    model_metadata_refresh_pending: std::sync::atomic::AtomicBool,
     pub(crate) service_tier: std::sync::RwLock<Option<pa_types::ai::ServiceTier>>,
     /// Built once on the first prompt, reused across prompts: long-running
     /// arms clone the Arc and release this mutex before their awaits, so
@@ -246,6 +256,8 @@ pub struct AgentSessionEngine {
     rlm_usage_store: std::sync::Mutex<
         Option<std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>>,
     >,
+    initial_context_selection_store:
+        std::sync::Mutex<Option<std::sync::Arc<dyn InitialContextSelectionStore>>>,
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,
     pub(crate) autonomous:
@@ -306,10 +318,6 @@ pub struct AgentSessionEngine {
     /// Turn-boundary runs register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
-    /// The model-allowlist refusal telemetry, shared with the RLM children
-    /// host (one lazily-built client per worker).
-    pub(crate) model_refusal_telemetry:
-        std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
     /// This session's semantic-edge identity (TS
     /// `semanticEdgeLedgerPath`/`semanticParentSessionId`/
     /// `semanticSpawnedByRequestId`): stamped by `configure_rlm_identity`

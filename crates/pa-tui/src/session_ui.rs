@@ -20,6 +20,8 @@ mod sessions_fork;
 mod settings;
 mod share;
 mod stream;
+mod transcript;
+mod working_messages;
 
 pub(crate) use apply::CompactionAbortNote;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
@@ -43,8 +45,8 @@ pub(crate) use prompt::SubmitBehavior;
 use sessions_fork::{create_session, terminal_columns};
 use settings::PendingConfirm;
 pub(crate) use settings::ReloadNote;
-pub(crate) use share::{ShareNote, TracesUploadNote, UpdateNote};
-use share::{ShareRun, TraceUploadAllRun, TracesLoginIntent};
+use share::ShareRun;
+pub(crate) use share::{ShareNote, UpdateNote};
 use stream::already_running_warning;
 pub(crate) use stream::resume_hint_from_stats;
 use stream::streaming_tray_hint;
@@ -120,6 +122,7 @@ const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth i
 pub(crate) struct CommandCatalogUpdate {
     pub epoch: u64,
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
+    pub plugin_catalog: Value,
 }
 
 pub(crate) fn attach_capabilities() -> Vec<pa_types::daemon::DaemonClientCapability> {
@@ -129,6 +132,7 @@ pub(crate) fn attach_capabilities() -> Vec<pa_types::daemon::DaemonClientCapabil
         "slim_attach".to_string(),
         "elide_snapshot_images".to_string(),
         "windowed_snapshot".to_string(),
+        "display_transcript".to_string(),
     ]
 }
 
@@ -147,6 +151,13 @@ pub(crate) fn last_assistant_text_of(chat: &[ChatEntry]) -> Option<String> {
 pub(crate) struct TranscriptBackfillNote {
     pub epoch: u64,
     pub entries: std::result::Result<Vec<ChatEntry>, String>,
+    pub replacement: Option<TranscriptReplacement>,
+}
+
+pub(crate) struct TranscriptReplacement {
+    pub complete: bool,
+    pub warning: Option<String>,
+    pub state: Option<Value>,
 }
 
 pub(crate) struct SessionUi {
@@ -184,7 +195,6 @@ pub(crate) struct SessionUi {
     models_fetched_at: Option<std::time::Instant>,
     pasted_images: std::collections::BTreeMap<u64, LoadedImage>,
     next_image_marker_id: u64,
-    telemetry_disabled: Option<bool>,
     code_block_indent: String,
     tree_filter_mode: crate::tree_list::FilterMode,
     branch_summary_skip_prompt: bool,
@@ -221,15 +231,6 @@ pub(crate) struct SessionUi {
     share_notes: mpsc::UnboundedSender<ShareNote>,
     reload: Option<tokio::task::JoinHandle<()>>,
     reload_notes: mpsc::UnboundedSender<ReloadNote>,
-    trace_upload: Option<TraceUploadAllRun>,
-    traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
-    pending_traces_login: Option<TracesLoginIntent>,
-    /// The in-flight traces login's enable intent: taken from the park
-    /// when the flow spawns, consumed by the settle.
-    traces_login_run: Option<TracesLoginIntent>,
-    /// The generation of the in-flight traces login: a late settle from a
-    /// superseded run never clears the newer login's panel.
-    traces_login_gen: u64,
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
     heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
     pending_snapshot: Option<Vec<ChatEntry>>,
@@ -253,6 +254,7 @@ pub(crate) struct SessionUi {
     pub(crate) steering_mode: String,
     streaming_index: Option<usize>,
     working_tokens: LoaderTokenTracker,
+    working_messages: working_messages::WorkingMessages,
     /// The turn already surfaced its error (a failed assistant message or
     /// a retry-exhausted banner); the `turn_end` error stays silent then.
     turn_error_shown: bool,
@@ -266,7 +268,6 @@ pub(crate) struct SessionUi {
     pub(crate) last_assistant_text: Option<String>,
     pub(crate) osc_sink: crate::clipboard::OscSink,
     pending_confirm: Option<PendingConfirm>,
-    traces: Option<crate::traces::TracesCommandsHandle>,
     provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
     /// A model selection parked on the provider's sign-in: the picker applied a model whose
     /// provider is not signed in, and a successful login retries the switch automatically.
@@ -289,6 +290,7 @@ pub(crate) struct SessionUi {
     command_updates: mpsc::UnboundedSender<CommandCatalogUpdate>,
     command_refresh_epoch: u64,
     skill_commands_cache: Vec<crate::autocomplete::SlashCommandEntry>,
+    plugin_catalog: Value,
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late response from an older
     /// request must not repaint a newer snapshot.
@@ -354,6 +356,10 @@ pub(crate) struct SessionUi {
     prompt_in_flight: usize,
     pub(crate) transcript_stale: bool,
     transcript_epoch: u64,
+    /// A restored branch owes native replay only after its complete history is loaded.
+    native_replay_epoch: Option<u64>,
+    display_transcript: bool,
+    transcript_incomplete: bool,
     backfill_compaction_count: Option<u64>,
     backfill_leaf_id: Option<String>,
     /// Dropping or replacing the handle aborts an obsolete backfill task. An
@@ -364,10 +370,6 @@ pub(crate) struct SessionUi {
     pending_backfill: Option<usize>,
     backfill_seam: crate::snapshot::BackfillSeam,
     backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
-    /// Adoption telemetry (counted into `tui exit`); `None` drops events.
-    pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
-    scroll_adoption_emitted: bool,
-    pub(crate) exit_reason: &'static str,
     /// The §10 reattach contract: set when a `daemon_closing` update frame
     /// arrived; the interactive loop drives the reconnect from it.
     pub(crate) reconnect: Option<crate::daemon_client::DaemonClosingUpdate>,
@@ -392,7 +394,6 @@ pub(crate) struct SessionUi {
     /// submit, patched by `bash_start`/`bash_end`).
     user_bash_running: bool,
     user_bash_card: Option<String>,
-    user_bash_started_at: Option<std::time::Instant>,
     user_bash_counter: u64,
     /// The attached snapshot's bash slot state, consumed by the next
     /// transcript rebuild: a same-session resync runs the `bashFinished` edge off it.
@@ -418,9 +419,7 @@ pub(crate) struct SessionUi {
     /// The editor holds the user's own text (the Tab path's restored browse draft, or the text
     /// ctrl+l opened the picker over), not a typed command partial: a picker apply must keep it.
     picker_restored_draft: bool,
-    suspend_adoption_emitted: bool,
     selection_auto_scroll: Option<SelectionAutoScroll>,
-    selection_adoption_emitted: bool,
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
@@ -432,7 +431,6 @@ pub(crate) struct SessionUi {
     /// The click target under the last plain left press: the release fires it
     /// when it lands on the same row without a drag between.
     pub(crate) pressed_click: Option<PressedClick>,
-    click_adoption_emitted: bool,
 }
 
 /// The reattach outcome for `reattach_after_recovery`: the budget expiry (a queued attach waiting
@@ -720,25 +718,18 @@ impl SessionUi {
         outcome: anyhow::Result<Option<String>>,
         view: &mut AgentView,
     ) {
-        let settled = match outcome {
+        match outcome {
             Ok(Some(text)) => {
                 view.editor.set_text(&text);
                 // The saved draft no longer carries the markers the registry describes; clear it
                 // the way submit does (TS keeps the stale registry: the same latent bug).
                 view.editor
                     .restore_paste_snapshot(crate::editor::EditorPasteSnapshot::default());
-                "applied"
             }
-            Ok(None) => "unchanged",
+            Ok(None) => {}
             Err(error) => {
                 self.error_row(&format!("{error:#}"), view);
-                "failed"
             }
-        };
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.external_editor_used(settled).await;
-            });
         }
         self.dirty = true;
     }
@@ -746,11 +737,6 @@ impl SessionUi {
     /// Whether the `/mcp` view parked an auth request for the loop to spawn.
     pub(crate) fn pending_mcp_auth(&self) -> bool {
         self.pending_mcp_auth.is_some()
-    }
-
-    /// The `tui exit` reason recorded at the point the loop stopped.
-    pub(crate) fn exit_reason(&self) -> &'static str {
-        self.exit_reason
     }
 }
 

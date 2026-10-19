@@ -284,6 +284,10 @@ impl Inner {
             let inner = Arc::downgrade(self);
             let stdin_for_error = stdin;
             tokio::spawn(async move {
+                let _host_requests = HostRequestsOnReaderExit {
+                    inner: inner.clone(),
+                    generation,
+                };
                 let mut reader = BufReader::new(stdout);
                 // A poisoned child's residue must not grow the buffer again before the protocol
                 // repair kills it: keep draining the pipe and discard.
@@ -549,6 +553,27 @@ fn unix_signal_of(status: std::process::ExitStatus) -> Option<i32> {
     crate::platform::process::termination_signal(&status)
 }
 
+/// EOF (including a closed stdout on a still-live kernel) retires native awaiters.
+struct HostRequestsOnReaderExit {
+    inner: std::sync::Weak<Inner>,
+    generation: u64,
+}
+
+impl Drop for HostRequestsOnReaderExit {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            // Validate and abort under the same lock: an old reader must not
+            // cancel a newer kernel's requests between two lock acquisitions.
+            let guarded = lock(&inner.guarded);
+            if guarded.start_generation == self.generation {
+                for task in guarded.host_inflight.values() {
+                    task.abort();
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +602,53 @@ mod tests {
             env.get("PRIME_AGENT_KERNEL_OWNER_PID").map(String::as_str),
             Some(std::process::id().to_string().as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn stale_reader_exit_does_not_cancel_new_generation_host_requests() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (probe_tx, probe_rx) = oneshot::channel();
+        let (alive_tx, alive_rx) = oneshot::channel();
+        let manager = manager();
+        lock(&manager.inner.guarded).start_generation = 1;
+        let cancellation = Arc::new(crate::kernel::cancellation::AbortSignal::new());
+        let work_cancellation = Arc::clone(&cancellation);
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            tokio::select! {
+                () = work_cancellation.cancelled() => {},
+                () = async {
+                    probe_rx.await.unwrap();
+                    let _ = alive_tx.send(());
+                    std::future::pending::<()>().await;
+                } => {},
+            }
+        });
+        lock(&manager.inner.guarded)
+            .host_inflight
+            .insert("new".into(), cancellation);
+        started_rx.await.unwrap();
+        let current = manager.inner.current_generation();
+        drop(HostRequestsOnReaderExit {
+            inner: Arc::downgrade(&manager.inner),
+            generation: current - 1,
+        });
+        probe_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), alive_rx)
+            .await
+            .expect("current task must answer after stale EOF")
+            .expect("stale EOF must not abort the current task");
+        // The matching reader does retire this task; the timeout waits on the
+        // exact join, not a scheduling sleep or a guessed cell attribution.
+        drop(HostRequestsOnReaderExit {
+            inner: Arc::downgrade(&manager.inner),
+            generation: current,
+        });
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        lock(&manager.inner.guarded).host_inflight.remove("new");
     }
 
     #[test]

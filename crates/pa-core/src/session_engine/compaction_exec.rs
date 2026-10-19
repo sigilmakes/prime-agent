@@ -140,6 +140,31 @@ pub async fn complete_summary_call(
     on_delta: Option<SummaryDeltaSink>,
     failure: &'static str,
 ) -> anyhow::Result<SummarySlice> {
+    complete_summary_call_routed(
+        model,
+        api_key,
+        headers,
+        max_tokens,
+        request_messages,
+        on_delta,
+        failure,
+        None,
+    )
+    .await
+}
+
+// Preserve the existing summary call interface; the extra adapter is session-local.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn complete_summary_call_routed(
+    model: &pa_types::ai::Model,
+    api_key: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
+    max_tokens: u64,
+    request_messages: Vec<AgentMessage>,
+    on_delta: Option<SummaryDeltaSink>,
+    failure: &'static str,
+    inference: Option<&std::sync::Arc<super::inference_router::AuxiliaryInference>>,
+) -> anyhow::Result<SummarySlice> {
     let messages = request_messages
         .into_iter()
         .filter_map(|message| match message {
@@ -166,19 +191,39 @@ pub async fn complete_summary_call(
             ..Default::default()
         });
     stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
-    let assistant = match on_delta {
-        None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
-        Some(on_delta) => {
-            // The live path rides the same provider stream: every text delta
-            // forwards to the sink, and the terminal event's message is the
-            // summary; thinking deltas stay off the sink.
-            let mut stream = pa_ai::stream_simple(model, &context, Some(stream_options))?;
-            while let Some(event) = stream.next_event().await {
-                if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event {
-                    on_delta(delta);
+    let assistant = if let Some(inference) = inference {
+        let options = pa_agent::stream::StreamRequestOptions {
+            api_key: stream_options.base.api_key.clone(),
+            headers: stream_options
+                .base
+                .headers
+                .clone()
+                .map(|headers| headers.into_iter().collect()),
+            max_tokens: Some(max_tokens),
+            reasoning: super::provider_adapter::map_thinking_level(
+                pa_types::ai::minimum_reasoning(model)
+                    .unwrap_or(pa_types::ai::ModelThinkingLevel::Off),
+            ),
+            ..Default::default()
+        };
+        inference
+            .complete(model, context, options, on_delta)
+            .await?
+    } else {
+        match on_delta {
+            None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
+            Some(on_delta) => {
+                // The live path rides the same provider stream: every text delta
+                // forwards to the sink, and the terminal event's message is the
+                // summary; thinking deltas stay off the sink.
+                let mut stream = pa_ai::stream_simple(model, &context, Some(stream_options))?;
+                while let Some(event) = stream.next_event().await {
+                    if let pa_types::ai::AssistantMessageEvent::TextDelta { delta, .. } = &event {
+                        on_delta(delta);
+                    }
                 }
+                stream.result().await
             }
-            stream.result().await
         }
     };
     if assistant.stop_reason == pa_types::ai::StopReason::Error {
@@ -355,13 +400,14 @@ pub fn compaction_entry_for(
     harness_state_fingerprint: Option<String>,
 ) -> CompactionEntry {
     CompactionEntry {
+        context_archive: None,
         summary: result.summary.clone(),
         first_kept_entry_id: result.first_kept_entry_id.clone(),
         tokens_before: result.tokens_before,
         details: Some(serde_json::to_value(details).unwrap_or_default()),
         from_hook: Some(false),
         custom_instructions: custom_instructions.map(str::to_string),
-        usage: result.usage,
+        usage: result.usage.clone(),
         harness_digest,
         harness_state_fingerprint,
     }
@@ -444,6 +490,7 @@ mod tests {
     #[test]
     fn compaction_entry_records_the_ts_wire_fields() {
         let usage = pa_types::ai::Usage {
+            rest: pa_types::JsonMap::new(),
             input: 20,
             output: 10,
             cache_read: 80,
@@ -455,7 +502,7 @@ mod tests {
             summary: "the overflow summary".to_string(),
             first_kept_entry_id: "e4".to_string(),
             tokens_before: 214,
-            usage: Some(usage),
+            usage: Some(usage.clone()),
         };
         let details = CompactionDetails {
             read_files: vec!["a.rs".to_string()],
@@ -464,6 +511,7 @@ mod tests {
         assert_eq!(
             compaction_entry_for(&result, &details, Some("focus"), None, None),
             CompactionEntry {
+                context_archive: None,
                 summary: "the overflow summary".to_string(),
                 first_kept_entry_id: "e4".to_string(),
                 tokens_before: 214,
@@ -631,12 +679,14 @@ mod tests {
     #[test]
     fn usage_summing_over_slices() {
         let usage = |input: u64, output: u64, cost: f64| pa_types::ai::Usage {
+            rest: pa_types::JsonMap::new(),
             input,
             output,
             cache_read: 0,
             cache_write: 0,
             total_tokens: input + output,
             cost: pa_types::ai::UsageCost {
+                rest: pa_types::JsonMap::new(),
                 input: pa_types::JsNumber::from(cost),
                 output: 0.0.into(),
                 cache_read: 0.0.into(),

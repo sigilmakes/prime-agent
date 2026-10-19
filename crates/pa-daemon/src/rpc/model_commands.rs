@@ -43,7 +43,7 @@ pub(crate) async fn set_model(
         .find(|candidate| candidate.provider == provider && candidate.id == model_id)
         .cloned()
         .ok_or_else(|| format!("Model not found: {provider}/{model_id}"))?;
-    apply_model_selection(state, &mut registry, &model).await?;
+    let model = apply_model_selection(state, &mut registry, &model).await?;
     Ok(ResponseData::Present(
         serde_json::to_value(&model).unwrap_or(Value::Null),
     ))
@@ -55,8 +55,15 @@ async fn apply_model_selection(
     state: &Arc<RpcState>,
     registry: &mut pa_core::models::ModelRegistry,
     model: &Model,
-) -> Result<(), String> {
-    let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+) -> Result<Model, String> {
+    let model = state
+        .session
+        .handle()
+        .await
+        .engine
+        .session
+        .configure_fresh_ollama_model(model);
+    let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
     // An unresolvable selection refuses the switch BEFORE anything
     // moves: the TS path answers the sign-in/not-found error instead of
     // installing a target that would fail on missing auth.
@@ -82,23 +89,23 @@ async fn apply_model_selection(
             .map_err(|error| error.to_string())? = Some(provider_target);
         let agent = handle.engine.session.agent();
         let agent_model: pa_agent::types::Model =
-            json_round_trip(model).ok_or_else(|| "model conversion failed".to_string())?;
+            json_round_trip(&model).ok_or_else(|| "model conversion failed".to_string())?;
         agent.set_model(agent_model).await;
         // TS `_getThinkingLevelForModelSwitch`: keep the level when the
         // new model supports it, else clamp.
         let current = agent.state().await.thinking_level;
         let requested = pa_core::session_engine::provider_adapter::model_thinking_level(current);
-        let clamped = pa_ai::models::clamp_thinking_level(model, requested);
+        let clamped = pa_ai::models::clamp_thinking_level(&model, requested);
         agent
             .set_thinking_level(
                 pa_core::session_engine::provider_adapter::map_thinking_level(clamped),
             )
             .await;
-        handle.model.clone_from(model);
+        handle.model.clone_from(&model);
         handle.api_key.clone_from(&resolved.api_key);
         // The turn-boundary model facts follow the switch: `model.info` and
         // the usage estimate's context window report the model NOW running.
-        handle.engine.update_model_facts(model);
+        handle.engine.update_model_facts(&model);
         let persistence = handle.engine.session.shared_persistence();
         let mut manager = persistence.lock().await;
         let _ = manager.append_model_change(&model.provider, &model.id);
@@ -108,7 +115,7 @@ async fn apply_model_selection(
     settings
         .set_default_model_and_provider(&model.provider, &model.id)
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(model)
 }
 
 /// `cycle_model` (forward only on this wire): cycle within the
@@ -135,7 +142,7 @@ pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, S
         None => 0,
     };
     let next = available[index].clone();
-    apply_model_selection(state, &mut registry, &next).await?;
+    let next = apply_model_selection(state, &mut registry, &next).await?;
     let level = {
         let handle = state.session.handle().await;
         let agent = handle.engine.session.agent();

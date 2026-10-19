@@ -1217,3 +1217,45 @@ fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
         "the agent slot re-syncs to the restored level"
     );
 }
+
+#[test]
+fn a_lazy_model_switch_roundtrip_preserves_the_requested_level() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir,
+        provider: Some("battery".to_string()),
+        model: Some("mock-reason".to_string()),
+        api_key: None,
+        thinking: Some(pa_types::ai::ModelThinkingLevel::High),
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    assert_eq!(engine.effective_thinking_level().as_deref(), Some("high"));
+    for (model, expected) in [("mock-plain", "off"), ("mock-reason", "high")] {
+        assert!(engine.switch_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some(model.to_string()),
+            api_key: None,
+            thinking: None,
+        }));
+        assert_eq!(engine.effective_thinking_level().as_deref(), Some(expected));
+        assert_eq!(
+            engine.current_selection().thinking,
+            Some(pa_types::ai::ModelThinkingLevel::High),
+            "clamping must not overwrite the requested level"
+        );
+        assert!(
+            engine.session.blocking_lock().is_none(),
+            "switching stays lazy"
+        );
+    }
+}

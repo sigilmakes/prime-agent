@@ -1,12 +1,12 @@
-//! The attach surface: the telemetry attach guard and the chunked-snapshot
+//! The attach surface: legacy opt-out compatibility and the chunked-snapshot
 //! attach stream (begin/chunk/end) against live TS goldens.
 
 use super::*;
 
-/// A telemetry-disabled client may not attach to a telemetry-enabled
-/// worker (TS error text); attaching to a disabled worker stays allowed.
+/// New workers always carry the legacy opt-out marker, including a worker
+/// created without one. Opted-out clients can attach to these workers.
 #[test]
-fn telemetry_disabled_attach_guard_matches_ts_error() {
+fn legacy_telemetry_disabled_attach_is_accepted() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
@@ -45,14 +45,10 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
             "telemetryDisabled": true,
         }),
     );
-    let rejected = client.read_response("ta1");
+    let attached = client.read_response("ta1");
     assert_eq!(
-        rejected["success"], false,
-        "attach must be refused: {rejected}"
-    );
-    assert_eq!(
-        rejected["error"],
-        "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry."
+        attached["success"], true,
+        "legacy opt-out attach failed: {attached}"
     );
 
     client.send_command(

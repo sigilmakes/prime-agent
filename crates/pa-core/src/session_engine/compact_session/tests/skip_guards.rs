@@ -17,6 +17,7 @@ async fn execute_compaction_with_pre_aborted_signal_never_runs_the_summarizer() 
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -25,7 +26,6 @@ async fn execute_compaction_with_pre_aborted_signal_never_runs_the_summarizer() 
                 ..Default::default()
             },
             abort: Some(&signal),
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,
@@ -70,6 +70,7 @@ async fn execute_compaction_with_late_abort_cancels_before_the_commit() {
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -78,7 +79,6 @@ async fn execute_compaction_with_late_abort_cancels_before_the_commit() {
                 ..Default::default()
             },
             abort: Some(&signal),
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,
@@ -107,12 +107,12 @@ async fn execute_compaction_skips_short_sessions() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
             settings: super::super::compaction::CompactionSettings::default(),
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,
@@ -148,6 +148,7 @@ async fn execute_compaction_skips_when_already_compacted() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -156,7 +157,6 @@ async fn execute_compaction_skips_when_already_compacted() {
                 ..Default::default()
             },
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,

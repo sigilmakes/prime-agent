@@ -40,19 +40,22 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 ## Install
 
-Install the latest stable version with the one-command installer:
+This is Willow's downstream Rust fork. Mnemosyne is the source of truth;
+GitHub is its mirror. It preserves native Ollama Cloud support, provider catalog
+refresh, local transcript history, and the fork's no-vendor-reporting policy.
+
+Build the complete application with its Python runtime, skills, and catalogs:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+nix build
+./result/bin/prime-agent
 ```
 
-On Windows, install from PowerShell:
-
-```powershell
-irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
-```
-
-The Windows installer downloads the latest stable Windows x64 build and verifies its checksum before installation.
+Use `nix develop` for the pinned development tools. On Willow's NixOS fleet,
+`/config` owns installation and pins this repository through `prime-agent-src`.
+Update that pin with the guarded fleet updater and deploy through the fleet pipeline;
+do not use upstream installers, global npm packages, or self-update for a Nix-owned
+installation.
 
 ## Why Prime Agent
 

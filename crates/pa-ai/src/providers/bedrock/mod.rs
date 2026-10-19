@@ -17,8 +17,8 @@ mod h2;
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
-    AssistantMessageEventWriter,
+    create_assistant_message_event_stream, create_provider_event_stream, AssistantMessageEvent,
+    AssistantMessageEventStream, AssistantMessageEventWriter,
 };
 use crate::providers::bedrock::auth::{resolve_credentials, resolve_endpoint, sigv4_headers};
 use crate::providers::bedrock::convert::{
@@ -244,9 +244,16 @@ pub fn stream_bedrock(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: API_BEDROCK_CONVERSE_STREAM.to_string(),
@@ -266,10 +273,12 @@ pub fn stream_bedrock(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -286,14 +295,19 @@ pub fn stream_bedrock(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -657,7 +671,9 @@ async fn run_stream(
                     writer,
                     &mut state,
                     request_id.as_ref(),
-                ) {
+                )
+                .await
+                {
                     Ok(()) => {}
                     Err(error) => {
                         stream_error = Some(error);
@@ -814,6 +830,10 @@ pub struct BedrockConverseStreamProvider;
 impl Provider for BedrockConverseStreamProvider {
     fn api(&self) -> &str {
         API_BEDROCK_CONVERSE_STREAM
+    }
+
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
     }
 
     fn stream(

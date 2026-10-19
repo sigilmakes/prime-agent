@@ -1,64 +1,66 @@
+//! Legacy TypeScript state belongs to its runtime and to rollback snapshots.
+//! Ordinary Rust startup must not delete or migrate it, even with a separate socket.
+
 use std::path::Path;
 
-pub(crate) fn sweep_ts_era_leftovers(agent_dir: &Path) -> usize {
-    let mut removed = 0;
-    for target in [
-        agent_dir.join("prime-inference-models-cache.json"),
-        agent_dir.join("agent-traces-outbox.json"),
-        agent_dir.join("worker-snapshot-cache"),
-    ] {
-        let gone = match std::fs::remove_file(&target) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => std::fs::remove_dir_all(&target).is_ok(),
-        };
-        removed += usize::from(gone);
-    }
-    removed
+/// Retained boot hook: legacy state is deliberately left untouched.
+/// Cleanup requires a separate, explicitly authorized maintenance operation.
+pub(crate) fn sweep_ts_era_leftovers(_agent_dir: &Path) -> usize {
+    0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
-    #[test]
-    fn removes_the_ts_leftovers_and_spares_the_rust_read_siblings() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let agent_dir = dir.path().join("agent");
-        let models_dir = agent_dir.join("models");
-        std::fs::create_dir_all(&models_dir).expect("models dir");
-        let outbox_dir = agent_dir.join("agent-traces-outbox");
-        std::fs::create_dir_all(&outbox_dir).expect("outbox dir");
-        std::fs::write(agent_dir.join("prime-inference-models-cache.json"), "{}").expect("stale");
-        std::fs::write(models_dir.join("prime-inference-models-cache.json"), "{}")
-            .expect("live cache");
-        std::fs::write(agent_dir.join("agent-traces-outbox.json"), "{}").expect("outbox marker");
-        std::fs::write(outbox_dir.join("hash.json"), "{}").expect("outbox entry");
-        std::fs::write(agent_dir.join("cron-jobs.json"), "{}").expect("cron fallback");
-        std::fs::create_dir_all(agent_dir.join("harness")).expect("harness dir");
-        std::fs::write(agent_dir.join("harness/refinements.jsonl"), "{}").expect("history");
-
-        assert_eq!(sweep_ts_era_leftovers(&agent_dir), 2);
-
-        assert!(!agent_dir.join("prime-inference-models-cache.json").exists());
-        assert!(!agent_dir.join("agent-traces-outbox.json").exists());
-        assert!(models_dir
-            .join("prime-inference-models-cache.json")
-            .exists());
-        assert!(outbox_dir.join("hash.json").exists());
-        assert!(agent_dir.join("cron-jobs.json").exists());
-        assert!(agent_dir.join("harness/refinements.jsonl").exists());
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, files);
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
     }
 
     #[test]
-    fn removes_the_worker_snapshot_cache_dir() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    fn ordinary_boot_hook_preserves_legacy_runtime_and_shared_state() {
+        let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");
-        let cache = agent_dir.join("worker-snapshot-cache");
-        std::fs::create_dir_all(cache.join("u-1")).expect("cache dir");
-        std::fs::write(cache.join("u-1/snapshot.json"), "{}").expect("snapshot");
-
-        assert_eq!(sweep_ts_era_leftovers(&agent_dir), 1);
-        assert!(!cache.exists());
+        for (relative, contents) in [
+            ("prime-inference-models-cache.json", "legacy catalog"),
+            (
+                "models/prime-inference-models-cache.json",
+                "current catalog",
+            ),
+            ("worker-snapshot-cache/u-1/snapshot.json", "legacy snapshot"),
+            ("kernel-venv/pyvenv.cfg", "legacy interpreter"),
+            ("kernel-venv/.bootstrap-version", "legacy runtime identity"),
+            ("agent-traces-outbox.json", "legacy inert outbox marker"),
+            ("agent-traces-outbox/hash.json", "legacy inert outbox entry"),
+            ("cron-jobs.json", "schedule"),
+            ("harness/refinements.jsonl", "retained local history"),
+        ] {
+            let path = agent_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let before = snapshot(&agent_dir);
+        assert_eq!(sweep_ts_era_leftovers(&agent_dir), 0);
+        assert_eq!(snapshot(&agent_dir), before);
+        // Repeated startup is also non-destructive.
+        assert_eq!(sweep_ts_era_leftovers(&agent_dir), 0);
+        assert_eq!(snapshot(&agent_dir), before);
     }
 }

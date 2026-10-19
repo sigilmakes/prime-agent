@@ -11,15 +11,6 @@ impl SessionUi {
         view.queue_selected = self.queue_selection.selected().cloned();
     }
 
-    /// Report a queue-edit adoption event (`tui queue edited`), fire-and-forget.
-    fn emit_queue_edit(&self, action: &'static str) {
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.queue_edited(action).await;
-            });
-        }
-    }
-
     /// Move the selection one parked message older/newer and show it in the editor. Entering the
     /// browse stashes the editor draft; reaching the draft again restores it.
     pub(crate) fn browse_queue_selection(
@@ -27,17 +18,11 @@ impl SessionUi {
         direction: QueueBrowseDirection,
         view: &mut AgentView,
     ) {
-        let entering = !self.queue_selection.is_browsing();
         let text = self
             .queue_selection
             .browse(&view.queued, &view.editor.get_text(), direction);
         if let Some(text) = text {
             view.editor.set_text(&text);
-        }
-        // Entering the browse (first selection of a parked message) is the
-        // queue-edit adoption signal; per-arrow moves are not.
-        if entering && self.queue_selection.is_browsing() {
-            self.emit_queue_edit("select");
         }
         self.sync_queue_selection(view);
     }
@@ -98,7 +83,6 @@ impl SessionUi {
             .await;
         match status {
             Ok(Some(status)) if status == "applied" => {
-                self.emit_queue_edit("reorder");
                 crate::queued::mirror_lane_move(
                     &mut view.queued,
                     selected.lane,
@@ -147,7 +131,6 @@ impl SessionUi {
             .await;
         match status {
             Ok(Some(status)) if status == "applied" => {
-                self.emit_queue_edit(if trimmed.is_empty() { "delete" } else { "edit" });
                 if !trimmed.is_empty() {
                     view.editor.add_to_history(trimmed);
                 }

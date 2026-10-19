@@ -14,6 +14,7 @@ async fn execute_compaction_persists_and_rebuilds() {
     let result = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: Some("focus on the goal"),
@@ -22,7 +23,6 @@ async fn execute_compaction_persists_and_rebuilds() {
                 ..Default::default()
             },
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,
@@ -106,12 +106,12 @@ async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() 
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
             settings,
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,
@@ -188,6 +188,7 @@ async fn execute_compaction_streams_summary_deltas_to_the_sink() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -196,7 +197,6 @@ async fn execute_compaction_streams_summary_deltas_to_the_sink() {
                 ..Default::default()
             },
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: Some(sink),
@@ -292,6 +292,7 @@ async fn split_turn_compaction_streams_in_final_order_and_converges() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -300,7 +301,6 @@ async fn split_turn_compaction_streams_in_final_order_and_converges() {
                 ..Default::default()
             },
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: Some(sink),
@@ -344,151 +344,6 @@ async fn split_turn_compaction_streams_in_final_order_and_converges() {
     registration.unregister();
 }
 
-/// The harness digest snapshot rides the durable compaction row: the disk
-/// read at the commit stays fresh, the digest never flows through the
-/// summarizer, and the rebuilt context leads with the digest block.
-#[tokio::test]
-async fn execute_compaction_attaches_harness_digest_snapshot() {
-    let registration = faux_registration();
-    let model = registration.get_model();
-    let tmp = tempfile::tempdir().unwrap();
-    let mut session = session_with_turns(tmp.path(), 3);
-    let global_dir = tmp.path().join("agent").join("harness");
-    let local_dir = tmp
-        .path()
-        .join("session-artifacts")
-        .join("s1")
-        .join("harness");
-    // Inputs captured before the run (the live-session half); no
-    // harness state exists yet.
-    let inputs = super::super::harness_digest::HarnessDigestInputs {
-        context: super::super::harness_digest::HarnessDigestContext {
-            global_dir: global_dir.clone(),
-            local_dir: Some(local_dir.clone()),
-            include_ipython: true,
-            include_shell_examples: true,
-            include_refine: true,
-        },
-        terms: super::super::harness_digest::digest_query_terms(None, &[]),
-    };
-    // Harness state written after the inputs were captured — the
-    // digest must still see it (fresh disk read at the commit).
-    let mut state = crate::refinement::empty_harness_state();
-    state
-        .entries
-        .get_mut(&crate::refinement::RefinementKind::Memory)
-        .unwrap()
-        .insert(
-            "compaction_test_memory".to_string(),
-            crate::refinement::HarnessEntry {
-                id: "compaction_test_memory".to_string(),
-                kind: crate::refinement::RefinementKind::Memory,
-                title: "Compaction test memory".to_string(),
-                content: "Written before compaction.".to_string(),
-                path: "general".to_string(),
-                scope: Some(crate::refinement::HarnessScope::Local),
-                reference: serde_json::Map::default(),
-                arguments: serde_json::Map::default(),
-                metadata: serde_json::Map::default(),
-                source: "refine".to_string(),
-                created_at: "2026-09-07T00:00:00.000Z".to_string(),
-                updated_at: "2026-09-07T00:00:00.000Z".to_string(),
-                version: 1,
-            },
-        );
-    crate::refinement::save_harness_state(&local_dir, &state).unwrap();
-    let result = execute_compaction(
-        &mut session,
-        CompactOptions {
-            model,
-            api_key: None,
-            custom_instructions: None,
-            settings: super::super::compaction::CompactionSettings {
-                keep_recent_tokens: 20,
-                ..Default::default()
-            },
-            abort: None,
-            harness_digest: Some(inputs),
-            auxiliary: None,
-            semantic_edges: None,
-            summary_delta: None,
-        },
-    )
-    .await
-    .unwrap();
-    let CompactOutcome::Ran(run) = result else {
-        panic!("expected the compaction to run");
-    };
-    let digest = run
-        .entry
-        .harness_digest
-        .as_deref()
-        .expect("digest snapshot");
-    assert!(digest.contains("Compaction test memory"));
-    assert!(!run.entry.summary.contains("# Continual Harness State"));
-    // The durable row carries the wire shape
-    // (`harnessDigest`/`harnessStateFingerprint`): one read feeds both.
-    let serialized = serde_json::to_value(&run.entry).unwrap();
-    assert_eq!(
-        serialized
-            .get("harnessDigest")
-            .and_then(|value| value.as_str()),
-        Some(digest)
-    );
-    let fingerprint = run
-        .entry
-        .harness_state_fingerprint
-        .as_deref()
-        .expect("digest state fingerprint");
-    assert_eq!(
-        serialized
-            .get("harnessStateFingerprint")
-            .and_then(|value| value.as_str()),
-        Some(fingerprint)
-    );
-    // Rewriting the state (same content, new timestamps) must not
-    // move the fingerprint; a real content change must.
-    let inputs = super::super::harness_digest::HarnessDigestInputs {
-        context: super::super::harness_digest::HarnessDigestContext {
-            global_dir,
-            local_dir: Some(local_dir.clone()),
-            include_ipython: true,
-            include_shell_examples: true,
-            include_refine: true,
-        },
-        terms: super::super::harness_digest::digest_query_terms(Some("fresh terms"), &[]),
-    };
-    let re_rendered = inputs.render_with_fingerprint();
-    assert_eq!(re_rendered.state_fingerprint, fingerprint);
-    state
-        .entries
-        .get_mut(&crate::refinement::RefinementKind::Memory)
-        .unwrap()
-        .get_mut("compaction_test_memory")
-        .unwrap()
-        .content
-        .push_str(" changed");
-    crate::refinement::save_harness_state(&local_dir, &state).unwrap();
-    let changed = inputs.render_with_fingerprint();
-    assert_ne!(changed.state_fingerprint, fingerprint);
-    let rebuilt = rebuilt_context_after_compaction(&session);
-    assert!(matches!(&rebuilt[0], AgentMessage::CompactionSummary(_)));
-    let provider_messages = super::super::messages::convert_to_llm(&rebuilt);
-    let AgentMessage::User(user) = &provider_messages[0] else {
-        panic!("expected compaction head user message");
-    };
-    let text = user.content.text();
-    let digest_at = text
-        .find("[harness-digest]")
-        .expect("digest block leads the compaction head");
-    let summary_at = text
-        .find("[compaction-summary]")
-        .expect("compaction summary follows");
-    assert!(digest_at < summary_at);
-    assert!(text.contains("Compaction test memory"));
-    registration.unregister();
-}
-
 /// An error-stop summarizer response fails the compaction, never an
 /// empty-summary success.
 #[tokio::test]
@@ -510,6 +365,7 @@ async fn execute_compaction_fails_on_an_error_summarizer_response() {
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -518,7 +374,6 @@ async fn execute_compaction_fails_on_an_error_summarizer_response() {
                 ..Default::default()
             },
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,
@@ -549,6 +404,7 @@ async fn durable_compaction_row_carries_the_ts_record() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            inference: None,
             model,
             api_key: None,
             custom_instructions: None,
@@ -557,7 +413,6 @@ async fn durable_compaction_row_carries_the_ts_record() {
                 ..Default::default()
             },
             abort: None,
-            harness_digest: None,
             auxiliary: None,
             semantic_edges: None,
             summary_delta: None,

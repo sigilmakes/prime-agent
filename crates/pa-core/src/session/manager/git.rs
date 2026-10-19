@@ -51,5 +51,6 @@ pub fn capture_git_context(cwd: &Path) -> Option<GitContext> {
         }),
         commit,
         branch,
+        rest: pa_types::JsonMap::new(),
     })
 }

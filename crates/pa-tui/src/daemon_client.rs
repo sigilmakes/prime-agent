@@ -34,9 +34,22 @@ pub use errors::{
 };
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MODEL_REFRESH_REQUEST_TIMEOUT_MS: u64 = 120_000;
 /// Requests whose completion is bounded by the turn itself
 /// (`prompt_and_wait`, `wait_for_idle`) — a long turn cannot expire them.
 pub const LONG_RUNNING_REQUEST_TIMEOUT_MS: u64 = 600_000;
+fn request_timeout_ms(command: &DaemonCommand) -> u64 {
+    match command {
+        DaemonCommand::PromptAndWait { .. } | DaemonCommand::WaitForIdle { .. } => {
+            LONG_RUNNING_REQUEST_TIMEOUT_MS
+        }
+        DaemonCommand::RefreshModels { .. } | DaemonCommand::RefreshAllModels { .. } => {
+            MODEL_REFRESH_REQUEST_TIMEOUT_MS
+        }
+        _ => DEFAULT_REQUEST_TIMEOUT_MS,
+    }
+}
+
 const CONNECT_TIMEOUT_MS: u64 = 3_000;
 /// Hello handshake budget. A daemon loading a very large session can take
 /// well over the 3s TS default to greet.
@@ -544,12 +557,7 @@ impl DaemonClient {
     ///
     /// Returns `Err` like [`Self::request_with_timeout`].
     pub async fn request(&self, command: DaemonCommand) -> Result<DaemonResponse> {
-        let timeout_ms = match &command {
-            DaemonCommand::PromptAndWait { .. } | DaemonCommand::WaitForIdle { .. } => {
-                LONG_RUNNING_REQUEST_TIMEOUT_MS
-            }
-            _ => DEFAULT_REQUEST_TIMEOUT_MS,
-        };
+        let timeout_ms = request_timeout_ms(&command);
         self.request_with_timeout(command, timeout_ms).await
     }
 
@@ -568,6 +576,9 @@ impl DaemonClient {
         command: DaemonCommand,
         timeout_ms: u64,
     ) -> Result<DaemonResponse> {
+        if self.direct_link_for(&command).is_none() {
+            self.check_optional_command(&command)?;
+        }
         if let Some(link) = self.direct_link_for(&command) {
             let id = format!(
                 "direct_{}",
@@ -596,9 +607,8 @@ impl DaemonClient {
     /// Returns `Err` when the request fails or times out, or carries `success: false`.
     pub async fn request_ok_via_supervisor(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
-        let response = self
-            .request_supervisor(command, DEFAULT_REQUEST_TIMEOUT_MS)
-            .await?;
+        let timeout_ms = request_timeout_ms(&command);
+        let response = self.request_supervisor(command, timeout_ms).await?;
         response_data_or_error(&name, response)
     }
 
@@ -645,6 +655,7 @@ impl DaemonClient {
         id: &str,
         timeout_ms: u64,
     ) -> Result<DaemonResponse> {
+        self.check_optional_command(&command)?;
         if *self.reader_dead_rx.borrow() {
             return Err(self.dead_reader_error());
         }
@@ -699,12 +710,63 @@ impl DaemonClient {
         response_data_or_error(&name, response)
     }
 
+    /// Native commands require a capable worker or a supervisor that gates its actual worker.
+    #[must_use]
+    pub fn supports_plugin_commands(&self) -> bool {
+        if let Some(link) = self.direct.live_link() {
+            return link.supports_optional_command("plugin_command");
+        }
+        self.check_optional_command(&DaemonCommand::PluginCommand {
+            id: None,
+            active_session_id: String::new(),
+            text: String::new(),
+            rest: Map::default(),
+        })
+        .is_ok()
+    }
+
+    /// Refuse optional additions before a request can reach either socket route.
+    fn check_optional_command(&self, command: &DaemonCommand) -> Result<()> {
+        use pa_types::daemon::compatibility::{command_compatibility, supports_optional_command};
+        let name = command_type_debug(command);
+        if command_compatibility(&name).is_none() {
+            return Ok(());
+        }
+        let capabilities: Vec<String> = self
+            .hello
+            .get("serverCapabilities")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if self.hello["protocol"]["name"] != DAEMON_PROTOCOL_NAME
+            || self.hello["protocol"]["version"].as_u64() != Some(DAEMON_PROTOCOL_VERSION)
+            || !supports_optional_command(
+                &name,
+                self.hello.get("schemaRevision").and_then(Value::as_u64),
+                &capabilities,
+            )
+        {
+            if name == "plugin_command" {
+                return Err(anyhow!("The running Prime Agent daemon cannot execute native plugin commands; restart or update it and try again."));
+            }
+            return Err(anyhow!("The running Prime Agent daemon cannot refresh models; restart or update it and try again."));
+        }
+        Ok(())
+    }
+
     /// The live direct link that may serve `command` (TS `servesDirect`):
     /// the command must be session-plane and address the link's session.
     fn direct_link_for(&self, command: &DaemonCommand) -> Option<DirectLink> {
         let link = self.direct.live_link()?;
         let command_type = command_type_debug(command);
-        if !is_session_plane_daemon_command(&command_type) {
+        // Each socket route must negotiate against the peer that serves it.
+        if (pa_types::daemon::compatibility::command_compatibility(&command_type).is_some()
+            && !link.supports_optional_command(&command_type))
+            || !is_session_plane_daemon_command(&command_type)
+        {
             return None;
         }
         let session = serde_json::to_value(command).ok().and_then(|payload| {

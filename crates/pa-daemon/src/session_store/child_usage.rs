@@ -105,7 +105,7 @@ impl SessionFile {
             );
             let payload: ChildUsageAttributionEntry = serde_json::from_value(entry.fields.clone())?;
             ensure!(
-                child_usage_identity_matches(&payload, target_id, child_usage, origin)?,
+                child_usage_identity_matches(&payload, target_id, &child_usage, origin)?,
                 "attribution ID collision"
             );
             let current = self.attribution_target_usage(target_id)?;
@@ -125,7 +125,7 @@ impl SessionFile {
             fields: serde_json::to_value(ChildUsageAttributionEntry {
                 target_id: target_id.to_owned(),
                 child_usage,
-                aggregate_usage: aggregate,
+                aggregate_usage: aggregate.clone(),
                 origin,
             })?,
         };
@@ -384,7 +384,6 @@ impl SessionFile {
                     }
                     full.leaf_id.clone_from(&self.leaf_id);
                     full.lease.clone_from(&self.lease);
-                    full.trace_upload.clone_from(&self.trace_upload);
                     full.child_usage_recovery
                         .clone_from(&self.child_usage_recovery);
                     full.anthropic_warning_shown = self.anthropic_warning_shown;
@@ -427,9 +426,6 @@ impl SessionFile {
                     "attribution confirmation file changed"
                 );
                 self.child_usage_recovery.pending = None;
-                if let Some(traces) = &self.trace_upload {
-                    traces.persisted(&self.path);
-                }
                 // Retain Created until its own report receives acknowledgment.
             }
             Ok(())

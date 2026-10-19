@@ -1,6 +1,6 @@
 //! Headless e2e for the mouse-wheel scroll surface (TS
-//! `handleFullscreenInput`): wheel up/down scroll the transcript three
-//! lines per turn, the wheel is consumed without scrolling while a
+//! `handleFullscreenInput`): wheel up/down scroll the transcript one
+//! line per turn, the wheel is consumed without scrolling while a
 //! picker owns the frame, and tracking-off reports are consumed either way.
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
@@ -18,6 +18,9 @@
 #![allow(clippy::large_futures)]
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
+
+#[path = "support/personalization_env.rs"]
+mod personalization_env;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -239,12 +242,9 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -258,10 +258,8 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
 /// process-global.
 fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> Vec<String> {
     let _guard = run_lock();
-    // The ambient TMUX variable shifts the paused-frame geometry the assertions reason about; scrub
-    // it so the run is the same inside tmux and out.
-    std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
+    let _environment = personalization_env::IsolatedEnv::new(dir.path());
     let socket = dir.path().join("tui.sock");
     let supervisor = MockSupervisor::bind(&socket);
     let handle = std::thread::spawn(move || supervisor.serve());
@@ -289,24 +287,8 @@ fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> Vec<String> {
 /// from the window; wheel-down scrolls back, and reaching the bottom resumes following.
 #[test]
 fn wheel_turns_scroll_the_transcript() {
-    let steps = vec![
-        HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        // Eighteen lines up clears the bottom rows of the tail (each user/assistant pair renders
-        // several rows).
-        HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        // Wheel-down turns scroll back: following resumes (extra turns clamp at the bottom).
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-        HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
-    ];
+    let mut steps = vec![HeadlessStep::Mouse(WHEEL_UP.to_string()); 18];
+    steps.extend(vec![HeadlessStep::Mouse(WHEEL_DOWN.to_string()); 19]);
     let frames = run_plan(steps, true);
     assert!(!frames.is_empty(), "frames were captured");
     let all = frames.join("\n");
@@ -388,4 +370,33 @@ fn wheel_reports_are_consumed_when_tracking_is_disabled() {
         tail.contains("row 38"),
         "the tail frame stayed at the bottom:\n{tail}"
     );
+}
+
+/// Dispatch decoded terminal reports through `SessionUi` and compare the actual painted rows.
+#[test]
+fn each_wheel_report_moves_exactly_one_rendered_row() {
+    let frames = run_plan(
+        vec![
+            HeadlessStep::ScrollTop,
+            HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
+            HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
+            HeadlessStep::Mouse(WHEEL_UP.to_string()),
+        ],
+        true,
+    );
+    let paused: Vec<Vec<&str>> = frames
+        .iter()
+        .filter(|frame| frame.contains("to follow"))
+        .map(|frame| frame.lines().collect())
+        .collect();
+    assert_eq!(paused.len(), 4, "one frame per scroll: {frames:#?}");
+    // Ignore top chrome and the bottom follow-hint row. Distinct content in the window
+    // makes a three-row mutant fail rather than accepting blank padding as movement.
+    let top = &paused[0][1..16];
+    let down = &paused[1][1..16];
+    assert!(top.iter().any(|row| row.contains("row 0")));
+    assert_ne!(top, down);
+    assert_eq!(&top[1..], &down[..down.len() - 1]);
+    assert_eq!(paused[1], paused[3], "up reverses one down report");
+    assert_ne!(paused[1], paused[2]);
 }

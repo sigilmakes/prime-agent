@@ -1,0 +1,16 @@
+Snapcompact source adapted from https://github.com/can1357/oh-my-pi
+Revision: 8cd716920d5f963f1bcd5ba6e9d98a3fee0c3b5b
+Rust renderer: crates/pi-natives/src/snapcompact.rs
+Serialization/layout design: packages/snapcompact/src/snapcompact.ts
+Modifications: removed NAPI, bounded native frame interface and archive replay.
+See UPSTREAM-MIT for Mario Zechner, Can Bölük, and Stencil Labs attribution.
+X.org BDF and Unscii pixel fonts: public domain; original font headers retained.
+Silver.ttf is unmodified. Silver by Poppy Works, Wolfgang Wozniak.
+Major contributors: Itou Hiro (PixelMPlus), leedheo (DOSGothic), ぶち (Buchidot).
+Source: https://poppyworks.itch.io/silver
+License: CC BY 4.0 https://creativecommons.org/licenses/by/4.0/
+See Silver.LICENSE and CC-BY-4.0.txt. This notice and licenses must accompany installed binaries
+which embed these fonts, not just source distributions.
+
+Full CC BY4.0 legal text retrieved from SPDX license-list-data:
+https://raw.githubusercontent.com/spdx/license-list-data/main/text/CC-BY-4.0.txt

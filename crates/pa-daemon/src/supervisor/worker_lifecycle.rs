@@ -106,7 +106,6 @@ impl Supervisor {
             no_session,
             name,
             config,
-            telemetry_disabled,
             runtime_metadata,
             env,
             launch_env,
@@ -329,9 +328,9 @@ impl Supervisor {
             root_session_id: None,
             session_file: session_path.clone(),
             session_dir: session_dir.clone(),
-            // TS main.ts `telemetryDisabled`: only ever `Some(true)`
-            // (the enabled case stays absent on the wire).
-            telemetry_disabled: telemetry_disabled.and(Some(true)),
+            // Every new worker is reporter-free. Keep the legacy opt-out
+            // marker so older supervisors and clients can recognize it.
+            telemetry_disabled: Some(true),
             created_at: now.clone(),
             updated_at: now,
             lifecycle: DaemonWorkerLifecycle::Starting,
@@ -1004,7 +1003,7 @@ impl Supervisor {
 
 /// The real graceful-stop transport (spec §5 `Stopping`): the routed
 /// `shutdown` request - the worker's handler is the flush barrier (it
-/// persists the recovery journal and finalizes telemetry before replying) -
+/// persists the recovery journal before replying) -
 /// and a pid/start-id liveness poll for the exit wait (a foreign process
 /// cannot be waited on directly). The stop is marked intentional before the
 /// request so the monitor never races an exit into a crash-restart.

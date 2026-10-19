@@ -1,57 +1,49 @@
 ---
 name: factory
-description: Run state-machine workflows of spawned child agents: store a validated machine or dag spec as a continual-harness factory entry (rlm.harness.create_factory), then run, watch, stop, and resume it through rlm.factory. For the full authoring reference and API guide, call rlm.factory.help() in the kernel.
+description: >-
+    Run and monitor state-machine workflows of child agents. Use when the user wants fan-out, joins, bounded review loops, or progress control through rlm.factory.
 ---
 
 # Factory
 
-The factory runs state-machine workflows of spawned child agents. A stored
-factory entry — harness kind `factory`, written with
-`rlm.harness.create_factory` — declares the machine: states, each backed by
-a subagent spec, plus guarded transitions between them. The spec validates
-at write time (machine form, or `dag` sugar that compiles to one; pass
-exactly one), and an invalid spec is never stored.
-`await rlm.factory.run('<spec_id>')` then spawns each state's subagent as an
-ordinary child, feeds captured outputs into the successors' prompts, and
-drives the run to quiescence in a background kernel task — the call
-returns immediately and the run continues after the model turn ends. Use
-it when a workflow needs shape: fan-out, bounded loops (review/fix until a
-verdict approves), joins, or one child per list item.
+Use the pre-imported `rlm.factory` namespace to run machines from the machine
+library. A machine defines states, child-agent prompts, and transitions.
 
-**For the full authoring reference and API guide — states, ports, guards,
-joins, foreach, residents, budgets and policies, and the `rlm.factory`
-run/status/stop/resume/graph/watch calls with worked examples — call
-`rlm.factory.help()` in the kernel.** The guide lands with the factory-core
-PR; on builds without it, the module docstring in
-`prime-agent-runtime/src/rlm/factory.py` is the source of truth.
+## Start a workflow
 
-## The opt-in gate
+1. Inspect a library `MACHINE.md` to choose a machine. To read the embedded
+   reference, call `print(rlm.factory.help())` synchronously; it works before
+   Factory is enabled. That reference also covers custom persistence adapters.
+   Use the library workflow and exact public methods below for this session.
+2. Factory is disabled by default. Ask the user to enable `factory.enabled`
+   before running or monitoring a workflow. The six async methods below refuse
+   with `the factory is disabled; run /factory on to enable it` while it is off.
+3. Choose an existing library machine. Start it with
+   `run = await rlm.factory.run("review-sweep", name="review")`.
+   `run` validates the machine and returns a run descriptor. A background kernel
+   task continues the workflow; finish the turn instead of polling in a loop.
+4. Save `run["run_id"]`. On a later turn, inspect its status or wait for a bounded
+   change. A paused run needs an explicit resume decision. Stop the run when the
+   user asks to cancel its children.
 
-The factory ships disabled. `rlm.factory.help()` answers while it is off
-(the authoring guide stays readable before opting in), but every other
-`rlm.factory` call and every factory harness write refuses with one
-message: `the factory is disabled; run /factory on to enable it`. The
-user turns it on with `/factory on` in the client (`/factory off`
-disables it again — refused while the session still has live runs, and
-on a lane-advertising client while the live-run count cannot be read, so
-an active factory never loses its stop path, `/factory status` reports
-it), which persists the
-`factory.enabled` setting in the agent dir's settings.json — the same
-setting the daemon's `factory_activity` lane advertisement reads, so the
-TUI's factory dock group and page surface only on a client started while
-the factory is enabled. If a call refuses with that message, tell the
-user to run `/factory on` and restart the client.
+## Public methods
 
-## Discovering machines
+All methods except `help` are async. Await each call.
 
-- The machine library: machines are `MACHINE.md` files, one directory
-  per machine — the bundled seeds ship inside the runtime package (wheel
-  package data, `rlm/machines/<name>/MACHINE.md`; `PRIME_AGENT_MACHINES_DIR`
-  redirects that level at a team directory), and the personal library
-  lives under the agent dir. `prime-agent factory list | import | export`
-  manages them. The seeds are `builder`, `pr-manager`, and `review-sweep`.
-- The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
-  click) opens one live diagram per run, newest run first. The up/down
-  arrows move the selection, Enter opens the selected run's action rows
-  (stop, or resume while it is paused — arrows to walk, Enter to run),
-  Esc closes.
+- `rlm.factory.run(spec_id: str, *, name: str | None = None)`: start a library
+  machine by name. A host-injected persistence adapter can also resolve a stored
+  spec. The standard runtime does not require such an adapter.
+- `rlm.factory.status(run_id: str)`: read state, recent events, elapsed time, and
+  usage for a known run.
+- `rlm.factory.stop(run_id: str)`: cancel its running children and stop the run.
+- `rlm.factory.resume(run_id: str)`: resume a paused run; other states are errors.
+- `rlm.factory.graph(ref: str | None = None)`: read a live run's graph by run ID,
+  or omit `ref` for the run collection. A library machine name alone does not
+  resolve a static graph.
+- `rlm.factory.watch(run_id: str, timeout: float = 0.0)`: return the graph with
+  `changed` after a shape change or bounded timeout in seconds. The default
+  timeout returns immediately.
+- `rlm.factory.help() -> str`: return the embedded machine authoring reference.
+
+Run state lives in kernel memory. Keep the run ID for later calls in that kernel;
+these methods are not a durable run-recovery API.

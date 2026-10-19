@@ -60,7 +60,7 @@ impl BedrockStreamState {
     }
 }
 
-pub(crate) fn handle_event(
+pub(crate) async fn handle_event(
     message: &crate::providers::bedrock::eventstream::EventStreamMessage,
     model: &Model,
     output: &mut AssistantMessage,
@@ -105,24 +105,26 @@ pub(crate) fn handle_event(
                 "Unexpected assistant message start but got user message start instead".to_string(),
             ));
         }
-        writer.push(AssistantMessageEvent::Start {
-            partial: output.clone(),
-        });
+        writer
+            .send(AssistantMessageEvent::Start {
+                partial: output.clone(),
+            })
+            .await?;
         return Ok(());
     }
 
     if let Some(content_block_start) = parsed.get("contentBlockStart") {
-        handle_content_block_start(content_block_start, output, writer, state);
+        handle_content_block_start(content_block_start, output, writer, state).await?;
         return Ok(());
     }
 
     if let Some(content_block_delta) = parsed.get("contentBlockDelta") {
-        handle_content_block_delta(content_block_delta, model, output, writer, state);
+        handle_content_block_delta(content_block_delta, model, output, writer, state).await?;
         return Ok(());
     }
 
     if let Some(content_block_stop) = parsed.get("contentBlockStop") {
-        handle_content_block_stop(content_block_stop, output, writer, state);
+        handle_content_block_stop(content_block_stop, output, writer, state).await?;
         return Ok(());
     }
 
@@ -143,12 +145,12 @@ pub(crate) fn handle_event(
     Ok(())
 }
 
-fn handle_content_block_start(
+async fn handle_content_block_start(
     event: &Value,
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) {
+) -> Result<(), ProviderError> {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
@@ -179,22 +181,25 @@ fn handle_content_block_start(
                 partial_json: StreamingJsonAccumulator::default(),
             },
         );
-        writer.push(AssistantMessageEvent::ToolcallStart {
-            content_index: index as u64,
-            partial: output.clone(),
-        });
+        writer
+            .send(AssistantMessageEvent::ToolcallStart {
+                content_index: index as u64,
+                partial: output.clone(),
+            })
+            .await?;
     }
+    Ok(())
 }
 
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
-fn handle_content_block_delta(
+async fn handle_content_block_delta(
     event: &Value,
     _model: &Model,
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) {
+) -> Result<(), ProviderError> {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
@@ -224,10 +229,12 @@ fn handle_content_block_delta(
             state
                 .slots
                 .insert(content_block_index, BlockSlot::Text { index });
-            writer.push(AssistantMessageEvent::TextStart {
-                content_index: index as u64,
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::TextStart {
+                    content_index: index as u64,
+                    partial: output.clone(),
+                })
+                .await?;
             state
                 .slots
                 .get(&content_block_index)
@@ -235,17 +242,19 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Text { index } => *index,
-            _ => return,
+            _ => return Ok(()),
         };
         if let AssistantContent::Text(block) = &mut output.content[index] {
             block.text.push_str(text);
         }
-        writer.push(AssistantMessageEvent::TextDelta {
-            content_index: index as u64,
-            delta: text.to_string(),
-            partial: output.clone(),
-        });
-        return;
+        writer
+            .send(AssistantMessageEvent::TextDelta {
+                content_index: index as u64,
+                delta: text.to_string(),
+                partial: output.clone(),
+            })
+            .await?;
+        return Ok(());
     }
 
     if let Some(tool_input) = tool_input {
@@ -262,13 +271,15 @@ fn handle_content_block_delta(
                 block.arguments = map;
             }
             let partial = output.clone();
-            writer.push(AssistantMessageEvent::ToolcallDelta {
-                content_index: index as u64,
-                delta: tool_input.to_string(),
-                partial,
-            });
+            writer
+                .send(AssistantMessageEvent::ToolcallDelta {
+                    content_index: index as u64,
+                    delta: tool_input.to_string(),
+                    partial,
+                })
+                .await?;
         }
-        return;
+        return Ok(());
     }
 
     if let Some(reasoning) = reasoning {
@@ -287,10 +298,12 @@ fn handle_content_block_delta(
             state
                 .slots
                 .insert(content_block_index, BlockSlot::Thinking { index });
-            writer.push(AssistantMessageEvent::ThinkingStart {
-                content_index: index as u64,
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ThinkingStart {
+                    content_index: index as u64,
+                    partial: output.clone(),
+                })
+                .await?;
             state
                 .slots
                 .get(&content_block_index)
@@ -298,7 +311,7 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Thinking { index } => *index,
-            _ => return,
+            _ => return Ok(()),
         };
         let mut signature_delta = None;
         if let AssistantContent::Thinking(block) = &mut output.content[index] {
@@ -312,28 +325,31 @@ fn handle_content_block_delta(
             }
         }
         if let Some(text) = reasoning.get("text").and_then(Value::as_str) {
-            writer.push(AssistantMessageEvent::ThinkingDelta {
-                content_index: index as u64,
-                delta: text.to_string(),
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ThinkingDelta {
+                    content_index: index as u64,
+                    delta: text.to_string(),
+                    partial: output.clone(),
+                })
+                .await?;
         }
         let _ = signature_delta;
     }
+    Ok(())
 }
 
-fn handle_content_block_stop(
+async fn handle_content_block_stop(
     event: &Value,
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) {
+) -> Result<(), ProviderError> {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let Some(slot) = state.slots.remove(&content_block_index) else {
-        return;
+        return Ok(());
     };
     match slot {
         BlockSlot::Text { index } => {
@@ -341,22 +357,26 @@ fn handle_content_block_stop(
                 AssistantContent::Text(text) => text.text.clone(),
                 _ => String::new(),
             };
-            writer.push(AssistantMessageEvent::TextEnd {
-                content_index: index as u64,
-                content,
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::TextEnd {
+                    content_index: index as u64,
+                    content,
+                    partial: output.clone(),
+                })
+                .await?;
         }
         BlockSlot::Thinking { index } => {
             let content = match &output.content[index] {
                 AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
                 _ => String::new(),
             };
-            writer.push(AssistantMessageEvent::ThinkingEnd {
-                content_index: index as u64,
-                content,
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ThinkingEnd {
+                    content_index: index as u64,
+                    content,
+                    partial: output.clone(),
+                })
+                .await?;
         }
         BlockSlot::ToolUse {
             index,
@@ -369,15 +389,18 @@ fn handle_content_block_stop(
                 }
                 block.clone()
             } else {
-                return;
+                return Ok(());
             };
-            writer.push(AssistantMessageEvent::ToolcallEnd {
-                content_index: index as u64,
-                tool_call: call,
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ToolcallEnd {
+                    content_index: index as u64,
+                    tool_call: call,
+                    partial: output.clone(),
+                })
+                .await?;
         }
     }
+    Ok(())
 }
 
 fn handle_metadata(
@@ -422,11 +445,8 @@ mod tests {
     use crate::types::{zero_model_cost, ModelInput, Usage};
     use serde_json::json;
 
-    /// TS `handleMetadata` assigns `usage.totalTokens = event.usage.totalTokens || input + output`:
-    /// an explicitly reported zero total is falsy and falls back to the input/output sum.
-    #[test]
-    fn metadata_usage_total_tokens_explicit_zero_falls_back_to_sum() {
-        let model = Model {
+    fn test_model() -> Model {
+        Model {
             id: "anthropic.claude-fable-5".into(),
             name: "Claude Fable 5".into(),
             api: crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM.to_string(),
@@ -442,7 +462,14 @@ mod tests {
             featured: None,
             headers: None,
             compat: None,
-        };
+        }
+    }
+
+    /// TS `handleMetadata` assigns `usage.totalTokens = event.usage.totalTokens || input + output`:
+    /// an explicitly reported zero total is falsy and falls back to the input/output sum.
+    #[test]
+    fn metadata_usage_total_tokens_explicit_zero_falls_back_to_sum() {
+        let model = test_model();
         let request_id = None;
         let mut output = crate::event_stream::initial_assistant_message(
             crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM,
@@ -481,5 +508,68 @@ mod tests {
             request_id.as_ref(),
         );
         assert_eq!(output.usage.total_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn bounded_delta_waits_between_start_and_delta() {
+        use crate::event_stream::create_provider_event_stream;
+        use crate::types::StreamOptions;
+        use std::task::Poll;
+
+        let model = test_model();
+        let options = StreamOptions {
+            event_buffer_capacity: Some(1),
+            ..StreamOptions::default()
+        };
+        let Ok((writer, mut reader)) = create_provider_event_stream(&model, Some(&options)) else {
+            panic!("positive capacity must create a writer");
+        };
+        let mut output =
+            crate::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
+        let mut state = BedrockStreamState::new();
+        let event = json!({"contentBlockIndex": 0, "delta": {"text": "hello"}});
+        let emission = handle_content_block_delta(&event, &model, &mut output, &writer, &mut state);
+        futures::pin_mut!(emission);
+        assert!(matches!(futures::poll!(&mut emission), Poll::Pending));
+        assert!(matches!(
+            reader.next_event().await,
+            Some(AssistantMessageEvent::TextStart {
+                content_index: 0,
+                ..
+            })
+        ));
+        assert_eq!(emission.await, Ok(()));
+        assert!(matches!(
+            reader.next_event().await,
+            Some(AssistantMessageEvent::TextDelta { delta, content_index: 0, .. }) if delta == "hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_delta_propagates_cancellation_while_full() {
+        use crate::event_stream::create_provider_event_stream;
+        use crate::types::StreamOptions;
+        use std::task::Poll;
+        use tokio_util::sync::CancellationToken;
+
+        let model = test_model();
+        let signal = CancellationToken::new();
+        let options = StreamOptions {
+            event_buffer_capacity: Some(1),
+            signal: Some(signal.clone()),
+            ..StreamOptions::default()
+        };
+        let Ok((writer, _reader)) = create_provider_event_stream(&model, Some(&options)) else {
+            panic!("positive capacity must create a writer");
+        };
+        let mut output =
+            crate::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
+        let mut state = BedrockStreamState::new();
+        let event = json!({"contentBlockIndex": 0, "delta": {"text": "hello"}});
+        let emission = handle_content_block_delta(&event, &model, &mut output, &writer, &mut state);
+        futures::pin_mut!(emission);
+        assert!(matches!(futures::poll!(&mut emission), Poll::Pending));
+        signal.cancel();
+        assert_eq!(emission.await, Err(ProviderError::Aborted));
     }
 }

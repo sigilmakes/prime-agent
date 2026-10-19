@@ -2,8 +2,8 @@
 //! over the mounted onboarding screens, and the phase that runs the flow before the session screen.
 
 use super::{
-    mpsc, AgentView, Duration, ExitGuard, Future, Instant, KeybindingsManager, Pin, Renderer,
-    Result, SessionUi, UiInput,
+    mpsc, AgentView, Duration, ExitGuard, Instant, KeybindingsManager, Renderer, Result, SessionUi,
+    UiInput,
 };
 
 /// Persistence for the first-run onboarding answers. The TUI crate owns only the surface; the
@@ -12,39 +12,21 @@ pub trait OnboardingSink: Send + Sync {
     /// The completion marker, read fresh: the phase's one-shot gate — the agents-view flow
     /// re-runs the phase per session, so a completed flow never shows anything again.
     fn onboarding_shown(&self) -> bool;
-    /// Whether a trace-sharing choice was ever written: such homes never see the question.
-    fn agent_traces_choice_written(&self) -> bool;
-    /// Persist the trace-sharing answer.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` when persisting the choice to the settings store fails.
-    fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()>;
     /// Mark the onboarding flow completed; an aborted flow leaves the flag unset.
     ///
     /// # Errors
     ///
     /// Returns `Err` when persisting the completion marker fails.
     fn mark_onboarding_complete(&self) -> anyhow::Result<()>;
-    /// The flow ran but did not complete (TS `runStartupOnboarding`'s
-    /// `finally`): `outcome` is `aborted` (cancelled, quit, or no usable
-    /// model at the end) or `error` (the flow failed). Resolves once the
-    /// report is delivered (or dropped), so a quit right after cannot
-    /// tear the runtime down under it.
-    fn onboarding_incomplete(
-        &self,
-        outcome: &'static str,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
 /// The model-readiness probe: the composition root re-resolves the startup model chain, because the
 /// flow's own steps can change the answer (the Prime sign-in configures the startup model).
 pub type ModelReadiness = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// The first-run flow to run before the session screen: the model-ready branch asks the trace
-/// question on the immediate splash; a home with no usable model runs the full flow — the
-/// welcome login, the Prime Inference sign-in, the default-model apply, the
-/// connect-more-providers picker, and the trace question.
+/// The first-run flow to run before the session screen. A model-ready home skips the flow; a home
+/// with no usable model runs the welcome login, the Prime Inference sign-in, the default-model
+/// apply, and the connect-more-providers picker.
 #[derive(Clone)]
 pub struct OnboardingTask {
     pub sink: std::sync::Arc<dyn OnboardingSink>,
@@ -265,6 +247,7 @@ async fn drive_onboarding_pane(
                 | UiInput::SettleIdle
                 | UiInput::Mouse(_)
                 | UiInput::WaitIdle { .. }
+                | UiInput::WaitNativeReplay { .. }
                 | UiInput::ScrollTop
                 | UiInput::Resize => {}
                 }
@@ -304,15 +287,7 @@ pub(super) async fn run_onboarding_phase(
     if task.sink.onboarding_shown() {
         return Ok(false);
     }
-    let result = run_onboarding_flow(task, session, view, drive).await;
-    // Only a completed flow sets the marker; every other ending reports
-    // its outcome (TS `onboarding completed` with `aborted` / `error`).
-    if !task.sink.onboarding_shown() {
-        task.sink
-            .onboarding_incomplete(if result.is_err() { "error" } else { "aborted" })
-            .await;
-    }
-    result
+    run_onboarding_flow(task, session, view, drive).await
 }
 
 async fn run_onboarding_flow(
@@ -322,48 +297,14 @@ async fn run_onboarding_flow(
     drive: &mut PaneDrive<'_>,
 ) -> Result<bool> {
     if (task.model_ready)() {
-        // The ready branch's standing-choice gate (the operator ruling): a home that already
-        // carries a trace-sharing choice never sees the question — the standing choice stands and
-        // the flow completes silently.
-        if task.sink.agent_traces_choice_written() {
-            if let Err(error) = task.sink.mark_onboarding_complete() {
-                warn_onboarding_persist_failure(session, view, &error);
-            }
-            return Ok(false);
-        }
-        // The model-ready branch: the immediate splash mounts the trace question alone.
-        let screen = crate::onboarding::OnboardingScreen::new();
-        let (_screen, outcome) =
-            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
-        match outcome {
-            PaneOutcome::InputClosed => return Ok(false),
-            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
-            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
-                // `Share` opts in; `Not now` keeps traces off. A write that fails surfaces as a
-                // warning row: the flow still settled this run, but an unpersisted marker
-                // re-mounts it next launch — the user must know, the run never dies over it.
-                if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
-                    warn_onboarding_persist_failure(session, view, &error);
-                }
-            }
-            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
-            PaneOutcome::Decision(
-                crate::onboarding::OnboardingDecision::Begin
-                | crate::onboarding::OnboardingDecision::Pick(_),
-            )
-            | PaneOutcome::Flow(_) => {
-                unreachable!("the question panel yields Selected or Cancelled only")
-            }
-        }
         if let Err(error) = task.sink.mark_onboarding_complete() {
             warn_onboarding_persist_failure(session, view, &error);
         }
         return Ok(false);
     }
 
-    // The full flow (the not-ready branch): Signing in is instant when a Prime CLI token is already
-    // on disk, so users who arrive with credentials still reach the same account, provider and
-    // trace questions. A flow that aborts leaves the marker unset — the next launch retries.
+    // The full flow: sign in, select an account, and connect providers. A flow that aborts leaves
+    // the marker unset so the next launch retries.
     let screen = crate::onboarding::OnboardingScreen::welcome();
     let (mut screen, outcome) =
         drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
@@ -372,11 +313,7 @@ async fn run_onboarding_flow(
         PaneOutcome::InputClosed => return Ok(false),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
         PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin) => {}
-        PaneOutcome::Decision(
-            crate::onboarding::OnboardingDecision::Selected(_)
-            | crate::onboarding::OnboardingDecision::Cancelled
-            | crate::onboarding::OnboardingDecision::Pick(_),
-        )
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(_))
         | PaneOutcome::Flow(_) => {
             unreachable!("the welcome screen yields Begin or Exit only")
         }
@@ -515,11 +452,7 @@ async fn run_onboarding_flow(
             PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
                 crate::onboarding_flow::ProviderPick::Provider(id),
             )) => id,
-            PaneOutcome::Decision(
-                crate::onboarding::OnboardingDecision::Selected(_)
-                | crate::onboarding::OnboardingDecision::Cancelled
-                | crate::onboarding::OnboardingDecision::Begin,
-            )
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin)
             | PaneOutcome::Flow(_) => unreachable!("the picker yields Pick only"),
         };
         let row = rows
@@ -644,38 +577,6 @@ async fn run_onboarding_flow(
         }
     }
 
-    // The trace question, the flow's last step — the merged question surface. A home that
-    // already carries a standing choice skips it (the operator ruling: the choice stands)
-    // while the flow still completes below — an aborted retry (the model still not ready)
-    // leaves the marker unset, so the next launch runs the sign-in again without re-asking.
-    if !task.sink.agent_traces_choice_written() {
-        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Question(
-            crate::onboarding_choice::OnboardingChoice::new(
-                crate::onboarding::trace_question_options(),
-                None,
-                crate::onboarding::trace_question_config(),
-            ),
-        ));
-        let (_screen, outcome) =
-            drive_onboarding_pane(view, &mut *drive, screen, None, &mut session.osc_sink).await?;
-        match outcome {
-            PaneOutcome::InputClosed => return Ok(false),
-            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Exit) => return Ok(true),
-            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
-                if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
-                    warn_onboarding_persist_failure(session, view, &error);
-                }
-            }
-            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
-            PaneOutcome::Decision(
-                crate::onboarding::OnboardingDecision::Begin
-                | crate::onboarding::OnboardingDecision::Pick(_),
-            )
-            | PaneOutcome::Flow(_) => {
-                unreachable!("the question panel yields Selected or Cancelled only")
-            }
-        }
-    }
     // Only a completed flow whose model is ready marks onboarding seen — a flow whose
     // sign-in left the home without a usable model stays unset and retries next launch.
     if (task.model_ready)() {
@@ -738,6 +639,7 @@ mod tests {
             height: 24,
             frames: Vec::new(),
             renders: 0,
+            replay_bytes: Vec::new(),
         };
         let exit_guard = ExitGuard::new();
         let mut headless_done = false;

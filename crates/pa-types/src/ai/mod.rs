@@ -406,7 +406,7 @@ impl UserContent {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCost {
     pub input: JsNumber,
@@ -416,9 +416,12 @@ pub struct UsageCost {
     #[serde(rename = "cacheWrite")]
     pub cache_write: JsNumber,
     pub total: JsNumber,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub input: u64,
@@ -430,6 +433,9 @@ pub struct Usage {
     #[serde(rename = "totalTokens")]
     pub total_tokens: u64,
     pub cost: UsageCost,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +471,9 @@ pub enum ErrorStopReason {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
+// Keep the public variants unboxed: lossless usage maps grow the assistant
+// payload, but boxing would change existing constructor and match APIs.
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     User(UserMessage),
     Assistant(AssistantMessage),
@@ -492,6 +501,9 @@ pub struct AssistantMessageDiagnostic {
     pub error: Option<DiagnosticErrorInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<JsonMap>,
+    /// Unrecognized wire metadata preserved through session rewrites.
+    #[serde(default, flatten)]
+    pub rest: JsonMap,
 }
 
 /// Error info captured inside a diagnostic.

@@ -90,7 +90,7 @@ impl SessionUi {
     pub(crate) fn start_loader_at(&mut self, view: &mut AgentView, since: std::time::Instant) {
         view.working = Some(WorkingState {
             activity: "Waiting",
-            message: None,
+            message: self.working_messages.selected(),
             download: false,
             tokens: 0,
             elapsed_secs: 0,

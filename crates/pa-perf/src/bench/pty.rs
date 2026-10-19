@@ -290,6 +290,18 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Resolve a real test peer before the PTY clears its child environment.
+#[cfg(test)]
+pub(super) fn test_executable(name: &str) -> std::path::PathBuf {
+    let path = std::env::var_os("PATH").expect("test executable PATH");
+    let cwd = std::env::current_dir().expect("test executable cwd");
+    std::env::split_paths(&path)
+        // Keep the applet basename: Nix coreutils may use multicall symlinks.
+        .map(|directory| cwd.join(directory).join(name))
+        .find(|candidate| candidate.is_file() && pa_core::platform::is_executable(candidate))
+        .unwrap_or_else(|| panic!("test executable {name} missing from PATH"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,15 +310,8 @@ mod tests {
     fn kitty_queries_are_answered_at_every_read_boundary_once() {
         let dir = tempfile::tempdir().expect("temp dir");
         for split in 1..KITTY_QUERY.len() {
-            let mut child = PtyChild::spawn(
-                std::path::Path::new("/bin/cat"),
-                &[],
-                &[],
-                dir.path(),
-                120,
-                36,
-            )
-            .expect("spawn mock terminal peer");
+            let mut child = PtyChild::spawn(&test_executable("cat"), &[], &[], dir.path(), 120, 36)
+                .expect("spawn mock terminal peer");
             child.receive(&KITTY_QUERY[..split]).expect("first chunk");
             assert!(!child.kitty_answered);
             child.receive(&KITTY_QUERY[split..]).expect("second chunk");
@@ -387,15 +392,8 @@ mod tests {
     #[test]
     fn an_initial_paint_timeout_reaps_the_owned_child() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut child = PtyChild::spawn(
-            std::path::Path::new("/bin/cat"),
-            &[],
-            &[],
-            dir.path(),
-            120,
-            36,
-        )
-        .expect("spawn the mock, never the product");
+        let mut child = PtyChild::spawn(&test_executable("cat"), &[], &[], dir.path(), 120, 36)
+            .expect("spawn the mock, never the product");
         let pid = nix::unistd::Pid::from_raw(child.pid());
         assert!(child
             .wait_from(0, b"missing first paint", "first paint", Instant::now())

@@ -1,6 +1,6 @@
 //! The `SessionEngine` trait impl for [`AgentSessionEngine`]: the
 //! worker-facing engine contract - model and goal config surfaces, the
-//! turn state machine, and the export/telemetry reads.
+//! turn state machine, and the export reads.
 
 use super::{
     artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
@@ -190,22 +190,6 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
-    /// Finalize telemetry on the live session: `agent session ended` + one flush; best-effort.
-    fn end_telemetry(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let session = self.session.lock().await;
-            let Some(engine) = session.as_deref() else {
-                return;
-            };
-            let Some(telemetry) = &engine.telemetry else {
-                return;
-            };
-            let _ = telemetry.end().await;
-        })
-    }
-
     /// The replacement teardown (see
     /// [`Self::retire_session_runtime`]): the moved-to session rebuilds cold.
     fn teardown_for_replacement(
@@ -216,24 +200,6 @@ impl SessionEngine for AgentSessionEngine {
         })
     }
 
-    /// The daemon `kill` path: report `session archived`, then finalize
-    /// (`SessionTelemetry::end` is idempotent).
-    fn archive_session_telemetry(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let session = self.session.lock().await;
-            let Some(engine) = session.as_deref() else {
-                return;
-            };
-            let Some(telemetry) = &engine.telemetry else {
-                return;
-            };
-            telemetry.note_archived();
-            let _ = telemetry.end().await;
-        })
-    }
-
     fn acp_mcp_manager(
         &self,
     ) -> Option<std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>> {
@@ -241,7 +207,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn model_context_window(&self) -> Option<u64> {
-        self.resolve_model().ok().map(|model| model.context_window)
+        self.session_model().ok().map(|model| model.context_window)
     }
 
     fn creation_model(&self) -> Option<(String, String)> {
@@ -310,15 +276,6 @@ impl SessionEngine for AgentSessionEngine {
         decision.fallback_message
     }
 
-    /// The `compact` command path: the compact-trigger auto-refine round
-    /// runs after the compaction answered (the same gated body as the
-    /// boundaries).
-    fn consume_compact_auto_refine(
-        &self,
-    ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
-        self.consume_compact_auto_refine_round()
-    }
-
     /// The worker's live session summary, rendered into the sender identity block.
     fn set_session_summary(&self, summary: Value) {
         *self
@@ -372,22 +329,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn configure_model(&self, selection: EngineModelSelection) {
-        // Merge like the TS runtime config: explicit wire flags replace; absent fields keep.
-        {
-            let mut current = self.selection.write().expect("model selection lock");
-            if selection.provider.is_some() {
-                current.provider = selection.provider;
-            }
-            if selection.model.is_some() {
-                current.model = selection.model;
-            }
-            if selection.api_key.is_some() {
-                current.api_key = selection.api_key;
-            }
-            if selection.thinking.is_some() {
-                current.thinking = selection.thinking;
-            }
-        }
+        self.merge_model_selection(selection);
         // The merge may have changed the selection: drop the cached level;
         // later summary/state calls stay side-effect-free.
         *self
@@ -431,8 +373,14 @@ impl SessionEngine for AgentSessionEngine {
                 return false;
             }
         }
-        self.configure_model(selection);
+        self.merge_model_selection(selection);
         let Ok(model) = self.resolve_model() else {
+            // Preserve configure_model's existing failed-switch cache behavior.
+            *self
+                .effective_thinking
+                .write()
+                .expect("effective thinking lock") = None;
+            let _ = self.effective_thinking();
             return false;
         };
         {
@@ -453,6 +401,13 @@ impl SessionEngine for AgentSessionEngine {
                 headers,
             });
         }
+        // Clamp only after publishing the resolved target. The requested level
+        // stays in selection so reasoning -> plain -> reasoning restores it.
+        *self
+            .effective_thinking
+            .write()
+            .expect("effective thinking lock") = None;
+        let _ = self.effective_thinking();
         let session = self.session.blocking_lock();
         if let Some(core) = session.as_deref() {
             let provider = model.provider.clone();
@@ -477,7 +432,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn supported_thinking_levels(&self) -> Option<Vec<String>> {
-        let model = self.resolve_model().ok()?;
+        let model = self.session_model().ok()?;
         Some(
             pa_ai::models::get_supported_thinking_levels(&model)
                 .into_iter()
@@ -511,7 +466,9 @@ impl SessionEngine for AgentSessionEngine {
     /// The built session's assembled prompt (the export embeds it); best-effort.
     fn export_system_prompt(&self) -> Option<String> {
         let session = self.session.try_lock().ok()?;
-        session.as_deref().map(|core| core.system_prompt.clone())
+        session
+            .as_deref()
+            .map(pa_core::session_engine::engine::SessionEngine::assembled_system_prompt)
     }
 
     /// The built session's live tool registry mapped to the export's tools
@@ -569,7 +526,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn model_metadata(&self) -> Option<Value> {
-        let model = self.resolve_model().ok()?;
+        let model = self.session_model().ok()?;
         Some(json!({
             "id": model.id,
             "name": model.name,
@@ -670,17 +627,6 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
             pa_core::session_engine::compact_session::CompactOutcome::Ran(run) => {
-                {
-                    let guard = self.session.blocking_lock();
-                    if let Some(telemetry) = guard
-                        .as_deref()
-                        .and_then(|engine| engine.telemetry.as_ref())
-                    {
-                        telemetry.note_compaction(Some(run.duration_ms));
-                    }
-                }
-                // The compact-trigger auto-refine review runs after every successful compaction.
-                self.mark_compact_auto_refine_pending();
                 CompactionOutcome::Compacted {
                     run: Box::new(CompactionRun {
                         // The wire result is the TS `CompactionResult` shape;
@@ -714,6 +660,11 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
         };
+        if let Err(error) = self.ensure_core_session(&model) {
+            return BranchSummaryOutcome::Failed {
+                error: error.to_string(),
+            };
+        }
         let api_key = self.resolve_request_api_key(&model);
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
@@ -801,8 +752,6 @@ impl SessionEngine for AgentSessionEngine {
             let Some(engine) = guard.as_deref() else {
                 return Ok(());
             };
-            // The moved branch invalidates an armed review.
-            engine.session.discard_compact_auto_refine();
             engine
                 .session
                 .rebuild_branch_context(branch_entries)
@@ -1057,8 +1006,16 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Value>> + Send + '_>> {
         Box::pin(async move {
-            // This port builds the core session lazily; a read before any turn builds it now.
-            if let Ok(model) = self.resolve_model() {
+            // Build only when absent. A live core already owns its model and host;
+            // discovery must not re-resolve provider credentials to read them.
+            if self.session.lock().await.is_none() {
+                let model = match self.resolve_model() {
+                    Ok(model) => model,
+                    Err(error) => {
+                        eprintln!("get_commands model resolution failed: {error:#}");
+                        return Vec::new();
+                    }
+                };
                 if let Err(error) = self.ensure_core_session_async(&model).await {
                     eprintln!("get_commands session build failed: {error:#}");
                     return Vec::new();
@@ -1095,7 +1052,34 @@ impl SessionEngine for AgentSessionEngine {
                 }
                 commands.push(entry);
             }
+            commands.extend(crate::plugin_commands::command_inventory(engine));
             commands
+        })
+    }
+
+    fn plugin_command<'a>(
+        &'a self,
+        text: &'a str,
+        target: Option<&'a Value>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<crate::engine::PluginCommandOutcome>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if self.session.lock().await.is_none() {
+                let model = self.resolve_model()?;
+                self.ensure_core_session_async(&model).await?;
+            }
+            let core = self
+                .session
+                .lock()
+                .await
+                .clone()
+                .expect("session built above");
+            crate::plugin_commands::execute(&core, text, target).await
         })
     }
 
@@ -1195,7 +1179,7 @@ impl SessionEngine for AgentSessionEngine {
             self.ensure_core_session_async(&model).await?;
             let guard = self.session.lock().await;
             let engine = guard.as_deref().expect("session built above");
-            Ok(engine.system_prompt.clone())
+            Ok(engine.assembled_system_prompt())
         })
     }
 
@@ -1216,35 +1200,6 @@ impl SessionEngine for AgentSessionEngine {
                 "parameters": tool.parameters(),
             }))
         })
-    }
-
-    fn run_refinement(
-        &self,
-        options: pa_core::session_engine::refine::RefineOptions,
-    ) -> anyhow::Result<Value> {
-        let model = self.resolve_model()?;
-        self.ensure_core_session(&model)?;
-        let api_key = self.resolve_request_api_key(&model);
-        let global_harness_dir = self.config.agent_dir.clone();
-        // The lock covers the clone only; the model call below must not ride it.
-        let core = self
-            .session
-            .blocking_lock()
-            .clone()
-            .expect("session built by ensure_core_session");
-        let result = self.runtime.block_on(async {
-            core.session
-                .refine(
-                    &options,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                    &model,
-                    api_key,
-                    global_harness_dir,
-                )
-                .await
-        })?;
-        serde_json::to_value(&result)
-            .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
     }
 
     fn rlm_max_depth_status(&self) -> Value {

@@ -3,7 +3,6 @@
 //! persistence); the Agent owns the loop, this layer decides admission.
 
 pub mod agent_messaging;
-pub mod auto_refine_trigger;
 pub mod auto_retry;
 pub mod auxiliary_model;
 pub mod branch_summarization;
@@ -13,7 +12,7 @@ pub mod compaction_exec;
 pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
-pub mod error_classify;
+pub use context_strategy::ContextStartupBoundary;
 pub mod factory_host;
 pub mod goal_boundary;
 pub mod goal_driver;
@@ -21,13 +20,21 @@ pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
 pub mod image_model_routing;
+pub(crate) mod inference_capabilities;
+pub(crate) mod inference_router;
 pub mod ipython_state;
 pub mod messages;
+pub mod ollama_cloud;
+pub(crate) mod optchat;
+mod plugin_context;
+mod plugin_jobs;
+mod plugin_observers;
+mod plugin_services;
+pub mod plugins;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_park;
 pub mod provider_retry;
-pub mod refine;
 mod refinement_gate;
 pub mod request_timing;
 pub mod rlm_host;
@@ -42,12 +49,12 @@ pub mod side_question;
 pub mod skills_unavailable_notice;
 pub mod slash_commands;
 pub mod state_restore_notice;
-pub mod telemetry;
 pub mod tool_bridge;
 pub mod turn_boundary;
 
 mod admission;
 mod compaction_arms;
+mod context_strategy;
 mod wiring;
 
 use std::sync::Arc;
@@ -119,29 +126,23 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
 /// The session-bound agent: admission rules + persistence over the loop.
 pub struct AgentSession {
     agent: Arc<Agent>,
+    ollama_cloud: Arc<ollama_cloud::SessionOllamaCloud>,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
     prompt_templates: Vec<PromptTemplate>,
     slash_commands: SlashCommandRegistry,
-    /// Harness digest inputs; `None` without harness state.
-    harness_digest: Option<harness_digest::HarnessDigestContext>,
-    /// Fresh sessions defer the first-turn digest so untouched sessions
-    /// stay empty.
-    digest_pending: std::sync::atomic::AtomicBool,
+    plugins: Option<Arc<plugins::SessionPlugins>>,
+    auxiliary_inference: Option<Arc<inference_router::AuxiliaryInference>>,
+    plugin_command_barrier: Arc<tokio::sync::Mutex<()>>,
+    plugin_jobs: Option<Arc<plugin_jobs::PluginJobs>>,
+    context_archive: Arc<std::sync::RwLock<Option<pa_types::session::ContextArchive>>>,
+    context_model: std::sync::RwLock<Option<pa_types::ai::Model>>,
+    accepted_context: std::sync::Mutex<Option<Vec<SessionAgentMessage>>>,
     /// Compaction settings; defaults until the engine wiring resolves
     /// them.
     compaction: std::sync::RwLock<compaction::CompactionSettings>,
     /// Auxiliary-model routing for compaction summaries; `None` keeps
     /// every summarizer on the session model.
     auxiliary_model: Option<auxiliary_model::AuxiliaryModelContext>,
-    /// Whether this session may auto-refine; defaults off until the
-    /// engine wiring resolves it.
-    auto_refine_allowed: bool,
-    refinement_settings: Option<crate::settings::SettingsManager>,
-    /// The resolved auto-refine gates; the compact trigger reads them.
-    auto_refine: refine::AutoRefineGates,
-    /// Session-side auto-refine state the transport surfaces arm and
-    /// consume.
-    compact_auto_refine: std::sync::Mutex<auto_refine_trigger::CompactAutoRefineState>,
     /// The kernel-state probe behind the post-compaction
     /// `ipython_state` notice; `None` without a kernel.
     kernel_state: Option<std::sync::Arc<dyn ipython_state::CompactionKernelProbe>>,
@@ -150,9 +151,6 @@ pub struct AgentSession {
     pending_next_turn_rows: std::sync::Arc<std::sync::Mutex<Vec<pa_types::session::CustomMessage>>>,
     /// The skill inventory `/skill:<name>` submissions expand against.
     skills: Vec<crate::skills::Skill>,
-    /// The telemetry handle for the `skill_use_count` counter the prompt
-    /// path owns (`None` in sessions without telemetry).
-    skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
     /// The image-model routing host seam; `None` keeps the session
     /// model on image turns.
     image_model_router: Option<image_model_routing::ImageModelRouter>,
@@ -175,17 +173,49 @@ pub struct AgentSession {
     /// a side question on an unwired session fails with the model-selection
     /// error (no fallback to the agent's id-carrying fn).
     side_question_stream_fn: std::sync::Mutex<Option<pa_agent::stream::StreamFn>>,
-    /// The session's agent dir (the settings root): the refine flow
-    /// resolves the `factory.enabled` opt-in from its settings.json on
-    /// every run, immediately before the plan applies, mirroring the
-    /// kernel-side factory gate that reads the same file through
-    /// `PRIME_AGENT_CODING_AGENT_DIR`. `None` until the engine wiring
-    /// resolves it (verification harnesses building the session directly
-    /// keep `None`, which reads as the fail-closed disabled default).
     agent_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentSession {
+    /// Opaque admitted job IDs for correlating one command or prompt's new work.
+    pub fn plugin_job_checkpoint(&self) -> Vec<String> {
+        self.plugin_jobs
+            .as_ref()
+            .map_or_else(Vec::new, |jobs| jobs.checkpoint())
+    }
+
+    /// Drain admitted jobs, returning only those admitted after the checkpoint.
+    /// Stop external prompt/command admission before calling this shutdown seam.
+    pub async fn drain_plugin_jobs_since(&self, checkpoint: &[String]) -> Vec<serde_json::Value> {
+        self.drain_plugin_jobs()
+            .await
+            .into_iter()
+            .filter(|row| {
+                row["id"]
+                    .as_str()
+                    .is_none_or(|id| !checkpoint.iter().any(|old| old == id))
+            })
+            .collect()
+    }
+
+    /// Wait for the current run, awaited observers, and all admitted jobs.
+    /// Terminal failures are values; hosts choose how to display their own scope.
+    pub async fn drain_plugin_jobs(&self) -> Vec<serde_json::Value> {
+        // Agent idle includes every awaited AgentEnd listener. Compaction
+        // observers are awaited before compact() returns. Both enqueue before
+        // this registry drain, not from detached observer tasks.
+        self.agent().wait_for_idle().await;
+        match &self.plugin_jobs {
+            Some(jobs) => jobs.drain().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Fence deferred plugin jobs until command acknowledgements are durable.
+    pub async fn plugin_command_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.plugin_command_barrier).lock_owned().await
+    }
+
     /// Build a session around a running agent loop.
     ///
     /// # Errors
@@ -200,7 +230,6 @@ impl AgentSession {
             agent,
             Arc::new(tokio::sync::Mutex::new(session)),
             prompt_templates,
-            None,
         )
         .await
     }
@@ -212,12 +241,10 @@ impl AgentSession {
     ///
     /// Returns an error when subscribing the persistence listener fails or
     /// the initial session context cannot be read.
-    #[allow(clippy::too_many_arguments)]
     pub async fn from_session_arc(
         agent: Arc<Agent>,
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         prompt_templates: Vec<PromptTemplate>,
-        harness_digest: Option<harness_digest::HarnessDigestContext>,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
         agent
@@ -231,21 +258,22 @@ impl AgentSession {
             .await;
         let this = Self {
             agent,
+            ollama_cloud: Arc::default(),
             session,
             prompt_templates,
             slash_commands: SlashCommandRegistry::builtin(),
-            harness_digest,
-            digest_pending: std::sync::atomic::AtomicBool::new(false),
+            plugins: None,
+            auxiliary_inference: None,
+            plugin_command_barrier: Arc::default(),
+            plugin_jobs: None,
+            context_archive: Arc::default(),
+            context_model: std::sync::RwLock::new(None),
+            accepted_context: std::sync::Mutex::new(None),
             compaction: std::sync::RwLock::new(compaction::CompactionSettings::default()),
             auxiliary_model: None,
-            auto_refine_allowed: false,
-            refinement_settings: None,
-            auto_refine: refine::AutoRefineGates::default(),
-            compact_auto_refine: std::sync::Mutex::default(),
             kernel_state: None,
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
-            skill_telemetry: None,
             image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
             semantic_edges: std::sync::Mutex::new(None),
@@ -253,7 +281,6 @@ impl AgentSession {
             agent_dir: None,
             compaction_flight: tokio::sync::Mutex::new(()),
         };
-        this.ensure_harness_digest_context().await?;
         Ok(this)
     }
 
@@ -280,15 +307,127 @@ impl AgentSession {
     }
 
     /// Restore a verified retained context without loading older transcript bodies.
+    ///
+    /// # Errors
+    /// Rejects invalid or incompatible strategy archives before changing live state.
     pub async fn restore_windowed_context(
         &self,
         window: crate::session::window::WindowedSessionStore,
-    ) {
-        let messages = {
-            let mut session = self.session.lock().await;
-            session.adopt_window(window);
-            session.active_context().messages
+    ) -> anyhow::Result<()> {
+        self.restore_windowed_context_at(window, &ContextStartupBoundary::Current, &[])
+            .await
+    }
+
+    /// Restore the complete canonical window while assembling only its verified
+    /// pre-admission prefix. Exact suffix user IDs prove the admission boundary.
+    ///
+    /// # Errors
+    /// Rejects foreign sessions, invalid ancestry/admission proof, retired
+    /// strategies, changed branches and incompatible archives before publication.
+    pub async fn restore_windowed_context_at(
+        &self,
+        mut window: crate::session::window::WindowedSessionStore,
+        boundary: &ContextStartupBoundary,
+        admitted_user_ids: &[String],
+    ) -> anyhow::Result<()> {
+        let _flight = self.compaction_flight.lock().await;
+        let (expected_leaf, session_id) = {
+            let session = self.session.lock().await;
+            (
+                session.get_leaf_id().map(str::to_owned),
+                session.get_session_id().to_owned(),
+            )
         };
+        if window
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                FileEntry::Header { header } => Some(header.id.as_str()),
+                _ => None,
+            })
+            .is_some_and(|id| id != session_id)
+        {
+            anyhow::bail!("context window belongs to another session");
+        }
+        let target = self
+            .plugins
+            .as_ref()
+            .map(|plugins| plugins.context_selection())
+            .transpose()?;
+        let initial = window.context();
+        let (context, projection_leaf) = if matches!(boundary, ContextStartupBoundary::Current) {
+            if !admitted_user_ids.is_empty() {
+                anyhow::bail!("Current startup context cannot carry admitted-user proof");
+            }
+            let context = if let Some(target) = &target {
+                let route = format!("{}/{}", target.plugin, target.name);
+                if route != crate::plugins::context::DEFAULT_STRATEGY
+                    || initial
+                        .archive
+                        .as_ref()
+                        .is_some_and(|archive| archive.strategy != route)
+                {
+                    window.ensure_full_history().await?;
+                }
+                context_strategy::project(window.entries(), Some(window.leaf_id()), &route)
+            } else {
+                initial
+            };
+            (context, Some(window.leaf_id().to_owned()))
+        } else {
+            window.ensure_full_history().await?;
+            let route = target.as_ref().map_or_else(
+                || crate::plugins::context::DEFAULT_STRATEGY.to_owned(),
+                |target| format!("{}/{}", target.plugin, target.name),
+            );
+            context_strategy::startup::project_at(
+                window.entries(),
+                Some(window.leaf_id()),
+                &route,
+                boundary,
+                admitted_user_ids,
+            )?
+        };
+        let model = self
+            .context_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let messages = match (&self.plugins, &target) {
+            (Some(plugins), Some(target)) => {
+                context_strategy::assemble_for_strategy(
+                    plugins,
+                    target,
+                    context.messages,
+                    context.archive.as_ref(),
+                    model.as_ref(),
+                    projection_leaf.as_deref(),
+                )
+                .await?
+            }
+            _ if context.archive.is_some() => {
+                anyhow::bail!("restoring an archive requires an active context strategy")
+            }
+            _ => context.messages,
+        };
+        {
+            let mut session = self.session.lock().await;
+            if session.get_leaf_id() != expected_leaf.as_deref() {
+                anyhow::bail!("session branch changed while restoring context; try again");
+            }
+            let commit = || {
+                session.adopt_window(window);
+                Ok(())
+            };
+            match (&self.plugins, &target) {
+                (Some(plugins), Some(target)) => plugins.with_strategy_authority(target, commit)?,
+                _ => commit()?,
+            }
+        }
+        *self
+            .context_archive
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context.archive;
         self.agent
             .set_messages(
                 messages
@@ -297,6 +436,7 @@ impl AgentSession {
                     .collect(),
             )
             .await;
+        Ok(())
     }
 
     /// Persisted entries (for UI resume and inspection).
@@ -309,6 +449,31 @@ impl AgentSession {
             .filter(|entry| !matches!(entry, FileEntry::Header { .. }))
             .cloned()
             .collect()
+    }
+
+    /// Reconfigure a captured model using the loop's session-local baseline.
+    /// Fresh registry selections must use `configure_fresh_ollama_model`.
+    /// The captured model and the shared registry remain unchanged.
+    pub fn configure_ollama_model(&self, model: &pa_types::ai::Model) -> pa_types::ai::Model {
+        self.auxiliary_model.as_ref().map_or_else(
+            || model.clone(),
+            |context| {
+                self.ollama_cloud
+                    .configure_model(&context.cwd, &context.agent_dir, model)
+            },
+        )
+    }
+
+    /// Configure a freshly resolved registry descriptor, even when its values
+    /// collide with an older session cap.
+    pub fn configure_fresh_ollama_model(&self, model: &pa_types::ai::Model) -> pa_types::ai::Model {
+        self.auxiliary_model.as_ref().map_or_else(
+            || model.clone(),
+            |context| {
+                self.ollama_cloud
+                    .configure_fresh_model(&context.cwd, &context.agent_dir, model)
+            },
+        )
     }
 
     /// Model change bookkeeping (mirrors appendModelChange); the model
@@ -324,10 +489,15 @@ impl AgentSession {
         provider: &str,
         model_id: &str,
     ) -> anyhow::Result<()> {
+        let model = self.configure_ollama_model(model);
         let wire: pa_agent::types::Model = serde_json::from_value(
-            serde_json::to_value(model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            serde_json::to_value(&model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        *self
+            .context_model
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(model.clone());
         self.agent.set_model(wire).await;
         let mut session = self.session.lock().await;
         session.append_model_change(provider, model_id)?;
@@ -349,10 +519,15 @@ impl AgentSession {
         model_id: &str,
         thinking_level: ThinkingLevel,
     ) -> anyhow::Result<()> {
+        let model = self.configure_ollama_model(model);
         let wire: pa_agent::types::Model = serde_json::from_value(
-            serde_json::to_value(model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            serde_json::to_value(&model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        *self
+            .context_model
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(model.clone());
         self.agent
             .set_model_and_thinking_level(wire, thinking_level)
             .await;
@@ -460,9 +635,12 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
     ))
 }
 
-/// Custom rows ride the loop's custom variant and are filtered out of
-/// the provider request.
+/// Preserve typed provenance while suppressing legacy host-owned harness context.
+/// Canonical history and user-authored text are never changed.
 pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<AgentMessage> {
+    let message = refinement_gate::without_refinements(vec![message.clone()])
+        .into_iter()
+        .next()?;
     serde_json::from_value(serde_json::to_value(message).ok()?).ok()
 }
 

@@ -351,7 +351,7 @@ impl PrintGoalSurface {
     }
 
     /// One raw stream event (the session-command events: `compaction_start`, `compaction_end`,
-    /// `refine_complete`, `refine_failed`).
+    /// command result rows).
     pub(crate) fn emit_stream_event(&self, event: &Value) {
         self.emit(event);
     }
@@ -526,36 +526,21 @@ impl PrintGoalSurface {
         boundary: &mut crate::print_boundary::TurnBoundary,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
     ) -> Result<bool, String> {
         let mut ran = false;
         loop {
             if let Some(message) = self.take_threshold_continuation().await {
                 // A goal that went inactive mid-turn drops its queued continuation.
                 if engine.goal_state().await.status == pa_types::goal::GoalStatus::Active {
-                    self.run_queued_turn(
-                        engine,
-                        boundary,
-                        model,
-                        api_key.clone(),
-                        global_harness_dir.clone(),
-                        &message,
-                    )
-                    .await?;
+                    self.run_queued_turn(engine, boundary, model, api_key.clone(), &message)
+                        .await?;
                     ran = true;
                     continue;
                 }
             }
             if let Some(steer) = self.take_budget_steer().await {
-                self.run_queued_turn(
-                    engine,
-                    boundary,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                    &steer,
-                )
-                .await?;
+                self.run_queued_turn(engine, boundary, model, api_key.clone(), &steer)
+                    .await?;
                 ran = true;
                 continue;
             }
@@ -578,7 +563,6 @@ impl PrintGoalSurface {
                         model,
                         api_key.clone(),
                         pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT,
-                        global_harness_dir.clone(),
                     )
                     .await?;
                 ran = true;
@@ -597,7 +581,6 @@ impl PrintGoalSurface {
         boundary: &mut crate::print_boundary::TurnBoundary,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
         message: &CustomMessage,
     ) -> Result<(), String> {
         let label = compact_rlm_text(&custom_message_text(message), 160);
@@ -614,7 +597,7 @@ impl PrintGoalSurface {
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         boundary
-            .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir)
+            .run_at_settled_turn(engine, model, api_key.clone())
             .await?;
         if let Some(error_message) =
             crate::headless_autonomous::latest_assistant_error(engine).await
@@ -638,7 +621,6 @@ impl PrintGoalSurface {
         boundary: &mut crate::print_boundary::TurnBoundary,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
         message: &CustomMessage,
     ) -> Result<(), String> {
         // The queued goal turn's run completes its admission: the held continuation
@@ -657,9 +639,7 @@ impl PrintGoalSurface {
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
         self.emit_action_drained().await;
-        boundary
-            .run_at_settled_turn(engine, model, api_key, global_harness_dir)
-            .await?;
+        boundary.run_at_settled_turn(engine, model, api_key).await?;
         Ok(())
     }
 }
@@ -804,12 +784,13 @@ mod tests {
     /// hook), and captured frames. The `--goal` seed runs BEFORE the surface wires.
     async fn goal_bed(
         script: Value,
-        settings: Value,
+        mut settings: Value,
         seed: Option<(&str, Option<u64>)>,
     ) -> GoalBed {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
+        settings["plugins"] = json!({"harness":{"enabled":false}});
         std::fs::write(agent_dir.join("settings.json"), settings.to_string()).unwrap();
         let parsed = pa_ai::faux::script::parse_faux_script(&script).unwrap();
         let registration =
@@ -832,9 +813,13 @@ mod tests {
             pa_core::session_engine::engine::create_session(
                 pa_core::session_engine::engine::SessionEngineConfig {
                     on_late_sent_agent_message: None,
+                    context_startup_boundary:
+                        pa_core::session_engine::ContextStartupBoundary::Current,
+                    context_startup_admitted_user_ids: Vec::new(),
+                    on_initial_context_selection: None,
+                    ollama_cloud: None,
                     semantic_edges: None,
                     cron_store: None,
-                    telemetry: None,
                     cwd: dir.path().to_path_buf(),
                     agent_dir,
                     mcp_manager: None,
@@ -894,13 +879,11 @@ mod tests {
             &autonomous_run,
             /*root_node*/ None,
         );
-        let harness_dir = dir.path().join("harness");
         GoalBed {
             engine,
             model,
             surface,
             frames,
-            harness_dir,
             _accounting: accounting,
             _autonomous_run: autonomous_run,
             _dir: dir,
@@ -912,7 +895,6 @@ mod tests {
         model: pa_types::ai::Model,
         surface: Arc<PrintGoalSurface>,
         frames: Frames,
-        harness_dir: std::path::PathBuf,
         _accounting: pa_agent::agent::Subscription,
         /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
         /// weakly).
@@ -936,17 +918,11 @@ mod tests {
                 .unwrap();
             self.engine.session.agent().wait_for_idle().await;
             boundary
-                .run_at_settled_turn(&self.engine, &self.model, None, self.harness_dir.clone())
+                .run_at_settled_turn(&self.engine, &self.model, None)
                 .await
                 .unwrap();
             self.surface
-                .drive_boundary(
-                    &self.engine,
-                    &mut boundary,
-                    &self.model,
-                    None,
-                    self.harness_dir.clone(),
-                )
+                .drive_boundary(&self.engine, &mut boundary, &self.model, None)
                 .await
                 .unwrap();
             self.engine.goal_owns_continuation_wakeup().await
@@ -1283,7 +1259,6 @@ mod tests {
                     "reserveTokens": 1,
                     "keepRecentTokens": 10,
                 },
-                "autoRefine": { "enabled": false },
             }),
         )
         .await;
@@ -1382,10 +1357,11 @@ mod tests {
 
     /// The threshold bed: a RESUMED session carrying one history turn and an
     /// active goal (the persisted goal state the driver loads at construction).
-    async fn goal_bed_with_resumed_goal(script: Value, settings: Value) -> GoalBed {
+    async fn goal_bed_with_resumed_goal(script: Value, mut settings: Value) -> GoalBed {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
+        settings["plugins"] = json!({"harness":{"enabled":false}});
         std::fs::write(agent_dir.join("settings.json"), settings.to_string()).unwrap();
         let parsed = pa_ai::faux::script::parse_faux_script(&script).unwrap();
         let registration =
@@ -1449,9 +1425,13 @@ mod tests {
             pa_core::session_engine::engine::create_session(
                 pa_core::session_engine::engine::SessionEngineConfig {
                     on_late_sent_agent_message: None,
+                    context_startup_boundary:
+                        pa_core::session_engine::ContextStartupBoundary::Current,
+                    context_startup_admitted_user_ids: Vec::new(),
+                    on_initial_context_selection: None,
+                    ollama_cloud: None,
                     semantic_edges: None,
                     cron_store: None,
-                    telemetry: None,
                     cwd: dir.path().to_path_buf(),
                     agent_dir,
                     mcp_manager: None,
@@ -1515,7 +1495,6 @@ mod tests {
             model,
             surface,
             frames,
-            harness_dir: dir.path().join("harness"),
             _accounting: accounting,
             _autonomous_run: autonomous_run,
             _dir: dir,

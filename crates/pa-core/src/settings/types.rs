@@ -228,12 +228,6 @@ pub struct WarningSettings {
     pub anthropic_extra_usage: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentTracesSettings {
-    pub enabled: Option<bool>,
-}
-
 /// `factory` (the agent factory's opt-in gate): `factory.enabled` is
 /// unset/false by default, and the `/factory on` client command persists
 /// it. Both the daemon's `factory_activity` lane advertisement and the
@@ -242,16 +236,6 @@ pub struct AgentTracesSettings {
 #[serde(rename_all = "camelCase")]
 pub struct FactorySettings {
     pub enabled: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TelemetrySettings {
-    pub enabled: Option<bool>,
-    pub notice_shown: Option<bool>,
-    /// Local JSONL mirror at `<agentDir>/telemetry.jsonl` (default on:
-    /// user-observable transparency).
-    pub local_mirror: Option<bool>,
 }
 
 /// User-declared MCP server (settings `mcpServers` entry).
@@ -298,6 +282,12 @@ pub enum McpServerConfig {
     },
 }
 
+fn deserialize_plugin_configuration<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 /// The settings document: every known field optional; unknown keys preserved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -330,9 +320,7 @@ pub struct Settings {
     pub auto_refine: Option<AutoRefineSettings>,
     /// Master switch for harness creation and context loading; unset preserves enabled behavior.
     pub harness_refinements: Option<bool>,
-    pub agent_traces: Option<AgentTracesSettings>,
     pub factory: Option<FactorySettings>,
-    pub telemetry: Option<TelemetrySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,
     pub provider_backup_model: Option<String>,
@@ -356,6 +344,14 @@ pub struct Settings {
     /// Extra local MCP service-catalog files (~-relative allowed), merged after the
     /// compiled built-ins; first source wins per id, and no bundled id can be shadowed.
     pub mcp_catalog_sources: Option<Vec<String>>,
+    /// Explicit plugin map, validated atomically by the session plugin manager.
+    /// Retain malformed JSON values so reload cannot silently disable active plugins.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_plugin_configuration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub plugins: Option<serde_json::Value>,
     pub packages: Option<Vec<serde_json::Value>>,
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,

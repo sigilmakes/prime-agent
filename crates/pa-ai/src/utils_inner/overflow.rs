@@ -153,6 +153,7 @@ mod tests {
 
     fn usage(input: u64, output: u64, cache_read: u64) -> Usage {
         Usage {
+            rest: pa_types::JsonMap::new(),
             input,
             output,
             cache_read,

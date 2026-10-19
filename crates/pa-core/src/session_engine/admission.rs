@@ -1,11 +1,10 @@
-use super::slash_commands::parse_session_command;
 use super::{
     session_message_to_loop, user_prompt_message, AgentSession, PromptOptions, PromptOutcome,
     SessionAgentMessage, SessionSlashCommand, StreamingBehavior,
 };
 
 impl AgentSession {
-    /// Submit a prompt. Session commands (compact/refine/goal/autonomous)
+    /// Submit a prompt. Session commands (compact/goal/autonomous)
     /// are recognized before admission and never reach the model.
     ///
     /// # Errors
@@ -26,7 +25,7 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Error when the session is busy, the digest capture fails, or the
+    /// Error when the session is busy or the
     /// agent rejects the prompt.
     pub async fn prompt_injected_message(
         &self,
@@ -40,9 +39,6 @@ impl AgentSession {
             );
         }
         let mut prompt_messages = Vec::new();
-        if let Some(digest_row) = self.pending_digest_prompt_row().await? {
-            prompt_messages.push(digest_row);
-        }
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
@@ -63,7 +59,7 @@ impl AgentSession {
     /// arms stay off the session-command path (TS never reaches `_prepareForCommit`).
     pub fn classify_session_command(&self, text: &str) -> Option<SessionSlashCommand> {
         let normalized = crate::skills::expand_prompt_template(text, &self.prompt_templates);
-        parse_session_command(&self.slash_commands, &normalized)
+        self.parse_core_session_command(&normalized)
     }
 
     /// Prompt with images attached (the ACP prompt-capability path). Busy
@@ -83,35 +79,19 @@ impl AgentSession {
         let expand = options.expand_prompt_templates.unwrap_or(true);
         // TS `_finishSubmissionNormalization` order: skill commands expand first, prompt templates
         // second; both are gated by the same policy flag.
-        let (normalized, used_skill) = if expand {
-            let (skill_expanded, used_skill) =
-                crate::skills::expand_skill_command(text, &self.skills);
-            let normalized =
-                crate::skills::expand_prompt_template(&skill_expanded, &self.prompt_templates);
-            (normalized, used_skill)
+        let normalized = if expand {
+            let (skill_expanded, _) = crate::skills::expand_skill_command(text, &self.skills);
+            crate::skills::expand_prompt_template(&skill_expanded, &self.prompt_templates)
         } else {
-            (text.to_string(), None)
+            text.to_string()
         };
 
-        if let Some(command) = parse_session_command(&self.slash_commands, &normalized) {
+        if let Some(command) = self.parse_core_session_command(&normalized) {
             return Ok(PromptOutcome::SessionCommand(command));
         }
 
         let state = self.agent.state().await;
         let busy = state.is_streaming;
-        // The `skill_use_count` session counter counts at the admission
-        // seam: an admitted user turn whose text IS a skill block counts
-        // once. A pre-expanded block (the daemon emits the accepted row
-        // before admission) counts here too — the block parse carries the
-        // skill identity.
-        let skill_used = used_skill.is_some()
-            || pa_types::skill_blocks::parse_skill_block(&normalized)
-                .is_some_and(|block| self.skills.iter().any(|skill| skill.name == block.name));
-        if skill_used {
-            if let Some(telemetry) = &self.skill_telemetry {
-                telemetry.note_skill_used();
-            }
-        }
         if busy && options.streaming_behavior.is_none() {
             anyhow::bail!(
                 "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
@@ -135,13 +115,7 @@ impl AgentSession {
             // downgrading the images to placeholders.
             self.apply_image_model_routing(&images, &options.batch)
                 .await?;
-            // The turn's prompt messages: the deferred first-turn harness
-            // digest rides first when one is due, streamed ahead of the user
-            // prompt and carried on `agent_end`.
             let mut prompt_messages = Vec::new();
-            if let Some(digest_row) = self.pending_digest_prompt_row().await? {
-                prompt_messages.push(digest_row);
-            }
             prompt_messages.extend(self.take_next_turn_rows().await);
             prompt_messages.push(user_prompt_message(&normalized, &images));
             // Each batched action contributes its user row after the

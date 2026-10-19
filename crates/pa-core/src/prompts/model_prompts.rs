@@ -267,7 +267,9 @@ pub fn model_prompt_error_message(errors: &[String]) -> CustomMessage {
         )),
         display: true,
         details: None,
-        timestamp: crate::session_engine::refine::now_millis(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as u64),
         rest: serde_json::Map::default(),
     }
 }

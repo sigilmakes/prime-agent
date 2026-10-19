@@ -46,12 +46,12 @@ pub fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usage) {
 pub fn child_usage_identity_matches(
     payload: &pa_types::session::ChildUsageAttributionEntry,
     target_id: &str,
-    child_usage: Usage,
+    child_usage: &Usage,
     origin: Option<ChildUsageOrigin>,
 ) -> std::io::Result<bool> {
-    let wire_usage: Usage = serde_json::from_str(&serde_json::to_string(&child_usage)?)?;
+    let wire_usage: Usage = serde_json::from_str(&serde_json::to_string(child_usage)?)?;
     Ok(payload.target_id == target_id
-        && (payload.child_usage == child_usage || payload.child_usage == wire_usage)
+        && (payload.child_usage == *child_usage || payload.child_usage == wire_usage)
         && payload.origin == origin)
 }
 
@@ -59,7 +59,7 @@ pub type RlmChildUsageFuture<'a, T> =
     std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// A confirmed store result, carrying the current authoritative aggregate.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ChildUsageAppendResult {
     /// First confirmed durable result for this owned attribution intent.
     Created(Usage),
@@ -126,7 +126,7 @@ impl RlmChildUsageStore for SessionUsageStore {
                 else {
                     return Err(attribution_id_collision());
                 };
-                if !child_usage_identity_matches(payload, &target_id, child_usage, origin)? {
+                if !child_usage_identity_matches(payload, &target_id, &child_usage, origin)? {
                     return Err(attribution_id_collision());
                 }
                 return Ok(ChildUsageAppendResult::Existing(target_assistant_usage(
@@ -139,7 +139,7 @@ impl RlmChildUsageStore for SessionUsageStore {
                 &row_id,
                 &target_id,
                 child_usage,
-                aggregate,
+                aggregate.clone(),
                 origin,
             )?;
             Ok(ChildUsageAppendResult::Created(aggregate))
@@ -166,7 +166,7 @@ fn target_assistant_usage(session: &SessionManager, target_id: &str) -> std::io:
             pa_types::session::FileEntry::Message {
                 message: pa_types::session::AgentMessage::Assistant(assistant),
                 ..
-            } if entry.id() == Some(target_id) => Some(assistant.usage),
+            } if entry.id() == Some(target_id) => Some(assistant.usage.clone()),
             _ => None,
         })
         .ok_or_else(|| {
@@ -196,9 +196,6 @@ pub struct RlmChildUsageAttributions {
     /// The parent assistant row each child attributes to, captured at spawn;
     /// dropped in [`Self::forget_child`].
     children: std::sync::Mutex<HashMap<String, String>>,
-    /// The `rlm_child_*` session counters' handle (`None` in sessions
-    /// without telemetry — subagents never double-report).
-    telemetry: std::sync::Mutex<Option<std::sync::Arc<super::telemetry::SessionTelemetry>>>,
     /// The successor a rebuild handed observation to; a post-rebuild
     /// chain never silently drops a late batch.
     forward: std::sync::Mutex<Option<std::sync::Arc<RlmChildUsageAttributions>>>,
@@ -213,21 +210,9 @@ impl RlmChildUsageAttributions {
             store,
             bases: tokio::sync::Mutex::new(HashMap::new()),
             children: std::sync::Mutex::new(HashMap::new()),
-            telemetry: std::sync::Mutex::new(None),
             forward: std::sync::Mutex::new(None),
             fallback: std::sync::Mutex::new(None),
         }
-    }
-
-    /// Bind the telemetry handle the `rlm_child_*` session counters count
-    /// through (the engine wiring installs it
-    /// once the session telemetry is assembled; depth-0 sessions only).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the telemetry state mutex is poisoned.
-    pub fn set_telemetry(&self, telemetry: std::sync::Arc<super::telemetry::SessionTelemetry>) {
-        *self.telemetry.lock().expect("rlm usage telemetry lock") = Some(telemetry);
     }
 
     /// The child attributes to the parent's last assistant row; that row's usage becomes the
@@ -266,7 +251,7 @@ impl RlmChildUsageAttributions {
     ///
     /// # Panics
     ///
-    /// Panics if the forward, children, or telemetry state mutexes are poisoned.
+    /// Panics if the forward or children state mutexes are poisoned.
     pub async fn record_child_usage(&self, report: RlmChildUsageReport) -> bool {
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
@@ -311,26 +296,11 @@ impl RlmChildUsageAttributions {
                 .await
             {
                 Ok(result) => {
-                    let (aggregate, created) = match result {
-                        ChildUsageAppendResult::Created(aggregate) => (aggregate, true),
-                        ChildUsageAppendResult::Existing(aggregate) => (aggregate, false),
+                    let aggregate = match result {
+                        ChildUsageAppendResult::Created(aggregate)
+                        | ChildUsageAppendResult::Existing(aggregate) => aggregate,
                     };
                     bases.insert(target_id.clone(), aggregate);
-                    if let Some(telemetry) = self
-                        .telemetry
-                        .lock()
-                        .expect("rlm usage telemetry lock")
-                        .as_ref()
-                        .filter(|_| created)
-                    {
-                        telemetry.note_child_usage_attributed(
-                            usage.input,
-                            usage.output,
-                            usage.cache_read,
-                            usage.cache_write,
-                            usage.cost.total.as_f64(),
-                        );
-                    }
                 }
                 Err(error) => {
                     eprintln!("pa-core: RLM child usage attribution not persisted: {error}");
@@ -368,7 +338,9 @@ impl RlmChildUsageAttributions {
         let retired_bases = retired.bases.lock().await;
         let mut bases = self.bases.lock().await;
         for (target_id, base) in retired_bases.iter() {
-            bases.entry(target_id.clone()).or_insert_with(|| *base);
+            bases
+                .entry(target_id.clone())
+                .or_insert_with(|| base.clone());
         }
     }
 
@@ -415,7 +387,7 @@ impl RlmChildUsageAttributions {
             let retired_bases = producer.bases.lock().await;
             if let Some(base) = retired_bases.get(&target_id) {
                 let mut bases = self.bases.lock().await;
-                bases.entry(target_id.clone()).or_insert(*base);
+                bases.entry(target_id.clone()).or_insert(base.clone());
                 break;
             }
         }
@@ -461,7 +433,7 @@ fn last_assistant_row(entry: &pa_types::session::FileEntry) -> Option<(String, U
     else {
         return None;
     };
-    base.id.clone().map(|id| (id, assistant.usage))
+    base.id.clone().map(|id| (id, assistant.usage.clone()))
 }
 
 /// The sink contract the daemon's children registry drives. Object-safe
@@ -494,12 +466,14 @@ mod tests {
         cost_total: f64,
     ) -> Usage {
         Usage {
+            rest: pa_types::JsonMap::new(),
             input,
             output,
             cache_read,
             cache_write,
             total_tokens,
             cost: UsageCost {
+                rest: pa_types::JsonMap::new(),
                 input: pa_types::JsNumber(0.0),
                 output: pa_types::JsNumber(0.0),
                 cache_read: pa_types::JsNumber(0.0),

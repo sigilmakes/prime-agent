@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 
 use dir_lock::acquire_bootstrap_lock;
 pub use runtime_code::{
@@ -20,9 +20,9 @@ pub use runtime_code::{
     PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
 };
 use venv::{
-    bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
-    missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
-    resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill,
+    ensure_uv, expand_home, has_prime_agent_runtime, missing_python_skill_import_labels,
+    missing_rlm_extra_import_labels, normalize_python_skills, resolve_writable_kernel_venv_dir,
+    sync_python_skills, BootstrapPythonSkill,
 };
 pub use venv::{invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python};
 use venv::{kernel_base_ready, kernel_ready};
@@ -234,55 +234,124 @@ async fn ensure_kernel_venv(
         venv::require_runtime_source_dir().map_err(|error| format_bootstrap_failure(&error))?;
     let runtime_identity =
         venv::hash_runtime_source(&source_dir).map_err(|error| format_bootstrap_failure(&error))?;
-    if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
+    if !venv::recovery::intent_path(&venv).exists()
+        && kernel_ready(&python_str, &venv, &runtime_identity, python_skills)
+    {
         return Ok(python);
     }
 
-    let release_lock = acquire_bootstrap_lock(&venv).await?;
-    let result = async {
-        if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
-            return Ok(python);
-        }
-        if kernel_base_ready(&python_str, &venv, &runtime_identity) {
-            let uv = ensure_uv()?;
-            sync_python_skills(
-                &uv,
+    // A caller can cancel its startup future while uv still runs on a
+    // blocking thread. Keep the transaction and its lock alive until that
+    // child finishes, rather than admitting a concurrent venv writer.
+    let options = EnsureKernelPythonOptions {
+        python_skills: options.python_skills.clone(),
+        on_progress: options.on_progress.clone(),
+    };
+    let python_skills = python_skills.to_vec();
+    let lock_venv = venv.clone();
+    finish_locked_bootstrap(lock_venv, async move {
+        let result = async {
+            venv::recovery::recover_interrupted_upgrade(&venv, &runtime_identity)?;
+            if kernel_ready(&python_str, &venv, &runtime_identity, &python_skills) {
+                return Ok(python);
+            }
+            if kernel_base_ready(&python_str, &venv, &runtime_identity) {
+                let uv = ensure_uv()?;
+                sync_python_skills(
+                    &uv,
+                    &venv,
+                    &python,
+                    &source_dir,
+                    &runtime_identity,
+                    &python_skills,
+                    &options,
+                )
+                .await?;
+                return Ok(python);
+            }
+            if venv::recovery::restore(&venv, &runtime_identity)? {
+                if !kernel_ready(&python_str, &venv, &runtime_identity, &python_skills) {
+                    sync_python_skills(
+                        &ensure_uv()?,
+                        &venv,
+                        &python,
+                        &source_dir,
+                        &runtime_identity,
+                        &python_skills,
+                        &options,
+                    )
+                    .await?;
+                }
+                return Ok(python);
+            }
+            options.report("› setting up python kernel (one-time, ~30s)…");
+            venv::rebuild_kernel_venv(
+                &ensure_uv()?,
                 &venv,
-                &python,
                 &source_dir,
                 &runtime_identity,
-                python_skills,
-                options,
+                &python_skills,
+                &options,
             )
             .await?;
-            return Ok(python);
+            Ok(python)
         }
-        let had_venv = venv.exists();
-        options.report("› setting up python kernel (one-time, ~30s)…");
-        if had_venv {
-            options.report("rebuilding kernel venv");
-            std::fs::remove_dir_all(&venv)
-                .with_context(|| format!("removing {}", venv.display()))?;
+        .await;
+        if result.is_ok() {
+            options.report("✓ ready");
         }
-        bootstrap_venv(
-            &venv,
-            &source_dir,
-            &runtime_identity,
-            python_skills,
-            options,
-        )
-        .await?;
-        Ok(python)
-    }
-    .await;
-    drop(release_lock);
-    options.report("✓ ready");
-    result.map_err(|error| format_bootstrap_failure(&error))
+        result.map_err(|error| format_bootstrap_failure(&error))
+    })
+    .await
+}
+
+async fn finish_locked_bootstrap(
+    venv: PathBuf,
+    action: impl std::future::Future<Output = anyhow::Result<PathBuf>> + Send + 'static,
+) -> anyhow::Result<PathBuf> {
+    tokio::spawn(async move {
+        let _lock = acquire_bootstrap_lock(&venv).await?;
+        action.await
+    })
+    .await
+    .map_err(|error| anyhow!("kernel bootstrap task failed: {error}"))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_caller_does_not_unlock_a_running_bootstrap() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        let lock = root.path().join("kernel-venv.bootstrap.lock");
+        let done = root.path().join("mutation-completed");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let result = venv.clone();
+        let finished = done.clone();
+        let caller = tokio::spawn(finish_locked_bootstrap(venv.clone(), async move {
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            std::fs::write(finished, "done")?;
+            Ok(result)
+        }));
+        entered_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(lock.is_file());
+        let mut contender = Box::pin(acquire_bootstrap_lock(&venv));
+        assert!(matches!(
+            futures::poll!(&mut contender),
+            std::task::Poll::Pending
+        ));
+        release_tx.send(()).unwrap();
+        let guard = contender.await.unwrap();
+        assert_eq!(std::fs::read_to_string(done).unwrap(), "done");
+        drop(guard);
+        assert!(!lock.exists());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn lock_timeout_prevents_venv_rebuild() {

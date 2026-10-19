@@ -72,9 +72,25 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
         {
+            route.target.model = self.configure_ollama_model(&route.target.model);
+            if let Some(model) =
+                pa_core::session_engine::provider_adapter::json_round_trip(&route.target.model)
+            {
+                route.agent_override.model = model;
+            }
             self.refresh_request_auth(&mut route.target);
             if let Some(saved) = route.session_target.as_mut() {
+                saved.model = self.configure_ollama_model(&saved.model);
                 self.refresh_request_auth(saved);
+            }
+        }
+        {
+            let mut slot = self
+                .provider_target
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(target) = slot.as_mut() {
+                target.model = self.configure_ollama_model(&target.model);
             }
         }
         let live_model = self
@@ -115,6 +131,35 @@ impl AgentSessionEngine {
                     }
                 }
             }
+        }
+        let core = self.session.blocking_lock().clone();
+        if let Some(core) = core {
+            self.runtime.block_on(async {
+                let agent = core.session.agent();
+                let state = agent.state().await;
+                let model = self.ollama_cloud.configure_agent_model(
+                    &self.cwd(),
+                    &self.config.agent_dir,
+                    &state.model,
+                );
+                if model != state.model {
+                    agent.set_model(model.clone()).await;
+                    if let Some(bound) = core.turn_boundary.bound() {
+                        core.turn_boundary.rebind_model_facts(
+                            bound.model_info.clone(),
+                            (model.context_window > 0).then_some(model.context_window),
+                        );
+                    }
+                }
+                if let Some(mut route) = agent.model_override() {
+                    route.model = self.ollama_cloud.configure_agent_model(
+                        &self.cwd(),
+                        &self.config.agent_dir,
+                        &route.model,
+                    );
+                    agent.set_model_override(Some(route));
+                }
+            });
         }
         Ok(())
     }

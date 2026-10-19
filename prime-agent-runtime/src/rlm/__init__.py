@@ -18,7 +18,6 @@ from .factory import (
     stop_factory,
     watch_factory,
 )
-from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 _RENAMED_RUN_MESSAGE = "rlm.run was renamed; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -517,70 +516,23 @@ async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagen
     return name
 
 
-class _HarnessProxy:
-    """Resolve the harness state against the current environment on every access.
-
-    Session env vars may be applied after import, so a state bound at import
-    time could freeze an env-less resolution. Resolution must never raise (a
-    failure inside the kernel namespace would take down the kernel). When the
-    local store is genuinely unconfigured (no session env, e.g. --no-session)
-    reads see an empty view but local writes raise instructively instead of
-    vanishing on kernel exit; any other resolution failure degrades to a shared
-    in-memory store until local resolution starts succeeding.
-    """
-
-    _fallback: HarnessState | None = None
-    _unpersisted: HarnessState | None = None
-
-    def _resolve(self) -> HarnessState:
-        try:
-            return get_harness_state()
-        except RuntimeError as exc:
-            if "Local harness state requires" in str(exc):
-                if _HarnessProxy._unpersisted is None:
-                    _HarnessProxy._unpersisted = HarnessState(
-                        in_memory=True,
-                        local_write_error=(
-                            f"{exc} This session has no persistent local harness store; "
-                            "pass global_=True to persist across sessions."
-                        ),
-                    )
-                return _HarnessProxy._unpersisted
-            return self._degraded()
-        except Exception:  # pragma: no cover - harness access must never raise
-            return self._degraded()
-
-    @staticmethod
-    def _degraded() -> HarnessState:
-        if _HarnessProxy._fallback is None:
-            _HarnessProxy._fallback = HarnessState(in_memory=True)
-        return _HarnessProxy._fallback
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._resolve(), name)
-
-    def __repr__(self) -> str:
-        return repr(self._resolve())
-
-
-_harness_state = _HarnessProxy()
-
-
 class _RLMFactoryNamespace:
-    """Run stored state-machine factories: rlm.factory.run/status/stop/resume,
+    """Run library state-machine factories: rlm.factory.run/status/stop/resume,
     plus graph/watch for live monitoring.
 
-    ``run('<spec_id>')`` validates a stored factory entry (machine form, or
+    ``run('<machine_name>')`` validates a library machine (machine form, or
     dag sugar that compiles to one), enters the entry states up to the
     spec's max_parallel, and returns immediately; a kernel asyncio task
     continues the run (nonblocking control loop). Runs live in kernel
-    memory only; children stay supervisor-owned. Every call is async, so
-    always await it: ``await rlm.factory.run('<id>')``.
+    memory only; children stay supervisor-owned. The six operations
+    run/status/stop/resume/graph/watch are async; await each call.
+    ``help()`` returns a string synchronously.
 
-    When no stored entry carries the id, ``run`` falls back to the machine
-    library: the bundled seeds ship inside the runtime (the personal
-    library lives under the agent dir), and the template runs directly
-    without creating a harness entry:
+    The default runtime resolves names from the machine library: bundled
+    seeds ship inside the runtime, and the personal library lives under
+    the agent dir. An embedding may explicitly inject an entry store;
+    only then can a matching stored spec take precedence over the library.
+    A library template runs without creating a persistent entry:
     ``await rlm.factory.run('review-sweep')``.
     ``prime-agent factory list | import | export`` manages the library (a
     broken machine names its exact errors; a missing one lists what the
@@ -588,16 +540,16 @@ class _RLMFactoryNamespace:
 
     ``graph()`` returns the machine structure fused with live runtime state
     (``status()``'s data plus the static graph): pass a live run id for one
-    run's snapshot, a stored spec id for the static structure, or nothing
-    for every live run. ``watch('<run_id>', timeout)`` blocks until the
+    run's snapshot, or nothing for the run collection. A stored spec id
+    resolves a static structure only with an explicitly injected entry store. ``watch('<run_id>', timeout)`` blocks until the
     run's state/instance shape changes or the timeout elapses (bounded),
     then returns the same snapshot with ``changed`` — an agent can stream
     progress and drive orchestration programmatically, and the emitted
     graph model renders as ASCII or genuine Mermaid from one shape.
 
     The factory is opt-in: while the ``factory.enabled`` setting is off (the
-    default; the user turns it on with ``/factory on``), every call above
-    refuses with one clean message and only ``help()`` answers, so the
+    default; the user turns it on with ``/factory on``), the six async calls
+    refuse with one clean message and only ``help()`` answers, so the
     guide stays readable before opting in.
 
     ``help()`` returns the full embedded authoring reference and API guide
@@ -629,9 +581,6 @@ class _RLMFactoryNamespace:
 
 
 class _RLMNamespace:
-    harness = _harness_state
-    get_harness_state = staticmethod(get_harness_state)
-
     async def spawn(
         self,
         prompt: str,
@@ -688,7 +637,6 @@ class _RLMNamespace:
 
 
 rlm = _RLMNamespace()
-harness = _harness_state
 
 
 class _NotCallableModule(types.ModuleType):
@@ -701,9 +649,6 @@ sys.modules[__name__].__class__ = _NotCallableModule
 __all__ = [
     "BashHandle",
     "BashResult",
-    "HarnessEntry",
-    "HarnessScope",
-    "HarnessState",
     "McpIntegration",
     "McpToolError",
     "NotEnabled",
@@ -714,13 +659,10 @@ __all__ = [
     "RLMSubagent",
     "RLMSubagentActivity",
     "create_session",
-    "RefinementEvent",
     "bash",
     "delete_subagent",
     "emit",
     "find_models",
-    "get_harness_state",
-    "harness",
     "host_request",
     "list_subagents",
     "progress_note",

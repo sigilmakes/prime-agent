@@ -817,6 +817,30 @@ mod tests {
 
     #[test]
     fn relative_corpus_paths_anchor_the_socket_before_changing_project() {
+        const CHILD_ENV: &str = "PA_PERF_RELATIVE_CORPUS_CHILD";
+        const CHILD_MARKER: &str = "pa-perf relative corpus child assertions complete";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let cwd = tempfile::tempdir().expect("private caller cwd");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "bench::runner::tests::relative_corpus_paths_anchor_the_socket_before_changing_project",
+                    "--nocapture",
+                ])
+                .current_dir(cwd.path())
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("run the exact test in its owned private cwd");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "child failed: {stdout}\n{stderr}");
+            assert!(stdout.contains(CHILD_MARKER), "child did not run: {stdout}");
+            println!("{stdout}");
+            return;
+        }
+        // tiny_context anchors this relative fixture before entering the project.
+        std::fs::write("Cargo.toml", include_str!("../../Cargo.toml"))
+            .expect("private binary-path fixture");
         let dir = tempfile::tempdir_in(".").expect("relative corpus directory");
         // TempDir may return an absolute path even for a relative parent.
         // The directory lives in cwd, so its name is the caller's relative path.
@@ -832,6 +856,7 @@ mod tests {
             dir.path().canonicalize().expect("absolute root")
         );
         assert_ne!(ctx.project_dir, ctx.corpus_root);
+        println!("{CHILD_MARKER}");
     }
 
     #[test]
@@ -973,7 +998,7 @@ mod tests {
     #[test]
     fn a_daemon_startup_timeout_kills_and_reaps_its_owned_child() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let child = std::process::Command::new("/bin/sleep")
+        let child = std::process::Command::new(super::super::pty::test_executable("sleep"))
             .arg("60")
             .spawn()
             .expect("spawn the mock daemon, never the product");

@@ -18,6 +18,13 @@ async fn assert_prompt_case(case: PromptCase) {
         let agent_dir = tmp.path().join("agent");
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
+        // This fixture asserts only the assembled base prompt. Dynamic optional
+        // context is covered by the active-plugin engine verifier.
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"plugins":{"harness":{"enabled":false}}}"#,
+        )
+        .unwrap();
         std::fs::write(cwd.join("AGENTS.md"), "PROJECT_CONTEXT_SENTINEL").unwrap();
         std::fs::write(agent_dir.join("AGENTS.md"), "GLOBAL_CONTEXT_SENTINEL").unwrap();
         if case.custom_system {

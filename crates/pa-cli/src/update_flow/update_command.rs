@@ -11,7 +11,6 @@ use pa_types::daemon::update_flow::{UpdateState, UpdateStatus, UpdateTimeoutBudg
 use super::intent::{acquire, hand_over, release, status_path_for, AcquireOutcome};
 use super::plan::{plan, UpdatePlan};
 use super::report::UpdateReport;
-use super::status::UPDATE_TELEMETRY_STATE_NAMES;
 use super::status::{read_status, StatusWriter};
 
 /// The tail loop budgets: 30 minutes of progress, 3 minutes of heartbeat liveness.
@@ -42,6 +41,9 @@ pub struct UpdateCommandOptions {
 /// Returns an error when the binary is not installer-owned or a phase,
 /// the lock, a status write, or the coordinator spawn fails.
 pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
+    if let Some(message) = pa_core::update::managed::self_update_refusal() {
+        anyhow::bail!(message);
+    }
     let agent_dir = crate::config::get_agent_dir();
     let socket_path = pa_daemon::socket::default_daemon_socket_path();
     let install_root = super::activation_root().map_err(|_| {
@@ -59,8 +61,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         &status_path,
     )? {
         AcquireOutcome::Join { status_path } => {
-            // Relay the running update's terminal status; the running coordinator's invoker owns
-            // the telemetry emission.
+            // Relay the running update's terminal status.
             let status = tail_status(&status_path).await;
             print_terminal(&status);
             return Ok(i32::from(status.state != UpdateState::Complete));
@@ -68,9 +69,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         AcquireOutcome::Acquired => {}
     }
     let mut writer = StatusWriter::new(&status_path, &update_id, &socket_path.to_string_lossy())?;
-    // §11 telemetry: one `update_<phase>` event per status transition; the
-    // tail below derives the coordinator-side events from the same file.
-    let mut phases = PhaseTelemetry::open();
     writer.set_state(UpdateState::Planning)?;
     let budget = UpdateTimeoutBudget::from_env();
     let download_base = std::env::var("PRIME_AGENT_DOWNLOAD_BASE_URL").ok();
@@ -93,12 +91,9 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             archive_sha256,
             base_url,
         }) => {
-            // The plan's target version rides the installation-stage events.
-            phases.target_version = Some(version.clone());
             // `Downloading`: stream + digest the archive (one wall-clock budget across all
             // attempts, spec §9).
             writer.set_state(UpdateState::Downloading)?;
-            phases.phase(writer.current());
             let archive = agent_dir.join(format!("update-{update_id}.tar.gz"));
             pa_core::update::download::download_archive(
                 &archive_url,
@@ -114,7 +109,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             .with_context(|| "the release download failed; the installed version was kept")?;
             // `Staged`: extract, validate, and probe the candidate.
             writer.set_state(UpdateState::Staged)?;
-            phases.phase(writer.current());
             let release_dir = pa_core::update::download::stage_archive(
                 &archive,
                 &archive_sha256,
@@ -133,7 +127,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             // `Staged` directly: `plan_direct` already staged the payload;
             // the probe below re-checks the binary's `--version`.
             writer.set_state(UpdateState::Staged)?;
-            phases.phase(writer.current());
             super::swap::validate_candidate(&candidate_dir.join("prime-agent"), &version).await?;
             (candidate_dir.join("prime-agent"), candidate_dir)
         }
@@ -151,7 +144,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             writer.set_state(UpdateState::Skipped)?;
             writer.set_message(Some(reason.clone()))?;
             release(&agent_dir, &socket_path.to_string_lossy())?;
-            track_update_completed(writer.current()).await;
             println!("{reason}");
             // An interactive child reports no-change with the not-attempted
             // code so the client keeps running (TS `setSelfUpdateNoChangeExitCode`).
@@ -166,7 +158,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             writer.set_state(UpdateState::Aborted)?;
             writer.set_message(Some(error.to_string()))?;
             release(&agent_dir, &socket_path.to_string_lossy())?;
-            track_update_completed(writer.current()).await;
             anyhow::bail!("{error:#}");
         }
     };
@@ -206,7 +197,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         &status_path,
     )?;
     let status = tail_status_with(&status_path, Some(&mut child), &mut |observed, _fresh| {
-        phases.phase(observed);
         if let Some(line) = phase_status_line(observed.state) {
             println!("{line}");
         }
@@ -219,8 +209,6 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             eprintln!("Warning: could not reap the update coordinator: {error}");
         }
     });
-    phases.finish().await;
-    track_update_completed(&status).await;
     print_terminal(&status);
     Ok(i32::from(status.state != UpdateState::Complete))
 }
@@ -267,8 +255,7 @@ async fn tail_status(status_path: &std::path::Path) -> UpdateStatus {
     tail_status_with(status_path, /*coordinator*/ None, &mut |_, _| {}).await
 }
 
-/// The tail with per-transition observers (§11: the CLI status line and the
-/// `update_<phase>` telemetry derive from the same status-file transitions).
+/// Tail status with an observer for each state transition.
 async fn tail_status_with(
     status_path: &std::path::Path,
     mut coordinator: Option<&mut std::process::Child>,
@@ -399,211 +386,6 @@ fn phase_status_line(state: UpdateState) -> Option<&'static str> {
         | UpdateState::Aborted
         | UpdateState::Failed => None,
     }
-}
-
-/// One `update_<phase>` telemetry event per status-file transition (spec §11: the
-/// invoker owns the emission). Primitives only.
-struct PhaseTelemetry {
-    client: Option<pa_telemetry::TelemetryClient>,
-    last_observed: Option<std::time::Instant>,
-    /// States already emitted: the CLI emits Downloading/Staged directly, so
-    /// the tail's first observation must not duplicate them.
-    emitted: Vec<UpdateState>,
-    /// The installed version at update start.
-    from_version: Option<String>,
-    /// The plan's target release (set once the release lookup resolved).
-    target_version: Option<String>,
-}
-
-impl PhaseTelemetry {
-    fn open() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let agent_dir = crate::config::get_agent_dir();
-        let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-        let client = if crate::mode::telemetry_disabled(&settings) {
-            None
-        } else {
-            Some(pa_core::session_engine::telemetry::build_client(
-                &settings, &agent_dir,
-            ))
-        };
-        PhaseTelemetry {
-            client,
-            last_observed: None,
-            emitted: Vec::new(),
-            from_version: Some(crate::config::version().to_string()),
-            target_version: None,
-        }
-    }
-
-    fn phase(&mut self, status: &UpdateStatus) {
-        let Some(client) = &self.client else { return };
-        if self.emitted.contains(&status.state) {
-            return;
-        }
-        // Only mapped states own a duration window; a `Stopped` observation
-        // between mapped stages would otherwise shorten the next stage's duration.
-        let v2_stage = installation_stage(status.state);
-        let v1_event = phase_event_name(status.state);
-        if v2_stage.is_none() && v1_event.is_none() {
-            return;
-        }
-        self.emitted.push(status.state);
-        let now = std::time::Instant::now();
-        let duration_ms = self
-            .last_observed
-            .map_or(0, |last| now.duration_since(last).as_millis() as u64);
-        self.last_observed = Some(now);
-        // The v2 installation stage fires for EVERY mapped transition,
-        // including the ones without their own v1 phase event.
-        self.installation_stage(status, duration_ms, v2_stage);
-        let Some(event) = v1_event else {
-            return;
-        };
-        let mut properties = pa_telemetry::base_properties("cli");
-        properties.set("phase", serde_json::Value::from(event));
-        properties.set("duration_ms", serde_json::Value::from(duration_ms));
-        if status.state.is_terminal() {
-            properties.set(
-                "sessions_total",
-                serde_json::Value::from(status.counts.total),
-            );
-            properties.set(
-                "sessions_restored",
-                serde_json::Value::from(status.counts.restored),
-            );
-            properties.set(
-                "sessions_failed",
-                serde_json::Value::from(status.counts.failed),
-            );
-        }
-        client.track(event, properties);
-    }
-
-    /// `agent installation stage` (v2): one event per status-file transition in
-    /// installer-stage vocabulary, with the attempt id and version pair.
-    fn installation_stage(
-        &self,
-        status: &UpdateStatus,
-        duration_ms: u64,
-        mapping: Option<(&'static str, &'static str, Option<&'static str>)>,
-    ) {
-        let Some(client) = &self.client else { return };
-        let Some((stage, outcome, reason)) = mapping else {
-            return;
-        };
-        let mut event = pa_telemetry::AgentInstallationStage {
-            installation_attempt_id: status.update_id.to_string(),
-            installation_action: "update",
-            installation_source: "cli",
-            stage,
-            outcome,
-            reason,
-            from_version: self.from_version.clone(),
-            target_version: self.target_version.clone(),
-            observed_version: None,
-            duration_ms: Some(duration_ms),
-            exit_code: None,
-            session_restore_total: None,
-            session_restore_failed: None,
-        };
-        if status.state.is_terminal() {
-            event.session_restore_total = Some(status.counts.total);
-            event.session_restore_failed = Some(status.counts.failed);
-        }
-        event.track(client);
-    }
-
-    async fn finish(self) {
-        if let Some(client) = self.client {
-            let _ = client.shutdown().await;
-        }
-    }
-}
-
-/// The installation-stage mapping for one coordinator state (`stage`, `outcome`, optional
-/// `reason`).
-fn installation_stage(
-    state: UpdateState,
-) -> Option<(&'static str, &'static str, Option<&'static str>)> {
-    match state {
-        UpdateState::Downloading => Some(("download", "started", None)),
-        UpdateState::Staged => Some(("verification", "success", None)),
-        UpdateState::Preparing => Some(("daemon_restart", "started", None)),
-        UpdateState::Prepared => Some(("daemon_restart", "success", None)),
-        UpdateState::Stopping => Some(("package_install", "started", None)),
-        UpdateState::Activating | UpdateState::Booting => {
-            Some(("package_install", "success", None))
-        }
-        UpdateState::Restoring => Some(("session_restore", "started", None)),
-        UpdateState::Complete => Some(("completed", "success", None)),
-        UpdateState::Rollback => Some(("completed", "failed", Some("install_failed"))),
-        UpdateState::Aborted => Some(("completed", "cancelled", Some("interrupted"))),
-        UpdateState::Failed => Some(("completed", "failed", None)),
-        UpdateState::Skipped => Some(("completed", "skipped", Some("up_to_date"))),
-        UpdateState::Acquire | UpdateState::Join | UpdateState::Stopped | UpdateState::Planning => {
-            None
-        }
-    }
-}
-
-/// The §11 telemetry event for one coordinator state (`None` for `Planning`,
-/// `Skipped`, and the phases the invoking CLI emits directly).
-fn phase_event_name(state: UpdateState) -> Option<&'static str> {
-    match state {
-        UpdateState::Downloading => Some("update_download_started"),
-        UpdateState::Staged => Some("update_staged"),
-        UpdateState::Preparing => Some("update_prepare_started"),
-        UpdateState::Prepared => Some("update_prepared"),
-        UpdateState::Stopping => Some("update_stopping"),
-        UpdateState::Activating | UpdateState::Booting => Some("update_restarting"),
-        UpdateState::Restoring => Some("update_restoring"),
-        UpdateState::Complete => Some("update_complete"),
-        UpdateState::Rollback => Some("update_rollback"),
-        UpdateState::Aborted => Some("update_aborted"),
-        UpdateState::Failed => Some("update_failed"),
-        UpdateState::Acquire
-        | UpdateState::Join
-        | UpdateState::Stopped
-        | UpdateState::Planning
-        | UpdateState::Skipped => None,
-    }
-}
-
-/// `update completed`: the adoption event, one per invocation at the terminal status (primitives
-/// only).
-async fn track_update_completed(status: &UpdateStatus) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let agent_dir = crate::config::get_agent_dir();
-    let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-    if crate::mode::telemetry_disabled(&settings) {
-        return;
-    }
-    let client = pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
-    let mut properties = pa_telemetry::base_properties("cli");
-    properties.set(
-        "outcome",
-        serde_json::Value::from(
-            UPDATE_TELEMETRY_STATE_NAMES
-                .iter()
-                .find(|(state, _)| *state == status.state)
-                .map_or("unknown", |(_, name)| *name),
-        ),
-    );
-    properties.set(
-        "sessions_total",
-        serde_json::Value::from(status.counts.total),
-    );
-    properties.set(
-        "sessions_restored",
-        serde_json::Value::from(status.counts.restored),
-    );
-    properties.set(
-        "sessions_failed",
-        serde_json::Value::from(status.counts.failed),
-    );
-    client.track("update completed", properties);
-    let _ = client.shutdown().await;
 }
 
 /// The coordinator mode entry (`--internal-update-restart-coordinator`): the

@@ -23,26 +23,14 @@ impl SessionUi {
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         update_notes: mpsc::UnboundedSender<UpdateNote>,
-        traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
         auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
         backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
-            SessionSelection::New => create_session(&client, options, None).await?,
-            SessionSelection::NewChild { rlm_depth, .. } => {
-                let id = create_session(&client, options, None).await?;
-                // `tui agents new scoped`, fire-and-forget (the
-                // `subagents_view_opened` pattern): the open never waits on
-                // the telemetry flush.
-                if let Some(telemetry) = options.telemetry.clone() {
-                    let depth = *rlm_depth;
-                    tokio::spawn(async move {
-                        telemetry.scoped_agent_created(depth).await;
-                    });
-                }
-                id
+            SessionSelection::New | SessionSelection::NewChild { .. } => {
+                create_session(&client, options, None).await?
             }
             SessionSelection::Attach(id) => id.clone(),
             SessionSelection::Resume(_) => {
@@ -53,6 +41,18 @@ impl SessionUi {
         // session drops its sender, so the task never outlives the run.
         let (orders_tx, orders_rx) = mpsc::unbounded_channel::<PromptOrder>();
         tokio::spawn(Self::prompt_submit_worker(orders_rx, prompt_notes.clone()));
+        let working_messages = match pa_types::platform::agent_dir()
+            .map(|dir| {
+                super::working_messages::WorkingMessages::load(&dir.join("working-messages.json"))
+            })
+            .transpose()
+        {
+            Ok(messages) => messages.unwrap_or_default(),
+            Err(error) => {
+                let _ = notes.send(format!("Custom working messages disabled: {error:#}"));
+                super::working_messages::WorkingMessages::default()
+            }
+        };
         let mut session = SessionUi {
             client,
             active_session_id: String::new(),
@@ -74,7 +74,6 @@ impl SessionUi {
             models_fetched_at: None,
             catalog_updates,
             heartbeat_updates: activity_updates.heartbeats,
-            telemetry_disabled: options.telemetry_disabled,
             code_block_indent: options.code_block_indent.clone(),
             tree_filter_mode: crate::tree_list::filter_mode_from_str(&options.tree_filter_mode),
             branch_summary_skip_prompt: options.branch_summary_skip_prompt,
@@ -93,11 +92,6 @@ impl SessionUi {
             reload: None,
             reload_notes,
             share_notes,
-            trace_upload: None,
-            traces_upload_notes,
-            pending_traces_login: None,
-            traces_login_run: None,
-            traces_login_gen: 0,
             pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -115,13 +109,13 @@ impl SessionUi {
             steering_mode: "all".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
+            working_messages,
             turn_error_shown: false,
             pending_tools: HashSet::default(),
             aborted_tools: HashSet::default(),
             last_assistant_text: None,
             osc_sink: crate::clipboard::OscSink::Stdout,
             pending_confirm: None,
-            traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
             pending_model_sign_in: None,
             auth_panel_notes,
@@ -140,6 +134,7 @@ impl SessionUi {
             command_updates: activity_updates.commands,
             command_refresh_epoch: 0,
             skill_commands_cache: Vec::new(),
+            plugin_catalog: Value::Null,
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
@@ -170,15 +165,15 @@ impl SessionUi {
             prompt_in_flight: 0,
             transcript_stale: false,
             transcript_epoch: 0,
+            native_replay_epoch: None,
+            display_transcript: false,
+            transcript_incomplete: false,
             backfill_compaction_count: None,
             backfill_leaf_id: None,
             transcript_backfill: None,
             pending_backfill: None,
             backfill_seam: crate::snapshot::BackfillSeam::Preserve,
             backfill_notes,
-            telemetry: options.telemetry.clone(),
-            scroll_adoption_emitted: false,
-            exit_reason: "daemon_closed",
             reconnect: None,
             daemon_closing_notice: None,
             transport_lost: None,
@@ -190,7 +185,6 @@ impl SessionUi {
             escape_tree_shortcut_spent: false,
             user_bash_running: false,
             user_bash_card: None,
-            user_bash_started_at: None,
             user_bash_counter: 0,
             resync_bash: None,
             loader_anchor_ms: None,
@@ -201,15 +195,12 @@ impl SessionUi {
             external_editor_request: None,
             pending_mcp_auth: None,
             picker_restored_draft: false,
-            suspend_adoption_emitted: false,
             selection_auto_scroll: None,
-            selection_adoption_emitted: false,
             copies: Vec::new(),
             pressed_hyperlink: None,
             left_mouse_dragged: false,
             opened_urls: Vec::new(),
             pressed_click: None,
-            click_adoption_emitted: false,
         };
         session
             .attach_session(&active_session_id, DockFold::FirstFrame)
@@ -351,7 +342,7 @@ impl SessionUi {
             // an image-heavy session's attach stops transferring megabytes.
             capabilities: Some(attach_capabilities()),
             resume_cursor: None,
-            telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
+            telemetry_disabled: Some(true),
             recovery_config: None,
             env: client_env.clone(),
             launch_env: None,
@@ -498,6 +489,9 @@ impl SessionUi {
                 .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
         });
         self.turn_active = streaming;
+        if mounted_session_changes || !streaming {
+            self.working_messages.reset();
+        }
         self.streaming_index = None;
         // The turn-end watermark restarts only when the mounted session CHANGES: an end owed by the
         // detached session's stream must not pin the watermark (without the reset a later prompt's
@@ -519,6 +513,29 @@ impl SessionUi {
         self.trim_after_frame = true;
         self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
         self.transcript_backfill = None;
+        self.display_transcript = attach
+            .snapshot
+            .get("displayTranscript")
+            .and_then(Value::as_bool)
+            == Some(true);
+        self.transcript_incomplete = attach
+            .snapshot
+            .get("displayTranscriptError")
+            .and_then(Value::as_str)
+            .is_some();
+        if let Some(error) = attach
+            .snapshot
+            .get("displayTranscriptError")
+            .and_then(Value::as_str)
+        {
+            if let Some(entries) = self.pending_snapshot.as_mut() {
+                entries.push(ChatEntry::Status {
+                    text: format!("Full session history unavailable: {error}. Showing current model context only; /reload retries full history."),
+                    kind: crate::chat::StatusKind::Warning,
+                });
+            }
+        }
+        self.native_replay_epoch = self.display_transcript.then_some(self.transcript_epoch);
         self.backfill_seam = reconstructed.backfill_seam;
         self.backfill_compaction_count = attach.snapshot["state"]["compactionCount"].as_u64();
         self.backfill_leaf_id = attach.snapshot["state"]["leafId"]
@@ -638,7 +655,6 @@ impl SessionUi {
         match kind {
             RebuildKind::Rebind => {
                 self.user_bash_card = None;
-                self.user_bash_started_at = None;
             }
             RebuildKind::Resync => {
                 if let Some(resync) = resync_bash {
@@ -661,7 +677,6 @@ impl SessionUi {
                             {
                                 card.set_complete(None, false, false, None);
                             }
-                            self.user_bash_started_at = None;
                             // TS flushes inside the active-component branch:
                             // a side run (no mounted card) never flushes.
                             if !resync.snap_streaming {
@@ -837,7 +852,6 @@ mod backfill_tests {
             mpsc::unbounded_channel().0,
             mpsc::unbounded_channel().0,
             mpsc::unbounded_channel().0,
-            mpsc::unbounded_channel().0,
             ActivityUpdates {
                 heartbeats: mpsc::unbounded_channel().0,
                 bash: mpsc::unbounded_channel().0,
@@ -852,6 +866,7 @@ mod backfill_tests {
         assert!(backfill_tx
             .send(TranscriptBackfillNote {
                 epoch: old_epoch,
+                replacement: None,
                 entries: Ok(crate::snapshot::transcript_to_entries(&[
                     json!({"role": "user", "content": "stale history", "timestamp": 0}),
                 ])),

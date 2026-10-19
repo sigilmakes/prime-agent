@@ -12,35 +12,36 @@ use crate::protocol::DaemonResponse;
 
 impl Worker {
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
-        // Only operations that inspect or change historical branches need hydration.
-        // Cancellation is deliberately excluded: it must reach the live turn immediately.
-        if matches!(
-            command_type,
-            "get_session_tree"
-                | "get_context_tree"
-                | "get_user_messages_for_forking"
-                | "set_session_entry_label"
-                | "navigate_tree"
-                | "fork"
-                | "export_html"
-                | "export_jsonl"
-        ) && self
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .is_some_and(|store| store.window.is_some())
-        {
-            let path = self
-                .core
-                .lock()
-                .unwrap()
-                .store
+        // Display reads need the entire active branch, not the model's compacted
+        // window. Hydrate once off the executor; viewport/backfill stay bounded.
+        let display_read = matches!(command_type, "attach" | "get_messages")
+            && super::connection::wants_display_transcript(payload);
+        let needs_history = display_read
+            || matches!(
+                command_type,
+                "get_session_tree"
+                    | "get_context_tree"
+                    | "get_user_messages_for_forking"
+                    | "set_session_entry_label"
+                    | "navigate_tree"
+                    | "fork"
+                    | "export_html"
+                    | "export_jsonl"
+            );
+        let hydration = {
+            let core = self.core.lock().unwrap();
+            core.store
                 .as_ref()
-                .unwrap()
-                .path
-                .clone();
+                .filter(|store| needs_history && store.window.is_some())
+                .map(|store| {
+                    (
+                        store.path.clone(),
+                        core.generation.clone(),
+                        store.session_id().to_owned(),
+                    )
+                })
+        };
+        if let Some((path, generation, session_id)) = hydration {
             let load_path = path.clone();
             let hydrated = tokio::task::spawn_blocking(move || SessionFile::open(&load_path))
                 .await
@@ -49,16 +50,48 @@ impl Worker {
             match hydrated {
                 Ok(full) => {
                     let mut core = self.core.lock().unwrap();
-                    if let Some(store) = core.store.as_mut().filter(|store| store.path == path) {
+                    if core.generation != generation
+                        || !core.store.as_ref().is_some_and(|store| {
+                            store.path == path
+                                && store.session_id() == session_id
+                                && full.session_id() == session_id
+                        })
+                    {
+                        return response_failure(
+                            None,
+                            command_type,
+                            "History session changed",
+                            None,
+                        );
+                    }
+                    if let Some(store) = core.store.as_mut() {
+                        // Merge any appends and preserve the current leaf, lease, and tracing.
                         store.install_full_history(full);
                     }
+                }
+                Err(error) if display_read && command_type == "attach" => {
+                    // Failure is local to display hydration, not an epoch change.
+                    // Recheck before degrading to model context on reconnect.
+                    let core = self.core.lock().unwrap();
+                    let same_session = core.generation == generation
+                        && core.store.as_ref().is_some_and(|store| {
+                            store.path == path && store.session_id() == session_id
+                        });
+                    drop(core);
+                    if !same_session {
+                        return response_failure(
+                            None,
+                            command_type,
+                            "History session changed",
+                            None,
+                        );
+                    }
+                    return self.handle_attach_projection(payload, Some(error.to_string()));
                 }
                 Err(error) => {
                     return response_failure(None, command_type, &error.to_string(), None);
                 }
             }
-            // The hydrated full file was a transient whole-file copy on
-            // top of the installed history: release its freed heap.
             pa_types::memory_release::trim_freed_heap();
         }
         match command_type {
@@ -98,6 +131,8 @@ impl Worker {
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),
             "get_model_catalog" => self.handle_get_model_catalog(),
+            "refresh_models" => self.handle_refresh_models(payload).await,
+            "apply_model_snapshots" => self.handle_apply_model_snapshots(payload).await,
             "get_queue" => self.handle_get_queue(),
             "clear_queue" => self.handle_clear_queue(),
             "abort_and_clear_queue" => self.handle_abort_and_clear_queue(),
@@ -162,6 +197,7 @@ impl Worker {
             "restore_actions" => self.handle_restore_actions(payload),
             "refine" => self.handle_refine(payload).await,
             "reload" => self.handle_reload().await,
+            "plugin_command" => self.handle_plugin_command(payload).await,
             "cancel_rlm_child" => self.handle_cancel_rlm_child(payload).await,
             "delete_rlm_subagent" => self.handle_delete_rlm_subagent(payload).await,
             // The engine call blocks on the engine runtime, so it
@@ -479,23 +515,43 @@ impl Worker {
             })
             .unwrap_or_default();
         let core = self.core.lock().unwrap();
-        // Validate ancestry atomically with the positional read. Appends keep the
-        // attached leaf on this branch; navigation to another branch does not.
-        let history_leaf = payload.get("historyLeafId").filter(|_| before.is_some());
+        let display = super::connection::wants_display_transcript(payload);
+        if display
+            && payload
+                .get("historyGeneration")
+                .is_some_and(|generation| generation.as_str() != Some(core.generation.as_str()))
+        {
+            return response_failure(None, "get_messages", "History generation changed", None);
+        }
+        // Prefixes permit descendant appends. Full replacements require the exact
+        // captured leaf. Validate and project under the same lock.
+        let history_leaf = payload
+            .get("historyLeafId")
+            .filter(|_| before.is_some() || display);
         if let Some(anchor) = history_leaf {
             let valid = anchor.as_str().is_some_and(|leaf| {
-                core.store
-                    .as_ref()
-                    .is_some_and(|store| store.branch().iter().any(|entry| entry.id == leaf))
+                core.store.as_ref().is_some_and(|store| {
+                    if display && before.is_none() {
+                        store.leaf_id() == Some(leaf)
+                    } else {
+                        store.branch().iter().any(|entry| entry.id == leaf)
+                    }
+                })
             });
             if !valid {
                 return response_failure(None, "get_messages", "History branch changed", None);
             }
         }
-        let mut messages: Vec<Value> = match (core.store.as_ref(), before) {
-            (Some(store), Some(before)) => store.messages_before(before),
-            (Some(store), None) => store.messages(),
-            (None, _) => Vec::new(),
+        let projected = match (core.store.as_ref(), before, display) {
+            (Some(store), Some(before), true) => store.display_messages_before(before),
+            (Some(store), None, true) => store.display_messages(),
+            (Some(store), Some(before), false) => Ok(store.messages_before(before)),
+            (Some(store), None, false) => Ok(store.messages()),
+            (None, _, _) => Ok(Vec::new()),
+        };
+        let mut messages = match projected {
+            Ok(messages) => messages,
+            Err(error) => return response_failure(None, "get_messages", &error.to_string(), None),
         };
         if crate::snapshot_stream::wants_image_elision(&capabilities) {
             crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
@@ -503,6 +559,14 @@ impl Worker {
         let mut data = json!({ "messages": messages });
         if let Some(anchor) = history_leaf {
             data["historyLeafId"] = anchor.clone();
+        }
+        if display {
+            data["displayTranscript"] = json!(true);
+            data["generation"] = json!(core.generation);
+            if let Some(store) = core.store.as_ref() {
+                data["sessionId"] = json!(store.session_id());
+                data["leafId"] = json!(store.leaf_id());
+            }
         }
         response_success(None, "get_messages", Some(data))
     }
@@ -724,7 +788,6 @@ impl Worker {
         self.await_session_work_settled().await;
         // The session-ended finalization runs AFTER the awaited settle: the
         // ended-run accounting includes the aborted turn, never a pending response.
-        self.engine.archive_session_telemetry().await;
         // The session's kernel dies with the session: the worker keeps the engine
         // object, so the #235 engine-drop teardown cannot run yet — dispose explicitly.
         if let Some(agent_engine) = &self.agent_engine {

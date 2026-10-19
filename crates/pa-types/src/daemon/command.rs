@@ -206,7 +206,7 @@ pub enum DaemonCommand {
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<Value>,
-        /// Telemetry opt-out: only ever `Some(true)`; absent means enabled.
+        /// Compatibility-only opt-out for older daemons; this fork has no reporter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         telemetry_disabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,6 +634,15 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Optional native plugin invocation, never an inference prompt.
+    PluginCommand {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        text: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     GetResourceSnapshot {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -682,6 +691,33 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Explicit, credential-free catalog refresh (capability `model_refresh`).
+    RefreshModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sources: Option<Vec<String>>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Adopt validated local snapshots only; never fetch or renew credentials.
+    ApplyModelSnapshots {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<u64>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    /// Refresh ready resident workers without waking saved sessions.
+    RefreshAllModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },

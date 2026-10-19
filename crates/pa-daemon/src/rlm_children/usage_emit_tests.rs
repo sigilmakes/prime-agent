@@ -84,10 +84,6 @@ fn registry(agent_dir: &Path) -> SupervisorChildSessions {
         Arc::new(SupervisorLink::new(socket)),
         agent_dir.to_path_buf(),
         "parent-live".to_string(),
-        std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
-            agent_dir.to_path_buf(),
-            /*telemetry_disabled*/ true,
-        )),
     )
 }
 
@@ -120,7 +116,7 @@ async fn emit_reads_once_and_advances_the_cursor() {
     let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].rlm_child_id, "sub-emit1");
-    let [(origin, usage)] = reports[0].batches[..] else {
+    let [(origin, ref usage)] = reports[0].batches[..] else {
         panic!("one batch: {:?}", reports[0].batches);
     };
     assert_eq!(origin, pa_types::session::ChildUsageOrigin::SpawnTask);
@@ -365,7 +361,7 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     sessions.inner.emit_child_usage(&record).await;
     let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
-    let [(_, usage)] = reports[0].batches[..] else {
+    let [(_, ref usage)] = reports[0].batches[..] else {
         panic!("one batch: {:?}", reports[0].batches);
     };
     assert_eq!((usage.input, usage.output), (10, 5));
@@ -592,10 +588,6 @@ async fn retirement_registry(
         Arc::new(SupervisorLink::new(socket)),
         dir.to_path_buf(),
         "parent-live".into(),
-        Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
-            dir.to_path_buf(),
-            /*telemetry_disabled*/ true,
-        )),
     );
     (registry, kills, commands, task)
 }

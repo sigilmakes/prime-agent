@@ -436,19 +436,6 @@ pub(crate) fn set_kitty_active_for_tests(active: bool) {
 #[cfg(test)]
 pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The established modes once the probe settles: `(kitty, modify_other_keys)`.
-/// `None` while the probe is still running (or never started). The second
-/// flag is always `false` (the mode-2 fallback is never armed) but keeps
-/// the TS telemetry event shape.
-pub(crate) fn settle_state() -> Option<(bool, bool)> {
-    if QUERY_IN_FLIGHT.load(Ordering::SeqCst) {
-        None
-    } else {
-        // Settled (or no probe ever ran): only kitty can be active beyond the paste markers.
-        Some((KITTY_ACTIVE.load(Ordering::SeqCst), false))
-    }
-}
-
 fn enhanced_keys_active() -> bool {
     BRACKETED_PASTE_ACTIVE.load(Ordering::SeqCst) || KITTY_ACTIVE.load(Ordering::SeqCst)
 }
@@ -738,7 +725,6 @@ mod tests {
         enable(&mut out).expect("enable");
         if !plain {
             assert!(!enhanced_keys_active());
-            assert_eq!(settle_state(), Some((false, false)));
         }
         disable(&mut out).expect("disable");
         assert!(!enhanced_keys_active());
@@ -754,17 +740,5 @@ mod tests {
         release_for_exit();
         enable_kitty(&mut std::io::stdout());
         assert!(!KITTY_ACTIVE.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn settle_state_reports_the_established_modes() {
-        let _lock = lock_state();
-        reset_state();
-        KITTY_ACTIVE.store(true, Ordering::SeqCst);
-        assert_eq!(settle_state(), Some((true, false)));
-        KITTY_ACTIVE.store(false, Ordering::SeqCst);
-        assert_eq!(settle_state(), Some((false, false)));
-        QUERY_IN_FLIGHT.store(true, Ordering::SeqCst);
-        assert_eq!(settle_state(), None);
     }
 }

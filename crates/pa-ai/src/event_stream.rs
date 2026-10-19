@@ -9,6 +9,9 @@ use std::task::{Context as TaskContext, Poll, Waker};
 
 use futures::Stream;
 use serde_json::Map;
+use tokio_util::sync::CancellationToken;
+
+use crate::utils_inner::stream_failure::ProviderError;
 
 pub use crate::types::{AssistantContent, AssistantMessage, AssistantMessageEvent, StopReason};
 
@@ -103,6 +106,11 @@ impl AssistantMessageEventExt for AssistantMessageEvent {
 #[derive(Default)]
 struct SharedState {
     done: bool,
+    closed: bool,
+    completion_only: bool,
+    producer_wakers: Vec<Waker>,
+    #[cfg(test)]
+    blocked_observer: Option<Waker>,
     queue: VecDeque<AssistantMessageEvent>,
     waker: Option<Waker>,
     resolved: Option<AssistantMessage>,
@@ -110,6 +118,28 @@ struct SharedState {
 }
 
 impl SharedState {
+    fn wake_producers(&mut self) {
+        for waker in self.producer_wakers.drain(..) {
+            waker.wake();
+        }
+    }
+
+    fn accept_event(&mut self, event: AssistantMessageEvent) {
+        if event.is_terminal() {
+            self.done = true;
+            if let Some(message) = event.terminal_message() {
+                self.resolve(message);
+            }
+            self.wake_producers();
+        }
+        if !self.completion_only {
+            self.queue.push_back(event);
+        }
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+
     /// Push a terminal event's message as the final result. First writer wins.
     fn resolve(&mut self, message: AssistantMessage) {
         if self.resolved.is_none() {
@@ -124,31 +154,72 @@ impl SharedState {
     }
 }
 
+#[derive(Default)]
+struct EventDeliveryOptions {
+    capacity: Option<usize>,
+    signal: Option<CancellationToken>,
+}
+
 struct Shared {
     state: Mutex<SharedState>,
+    delivery: EventDeliveryOptions,
 }
 
 impl Shared {
     fn push(&self, event: AssistantMessageEvent) {
+        // Synchronous emission is retained only for legacy/unbounded producers
+        // and immediate one-terminal error streams. Bounded producers use send.
+        assert!(
+            self.delivery.capacity.is_none(),
+            "bounded producers must await send"
+        );
         let mut state = self.state.lock().unwrap();
+        if !state.done {
+            state.accept_event(event);
+        }
+    }
+
+    fn poll_send(
+        &self,
+        cx: &mut TaskContext<'_>,
+        event: &mut Option<AssistantMessageEvent>,
+    ) -> Poll<Result<(), ProviderError>> {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return Poll::Ready(Err(ProviderError::Aborted));
+        }
         if state.done {
-            return;
+            return Poll::Ready(Ok(()));
         }
-        if event.is_terminal() {
-            state.done = true;
-            if let Some(message) = event.terminal_message() {
-                state.resolve(message);
+        if !state.completion_only
+            && self
+                .delivery
+                .capacity
+                .is_some_and(|capacity| state.queue.len() >= capacity)
+        {
+            if !state
+                .producer_wakers
+                .iter()
+                .any(|waker| waker.will_wake(cx.waker()))
+            {
+                state.producer_wakers.push(cx.waker().clone());
             }
+            #[cfg(test)]
+            if let Some(observer) = state.blocked_observer.take() {
+                observer.wake();
+            }
+            return Poll::Pending;
         }
-        state.queue.push_back(event);
-        if let Some(waker) = state.waker.take() {
-            waker.wake();
+        if let Some(event) = event.take() {
+            state.accept_event(event);
         }
+        Poll::Ready(Ok(()))
     }
 
     fn end(&self, result: Option<AssistantMessage>) {
         let mut state = self.state.lock().unwrap();
         state.done = true;
+        state.wake_producers();
         if let Some(result) = result {
             state.resolve(result);
         }
@@ -170,6 +241,26 @@ impl AssistantMessageEventWriter {
         self.shared.push(event);
     }
 
+    /// Await one ordered event. In legacy mode this is immediately ready. A
+    /// bounded send waits without holding the state mutex and respects request
+    /// cancellation. Terminal sends ignore request cancellation after transport
+    /// teardown, but still wait for capacity or reader closure.
+    pub async fn send(&self, event: AssistantMessageEvent) -> Result<(), ProviderError> {
+        let terminal = event.is_terminal();
+        let mut event = Some(event);
+        let send = futures::future::poll_fn(|cx| self.shared.poll_send(cx, &mut event));
+        if self.shared.delivery.capacity.is_some() && !terminal {
+            if let Some(signal) = &self.shared.delivery.signal {
+                return tokio::select! {
+                    biased;
+                    () = signal.cancelled() => Err(ProviderError::Aborted),
+                    result = send => result,
+                };
+            }
+        }
+        send.await
+    }
+
     pub fn end(&self, result: Option<AssistantMessage>) {
         self.shared.end(result);
     }
@@ -183,20 +274,44 @@ impl AssistantMessageEventWriter {
 /// final-result future.
 pub struct AssistantMessageEventStream {
     shared: Arc<Shared>,
+    /// Native inference must not keep a detached HTTP task alive after retirement.
+    pub(crate) abort_on_drop: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for AssistantMessageEventStream {
+    fn drop(&mut self) {
+        if self.shared.delivery.capacity.is_some() {
+            let mut state = self.shared.state.lock().unwrap();
+            state.closed = true;
+            state.queue.clear();
+            state.wake_producers();
+        }
+        if let Some(handle) = &self.abort_on_drop {
+            handle.abort();
+        }
+    }
 }
 
 impl AssistantMessageEventStream {
     /// Create a linked writer/stream pair.
     #[must_use]
     pub fn new() -> (AssistantMessageEventWriter, Self) {
+        Self::with_delivery(EventDeliveryOptions::default())
+    }
+
+    fn with_delivery(delivery: EventDeliveryOptions) -> (AssistantMessageEventWriter, Self) {
         let shared = Arc::new(Shared {
             state: Mutex::new(SharedState::default()),
+            delivery,
         });
         (
             AssistantMessageEventWriter {
                 shared: shared.clone(),
             },
-            Self { shared },
+            Self {
+                shared,
+                abort_on_drop: None,
+            },
         )
     }
 
@@ -224,6 +339,7 @@ impl AssistantMessageEventStream {
     ) -> Poll<Option<AssistantMessageEvent>> {
         let mut state = self.shared.state.lock().unwrap();
         if let Some(event) = state.queue.pop_front() {
+            state.wake_producers();
             return Poll::Ready(Some(event));
         }
         if state.done {
@@ -234,6 +350,8 @@ impl AssistantMessageEventStream {
     }
 
     /// Await the final assistant message carried by the terminal event.
+    /// Bounded streams enter completion-only mode: intermediate events are no
+    /// longer retained, so a result-only caller cannot block its own producer.
     ///
     /// # Panics
     ///
@@ -248,6 +366,13 @@ impl AssistantMessageEventStream {
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut state = self.shared.state.lock().unwrap();
+            if self.shared.delivery.capacity.is_some() {
+                // result consumes the only reader: no caller can observe these
+                // intermediate events. Stop retaining them and unblock producers.
+                state.completion_only = true;
+                state.queue.clear();
+                state.wake_producers();
+            }
             if let Some(message) = &state.resolved {
                 return message.clone();
             }
@@ -285,6 +410,34 @@ impl Stream for AssistantMessageEventStream {
 pub fn create_assistant_message_event_stream(
 ) -> (AssistantMessageEventWriter, AssistantMessageEventStream) {
     AssistantMessageEventStream::new()
+}
+
+/// Configure builtin delivery before starting any producer/network work. Invalid
+/// capacities return an already-resolved one-terminal error stream.
+pub(crate) fn create_provider_event_stream(
+    model: &crate::types::Model,
+    options: Option<&crate::types::StreamOptions>,
+) -> Result<(AssistantMessageEventWriter, AssistantMessageEventStream), AssistantMessageEventStream>
+{
+    let capacity = options.and_then(|options| options.event_buffer_capacity);
+    if capacity == Some(0) {
+        let (writer, reader) = create_assistant_message_event_stream();
+        let mut message = initial_assistant_message(&model.api, &model.provider, &model.id);
+        message.stop_reason = StopReason::Error;
+        message.error_message = Some("Event buffer capacity must be greater than zero".into());
+        writer.push(AssistantMessageEvent::Error {
+            reason: crate::types::ErrorStopReason::Error,
+            error: message.clone(),
+        });
+        writer.end(Some(message));
+        return Err(reader);
+    }
+    Ok(AssistantMessageEventStream::with_delivery(
+        EventDeliveryOptions {
+            capacity,
+            signal: options.and_then(|options| options.signal.clone()),
+        },
+    ))
 }
 
 /// Initial assistant message shape shared by every provider.
@@ -400,3 +553,11 @@ mod tests {
         assert!(stream.next_event().await.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "bounded_event_tests.rs"]
+mod bounded_tests;
+
+#[cfg(test)]
+#[path = "providers/openai_responses_lifecycle_tests.rs"]
+mod responses_lifecycle_tests;

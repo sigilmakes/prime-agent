@@ -72,15 +72,10 @@ impl Inner {
         let mut performed_cleanup = false;
         let mut request_id: Option<String> = None;
         if opts.drain_host_requests {
-            let in_flight = {
-                let mut g = lock(&self.guarded);
-                std::mem::take(&mut g.host_inflight)
-            };
-            if !in_flight.is_empty() {
-                self.wait_for_host_requests_to_settle(in_flight, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS)
-                    .await;
-            }
+            self.wait_for_host_requests_to_settle(HOST_REQUEST_SHUTDOWN_TIMEOUT_MS)
+                .await;
         }
+        self.cancel_host_requests();
         if protocol_shutdown_available
             && !self.start_stale(generation)
             && lock(&self.child).is_some()
@@ -154,6 +149,7 @@ impl Inner {
     /// Tear the child down: stop timers, fail pending work, close pipes, kill
     /// the process, and reap any `bash()` process groups it journaled.
     pub(crate) fn cleanup_resources(&self, kill_signal: Signal) {
+        self.cancel_host_requests();
         let had_background_work = {
             let mut g = lock(&self.guarded);
             // Any teardown invalidates in-flight starts.

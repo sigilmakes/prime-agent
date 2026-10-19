@@ -188,6 +188,9 @@ impl crate::auth::OAuthIntegration for ProviderOAuth {
     }
 
     fn refresh(&self, provider_id: &str, credentials: &AuthStorageData) -> Option<AuthCredential> {
+        if super::refresh_policy::disabled() {
+            return None;
+        }
         if !matches!(
             provider_id,
             OPENAI_CODEX_PROVIDER_ID

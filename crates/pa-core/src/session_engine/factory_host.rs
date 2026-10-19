@@ -1,47 +1,23 @@
-//! The factory host bridge: the session seam that exposes the kernel's
-//! factory surface (`factory.graph/status/watch/run/stop/resume`) to the
-//! daemon and TUI, the `/factory` view's lane.
-//!
-//! The factory itself lives in the kernel (`rlm/factory.py`, the Rust port's
-//! Python kernel architecture — the executor owns the run registry in kernel
-//! memory), so this bridge is host->kernel: the session engine validates the
-//! request, prefights a `run` before any child spawns, and rides the
-//! out-of-band `factory_activity` kernel frame (the `bash_activity`
-//! precedent — a running cell never delays the live view).
-//!
-//! The module follows the `system_router_host` pattern from #3184: a config
-//! struct of session facts captured in `create_session` (the daemon model
-//! allowlist pin, the session model), a registry-backed model preflight
-//! (exact catalog match, TS short form, the stale-provider gate) that fails
-//! loudly before a run starts, and a unit battery in the child module. The
-//! direction differs by design: #3184 registers a kernel->host handler, while
-//! the factory bridge serves daemon/TUI->kernel requests through
-//! [`SessionEngine::factory_activity`]; the executor's own children ride the
-//! existing `rlm.spawn` host path, where the daemon allowlist pin is
-//! enforced per spawn.
+//! Factory activity request validation and explicit model-selector preflight.
+//! Named factory specs and subagents resolve in the Python library. Their
+//! children still pass through the `rlm.spawn` host model and allowlist checks.
+//! This module never reads legacy harness stores.
 
 use std::path::PathBuf;
 
 use anyhow::anyhow;
-use serde_json::Value;
 
 use crate::kernel::shared::{FACTIVITY_WATCH_TIMEOUT_MS_CAP, FACTORY_ACTIVITY_ACTIONS};
 use crate::models::registry::ModelRegistry;
 use crate::models::resolver::find_exact_model_reference_match;
 use pa_types::ai::Model as AiModel;
 
-/// The session facts the factory bridge resolves against, captured in
-/// `create_session` (the #3184 `SystemRouterHostConfig` capture shape).
+/// Explicit session facts used for model-selector preflight.
 #[derive(Clone)]
 pub struct FactoryHostConfig {
     /// The agent directory: the model registry and auth cache resolve
     /// against it (the `run` preflight's model resolution).
     pub agent_dir: PathBuf,
-    /// The global harness state directory (factory spec lookup).
-    pub global_harness_dir: PathBuf,
-    /// The session's local harness state directory, when it has one
-    /// (depth-0 daemon sessions; `None` for engines without artifacts).
-    pub local_harness_dir: Option<PathBuf>,
     /// The session model (the agent-side descriptor `create_session`
     /// requires): the declared-selector preflight's stale-provider gate and
     /// the equality fallback for a selector the catalog does not carry (the
@@ -55,8 +31,7 @@ pub struct FactoryHostConfig {
     pub allowed_models: Option<Vec<String>>,
 }
 
-/// The factory host bridge built from [`FactoryHostConfig`]; held by the
-/// session engine, reached through [`SessionEngine::factory_activity`].
+/// An explicit model-selector policy built from [`FactoryHostConfig`].
 #[derive(Clone)]
 pub struct FactoryHost {
     config: FactoryHostConfig,
@@ -68,189 +43,18 @@ impl FactoryHost {
         Self { config }
     }
 
-    /// The global harness state (factory spec lookup's fallback tier).
-    fn global_harness_state(&self) -> crate::refinement::HarnessState {
-        crate::refinement::load_harness_state(
-            &self.config.global_harness_dir,
-            crate::refinement::HarnessScope::Global,
-        )
-    }
-
-    /// The local harness state, when the session has one (the lookup's
-    /// first tier, exactly like the kernel harness's unprefixed `get`).
-    fn local_harness_state(&self) -> Option<crate::refinement::HarnessState> {
-        self.config.local_harness_dir.as_ref().map(|dir| {
-            crate::refinement::load_harness_state(dir, crate::refinement::HarnessScope::Local)
-        })
-    }
-
-    /// Every model selector a stored factory spec declares: an inline
-    /// subagent object's `model`, or a referenced harness subagent entry's
-    /// `metadata.model`. `None` when the spec is not readable here (the
-    /// kernel's `run()` remains the authority and reports unknown specs).
-    /// Ids carry the harness's scope prefixes (`local:`/`global:`) verbatim
-    /// — the kernel's harness `get` routes them to one store, so the
-    /// preflight resolves the exact entry the run will execute. An
-    /// unprefixed id resolves local state first, then global — broader
-    /// than the kernel's own unprefixed lookup, which reads one store
-    /// (a spec stored only globally is an unknown spec to the kernel),
-    /// so a global fall-through judges a run the kernel would refuse;
-    /// harmless, and the kernel's `run()` remains the authority.
-    fn spec_model_selectors(&self, spec_id: &str) -> Option<Vec<String>> {
-        let (spec_scope, spec_id) = split_harness_scope(spec_id);
-        let global = self.global_harness_state();
-        let local = self.local_harness_state();
-        let entry = match spec_scope {
-            Scope::Local => local
-                .as_ref()?
-                .entries
-                .get(&crate::refinement::RefinementKind::Factory)
-                .and_then(|entries| entries.get(spec_id)),
-            Scope::Global => global
-                .entries
-                .get(&crate::refinement::RefinementKind::Factory)
-                .and_then(|entries| entries.get(spec_id)),
-            Scope::Any => local
-                .as_ref()
-                .and_then(|state| {
-                    state
-                        .entries
-                        .get(&crate::refinement::RefinementKind::Factory)
-                        .and_then(|entries| entries.get(spec_id))
-                })
-                .or_else(|| {
-                    global
-                        .entries
-                        .get(&crate::refinement::RefinementKind::Factory)
-                        .and_then(|entries| entries.get(spec_id))
-                }),
-        }?;
-        // JSON null is absent, the read every settled seam makes
-        // (`refinement::planner`'s dag/machine reads, the kernel's Python
-        // writers): a stored `"machine": null` beside a `dag` is the dag
-        // form. `Value::Null` is `Some` here without the filter, so the
-        // fall-through never reached the `dag` and the preflight read "no
-        // declared models" — exempting the dag's selectors from the
-        // allowlist and auth checks.
-        let arguments = entry
-            .arguments
-            .get("machine")
-            .filter(|value| !value.is_null())
-            .or_else(|| entry.arguments.get("dag").filter(|value| !value.is_null()))?;
-        let Some(argument_object) = arguments.as_object() else {
-            return Some(Vec::new());
-        };
-        let states = argument_object
-            .get("states")
-            .or_else(|| argument_object.get("nodes"))?
-            .as_array()?;
-        let mut subagents: Vec<(Scope, crate::refinement::HarnessEntry)> = Vec::new();
-        if let Some(local) = &local {
-            if let Some(entries) = local
-                .entries
-                .get(&crate::refinement::RefinementKind::Subagent)
-            {
-                for entry in entries.values() {
-                    subagents.push((Scope::Local, entry.clone()));
-                }
-            }
-        }
-        if let Some(entries) = global
-            .entries
-            .get(&crate::refinement::RefinementKind::Subagent)
-        {
-            for entry in entries.values() {
-                subagents.push((Scope::Global, entry.clone()));
-            }
-        }
-        let mut selectors: Vec<String> = Vec::new();
-        for state in states {
-            let Some(subagent) = state.get("subagent") else {
-                continue;
-            };
-            let model = if let Some(inline) = subagent.as_object() {
-                inline.get("model").and_then(Value::as_str)
-            } else {
-                // A harness subagent reference: the metadata carries the
-                // spawn settings (the kernel resolves the same way). An
-                // unreadable reference (a non-string value, or a name no
-                // harness entry carries) is the kernel's own `run()`
-                // error, not the preflight's (this read stays
-                // best-effort): skip the state, never the whole spec —
-                // one unresolved reference must not exempt the other
-                // states' declared models from the preflight. A scoped
-                // reference (`local:`/`global:`) resolves its own
-                // store's entry, exactly like the kernel's harness get.
-                //
-                // The match order is the kernel's own resolution, tier
-                // by tier: the id, then the title, within a tier before
-                // the next tier (its harness `get` answers the id before
-                // the title scan, and the local store is the
-                // unprefixed tier). A global id must not shadow a local
-                // title — the old id-first sweep matched the global id
-                // while the kernel spawned the local titled subagent,
-                // validating (and allowlisting) the wrong model. Among
-                // duplicate titles within a tier, the kernel's title
-                // scan reads `harness.list`, sorted by (kind, path,
-                // title, id), so it picks the (path, id)-least entry —
-                // the preflight must pick the same one, not whichever
-                // entry the store's map iteration happens to offer.
-                let Some(reference) = subagent.as_str() else {
-                    continue;
-                };
-                let (reference_scope, reference) = split_harness_scope(reference);
-                let allows = |scope: Scope| match reference_scope {
-                    Scope::Any => true,
-                    other => other == scope,
-                };
-                let id_in_tier = |tier: Scope| {
-                    subagents.iter().find(|(scope, candidate)| {
-                        *scope == tier && allows(*scope) && candidate.id == reference
-                    })
-                };
-                let title_in_tier = |tier: Scope| {
-                    subagents
-                        .iter()
-                        .filter(|(scope, candidate)| {
-                            *scope == tier && allows(*scope) && candidate.title == reference
-                        })
-                        .min_by(|a, b| (&a.1.path, &a.1.id).cmp(&(&b.1.path, &b.1.id)))
-                };
-                [Scope::Local, Scope::Global]
-                    .into_iter()
-                    .filter(|tier| allows(*tier))
-                    .find_map(|tier| id_in_tier(tier).or_else(|| title_in_tier(tier)))
-                    .and_then(|(_, entry)| entry.metadata.get("model"))
-                    .and_then(Value::as_str)
-            };
-            if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-                let model = model.trim().to_string();
-                if !selectors.contains(&model) {
-                    selectors.push(model);
-                }
-            }
-        }
-        Some(selectors)
-    }
-
-    /// Preflight one `factory run` from the daemon/TUI lane: every model
-    /// selector the spec declares must resolve through the credential-backed
-    /// catalog, sit inside the daemon allowlist pin, and carry request auth
-    /// — a doomed run fails before any child spawns (the #3184 auth
-    /// preflight's factory analogue). States without a declared model ride
-    /// the existing spawn-path default chain (resolved per spawn); a spec
-    /// this host cannot read passes through to the kernel's own `run()`
-    /// validation.
+    /// Preflight explicit model selectors supplied by a factory caller.
+    /// Named library specs and subagents stay kernel-owned and are checked per spawn.
+    /// This never reads stored harness specs or resolves scoped harness references.
     ///
     /// # Errors
     ///
-    /// Returns an error when a declared selector is unavailable,
-    /// unauthenticated, or expired, sits outside the allowlist pin, or its
-    /// provider credentials are stale.
-    pub fn preflight_run(&self, spec_id: &str) -> anyhow::Result<()> {
-        let Some(selectors) = self.spec_model_selectors(spec_id) else {
+    /// Returns an error if an explicit selector is unavailable, unauthenticated,
+    /// expired, or outside the daemon model allowlist.
+    pub fn preflight_selectors(&self, selectors: &[String]) -> anyhow::Result<()> {
+        if selectors.is_empty() {
             return Ok(());
-        };
+        }
         let mut registry = ModelRegistry::create(
             crate::auth::AuthStorage::create(&self.config.agent_dir),
             self.config.agent_dir.join("models.json"),
@@ -262,9 +66,9 @@ impl FactoryHost {
             .cloned()
             .collect();
         for selector in selectors {
-            let model = resolve_declared_model(&searchable, &selector)
-                .or_else(|| self.session_model_fallback(&registry, &selector))
-                .ok_or_else(|| unavailable_error(&selector))?;
+            let model = resolve_declared_model(&searchable, selector)
+                .or_else(|| self.session_model_fallback(&registry, selector))
+                .ok_or_else(|| unavailable_error(selector))?;
             if let Some(allowlist) = &self.config.allowed_models {
                 let pinned = format!("{}/{}", model.provider, model.id).to_lowercase();
                 if !crate::models::model_allowed(&pinned, allowlist) {
@@ -374,33 +178,6 @@ fn unavailable_error(reference: &str) -> anyhow::Error {
     anyhow!(
         "Requested factory model \"{reference}\" is unavailable, unauthenticated, or expired; selectors use the form \"provider/model-id\" (e.g. \"prime-inference/internal/glm-5.3-fast\")"
     )
-}
-
-/// One harness store a scoped id routes to (`local:`/`global:` prefixes;
-/// unprefixed ids resolve either, local first).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
-    Any,
-    Local,
-    Global,
-}
-
-/// Split the harness's scope prefix off an id, mirroring the kernel
-/// harness's `_strip_scope_prefix`: `local:x`/`global:x` route to one
-/// store (`x` must be non-empty, or the prefix stays part of the id),
-/// anything else is unprefixed.
-fn split_harness_scope(id: &str) -> (Scope, &str) {
-    if let Some(rest) = id.strip_prefix("local:") {
-        if !rest.is_empty() {
-            return (Scope::Local, rest);
-        }
-    }
-    if let Some(rest) = id.strip_prefix("global:") {
-        if !rest.is_empty() {
-            return (Scope::Global, rest);
-        }
-    }
-    (Scope::Any, id)
 }
 
 /// The out-of-band request the bridge sends into the kernel, validated

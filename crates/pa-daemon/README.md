@@ -15,6 +15,10 @@ command arm the pa-core trigger, and the quiescent turn boundaries /
 the command path consume the gated review - TS
 `_scheduleAutoRefineAfterCompaction` plus the background
 `_maybeAutoRefine("compact")`).
+Explicit model refresh (`supervisor/model_refresh.rs`): a coalesced, bounded
+ready-resident leader sweep with local snapshot fan-out; never launches saved
+or disconnected workers. `model_refresh_worker.rs` owns the session commands;
+model selection stays pinned and metadata adoption waits for a turn boundary.
 Supervisor process (one worker process per active session), restart/backoff
 supervision, session registry/roster + worker self-registration (session
 identity survives supervisor restarts: workers re-register with backoff and

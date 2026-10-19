@@ -727,3 +727,106 @@ fn reload_keeps_the_target_when_the_credential_leaves_the_store() {
         "a restored credential rebinds the request auth"
     );
 }
+
+#[test]
+fn reload_ollama_caps_restores_targets_routes_and_loop_budgets_without_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let engine = credential_backed_engine(dir.path());
+    let primary: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
+        "id": "glm-5", "name": "Gateway model", "api": "openai-completions",
+        "provider": "ollama-cloud", "baseUrl": "http://127.0.0.1:9/gateway/v1",
+        "reasoning": false, "input": ["text", "image"],
+        "contextWindow": 200_000, "maxTokens": 32000,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "headers": {"X-Gateway": "preserve"}, "compat": {"supportsDeveloperRole": false}
+    }))
+    .unwrap();
+    let mut image = primary.clone();
+    image.id = "image".into();
+    let core = engine.runtime.block_on(async {
+        let agent_model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&primary).unwrap();
+        let stream_fn =
+            pa_core::session_engine::provider_adapter::real_stream_fn(None, primary.clone());
+        pa_core::session_engine::engine::create_session(
+            pa_core::session_engine::engine::SessionEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                model: Some(agent_model),
+                model_info: Some(primary.clone()),
+                stream_fn: Some(stream_fn),
+                ollama_cloud: Some(engine.ollama_cloud.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    });
+    let core = std::sync::Arc::new(core);
+    *engine.session.blocking_lock() = Some(core.clone());
+    let target = ProviderTarget {
+        api_key: Some("last-good".into()),
+        headers: primary.headers.clone(),
+        model: primary.clone(),
+        service_tier: None,
+    };
+    *engine.provider_target.write().unwrap() = Some(target.clone());
+    *engine.image_route.lock().unwrap() = Some(crate::image_route::ImageRoute {
+        target: ProviderTarget {
+            model: image.clone(),
+            ..target.clone()
+        },
+        agent_override: pa_agent::agent::AgentModelOverride {
+            model: pa_core::session_engine::provider_adapter::json_round_trip(&image).unwrap(),
+            thinking_level: pa_agent::types::ThinkingLevel::Off,
+        },
+        session_target: Some(target),
+    });
+    for (context, output) in [(100_000, 12000), (50000, 8000), (200_000, 32000)] {
+        let config = if context == 200_000 {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"modelOverrides": {
+                "glm-5": {"contextWindow": context, "maxTokens": output},
+                "image": {"contextWindow": context, "maxTokens": output}
+            }})
+        };
+        std::fs::write(agent_dir.join("ollama-cloud.json"), config.to_string()).unwrap();
+        engine.reload_live_inputs().unwrap();
+        let mut expected = primary.clone();
+        expected.context_window = context;
+        expected.max_tokens = output;
+        expected.max_tokens_explicit = context != 200_000;
+        let live = engine.provider_target.read().unwrap().clone().unwrap();
+        assert_eq!(live.model, expected);
+        assert_eq!(live.api_key.as_deref(), Some("last-good"));
+        let route = engine.image_route.lock().unwrap().clone().unwrap();
+        assert_eq!(route.session_target.unwrap().model, expected);
+        let mut expected_image = expected.clone();
+        expected_image.id = "image".into();
+        assert_eq!(route.target.model, expected_image);
+        assert_eq!(route.agent_override.model.context_window, context);
+        let state = engine.runtime.block_on(core.session.agent().state());
+        assert_eq!(
+            (
+                state.model.context_window,
+                state.model.max_tokens,
+                state.model.max_tokens_explicit
+            ),
+            (context, output, context != 200_000)
+        );
+        assert_eq!(
+            core.turn_boundary.bound().unwrap().context_window,
+            Some(context)
+        );
+        assert_eq!(
+            pa_core::session_engine::compaction::request_output_budget(
+                &live.model,
+                pa_types::ai::ModelThinkingLevel::Off
+            ),
+            output
+        );
+    }
+}

@@ -17,15 +17,24 @@ pub(super) fn home_dir() -> PathBuf {
     pa_types::platform::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Directory of the kernel venv, honoring `PRIME_AGENT_KERNEL_VENV`.
+fn absolute_path(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+/// Directory of the Rust kernel venv, honoring `PRIME_AGENT_KERNEL_VENV`.
+/// The default is separate from the TypeScript runtime's `kernel-venv`;
+/// existing environments are never discovered or migrated implicitly.
 #[must_use]
 pub fn kernel_venv_dir() -> PathBuf {
     if let Ok(override_dir) = std::env::var("PRIME_AGENT_KERNEL_VENV") {
         if !override_dir.is_empty() {
-            return expand_home(&override_dir);
+            return absolute_path(expand_home(&override_dir));
         }
     }
-    home_dir().join(".prime").join("agent").join("kernel-venv")
+    home_dir()
+        .join(".prime")
+        .join("agent")
+        .join("kernel-venv-rust")
 }
 
 fn xdg_kernel_venv_dir() -> PathBuf {
@@ -33,7 +42,10 @@ fn xdg_kernel_venv_dir() -> PathBuf {
         Ok(value) if !value.is_empty() => expand_home(&value),
         _ => home_dir().join(".local").join("share"),
     };
-    data_home.join("prime").join("agent").join("kernel-venv")
+    absolute_path(data_home)
+        .join("prime")
+        .join("agent")
+        .join("kernel-venv-rust")
 }
 
 pub(crate) fn resolve_writable_kernel_venv_dir() -> anyhow::Result<PathBuf> {
@@ -67,3 +79,6 @@ pub fn kernel_venv_python(venv: &Path) -> PathBuf {
         venv.join("bin").join("python")
     }
 }
+
+#[cfg(test)]
+mod tests;

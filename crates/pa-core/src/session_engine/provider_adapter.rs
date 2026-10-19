@@ -9,6 +9,30 @@ use pa_agent::stream::{LlmContext, ModelStream, StreamFn, StreamRequestOptions};
 use pa_agent::types::{Model as AgentModel, ThinkingLevel};
 use pa_types::ai::Model;
 
+tokio::task_local! {
+    static NATIVE_INPUT: pa_ai::compaction::NativeResponsesInput;
+    static EVENT_BUFFER_CAPACITY: usize;
+}
+
+/// Enable bounded native producer delivery only for this plugin-owned opening.
+/// Ordinary host requests retain the transport's legacy delivery mode.
+pub(crate) async fn with_bounded_native_events<F: std::future::Future>(work: F) -> F::Output {
+    EVENT_BUFFER_CAPACITY.scope(16, work).await
+}
+
+/// Carry one typed native request through an existing stream seam. This scope is
+/// local to the awaiting task; it is neither session state nor a global route.
+pub async fn with_native_input<F: std::future::Future>(
+    input: pa_ai::compaction::NativeResponsesInput,
+    work: F,
+) -> F::Output {
+    NATIVE_INPUT.scope(input, work).await
+}
+
+pub(crate) fn current_native_input() -> Option<pa_ai::compaction::NativeResponsesInput> {
+    NATIVE_INPUT.try_with(Clone::clone).ok()
+}
+
 /// Wire-shape conversion at the pa-agent/pa-ai boundary: both sides
 /// serialize to the same camelCase wire shapes.
 pub fn json_round_trip<T, U>(value: &T) -> Option<U>
@@ -19,6 +43,18 @@ where
     serde_json::to_value(value)
         .ok()
         .and_then(|value| serde_json::from_value(value).ok())
+}
+
+/// Convert the loop's minimal descriptor without resolving a newer catalog model.
+/// The anchored model supplied by the caller remains authoritative.
+///
+/// # Errors
+/// Returns an error for a structurally invalid model descriptor.
+pub fn native_model(model: &AgentModel) -> anyhow::Result<Model> {
+    let mut wire = serde_json::to_value(model)?;
+    wire["baseUrl"] = serde_json::Value::String(model.base_url.clone());
+    wire["input"] = serde_json::json!(["text"]);
+    serde_json::from_value(wire).map_err(Into::into)
 }
 
 /// Thinking-level mapping across the two crates.
@@ -100,7 +136,7 @@ pub struct ProviderTarget {
 /// target slot was never set before the first stream.
 pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>>>) -> StreamFn {
     Arc::new(
-        move |_requested: AgentModel, context: LlmContext, options: StreamRequestOptions| {
+        move |requested: AgentModel, context: LlmContext, options: StreamRequestOptions| {
             let ProviderTarget {
                 api_key,
                 model,
@@ -111,8 +147,25 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
                 .expect("provider target lock")
                 .clone()
                 .expect("provider target set before the first stream");
+            // The main request keeps its anchored full target, including auth and
+            // capabilities. An auxiliary request can deliberately select another model;
+            // never replace it with the main session model.
+            let selected = requested.id == "unknown"
+                || (requested.id == model.id && requested.provider == model.provider);
             Box::pin(async move {
-                stream_once(&model, api_key, service_tier, headers, context, options)
+                if selected {
+                    stream_once(&model, api_key, service_tier, headers, context, options)
+                } else {
+                    let requested = native_model(&requested)?;
+                    stream_once(
+                        &requested,
+                        options.api_key.clone(),
+                        None,
+                        None,
+                        context,
+                        options,
+                    )
+                }
             })
         },
     )
@@ -134,6 +187,33 @@ pub fn stream_once(
     context: LlmContext,
     options: StreamRequestOptions,
 ) -> anyhow::Result<Box<dyn ModelStream>> {
+    stream_once_with_native(
+        model,
+        api_key,
+        service_tier,
+        headers,
+        context,
+        options,
+        current_native_input(),
+    )
+}
+
+/// Stream an authoritative complete Responses array, or an ordinary portable request.
+/// A native request keeps its raw bytes and route validation in pa-ai; callers must
+/// clear portable messages only after appending the fresh continuation to the array.
+///
+/// # Errors
+/// Returns native route/shape validation and transport errors without fallback.
+pub fn stream_once_with_native(
+    model: &Model,
+    api_key: Option<String>,
+    service_tier: Option<pa_types::ai::ServiceTier>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
+    context: LlmContext,
+    options: StreamRequestOptions,
+    native_responses_input: Option<pa_ai::compaction::NativeResponsesInput>,
+) -> anyhow::Result<Box<dyn ModelStream>> {
+    pa_agent::abort::throw_if_aborted(&options.signal)?;
     let messages: Vec<pa_types::ai::Message> = context
         .messages
         .iter()
@@ -178,31 +258,49 @@ pub fn stream_once(
             },
             metadata: None,
             timeout_ms: None,
+            native_responses_input,
+            event_buffer_capacity: EVENT_BUFFER_CAPACITY.try_with(|capacity| *capacity).ok(),
         },
         reasoning: Some(model_thinking_level(options.reasoning)),
         thinking_budgets: None,
     };
     let stream = pa_ai::stream_simple(model, &ai_context, Some(stream_options))
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    // Pump pa-ai events into the loop's event stream, verbatim.
-    let (handle, consumer) = pa_agent::stream::event_stream();
+    // Bound the adapter queue. A slow consumer cannot accumulate unbounded
+    // normalized events here. The producer cannot publish after close/drop.
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    let pump_cancel = cancel.clone();
+    let signal = options.signal;
+    let pump_signal = signal.clone();
     let forwarder = tokio::spawn(async move {
         let mut stream = stream;
-        while let Some(event) = stream.next_event().await {
+        loop {
+            let event = tokio::select! { biased;
+                () = pump_cancel.cancelled() => break,
+                () = pump_signal.aborted() => { pump_cancel.cancel(); break; },
+                event = stream.next_event() => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
             if let Some(converted) = convert_stream_event(&event) {
-                handle.push(converted);
+                tokio::select! { biased;
+                    () = pump_cancel.cancelled() => break,
+                    () = pump_signal.aborted() => { pump_cancel.cancel(); break; },
+                    result = sender.send(converted) => if result.is_err() { break; },
+                }
             }
         }
-        let result = stream.result().await;
-        if let Some(converted) = json_round_trip::<_, pa_agent::types::AssistantMessage>(&result) {
-            handle.end(Some(converted));
-        } else {
-            handle.end(None);
-        }
     });
-    // Keep the pump task alive as long as the stream lives.
-    let (forwarder, consumer) = (forwarder, consumer);
-    Ok(consumer_pump(forwarder, consumer, cancel))
+    Ok(Box::new(PumpedStream {
+        forwarder,
+        receiver,
+        cancel,
+        signal,
+        result: None,
+        model: json_round_trip(model).ok_or_else(|| anyhow::anyhow!("invalid provider model"))?,
+        aborted_delivered: false,
+    }))
 }
 
 /// A stream adapter pinned to one target (headless runtimes resolve
@@ -324,32 +422,41 @@ pub fn convert_stream_event(
     })
 }
 
-/// Wrap the consumer so the pump task is aborted when the stream drops.
-fn consumer_pump(
+/// Bounded native adapter. Both request cancellation sources fence already queued
+/// updates and terminal messages. Drop aborts the producer instead of detaching it.
+struct PumpedStream {
     forwarder: tokio::task::JoinHandle<()>,
-    consumer: pa_agent::stream::AssistantMessageEventStream,
+    receiver: tokio::sync::mpsc::Receiver<pa_agent::stream::AssistantMessageEvent>,
     cancel: tokio_util::sync::CancellationToken,
-) -> Box<dyn ModelStream> {
-    Box::new(PumpedStream {
-        _forwarder: forwarder,
-        stream: consumer,
-        cancel,
-    })
+    signal: pa_agent::abort::AbortSignal,
+    result: Option<pa_agent::types::AssistantMessage>,
+    model: AgentModel,
+    aborted_delivered: bool,
 }
 
-/// A `ModelStream` whose lifetime keeps the pa-ai pump task alive and owns
-/// the fetch's cancellation token (the transport half of the turn-abort).
-struct PumpedStream {
-    _forwarder: tokio::task::JoinHandle<()>,
-    stream: pa_agent::stream::AssistantMessageEventStream,
-    cancel: tokio_util::sync::CancellationToken,
+impl PumpedStream {
+    fn aborted_message(&self) -> pa_agent::types::AssistantMessage {
+        pa_agent::types::AssistantMessage {
+            content: vec![],
+            api: self.model.api.clone(),
+            provider: self.model.provider.clone(),
+            model: self.model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_agent::types::Usage::zero(),
+            stop_reason: pa_agent::types::StopReason::Aborted,
+            stop_reason_raw: None,
+            error_message: Some("Request was aborted".into()),
+            timestamp: 0,
+        }
+    }
 }
 
 impl Drop for PumpedStream {
     fn drop(&mut self) {
-        // The in-flight fetch cancels instead of running to completion
-        // detached (TS: the fetch dies with its iterator).
         self.cancel.cancel();
+        self.forwarder.abort();
     }
 }
 
@@ -357,19 +464,56 @@ impl ModelStream for PumpedStream {
     fn next_event(
         &mut self,
     ) -> pa_agent::BoxFut<'_, Option<pa_agent::stream::AssistantMessageEvent>> {
-        self.stream.next_event()
+        Box::pin(async move {
+            let event = tokio::select! { biased;
+                () = self.cancel.cancelled() => None,
+                () = self.signal.aborted() => { self.cancel.cancel(); None },
+                event = self.receiver.recv() => event,
+            };
+            if self.cancel.is_cancelled() || self.signal.is_aborted() {
+                if self.aborted_delivered {
+                    return None;
+                }
+                self.aborted_delivered = true;
+                let message = self.aborted_message();
+                self.result = Some(message.clone());
+                return Some(pa_agent::stream::AssistantMessageEvent::Error {
+                    reason: pa_agent::types::StopReason::Aborted,
+                    error: message,
+                });
+            }
+            if let Some(message) = event
+                .as_ref()
+                .and_then(pa_agent::stream::AssistantMessageEvent::terminal_message)
+            {
+                self.result = Some(message.clone());
+            }
+            event
+        })
     }
 
     fn result(
         &mut self,
     ) -> pa_agent::BoxFut<'_, anyhow::Result<pa_agent::types::AssistantMessage>> {
-        self.stream.result()
+        Box::pin(async move {
+            while self.result.is_none() {
+                if self.next_event().await.is_none() {
+                    break;
+                }
+            }
+            if self.cancel.is_cancelled() || self.signal.is_aborted() {
+                return Ok(self.aborted_message());
+            }
+            self.result
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("provider stream ended without terminal event"))
+        })
     }
 
-    /// Close/cancel: the in-flight fetch cancels immediately. Idempotent
-    /// — the token's cancelled state is sticky.
     fn close(&mut self) {
         self.cancel.cancel();
+        self.forwarder.abort();
+        self.receiver.close();
     }
 }
 
@@ -427,6 +571,67 @@ mod tests {
             vec![
                 (model.id.clone(), Some(pa_types::ai::ServiceTier::Priority)),
                 (model.id, None),
+            ]
+        );
+        registration.unregister();
+    }
+
+    #[tokio::test]
+    async fn auxiliary_model_is_not_replaced_by_the_main_switchable_target() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("session-auxiliary-target-test".into()),
+                ..Default::default()
+            });
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&received);
+        let factory = pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, _, _, model| {
+            captured
+                .lock()
+                .unwrap()
+                .push((model.id.clone(), model.base_url.clone()));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }));
+        registration.set_responses(vec![factory.clone(), factory]);
+        let model = registration.get_model();
+        let stream_fn =
+            switchable_stream_fn(Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+                api_key: Some("test-only".into()),
+                model: model.clone(),
+                service_tier: None,
+                headers: None,
+            }))));
+        let main: AgentModel = json_round_trip(&model).unwrap();
+        let mut auxiliary = main.clone();
+        auxiliary.id = "auxiliary".into();
+        auxiliary.base_url = "http://127.0.0.1:1/auxiliary".into();
+        stream_fn(main, LlmContext::default(), StreamRequestOptions::default())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        stream_fn(
+            auxiliary.clone(),
+            LlmContext::default(),
+            StreamRequestOptions {
+                api_key: Some("aux-test-only".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![
+                (model.id, model.base_url),
+                (auxiliary.id, auxiliary.base_url)
             ]
         );
         registration.unregister();

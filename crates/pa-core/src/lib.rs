@@ -54,17 +54,18 @@ pub use tools::ipython::{
     LateSentAgentMessageHandler,
 };
 // RLM kernel subsystem: persistent IPython kernel lifecycle.
-pub mod agent_traces;
 pub mod auth;
 pub mod autonomous;
 pub mod cron;
 pub mod export_html;
 pub mod goals;
+mod harness_plugin;
 pub mod kernel;
 pub mod mcp;
 pub mod models;
 pub mod packages;
 pub mod platform;
+pub mod plugins;
 pub mod prompts;
 pub mod refinement;
 pub mod resources;
@@ -73,6 +74,7 @@ pub mod session_engine;
 pub mod settings;
 pub mod skills;
 pub mod slash_command_args;
+pub mod snapcompact;
 pub mod update;
 pub mod workspace_snapshot;
 pub use kernel::ReplKernelManager;

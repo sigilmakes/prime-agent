@@ -76,6 +76,7 @@ async fn refresh_plugins_catalog(cache: &PluginsCatalogCache, force: bool) {
                 force,
                 headers: Vec::new(),
                 is_current: None,
+                ..Default::default()
             },
         )
         .await;

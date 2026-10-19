@@ -270,10 +270,6 @@ pub struct McpManagerOptions {
     pub probe_override: Option<probe::McpEndpointProbe>,
 }
 
-/// Telemetry usage reporter: called with `(action, server)` on every successful `mcp.*` host
-/// request; never tool names, arguments, or results.
-pub type McpUsageReporter = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
-
 /// Host-side MCP manager: auth gating, config resolution, `mcp.*` host
 /// requests, and ACP session servers.
 pub struct McpManager {
@@ -284,7 +280,6 @@ pub struct McpManager {
     get_catalog_sources: Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>,
     remote_source: Option<manager_catalog::RemoteCatalogSourceFn>,
     probe_override: Option<probe::McpEndpointProbe>,
-    usage_report: Option<McpUsageReporter>,
     integrations: HashMap<String, ResolvedIntegration>,
     /// The resolved service catalog (the SAME resolution feeds integrations
     /// and the `/mcp` view).
@@ -296,14 +291,6 @@ pub struct McpManager {
     connection_store: std::sync::Arc<std::sync::Mutex<connection_store::McpConnectionStore>>,
     acp_servers: std::sync::Arc<std::sync::Mutex<HashMap<String, AcpMcpServerConfig>>>,
     acp_owner_id: std::sync::Mutex<Option<String>>,
-}
-
-impl McpManager {
-    /// Set the telemetry usage reporter. Must run before
-    /// [`McpManager::register_host_handlers`] so the handlers capture it.
-    pub fn set_usage_report(&mut self, reporter: Option<McpUsageReporter>) {
-        self.usage_report = reporter;
-    }
 }
 
 fn provider_id(server: &str) -> String {
@@ -344,7 +331,6 @@ impl McpManager {
             get_catalog_sources: options.get_catalog_sources,
             remote_source,
             probe_override: options.probe_override,
-            usage_report: None,
             integrations: HashMap::new(),
             service_catalog: crate::mcp::service_catalog::McpCatalogResolution::default(),
             catalog_available: false,
@@ -614,14 +600,12 @@ impl McpManager {
             Ok(number.min(max_limit as u64) as usize)
         }
 
-        let (auth, acp_servers, usage_refresh, acp_servers_for_config, usage_config, begin_login) = {
+        let (auth, acp_servers, acp_servers_for_config, begin_login) = {
             let manager = manager.lock().unwrap();
             (
                 manager.auth_storage.clone(),
                 manager.acp_servers.clone(),
-                manager.usage_report.clone(),
                 manager.acp_servers.clone(),
-                manager.usage_report.clone(),
                 manager.begin_login.clone(),
             )
         };
@@ -629,7 +613,6 @@ impl McpManager {
             "mcp.refresh",
             host_handler(move |payload| {
                 let auth = auth.clone();
-                let usage_refresh = usage_refresh.clone();
                 let acp_servers = acp_servers.clone();
                 Box::pin(async move {
                     let server = payload
@@ -658,9 +641,6 @@ impl McpManager {
                             "Could not refresh credentials for {server}"
                         ));
                     }
-                    if let Some(report) = &usage_refresh {
-                        report("refresh", &server);
-                    }
                     Ok(json!({}))
                 })
             }),
@@ -671,7 +651,6 @@ impl McpManager {
             host_handler(move |payload| {
                 let manager = std::sync::Arc::clone(&manager_for_config);
                 let acp_servers = acp_servers_for_config.clone();
-                let usage_config = usage_config.clone();
                 Box::pin(async move {
                     let server = payload
                         .data
@@ -687,9 +666,6 @@ impl McpManager {
                         let mut config = serde_json::to_value(acp).unwrap_or(Value::Null);
                         if let Value::Object(map) = &mut config {
                             map.insert("credentialSource".to_string(), json!("acp"));
-                        }
-                        if let Some(report) = &usage_config {
-                            report("config", &server);
                         }
                         return Ok(config);
                     }
@@ -712,9 +688,6 @@ impl McpManager {
                             if let Value::Object(map) = &mut config {
                                 map.insert("credentialSource".to_string(), json!("static-token"));
                             }
-                        }
-                        if let Some(report) = &usage_config {
-                            report("config", &server);
                         }
                         return Ok(config);
                     }

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 /// Session-executed commands (their behavior lives in the session engine).
-pub const SESSION_SLASH_COMMAND_NAMES: [&str; 4] = ["compact", "refine", "goal", "autonomous"];
+pub const SESSION_SLASH_COMMAND_NAMES: [&str; 3] = ["compact", "goal", "autonomous"];
 
 /// Durable row custom types (TS `messages.ts`): the command echo and its
 /// result, persisted in sessions and rendered by every surface.
@@ -53,8 +53,6 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "session", description: "Show session info", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "system-prompt", description: "Show the exact system prompt sent to the model", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "logs", description: "Show where daemon and client logs are saved", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "traces", description: "Preview, upload, or configure Prime Agent traces", execution: SlashCommandExecution::Client, argument_hint: Some("[status|on|off|preview|upload|upload-current|upload-all|login]"), aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "telemetry", description: "Show or change usage telemetry (pseudonymous metrics, never prompts or code)", execution: SlashCommandExecution::Client, argument_hint: Some("[status|on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "context", description: "Show token, cost, and context usage for agent and sub-agents", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &["usage"], takes_argument: false },
     BuiltinSlashCommand { name: "changelog", description: "Show changelog entries", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "update", description: "Update to the latest Rust build (uninstalls the TypeScript version; sessions preserved)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
@@ -65,11 +63,10 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "tree", description: "Navigate session tree (switch branches)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "login", description: "Configure provider authentication", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "logout", description: "Remove provider authentication", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "mcp", description: "Open the MCP connections menu (Tab filters by typed text)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "plugins", description: "Browse and connect external services", execution: SlashCommandExecution::Client, argument_hint: Some("[search]"), aliases: &[], takes_argument: true },
+    BuiltinSlashCommand { name: "mcp", description: "Manage MCP tool gateway connections (Tab filters by typed text)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "plugins", description: "List native Lua plugins and reload their configuration", execution: SlashCommandExecution::Client, argument_hint: Some("[list|reload]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "new", description: "Start a new session, optionally named and/or with an initial prompt", execution: SlashCommandExecution::Client, argument_hint: Some("[--name \"session name\" --] [prompt]"), aliases: &["clear"], takes_argument: true },
     BuiltinSlashCommand { name: "compact", description: "Compact the session context; optional instructions focus the summary", execution: SlashCommandExecution::Session, argument_hint: Some("[instructions]"), aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "refine", description: "Refine continual harness prompt notes, skills, subagents, and memory", execution: SlashCommandExecution::Session, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "goal", description: "Set or view a persistent goal; supports pause, resume, and clear", execution: SlashCommandExecution::Session, argument_hint: Some("[objective]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "autonomous", description: "Set or view autonomous mode with an optional budget", execution: SlashCommandExecution::Session, argument_hint: Some("[status|off|on [--max-continuations <n>] [--max-turns <n>] [--max-tokens <n>] [--timeout-ms <n>] [--gate <command>]]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "rlm-max-depth", description: "Set/view the per-chat persistent RLM max depth immediately; never interrupts or queues the running turn", execution: SlashCommandExecution::Client, argument_hint: Some("[<int> [--global]]"), aliases: &[], takes_argument: true },
@@ -77,7 +74,8 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "factory", description: "Show or set the agent factory opt-in gate (off by default)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
-    BuiltinSlashCommand { name: "reload", description: "Reload keybindings, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "refresh", description: "Refresh model catalogs without reloading session resources", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "reload", description: "Reload native plugins, session resources, keybindings, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "quit", description: "Quit Prime Agent", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
 ];

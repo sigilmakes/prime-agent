@@ -16,7 +16,7 @@ pub enum HomebrewKind {
 }
 
 impl HomebrewKind {
-    /// The fixed telemetry vocabulary for this Homebrew layout.
+    /// The name of this Homebrew layout.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

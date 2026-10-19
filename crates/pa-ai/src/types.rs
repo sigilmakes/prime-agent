@@ -80,6 +80,11 @@ pub struct StreamOptions {
     pub headers: Option<std::collections::HashMap<String, String>>,
     pub timeout_ms: Option<u64>,
     pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Authoritative, route-bound native input. Append fresh items before setting this option.
+    pub native_responses_input: Option<crate::compaction::NativeResponsesInput>,
+    /// Opt-in event-count backpressure. None preserves the legacy unbounded queue.
+    /// Zero is invalid. This does not bound event bytes, SSE frames or total output.
+    pub event_buffer_capacity: Option<usize>,
 }
 
 impl std::fmt::Debug for StreamOptions {
@@ -98,6 +103,8 @@ impl std::fmt::Debug for StreamOptions {
             .field("headers", &self.headers)
             .field("timeout_ms", &self.timeout_ms)
             .field("metadata", &self.metadata)
+            .field("native_responses_input", &self.native_responses_input)
+            .field("event_buffer_capacity", &self.event_buffer_capacity)
             .finish()
     }
 }

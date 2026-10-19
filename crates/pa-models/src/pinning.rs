@@ -60,6 +60,46 @@ pub fn parse_provider_model_catalog(
     pin_catalog_models(catalog.models, templates)
 }
 
+/// Validate a runtime aggregate atomically before it replaces the baseline.
+///
+/// # Errors
+/// Rejects malformed records, unsupported transports, transport changes, and missing baseline IDs.
+pub fn parse_trusted_provider_model_catalog(
+    payload: &serde_json::Value,
+    templates: &PinnedTemplates,
+) -> Result<Vec<Model>, String> {
+    let catalog = parse_model_catalog(payload, InvalidEntries::Reject)?;
+    let mut covered = std::collections::HashSet::new();
+    for model in &catalog.models {
+        if model.provider == "prime-inference" {
+            continue;
+        }
+        let id = (model.provider.clone(), model.id.clone());
+        let transport = (
+            model.provider.clone(),
+            model.api.clone(),
+            model.base_url.clone(),
+        );
+        if !templates.transports.contains_key(&transport) {
+            return Err("Unsupported provider catalog transport".into());
+        }
+        if let Some(original) = templates.exact.get(&id) {
+            if original.api != model.api || original.base_url != model.base_url {
+                return Err("Provider catalog changed installed model transport".into());
+            }
+        }
+        covered.insert(id);
+    }
+    if templates
+        .exact
+        .keys()
+        .any(|id| id.0 != "prime-inference" && !covered.contains(id))
+    {
+        return Err("Provider catalog is missing bundled model".into());
+    }
+    pin_catalog_models(catalog.models, templates)
+}
+
 /// Pin an already-parsed catalog's models to compiled transports.
 ///
 /// # Errors
@@ -240,5 +280,28 @@ mod tests {
             .headers
             .as_ref()
             .is_some_and(|headers| headers.contains_key("X-Evil")));
+    }
+    #[test]
+    fn a_runtime_aggregate_is_atomic_and_covers_the_installed_baseline() {
+        let templates = compiled_fixture();
+        let complete = json!({"schemaVersion":1,"models":[
+            catalog_entry("known", "openai-completions", "prov", "https://prov.example"),
+            catalog_entry("exact", "openai-completions", "prov", "https://prov.example")
+        ]});
+        let expected = parse_provider_model_catalog(&complete, &templates).unwrap();
+        assert_eq!(
+            parse_trusted_provider_model_catalog(&complete, &templates).unwrap(),
+            expected
+        );
+        let partial = json!({"schemaVersion":1,"models":[
+            catalog_entry("known", "openai-completions", "prov", "https://prov.example")
+        ]});
+        assert!(parse_trusted_provider_model_catalog(&partial, &templates).is_err());
+        let mut malformed = complete.clone();
+        malformed["models"][1]["contextWindow"] = json!(0);
+        assert!(parse_trusted_provider_model_catalog(&malformed, &templates).is_err());
+        let mut changed_transport = complete;
+        changed_transport["models"][1]["baseUrl"] = json!("https://unapproved.example");
+        assert!(parse_trusted_provider_model_catalog(&changed_transport, &templates).is_err());
     }
 }

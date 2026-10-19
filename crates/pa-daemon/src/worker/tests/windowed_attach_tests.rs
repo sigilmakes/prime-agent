@@ -606,3 +606,251 @@ async fn anchored_backfill_accepts_descendant_appends_and_restored_branch() {
         );
     }
 }
+
+#[tokio::test]
+async fn display_transcript_restores_precompaction_history_without_sibling_leakage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("display-history.jsonl");
+    let mut fixture = Fixture {
+        content: header_line("display-history"),
+        prev: None,
+        id: 0,
+    };
+    fixture.content.push_str(&message_row(
+        None,
+        "sibling",
+        &assistant_message("SIBLING SECRET"),
+    ));
+    for index in 0..600 {
+        fixture.row(|prev, id| {
+            message_row(
+                prev,
+                id,
+                &json!({
+                    "role": "user", "content": format!("old {index}"), "timestamp": 1000 + index,
+                }),
+            )
+        });
+    }
+    let kept = fixture.prev.clone().unwrap();
+    fixture.row(|prev, id| format!(
+        "{{\"type\":\"compaction\",\"summary\":\"the story\",\"firstKeptEntryId\":\"{kept}\",\"tokensBefore\":4000,\"id\":\"{id}\",\"parentId\":{},\"timestamp\":\"2026-01-01T00:00:00.000Z\"}}\n",
+        parent_json(prev),
+    ));
+    fixture.row(|prev, id| {
+        message_row(
+            prev,
+            id,
+            &json!({"role":"user","content":"after","timestamp":2000}),
+        )
+    });
+    std::fs::write(&path, fixture.content).unwrap();
+    let worker = worker_over(dir.path(), &path).await;
+    assert!(
+        worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .window
+            .is_some(),
+        "exercise trimmed create/rehydrate path"
+    );
+    let legacy = full_messages(&worker).await;
+    assert_eq!(legacy.len(), 3);
+    assert_eq!(legacy[0]["role"], "compactionSummary");
+    let mut capabilities = TUI_CAPABILITIES.to_vec();
+    capabilities.push("display_transcript");
+    // A failed display read cannot make an existing session unattachable.
+    let held_path = path.with_extension("held");
+    std::fs::rename(&path, &held_path).unwrap();
+    let fallback = attach(&worker, &capabilities).await;
+    assert_eq!(fallback["snapshot"]["messages"], json!(legacy));
+    assert!(fallback["snapshot"]["displayTranscriptError"].is_string());
+    assert!(fallback["snapshot"].get("displayTranscript").is_none());
+    assert!(fallback["snapshot"].get("historyBefore").is_none());
+    std::fs::rename(&held_path, &path).unwrap();
+    // A retry hydrates the full branch; the failed read never poisons the store.
+    let data = attach(&worker, &capabilities).await;
+    let snapshot = &data["snapshot"];
+    assert_eq!(snapshot["displayTranscript"], true);
+    assert_eq!(snapshot["historyBefore"], 90);
+    let tail = snapshot["messages"].as_array().unwrap();
+    assert_eq!(tail.len(), 512);
+    assert_eq!(tail[0]["content"], "old 90");
+    assert_eq!(tail[509]["content"], "old 599");
+    assert_eq!(tail[510]["role"], "compactionSummary");
+    assert_eq!(
+        tail[511],
+        json!({"role":"user","content":"after","timestamp":2000})
+    );
+    let all = worker
+        .dispatch("get_messages", &json!({"capabilities": capabilities}))
+        .await;
+    assert!(all.success, "{all:?}");
+    let all = all.data.unwrap();
+    assert_eq!(all["displayTranscript"], true);
+    assert_eq!(all["messages"].as_array().unwrap().len(), 602);
+    let head = worker.dispatch("get_messages", &json!({
+        "before": 90, "historyLeafId": snapshot["state"]["leafId"], "capabilities": capabilities,
+    })).await;
+    assert!(head.success, "{head:?}");
+    let head = head.data.unwrap();
+    assert_eq!(head["displayTranscript"], true);
+    let mut joined = head["messages"].as_array().unwrap().clone();
+    joined.extend(tail.iter().cloned());
+    assert_eq!(json!(joined), all["messages"]);
+    assert_eq!(
+        full_messages(&worker).await,
+        legacy,
+        "display reads never change model/legacy fold"
+    );
+    assert_eq!(
+        attach(&worker, TUI_CAPABILITIES).await["snapshot"]["messages"],
+        json!(legacy)
+    );
+}
+
+#[tokio::test]
+async fn display_transcript_fences_full_replacements_and_prefixes() {
+    let (_dir, worker) = branched_worker().await;
+    let mut caps = TUI_CAPABILITIES.to_vec();
+    caps.push("display_transcript");
+    let attached = attach(&worker, &caps).await;
+    let snapshot = &attached["snapshot"];
+    let leaf = snapshot["state"]["leafId"].as_str().unwrap();
+    let generation = snapshot["lastEventCursor"]["generation"].as_str().unwrap();
+    let original = worker
+        .dispatch(
+            "get_messages",
+            &json!({
+                "capabilities":caps,"historyLeafId":leaf,"historyGeneration":generation,
+            }),
+        )
+        .await;
+    assert!(original.success, "{original:?}");
+    let original = original.data.unwrap();
+    assert_eq!(original["generation"], generation);
+    assert_eq!(original["leafId"], leaf);
+    assert_eq!(original["historyLeafId"], leaf);
+    assert_eq!(original["sessionId"], "branched-tail");
+    for before in [None, Some(88)] {
+        let mut request =
+            json!({"capabilities":caps,"historyLeafId":leaf,"historyGeneration":"stale"});
+        if let Some(before) = before {
+            request["before"] = json!(before);
+        }
+        let stale = worker.dispatch("get_messages", &request).await;
+        assert!(!stale.success, "stale generation must fail: {stale:?}");
+        request["historyGeneration"] = json!(generation);
+        request["historyLeafId"] = json!("sibling");
+        let sibling = worker.dispatch("get_messages", &request).await;
+        assert!(!sibling.success, "sibling anchor must fail: {sibling:?}");
+    }
+    let appended = worker
+        .dispatch("prompt_and_wait", &json!({"message":"append"}))
+        .await;
+    assert!(appended.success, "{appended:?}");
+    let full = worker
+        .dispatch(
+            "get_messages",
+            &json!({"capabilities":caps,"historyLeafId":leaf,"historyGeneration":generation}),
+        )
+        .await;
+    assert!(
+        !full.success,
+        "full replacement requires exact captured leaf: {full:?}"
+    );
+    let prefix = worker.dispatch("get_messages", &json!({"before":88,"capabilities":caps,"historyLeafId":leaf,"historyGeneration":generation})).await;
+    assert!(
+        prefix.success,
+        "descendant appends preserve prefix: {prefix:?}"
+    );
+    assert_eq!(
+        prefix.data.unwrap()["messages"],
+        json!(original["messages"].as_array().unwrap()[..88])
+    );
+    let navigated = worker
+        .dispatch(
+            "navigate_tree",
+            &json!({"targetId":"sibling","clientId":"other"}),
+        )
+        .await;
+    assert!(navigated.success, "{navigated:?}");
+    let rejected = worker.dispatch("get_messages", &json!({"before":88,"capabilities":caps,"historyLeafId":leaf,"historyGeneration":generation})).await;
+    assert!(
+        !rejected.success,
+        "other branch cannot join old tail: {rejected:?}"
+    );
+    let legacy = worker
+        .dispatch(
+            "get_messages",
+            &json!({"historyLeafId":leaf,"historyGeneration":"stale"}),
+        )
+        .await;
+    assert!(
+        legacy.success,
+        "legacy full requests keep their contract: {legacy:?}"
+    );
+    assert!(legacy.data.unwrap().get("displayTranscript").is_none());
+}
+
+#[tokio::test]
+async fn display_transcript_attach_uses_original_client_capabilities() {
+    let (_dir, worker) = branched_worker().await;
+    for (outer, client, expected) in [
+        (vec!["display_transcript"], vec!["attach_snapshot"], false),
+        (vec!["attach_snapshot"], vec!["display_transcript"], true),
+    ] {
+        let result = worker
+            .dispatch(
+                "attach",
+                &json!({"capabilities":outer,"clientCapabilities":client,"clientId":"routed"}),
+            )
+            .await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(
+            result.data.unwrap()["snapshot"]["displayTranscript"]
+                .as_bool()
+                .unwrap_or(false),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn display_transcript_corrupt_branch_attach_falls_back_without_sibling_leakage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("incomplete.jsonl");
+    let content = header_line("incomplete")
+        + &message_row(None, "sibling", &assistant_message("SIBLING SECRET"))
+        + &message_row(
+            Some("missing"),
+            "leaf",
+            &json!({"role":"user","content":"selected","timestamp":1}),
+        );
+    std::fs::write(&path, content).unwrap();
+    let worker = worker_over(dir.path(), &path).await;
+    let legacy = full_messages(&worker).await;
+    assert_eq!(
+        legacy,
+        vec![json!({"role":"user","content":"selected","timestamp":1})]
+    );
+    let data = attach(&worker, &["display_transcript", "windowed_snapshot"]).await;
+    assert_eq!(data["snapshot"]["messages"], json!(legacy));
+    assert!(data["snapshot"]["displayTranscriptError"].is_string());
+    assert!(data["snapshot"].get("displayTranscript").is_none());
+    assert!(data["snapshot"].get("historyBefore").is_none());
+    let full = worker
+        .dispatch(
+            "get_messages",
+            &json!({"capabilities":["display_transcript"]}),
+        )
+        .await;
+    assert!(
+        !full.success,
+        "malformed full display read must fail closed: {full:?}"
+    );
+}

@@ -44,8 +44,10 @@ fn repo_root() -> PathBuf {
 /// readers may hand back the `on` key as a boolean (`true`), so the trigger
 /// accessor handles both spellings.
 fn workflow_yaml() -> (serde_yaml::Value, serde_yaml::Value) {
-    let text = fs::read_to_string(repo_root().join(".github/workflows/windows-runtime-triage.yml"))
-        .expect("read .github/workflows/windows-runtime-triage.yml");
+    let text = fs::read_to_string(
+        repo_root().join(".github/upstream-workflows/windows-runtime-triage.yml"),
+    )
+    .expect("read .github/workflows/windows-runtime-triage.yml");
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&text).expect("windows-runtime-triage.yml parses as YAML");
     let triggers = workflow

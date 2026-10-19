@@ -89,9 +89,13 @@ fn make_fixture(case: &serde_json::Value) -> (tempfile::TempDir, String) {
     if let Some(commands) = case.get("fixture").and_then(serde_json::Value::as_array) {
         for command in commands {
             let command = command.as_str().expect("fixture command");
-            let status = std::process::Command::new("/bin/bash")
-                .arg("-c")
+            let shell = crate::platform::shell::get_shell_config(None).expect("fixture shell");
+            let status = std::process::Command::new(&shell.shell)
+                .args(&shell.args)
                 .arg(command)
+                // The corpus pins offset-free Git dates; use its UTC timezone,
+                // not the host's /etc/localtime, to reproduce the recorded object id.
+                .env("TZ", "UTC")
                 .current_dir(dir.path())
                 .status()
                 .expect("run fixture command");

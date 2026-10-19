@@ -1,0 +1,9 @@
+Bundled X.org misc fixed bitmap fonts:
+5x8.bdf and 8x13.bdf: "Public domain font.  Share and enjoy."
+6x12.bdf: "Public domain terminal emulator font.  Share and enjoy."
+Font source headers retained in the font assets. Markus Kuhn UCS fonts.
+
+Bundled unscii-8.hex is the public-domain Unscii 8x8 font by Viznut.
+Source: https://pelulamu.net/unscii/
+The Unscii 8/16 variants are public domain. This distribution uses unscii-8,
+not the differently licensed unscii-16-full variant.

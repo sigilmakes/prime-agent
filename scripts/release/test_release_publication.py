@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
-WORKFLOW = REPO / '.github/workflows/release.yml'
+WORKFLOW = REPO / '.github/upstream-workflows/release.yml'
 
 
 def step_script(name):

@@ -6,6 +6,137 @@
 use super::{AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine};
 
 impl AgentSessionEngine {
+    /// Merge requested flags without resolving against the previous live target.
+    pub(super) fn merge_model_selection(&self, selection: EngineModelSelection) {
+        // Merge like the TS runtime config: explicit wire flags replace; absent fields keep.
+        {
+            let mut current = self.selection.write().expect("model selection lock");
+            if selection.provider.is_some() {
+                current.provider = selection.provider;
+            }
+            if selection.model.is_some() {
+                current.model = selection.model;
+            }
+            if selection.api_key.is_some() {
+                current.api_key = selection.api_key;
+            }
+            if selection.thinking.is_some() {
+                current.thinking = selection.thinking;
+            }
+        }
+    }
+
+    /// Preserve a lazy session's already selected model before disk publication.
+    /// This fills only the model slot: the eventual build resolves credentials
+    /// normally, and explicit switches/replacements replace or clear the slot.
+    pub(crate) fn capture_model_metadata_refresh_anchor(&self) {
+        let _reload_serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .provider_target
+            .read()
+            .expect("provider target lock")
+            .is_some()
+        {
+            return;
+        }
+        // A session without any resolvable model may still refresh its catalog.
+        // There is no selected identity to retain in that case.
+        let Ok(model) = self.resolve_model() else {
+            return;
+        };
+        let mut target = self.provider_target.write().expect("provider target lock");
+        if target.is_none() {
+            *target = Some(pa_core::session_engine::provider_adapter::ProviderTarget {
+                model,
+                api_key: None,
+                headers: None,
+                service_tier: *self.service_tier.read().expect("service tier lock"),
+            });
+        }
+    }
+
+    /// Queue catalog metadata adoption without touching an active provider request.
+    pub(crate) fn schedule_model_metadata_refresh(&self) {
+        self.model_metadata_refresh_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Called only before a model turn starts, never from a refresh command.
+    /// Refresh the serving identity, not the startup default; a catalog removal
+    /// keeps the last-good model. Credentials stay owned by the auth/reload lane.
+    pub(super) fn apply_scheduled_model_metadata_refresh(&self) -> anyhow::Result<()> {
+        if !self
+            .model_metadata_refresh_pending
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        let _reload_serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self
+            .provider_target
+            .read()
+            .expect("provider target lock")
+            .as_ref()
+            .map(|target| target.model.clone());
+        let Some(current) = current else {
+            // A not-yet-built session resolves the refreshed disk view at build.
+            return Ok(());
+        };
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        registry.load_private_authorization_from_cache();
+        let refreshed = registry
+            .get_all()
+            .iter()
+            .find(|model| model.provider == current.provider && model.id == current.id)
+            .cloned()
+            .unwrap_or_else(|| current.clone());
+        let refreshed = self.configure_fresh_ollama_model(&refreshed);
+        let wire = pa_core::session_engine::provider_adapter::json_round_trip(&refreshed)
+            .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+        let level = pa_ai::models::clamp_thinking_level(&refreshed, self.effective_thinking());
+        let session = self.session.blocking_lock().clone();
+        if let Some(core) = session {
+            // Agent-only metadata update: no synthetic model_change row.
+            self.runtime
+                .block_on(core.session.agent().set_model_and_thinking_level(
+                    wire,
+                    pa_core::session_engine::provider_adapter::map_thinking_level(level),
+                ));
+            core.update_model_facts(&refreshed);
+        }
+        // Reload and model-switch credentials may have advanced while reading
+        // the catalog. Replace only model metadata, and only for the same id.
+        let mut target = self.provider_target.write().expect("provider target lock");
+        if let Some(target) = target.as_mut().filter(|target| {
+            target.model.provider == current.provider && target.model.id == current.id
+        }) {
+            target.model = refreshed;
+            *self
+                .effective_thinking
+                .write()
+                .expect("effective thinking lock") = Some(level);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn configure_ollama_model(&self, model: &Model) -> Model {
+        self.ollama_cloud
+            .configure_model(&self.cwd(), &self.config.agent_dir, model)
+    }
+
+    pub(crate) fn configure_fresh_ollama_model(&self, model: &Model) -> Model {
+        self.ollama_cloud
+            .configure_fresh_model(&self.cwd(), &self.config.agent_dir, model)
+    }
+
     /// The startup chain: the saved settings default, then the featured
     /// default, then the first available model.
     fn startup_chain_model(&self, registry: &pa_core::models::ModelRegistry) -> Option<Model> {
@@ -185,28 +316,15 @@ impl AgentSessionEngine {
         pa_core::models::resolve_cli_model(Some(&provider), &model_id, registry.get_all()).model
     }
 
-    /// Emit the daemon model-allowlist refusal's adoption event (schema v1
-    /// `model refused`) from any of this worker's enforcement seams.
-    pub(crate) fn note_model_refused(&self, surface: &str, selector: &str) {
-        self.model_refusal_telemetry
-            .note_refused(surface, selector, &self.cwd());
-    }
-
     /// Resolve the model through the composed registry, then enforce the
     /// settings `allowedModels` allowlist: a resolution outside the allowlist
-    /// fails loudly here (never a silent fallback), emitting `model refused`.
+    /// fails loudly here (never a silent fallback).
     pub(super) fn resolve_registry_model(&self) -> anyhow::Result<Model> {
         let model = self.resolve_registry_model_unchecked()?;
         let selector = format!("{}/{}", model.provider, model.id);
         let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
-        if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
-            if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
-            {
-                self.note_model_refused("session_start", &refusal.selector);
-            }
-            return Err(refusal);
-        }
-        Ok(model)
+        crate::model_allowlist::assert_allowed(&allowlist, &selector)?;
+        Ok(self.configure_fresh_ollama_model(&model))
     }
 
     /// The registry resolution before the allowlist gate: the flagged-model
@@ -293,7 +411,7 @@ impl AgentSessionEngine {
             .expect("provider target lock")
             .clone()
         {
-            return Ok(target.model);
+            return Ok(self.configure_ollama_model(&target.model));
         }
         self.resolve_model()
     }
@@ -309,7 +427,7 @@ impl AgentSessionEngine {
         {
             return level;
         }
-        let model = self.resolve_model();
+        let model = self.session_model();
         let selection = self.current_selection();
         let requested = selection
             .thinking
@@ -466,7 +584,7 @@ impl AgentSessionEngine {
         pa_core::session_engine::provider_adapter::ProviderTarget {
             service_tier: *self.service_tier.read().expect("service tier lock"),
             api_key,
-            model: primary.clone(),
+            model: self.configure_ollama_model(primary),
             headers,
         }
     }
@@ -513,4 +631,301 @@ fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
     let parsed = pa_ai::faux::script::parse_faux_script(&script).map_err(anyhow::Error::msg)?;
     let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
     Ok(registration.get_model())
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use pa_core::session_engine::provider_adapter::ProviderTarget;
+    use serde_json::json;
+
+    fn bare_engine(dir: &std::path::Path) -> AgentSessionEngine {
+        let agent_dir = dir.join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        AgentSessionEngine::new(crate::agent_engine::AgentEngineConfig {
+            cwd: dir.to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap()
+    }
+
+    fn write_models(engine: &AgentSessionEngine, ids: &[&str], window: u64) {
+        let models: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id, "name": format!("Refreshed {id}"), "api": "openai-completions",
+                    "contextWindow": window, "maxTokens": 4096,
+                })
+            })
+            .collect();
+        std::fs::write(engine.config.agent_dir.join("models.json"), json!({
+            "providers": {"refresh-test": {"api": "openai-completions",
+                "baseUrl": "http://127.0.0.1:9/v1", "apiKey": "configured-fallback", "models": models}}
+        }).to_string()).unwrap();
+    }
+
+    #[test]
+    fn refresh_metadata_defers_then_adopts_same_id_without_replacing_credentials() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = bare_engine(dir.path());
+        write_models(&engine, &["selected"], 128_000);
+        engine.configure_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("selected".into()),
+            ..Default::default()
+        });
+        let original = engine.resolve_model().unwrap();
+        engine.ensure_core_session(&original).unwrap();
+        let mut expected = ProviderTarget {
+            model: original.clone(),
+            api_key: Some("live-key".into()),
+            headers: Some(std::collections::BTreeMap::from([(
+                "X-Live".into(),
+                "retained".into(),
+            )])),
+            service_tier: None,
+        };
+        *engine.provider_target.write().unwrap() = Some(expected.clone());
+        write_models(&engine, &["other", "selected"], 256_000);
+        engine.schedule_model_metadata_refresh();
+        // Scheduling is safe during an active stream: the serving target has
+        // not changed until the model-turn boundary explicitly applies it.
+        assert_eq!(
+            serde_json::to_value(engine.session_model().unwrap()).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        engine.apply_scheduled_model_metadata_refresh().unwrap();
+        expected.model = engine.resolve_model().unwrap();
+        let core = engine.session.blocking_lock().clone().unwrap();
+        let state = engine.runtime.block_on(core.session.agent().state());
+        let expected_wire: pa_agent::types::Model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&expected.model).unwrap();
+        assert_eq!(state.model, expected_wire);
+        let actual = engine.provider_target.read().unwrap().clone().unwrap();
+        assert_eq!(
+            (
+                actual.model,
+                actual.api_key,
+                actual.headers,
+                actual.service_tier
+            ),
+            (
+                expected.model,
+                expected.api_key,
+                expected.headers,
+                expected.service_tier
+            )
+        );
+        assert!(!engine
+            .model_metadata_refresh_pending
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn refresh_metadata_lazy_anchor_survives_removal_and_default_change_at_build() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = bare_engine(dir.path());
+        write_models(&engine, &["selected", "replacement"], 128_000);
+        let mut settings =
+            pa_core::settings::SettingsManager::create(engine.cwd(), &engine.config.agent_dir);
+        settings
+            .set_default_model_and_provider("refresh-test", "selected")
+            .unwrap();
+        let original = engine.resolve_model().unwrap();
+        engine.capture_model_metadata_refresh_anchor();
+        assert_eq!(engine.model_metadata().unwrap()["id"], "selected");
+        assert_eq!(engine.model_context_window(), Some(128_000));
+        assert!(
+            engine.session.blocking_lock().is_none(),
+            "anchor must not build a core"
+        );
+        let anchor = engine.provider_target.read().unwrap().clone().unwrap();
+        assert_eq!(
+            (anchor.model, anchor.api_key, anchor.headers),
+            (original.clone(), None, None)
+        );
+        write_models(&engine, &["replacement"], 256_000);
+        settings
+            .set_default_model_and_provider("refresh-test", "replacement")
+            .unwrap();
+        engine.schedule_model_metadata_refresh();
+        engine.apply_scheduled_model_metadata_refresh().unwrap();
+        let model = engine.session_model().unwrap();
+        assert_eq!(model, original);
+        assert_eq!(engine.model_metadata().unwrap()["id"], "selected");
+        assert_eq!(engine.model_context_window(), Some(original.context_window));
+        // This is the same lazy build seam used by run_model_turn.
+        engine.ensure_core_session(&model).unwrap();
+        let core = engine.session.blocking_lock().clone().unwrap();
+        let state = engine.runtime.block_on(core.session.agent().state());
+        let expected: pa_agent::types::Model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&original).unwrap();
+        assert_eq!(state.model, expected);
+        assert_eq!(
+            engine
+                .provider_target
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("configured-fallback")
+        );
+    }
+
+    #[test]
+    fn refresh_metadata_lazy_anchor_yields_to_explicit_switch_and_replacement() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = bare_engine(dir.path());
+        write_models(&engine, &["selected", "replacement"], 128_000);
+        engine.configure_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("selected".into()),
+            ..Default::default()
+        });
+        engine.capture_model_metadata_refresh_anchor();
+        assert!(engine.switch_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("replacement".into()),
+            ..Default::default()
+        }));
+        assert_eq!(engine.session_model().unwrap().id, "replacement");
+        engine.runtime.block_on(engine.teardown_for_replacement());
+        assert!(engine.provider_target.read().unwrap().is_none());
+        assert!(engine.session.blocking_lock().is_none());
+    }
+
+    #[test]
+    fn refresh_metadata_keeps_a_removed_selected_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = bare_engine(dir.path());
+        write_models(&engine, &["selected"], 128_000);
+        engine.configure_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("selected".into()),
+            ..Default::default()
+        });
+        let original = engine.resolve_model().unwrap();
+        *engine.provider_target.write().unwrap() = Some(ProviderTarget {
+            model: original.clone(),
+            api_key: None,
+            headers: None,
+            service_tier: None,
+        });
+        write_models(&engine, &["replacement"], 256_000);
+        engine.schedule_model_metadata_refresh();
+        engine.apply_scheduled_model_metadata_refresh().unwrap();
+        assert_eq!(engine.session_model().unwrap(), original);
+    }
+    #[test]
+    fn lazy_refresh_retains_selected_identity_on_the_first_public_prompt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = bare_engine(dir.path());
+        let listener = engine
+            .runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        engine.runtime.spawn(async move {
+            let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let (header_end, content_len) = loop {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                        let len: usize = head.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+                        break (end + 4, len);
+                    }
+                };
+                while bytes.len() < header_end + content_len {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                let request: serde_json::Value = serde_json::from_slice(&bytes[header_end..header_end + content_len]).unwrap();
+                let body = concat!(
+                    "data: {\"id\":\"refresh-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ack\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"id\":\"refresh-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                request
+            }).await;
+            let _ = request_tx.send(request);
+        });
+        write_models(&engine, &["selected", "replacement"], 128_000);
+        let file = engine.config.agent_dir.join("models.json");
+        std::fs::write(
+            &file,
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .replace("http://127.0.0.1:9/v1", &base_url),
+        )
+        .unwrap();
+        let mut settings =
+            pa_core::settings::SettingsManager::create(engine.cwd(), &engine.config.agent_dir);
+        settings
+            .set_default_model_and_provider("refresh-test", "selected")
+            .unwrap();
+        engine.capture_model_metadata_refresh_anchor();
+        write_models(&engine, &["replacement"], 256_000);
+        std::fs::write(
+            &file,
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .replace("http://127.0.0.1:9/v1", &base_url),
+        )
+        .unwrap();
+        settings
+            .set_default_model_and_provider("refresh-test", "replacement")
+            .unwrap();
+        engine.schedule_model_metadata_refresh();
+        let mut events = Vec::new();
+        engine.run_prompt(
+            0,
+            crate::engine::PromptRequest {
+                message: "hello".into(),
+                images: Vec::new(),
+                source: "user".into(),
+                agent_message_id: None,
+                custom_message: None,
+                batch: Vec::new(),
+            },
+            &|| false,
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        let request = engine
+            .runtime
+            .block_on(request_rx)
+            .unwrap()
+            .expect("local provider request");
+        assert_eq!(request["model"], "selected");
+        assert_eq!(engine.model_metadata().unwrap()["id"], "selected");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, crate::engine::EngineEvent::Done(Ok(())))));
+    }
 }

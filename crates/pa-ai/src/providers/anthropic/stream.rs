@@ -10,7 +10,7 @@ use crate::cache_pricing::{
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::AssistantMessageEventStream;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventWriter,
+    create_provider_event_stream, AssistantMessageEvent, AssistantMessageEventWriter,
 };
 use crate::models::{calculate_cost, CostOverrides};
 use crate::providers::anthropic::convert::map_stop_reason;
@@ -81,9 +81,6 @@ fn anthropic_sse_error(data: &str, request_id: Option<&str>) -> StreamFailureErr
     StreamFailureError { message, info }
 }
 
-/// Marker error for an unhandled Anthropic stop reason.
-struct StopReasonError(String);
-
 /// Per-block streaming state kept outside the output: the wire index and the tool-JSON scratch,
 /// parallel to `output.content` by position.
 struct IndexedBlocks {
@@ -130,9 +127,16 @@ pub fn stream_anthropic(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: model.api.clone(),
@@ -152,10 +156,12 @@ pub fn stream_anthropic(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -170,14 +176,19 @@ pub fn stream_anthropic(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -270,9 +281,11 @@ async fn run_stream(
         ));
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
 
     let mut blocks = IndexedBlocks::new();
     let mut decoder = SseDecoder::new();
@@ -282,7 +295,7 @@ async fn run_stream(
     macro_rules! handle_event {
         ($event:expr) => {{
             let event: Value = $event;
-            (|| {
+            async {
                 match event
                     .get("type")
                     .and_then(|value| value.as_str())
@@ -351,10 +364,12 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                writer.push(AssistantMessageEvent::TextStart {
-                                    content_index: (output.content.len() - 1) as u64,
-                                    partial: output.clone(),
-                                });
+                                writer
+                                    .send(AssistantMessageEvent::TextStart {
+                                        content_index: (output.content.len() - 1) as u64,
+                                        partial: output.clone(),
+                                    })
+                                    .await?;
                             }
                             "thinking" => {
                                 output
@@ -369,10 +384,12 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                writer.push(AssistantMessageEvent::ThinkingStart {
-                                    content_index: (output.content.len() - 1) as u64,
-                                    partial: output.clone(),
-                                });
+                                writer
+                                    .send(AssistantMessageEvent::ThinkingStart {
+                                        content_index: (output.content.len() - 1) as u64,
+                                        partial: output.clone(),
+                                    })
+                                    .await?;
                             }
                             "redacted_thinking" => {
                                 output
@@ -393,10 +410,12 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                writer.push(AssistantMessageEvent::ThinkingStart {
-                                    content_index: (output.content.len() - 1) as u64,
-                                    partial: output.clone(),
-                                });
+                                writer
+                                    .send(AssistantMessageEvent::ThinkingStart {
+                                        content_index: (output.content.len() - 1) as u64,
+                                        partial: output.clone(),
+                                    })
+                                    .await?;
                             }
                             "tool_use" => {
                                 output.content.push(AssistantContent::ToolCall(ToolCall {
@@ -432,10 +451,12 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                writer.push(AssistantMessageEvent::ToolcallStart {
-                                    content_index: (output.content.len() - 1) as u64,
-                                    partial: output.clone(),
-                                });
+                                writer
+                                    .send(AssistantMessageEvent::ToolcallStart {
+                                        content_index: (output.content.len() - 1) as u64,
+                                        partial: output.clone(),
+                                    })
+                                    .await?;
                             }
                             _ => {}
                         }
@@ -462,11 +483,13 @@ async fn run_stream(
                                     {
                                         block.text.push_str(text);
                                     }
-                                    writer.push(AssistantMessageEvent::TextDelta {
-                                        content_index: position as u64,
-                                        delta: text.to_string(),
-                                        partial: output.clone(),
-                                    });
+                                    writer
+                                        .send(AssistantMessageEvent::TextDelta {
+                                            content_index: position as u64,
+                                            delta: text.to_string(),
+                                            partial: output.clone(),
+                                        })
+                                        .await?;
                                 }
                                 "thinking_delta" => {
                                     let thinking = delta
@@ -478,11 +501,13 @@ async fn run_stream(
                                     {
                                         block.thinking.push_str(thinking);
                                     }
-                                    writer.push(AssistantMessageEvent::ThinkingDelta {
-                                        content_index: position as u64,
-                                        delta: thinking.to_string(),
-                                        partial: output.clone(),
-                                    });
+                                    writer
+                                        .send(AssistantMessageEvent::ThinkingDelta {
+                                            content_index: position as u64,
+                                            delta: thinking.to_string(),
+                                            partial: output.clone(),
+                                        })
+                                        .await?;
                                 }
                                 "input_json_delta" => {
                                     let partial_json = delta
@@ -501,11 +526,13 @@ async fn run_stream(
                                         tool_call.arguments =
                                             parsed.as_object().cloned().unwrap_or_default();
                                     }
-                                    writer.push(AssistantMessageEvent::ToolcallDelta {
-                                        content_index: position as u64,
-                                        delta: partial_json.to_string(),
-                                        partial: output.clone(),
-                                    });
+                                    writer
+                                        .send(AssistantMessageEvent::ToolcallDelta {
+                                            content_index: position as u64,
+                                            delta: partial_json.to_string(),
+                                            partial: output.clone(),
+                                        })
+                                        .await?;
                                 }
                                 "signature_delta" => {
                                     let signature = delta
@@ -533,18 +560,22 @@ async fn run_stream(
                         if let Some(position) = blocks.position(index) {
                             match &output.content[position] {
                                 AssistantContent::Text(text) => {
-                                    writer.push(AssistantMessageEvent::TextEnd {
-                                        content_index: position as u64,
-                                        content: text.text.clone(),
-                                        partial: output.clone(),
-                                    })
+                                    writer
+                                        .send(AssistantMessageEvent::TextEnd {
+                                            content_index: position as u64,
+                                            content: text.text.clone(),
+                                            partial: output.clone(),
+                                        })
+                                        .await?;
                                 }
                                 AssistantContent::Thinking(thinking) => {
-                                    writer.push(AssistantMessageEvent::ThinkingEnd {
-                                        content_index: position as u64,
-                                        content: thinking.thinking.clone(),
-                                        partial: output.clone(),
-                                    })
+                                    writer
+                                        .send(AssistantMessageEvent::ThinkingEnd {
+                                            content_index: position as u64,
+                                            content: thinking.thinking.clone(),
+                                            partial: output.clone(),
+                                        })
+                                        .await?;
                                 }
                                 AssistantContent::ToolCall(_) => {
                                     let parsed = blocks
@@ -562,11 +593,13 @@ async fn run_stream(
                                         AssistantContent::ToolCall(tool_call) => tool_call.clone(),
                                         _ => unreachable!("position points at a tool call"),
                                     };
-                                    writer.push(AssistantMessageEvent::ToolcallEnd {
-                                        content_index: position as u64,
-                                        tool_call,
-                                        partial: output.clone(),
-                                    });
+                                    writer
+                                        .send(AssistantMessageEvent::ToolcallEnd {
+                                            content_index: position as u64,
+                                            tool_call,
+                                            partial: output.clone(),
+                                        })
+                                        .await?;
                                 }
                             }
                         }
@@ -583,7 +616,7 @@ async fn run_stream(
                                             output.stop_reason_raw = Some(stop_reason.to_string());
                                         }
                                     }
-                                    Err(message) => return Err(StopReasonError(message)),
+                                    Err(message) => return Err(ProviderError::Message(message)),
                                 }
                             }
                         }
@@ -634,8 +667,9 @@ async fn run_stream(
                     }
                     _ => {}
                 }
-                Ok::<(), StopReasonError>(())
-            })()
+                Ok::<(), ProviderError>(())
+            }
+            .await
         }};
     }
 
@@ -647,15 +681,15 @@ async fn run_stream(
                 break;
             };
             for sse in decoder.push_text(&chunk) {
-                handle_sse(&sse, request_id.as_deref(), |event| {
-                    handle_event!(event).map_err(|error| error.0)
-                })?;
+                if let Some(event) = parse_sse(&sse, request_id.as_deref())? {
+                    handle_event!(event)?;
+                }
             }
         }
         for sse in decoder.finish() {
-            handle_sse(&sse, request_id.as_deref(), |event| {
-                handle_event!(event).map_err(|error| error.0)
-            })?;
+            if let Some(event) = parse_sse(&sse, request_id.as_deref())? {
+                handle_event!(event)?;
+            }
         }
         if saw_message_start && !saw_message_end {
             return Err(ProviderError::StreamFailure(StreamFailureError {
@@ -706,23 +740,18 @@ fn recalculate_cost(model: &Model, output: &mut AssistantMessage, cache_write_co
     calculate_cost(model, &mut output.usage, overrides.as_ref());
 }
 
-/// Handle one SSE event: error events become classified failures; message events are parsed and
-/// forwarded.
-fn handle_sse<E>(
+/// Parse one SSE event: errors become classified failures; unrelated events are skipped.
+fn parse_sse(
     sse: &ServerSentEvent,
     request_id: Option<&str>,
-    mut on_event: E,
-) -> Result<(), ProviderError>
-where
-    E: FnMut(Value) -> Result<(), String>,
-{
+) -> Result<Option<Value>, ProviderError> {
     if sse.event.as_deref() == Some("error") {
         return Err(ProviderError::StreamFailure(anthropic_sse_error(
             &sse.data, request_id,
         )));
     }
     if !ANTHROPIC_MESSAGE_EVENTS.contains(&sse.event.as_deref().unwrap_or("")) {
-        return Ok(());
+        return Ok(None);
     }
     let event = match parse_json_with_repair(&sse.data) {
         Ok(event) => event,
@@ -743,6 +772,5 @@ where
             }));
         }
     };
-    on_event(event).map_err(ProviderError::Message)?;
-    Ok(())
+    Ok(Some(event))
 }

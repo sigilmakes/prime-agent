@@ -20,6 +20,13 @@ pub enum SettingsScope {
 /// Read/modify/write under a per-file advisory lock. `update` returns the next
 /// document or `None` to leave the file unchanged.
 pub trait SettingsStorage: Send + Sync {
+    /// Whether project and global name the same physical settings document.
+    /// Such a document has global authority only; managers must not load a self-overlay.
+    /// Stores with independent scopes (including in-memory stores) keep the default.
+    fn project_scope_is_global(&self) -> bool {
+        false
+    }
+
     /// The scope's current content, exactly what [`Self::with_lock`]'s read
     /// arm would deliver, without a write-back channel. Implementations may
     /// serve a process-cached copy validated against the file as it stands.
@@ -65,8 +72,10 @@ impl FileSettingsStorage {
     pub fn new(cwd: impl Into<PathBuf>, agent_dir: impl Into<PathBuf>) -> Self {
         let agent_dir: PathBuf = agent_dir.into();
         FileSettingsStorage {
-            global_path: agent_dir.join("settings.json"),
-            project_path: cwd.into().join(CONFIG_DIR_NAME).join("settings.json"),
+            global_path: canonical_settings_path(&agent_dir.join("settings.json")),
+            project_path: canonical_settings_path(
+                &cwd.into().join(CONFIG_DIR_NAME).join("settings.json"),
+            ),
         }
     }
 
@@ -98,6 +107,44 @@ impl FileSettingsStorage {
             last_error.map_or_else(|| "busy".into(), |e| e.to_string())
         ))
     }
+}
+
+/// Resolve the leaf (including a dangling symlink) or its nearest existing ancestor.
+/// Storage still reports inaccessible or invalid paths through its normal read/write errors.
+fn canonical_settings_path(path: &Path) -> PathBuf {
+    fn resolve(path: &Path, remaining: usize) -> Result<PathBuf> {
+        if remaining == 0 {
+            return Err(anyhow!("Too many settings path aliases"));
+        }
+        if let Ok(target) = fs::canonicalize(path) {
+            return Ok(target);
+        }
+        if let Ok(target) = fs::read_link(path) {
+            let target = if target.is_absolute() {
+                target
+            } else {
+                path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+            };
+            return resolve(&target, remaining - 1);
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("Invalid settings path"))?;
+        let parent = resolve(parent, remaining - 1)?;
+        match path.components().next_back() {
+            Some(std::path::Component::Normal(name)) => Ok(parent.join(name)),
+            Some(std::path::Component::ParentDir) => {
+                Ok(parent.parent().unwrap_or(&parent).to_path_buf())
+            }
+            _ => Ok(parent),
+        }
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    resolve(&absolute, 64).unwrap_or(absolute)
 }
 
 /// Same-process serialization for one settings document: the TS lock is
@@ -177,6 +224,10 @@ fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
 }
 
 impl SettingsStorage for FileSettingsStorage {
+    fn project_scope_is_global(&self) -> bool {
+        self.global_path == self.project_path
+    }
+
     /// The consolidated read arm: on a cache hit, one `stat` and the cached content;
     /// on a miss, the full locked cycle, byte-identical to `with_lock`'s read arm, which
     /// also populates the cache. The same-process mutex still orders in-process writers.
@@ -335,6 +386,22 @@ impl SettingsStorage for InMemorySettingsStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn file_alias_uses_the_physical_targets_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&agent).unwrap();
+        let target = dir.path().join("target.json");
+        fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, agent.join("settings.json")).unwrap();
+        let storage = FileSettingsStorage::new(dir.path().join("cwd"), &agent);
+        let _guard = FileSettingsStorage::acquire_lock(&target).unwrap();
+        assert!(storage
+            .with_lock(SettingsScope::Global, &mut |_| Some("{}".into()))
+            .is_err());
+    }
 
     #[test]
     fn in_memory_round_trip() {

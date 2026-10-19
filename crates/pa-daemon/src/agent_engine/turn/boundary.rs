@@ -19,7 +19,7 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Drop pending turn-boundary requests (aborted turns clear both).
+    /// Drop pending compaction requests after an aborted turn.
     pub(super) fn drop_turn_boundary_requests(&self) {
         let guard = self.session.blocking_lock();
         if let Some(engine) = guard.as_deref() {
@@ -27,10 +27,8 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Consume pending `compact.run`/`refine.run` requests at the settled
-    /// turn boundary, compaction first, then refinement. A consumed
-    /// compaction stops the run on purpose; the model resumes on the next
-    /// prompt.
+    /// Consume a pending `compact.run` request at the settled turn boundary.
+    /// A consumed compaction stops the run; the model resumes on the next prompt.
     pub(super) fn run_turn_boundary(
         &self,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
@@ -39,10 +37,9 @@ impl AgentSessionEngine {
         let has_pending = {
             let guard = self.session.blocking_lock();
             match guard.as_deref() {
-                Some(engine) => self.runtime.block_on(async {
-                    engine.turn_boundary.compaction_scheduled().await
-                        || engine.turn_boundary.refine_pending().await
-                }),
+                Some(engine) => self
+                    .runtime
+                    .block_on(async { engine.turn_boundary.compaction_scheduled().await }),
                 None => false,
             }
         };
@@ -60,7 +57,6 @@ impl AgentSessionEngine {
             }
         };
         let api_key = self.resolve_request_api_key(&model);
-        let global_harness_dir = self.config.agent_dir.clone();
         // The start event goes out before the summarizer runs, carrying the
         // pending instructions.
         let scheduled = {
@@ -101,12 +97,7 @@ impl AgentSessionEngine {
             };
             let consumed = self.runtime.block_on(async {
                 engine
-                    .consume_turn_boundary_requests(
-                        &model,
-                        api_key,
-                        global_harness_dir,
-                        Some(&signal),
-                    )
+                    .consume_turn_boundary_requests(&model, api_key, Some(&signal))
                     .await
             });
             self.clear_auto_compaction_abort(&controller);
@@ -125,18 +116,6 @@ impl AgentSessionEngine {
                         return BoundaryRun::Cancelled;
                     }
                 }
-                {
-                    let guard = self.session.blocking_lock();
-                    if let Some(telemetry) = guard
-                        .as_deref()
-                        .and_then(|engine| engine.telemetry.as_ref())
-                    {
-                        telemetry.note_compaction(Some(run.duration_ms));
-                    }
-                }
-                // The run stops on purpose; the worker services the armed review off
-                // the settle (never before the `Done`).
-                self.mark_compact_auto_refine_pending();
                 let entry = serde_json::to_value(&run.entry).unwrap_or(Value::Null);
                 // The wire result is the `CompactionResult` shape; the event reason
                 // is `requested`.
@@ -191,35 +170,6 @@ impl AgentSessionEngine {
                     return BoundaryRun::Cancelled;
                 }
                 stopped_for_compaction = true;
-            }
-            None => {}
-        }
-        match consumption.refinement {
-            Some(Ok(refinement)) => {
-                if refinement.applied_edits.iter().any(|edit| edit.applied) {
-                    let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                        &refinement,
-                        pa_core::session_engine::refine::RefinementSource::SelfRefine,
-                    );
-                    if !emit(EngineEvent::CustomMessage(
-                        crate::session_commands::custom_message_value(&notice),
-                    )) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-                if let Ok(result) = serde_json::to_value(&refinement) {
-                    if !emit(EngineEvent::RefineComplete { result }) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-            }
-            Some(Err(error)) => {
-                eprintln!("pa-daemon: requested refinement failed: {error:#}");
-                if !emit(EngineEvent::RefineFailed {
-                    error: format!("{error:#}"),
-                }) {
-                    return BoundaryRun::Cancelled;
-                }
             }
             None => {}
         }

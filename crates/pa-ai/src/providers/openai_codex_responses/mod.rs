@@ -6,8 +6,8 @@ use serde_json::{json, Map, Value};
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
-    AssistantMessageEventWriter,
+    create_assistant_message_event_stream, create_provider_event_stream, AssistantMessageEvent,
+    AssistantMessageEventStream, AssistantMessageEventWriter,
 };
 use crate::models::clamp_thinking_level;
 use crate::providers::openai_codex_responses::errors::{
@@ -108,9 +108,16 @@ pub fn stream_openai_codex_responses(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: API_OPENAI_CODEX_RESPONSES.to_string(),
@@ -130,10 +137,12 @@ pub fn stream_openai_codex_responses(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -150,14 +159,19 @@ pub fn stream_openai_codex_responses(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -342,9 +356,11 @@ async fn run_stream(
         return Err(api_error.into_provider_error());
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
     run_sse_stream(&mut response, model, &options, output, writer).await?;
 
     if options
@@ -393,13 +409,14 @@ async fn run_websocket_attempt(
 ) -> Result<(), CodexStreamError> {
     let session_id = options.base.session_id.as_deref();
     let url = resolve_codex_websocket_url(&model.base_url);
-    let connection = acquire_websocket(
+    let mut connection = acquire_websocket(
         &url,
         websocket_headers,
         session_id,
         options.base.signal.clone(),
     )
     .await?;
+    connection.abort_on_drop = options.base.event_buffer_capacity.is_some();
 
     let use_cached_context = matches!(
         options.base.transport,
@@ -449,7 +466,23 @@ async fn run_websocket_attempt(
         let mut processor = ResponsesStreamProcessor::new(model, output, writer, hooks);
         // The TS catch settles partial tool calls before the error event carries the message.
         let streamed: Result<(), CodexStreamError> = async {
-            while let Some(event) = events.recv().await {
+            loop {
+                let event = if options.base.event_buffer_capacity.is_some() {
+                    tokio::select! {
+                        () = async {
+                            match options.base.signal.as_ref() {
+                                Some(signal) => signal.cancelled().await,
+                                None => std::future::pending().await,
+                            }
+                        } => return Err(CodexStreamError::Aborted),
+                        event = events.recv() => event,
+                    }
+                } else {
+                    events.recv().await
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 match event {
                     websocket::WorkerEvent::Event(event) => {
                         // Codex can emit lifecycle, telemetry, or vendor metadata before rejecting
@@ -458,12 +491,14 @@ async fn run_websocket_attempt(
                         if !start_emitted && is_codex_visible_response_event(&event) {
                             start_emitted = true;
                             *websocket_started = true;
-                            writer.push(AssistantMessageEvent::Start {
-                                partial: start_partial.clone(),
-                            });
+                            writer
+                                .send(AssistantMessageEvent::Start {
+                                    partial: start_partial.clone(),
+                                })
+                                .await?;
                         }
                         let mapped = map_codex_event(event)?;
-                        processor.handle_event(&mapped.event)?;
+                        processor.handle_event(&mapped.event).await?;
                         if mapped.done {
                             break;
                         }
@@ -505,6 +540,7 @@ async fn run_websocket_attempt(
                     &OPENAI_TOOL_CALL_PROVIDERS,
                     ConvertResponsesMessagesOptions {
                         include_system_prompt: false,
+                        ..Default::default()
                     },
                 )
                 .into_iter()
@@ -564,7 +600,7 @@ async fn run_sse_stream(
             let Some(chunk) = response.next_text().await? else {
                 break;
             };
-            process_sse_chunk(&chunk, &mut decoder, model, &mut processor)?;
+            process_sse_chunk(&chunk, &mut decoder, model, &mut processor).await?;
         }
         for sse in decoder.finish() {
             if sse.data.trim().is_empty() || sse.data.trim() == "[DONE]" {
@@ -578,7 +614,7 @@ async fn run_sse_stream(
                 .into_provider_error()
             })?;
             let mapped = map_codex_event(event).map_err(CodexStreamError::into_provider_error)?;
-            processor.handle_event(&mapped.event)?;
+            processor.handle_event(&mapped.event).await?;
         }
         processor.finish()?;
         Ok(())
@@ -590,7 +626,7 @@ async fn run_sse_stream(
     stream_result
 }
 
-fn process_sse_chunk(
+async fn process_sse_chunk(
     chunk: &str,
     decoder: &mut SseDecoder,
     _model: &Model,
@@ -608,7 +644,7 @@ fn process_sse_chunk(
             .into_provider_error()
         })?;
         let mapped = map_codex_event(event).map_err(CodexStreamError::into_provider_error)?;
-        processor.handle_event(&mapped.event)?;
+        processor.handle_event(&mapped.event).await?;
         if mapped.done {
             return Ok(());
         }
@@ -627,6 +663,7 @@ fn build_request_body(
         &OPENAI_TOOL_CALL_PROVIDERS,
         ConvertResponsesMessagesOptions {
             include_system_prompt: false,
+            ..Default::default()
         },
     );
 
@@ -787,6 +824,10 @@ impl Provider for OpenAICodexResponsesProvider {
         API_OPENAI_CODEX_RESPONSES
     }
 
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
+    }
+
     fn stream(
         &self,
         model: &Model,
@@ -889,7 +930,7 @@ mod tests {
     /// Replay a codex wire turn that issues one function call and return the recorded assistant
     /// message. `item_id` omits the `fc_` item id, the degenerate shape that produced the
     /// `[ApiParam][invalid_id]` rejection on the follow-up turn.
-    fn replay_codex_tool_call_turn(model: &Model, item_id: Option<&str>) -> AssistantMessage {
+    async fn replay_codex_tool_call_turn(model: &Model, item_id: Option<&str>) -> AssistantMessage {
         let function_call_item = |arguments: &str| {
             let mut item = Map::new();
             item.insert("type".into(), json!("function_call"));
@@ -981,7 +1022,10 @@ mod tests {
         );
         for event in events {
             let mapped = map_codex_event(event).expect("codex event mapping");
-            processor.handle_event(&mapped.event).expect("stream event");
+            processor
+                .handle_event(&mapped.event)
+                .await
+                .expect("stream event");
         }
         processor.finish().expect("stream finish");
         output
@@ -1043,10 +1087,10 @@ mod tests {
 
     /// The follow-up request replays the recorded rows and every input item carries valid ids (the
     /// dogfood bug sent `input[2].id: ""`, rejected with `[ApiParam][invalid_id]`).
-    #[test]
-    fn codex_tool_call_followup_request_carries_valid_ids() {
+    #[tokio::test]
+    async fn codex_tool_call_followup_request_carries_valid_ids() {
         let model = codex_wire_model();
-        let output = replay_codex_tool_call_turn(&model, Some("fc_123"));
+        let output = replay_codex_tool_call_turn(&model, Some("fc_123")).await;
         // The recorded rows carry the `call_id|item_id` encoding and the streamed arguments.
         let tool_call = match output.content.last() {
             Some(crate::types::AssistantContent::ToolCall(tool_call)) => tool_call,
@@ -1069,10 +1113,10 @@ mod tests {
     /// Degenerate wire shape: `function_call` items without an `fc_` item id. The recorded tool
     /// call id carries an empty item segment; the follow-up request must omit the `id` key (never
     /// `id: ""`).
-    #[test]
-    fn codex_followup_omits_missing_item_id_instead_of_sending_empty() {
+    #[tokio::test]
+    async fn codex_followup_omits_missing_item_id_instead_of_sending_empty() {
         let model = codex_wire_model();
-        let output = replay_codex_tool_call_turn(&model, None);
+        let output = replay_codex_tool_call_turn(&model, None).await;
         let recorded_id = match output.content.last() {
             Some(crate::types::AssistantContent::ToolCall(tool_call)) => tool_call.id.clone(),
             other => panic!("expected a recorded tool call, got {other:?}"),
@@ -1171,6 +1215,75 @@ mod tests {
                 },
             }),
         ]
+    }
+
+    #[tokio::test]
+    async fn bounded_sse_chunk_waits_for_each_parsed_event() {
+        use std::fmt::Write as _;
+
+        let model = codex_wire_model();
+        let options = StreamOptions {
+            event_buffer_capacity: Some(1),
+            ..Default::default()
+        };
+        let Ok((writer, mut reader)) = create_provider_event_stream(&model, Some(&options)) else {
+            panic!("valid bounded options");
+        };
+        let mut output = AssistantMessage {
+            content: Vec::new(),
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: Map::default(),
+        };
+        let mut chunk = String::new();
+        for event in codex_response_events("resp_bounded", "msg_bounded", "bounded text") {
+            write!(chunk, "data: {event}\n\n").expect("write SSE chunk");
+        }
+        let mut decoder = SseDecoder::new();
+        let mut processor = ResponsesStreamProcessor::new(
+            &model,
+            &mut output,
+            &writer,
+            ResponsesStreamHooks::default(),
+        );
+        {
+            let process = process_sse_chunk(&chunk, &mut decoder, &model, &mut processor);
+            tokio::pin!(process);
+            assert!(futures::poll!(process.as_mut()).is_pending());
+            assert!(matches!(
+                reader.next_event().await,
+                Some(AssistantMessageEvent::TextStart {
+                    content_index: 0,
+                    ..
+                })
+            ));
+            assert!(futures::poll!(process.as_mut()).is_pending());
+            let Some(AssistantMessageEvent::TextDelta { delta, .. }) = reader.next_event().await
+            else {
+                panic!("expected text delta");
+            };
+            assert_eq!(delta, "bounded text");
+            assert!(matches!(
+                futures::poll!(process.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            let Some(AssistantMessageEvent::TextEnd { content, .. }) = reader.next_event().await
+            else {
+                panic!("expected text end");
+            };
+            assert_eq!(content, "bounded text");
+        }
+        processor.finish().expect("response completed");
+        assert_eq!(output.response_id.as_deref(), Some("resp_bounded"));
     }
 
     fn codex_error_events(code: &str, message: &str) -> Vec<Value> {

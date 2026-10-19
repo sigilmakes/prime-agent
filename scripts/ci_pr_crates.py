@@ -43,14 +43,13 @@ FILES_API_CEILING = 3000
 # The changes job must select without installing Rust or running Cargo.
 WORKSPACE_DEPS = {
     "pa-types": set(),
-    "pa-telemetry": set(),
     "pa-ai": {"pa-types"},
     "pa-models": {"pa-ai"},
     "pa-agent": {"pa-ai", "pa-types"},
-    "pa-core": {"pa-agent", "pa-ai", "pa-models", "pa-types", "pa-telemetry"},
+    "pa-core": {"pa-agent", "pa-ai", "pa-models", "pa-types"},
     "pa-daemon": {"pa-core"},
     "pa-tui": {"pa-types", "pa-core"},
-    "pa-cli": {"pa-types", "pa-telemetry", "pa-ai", "pa-models",
+    "pa-cli": {"pa-types", "pa-ai", "pa-models",
                "pa-agent", "pa-core", "pa-daemon", "pa-tui"},
 }
 
@@ -104,7 +103,7 @@ def select_crates(rows: list[tuple[str, str]]) -> list[str] | None:
                 print(f"non-crate path {candidate}: the full selection runs")
                 return None
     # pa-types owns the shared wire vocabulary: run every workspace test for
-    # its changes, including the independent pa-telemetry leaf crate.
+    # its changes.
     if "pa-types" in crates:
         return sorted(WORKSPACE_DEPS)
     # Walk upward through the DAG until no dependent is left unselected.

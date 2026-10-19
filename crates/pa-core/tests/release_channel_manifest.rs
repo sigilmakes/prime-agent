@@ -75,8 +75,9 @@ struct With {
 }
 
 fn load_workflow() -> (String, Workflow) {
-    let text = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
-        .expect("read .github/workflows/release.yml");
+    let text =
+        std::fs::read_to_string(workspace_root().join(".github/upstream-workflows/release.yml"))
+            .expect("read .github/workflows/release.yml");
     let workflow: Workflow =
         serde_yaml::from_str(&text).expect("release.yml parses as the expected schema");
     (text, workflow)
@@ -546,15 +547,10 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     let emit_run = channel_step_run(&workflow);
     let fixture = tempfile::tempdir().expect("fixture dir");
 
-    // A minimal repo tree the assembler accepts (the same shape
-    // scripts/release/test_catalog_assets.py stages).
+    // Use the complete trusted workspace runtime; the remaining payload
+    // entries can come from a minimal synthetic repo tree.
+    let runtime = workspace_root().join("prime-agent-runtime");
     let repo = fixture.path().join("synrepo");
-    std::fs::create_dir_all(repo.join("prime-agent-runtime")).expect("runtime dir");
-    std::fs::write(
-        repo.join("prime-agent-runtime/pyproject.toml"),
-        "# fixture\n",
-    )
-    .expect("runtime manifest");
     std::fs::create_dir_all(repo.join("skills")).expect("skills dir");
     std::fs::write(repo.join("LICENSE"), "fixture license\n").expect("LICENSE");
     std::fs::write(repo.join("README.md"), "fixture readme\n").expect("README.md");
@@ -631,6 +627,8 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
         &[
             "--repo-root".as_ref(),
             repo.as_os_str(),
+            "--runtime-dir".as_ref(),
+            runtime.as_os_str(),
             "--version".as_ref(),
             "1.2.3".as_ref(),
             "--target".as_ref(),

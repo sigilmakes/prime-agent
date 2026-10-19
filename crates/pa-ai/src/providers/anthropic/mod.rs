@@ -536,6 +536,10 @@ impl AnthropicOptions {
 pub struct AnthropicMessagesProvider;
 
 impl Provider for AnthropicMessagesProvider {
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
+    }
+
     fn api(&self) -> &str {
         API_ANTHROPIC_MESSAGES
     }

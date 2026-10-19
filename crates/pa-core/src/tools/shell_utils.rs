@@ -110,10 +110,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_config_prefers_bin_bash() {
+    fn shell_config_prefers_bin_bash_with_portable_fallback() {
         let cfg = get_shell_config(None).unwrap();
-        assert_eq!(cfg.shell, "/bin/bash");
+        if std::path::Path::new("/bin/bash").exists() {
+            assert_eq!(cfg.shell, "/bin/bash");
+        }
         assert_eq!(cfg.args, vec!["-c".to_string()]);
+        let output = std::process::Command::new(&cfg.shell)
+            .args(&cfg.args)
+            .arg("printf shell-ready")
+            .output()
+            .expect("selected shell is available");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"shell-ready");
     }
 
     #[test]

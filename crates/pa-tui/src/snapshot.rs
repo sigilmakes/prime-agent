@@ -226,6 +226,10 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
     transcript_with_backfill_seam(messages).0
 }
 
+pub(crate) fn display_transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
+    fold_transcript(messages.iter().collect()).0
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) enum BackfillSeam {
     #[default]
@@ -234,7 +238,10 @@ pub(crate) enum BackfillSeam {
 }
 
 fn transcript_with_backfill_seam(messages: &[Value]) -> (Vec<ChatEntry>, BackfillSeam) {
-    let ordered = order_messages_for_transcript(messages);
+    fold_transcript(order_messages_for_transcript(messages))
+}
+
+fn fold_transcript(ordered: Vec<&Value>) -> (Vec<ChatEntry>, BackfillSeam) {
     let mut seam = BackfillSeam::Preserve;
     let mut chat: Vec<ChatEntry> = Vec::new();
     let mut card_index: HashMap<String, Vec<usize>> = HashMap::new();
@@ -348,7 +355,13 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     let (messages, backfill_seam) = snapshot
         .get("messages")
         .and_then(Value::as_array)
-        .map(|messages| transcript_with_backfill_seam(messages))
+        .map(|messages| {
+            if snapshot.get("displayTranscript").and_then(Value::as_bool) == Some(true) {
+                fold_transcript(messages.iter().collect())
+            } else {
+                transcript_with_backfill_seam(messages)
+            }
+        })
         .unwrap_or_default();
     let state = snapshot.get("state");
     let (model_id, model_provider) = state

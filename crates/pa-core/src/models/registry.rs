@@ -11,14 +11,16 @@ use pa_types::ai::{
 use crate::auth::manager::AuthStorage;
 use crate::auth::types::{AuthCredential, PRIME_INFERENCE_PROVIDER_ID};
 
+mod catalog_refresh;
+mod codex_catalog;
+
 use super::catalog_chain;
 use super::custom::{apply_model_override, load_custom_models, merge_compat, CustomModelsResult};
 use super::prime_inference::is_private_prime_inference_model;
 use super::private_auth::{
-    fetch_authorized_private_prime_inference_models, is_offline_mode_enabled,
-    private_prime_authorization_fingerprint, read_private_prime_authorization_cache,
-    write_private_prime_authorization_cache, PrivatePrimeAuthorizationCache,
-    PRIVATE_BACKGROUND_TIMEOUT_MS, PRIVATE_MODEL_TIMEOUT_MS,
+    is_offline_mode_enabled, private_prime_authorization_fingerprint,
+    read_private_prime_authorization_cache, write_private_prime_authorization_cache,
+    PrivatePrimeAuthorizationCache, PRIVATE_BACKGROUND_TIMEOUT_MS,
     PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
 };
 
@@ -96,6 +98,8 @@ pub struct ModelRegistry {
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`);
     /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
+    codex_catalog: Option<std::sync::Arc<pa_models::cache::CatalogCache<HashSet<String>>>>,
+    codex_scope: Option<String>,
 }
 
 /// Under a stored xAI subscription the provider's models switch onto the
@@ -183,6 +187,8 @@ impl ModelRegistry {
             authorized_private_models: Vec::new(),
             authorized_team_id: None,
             catalog,
+            codex_catalog: None,
+            codex_scope: None,
         };
         registry.load_models();
         registry
@@ -235,7 +241,7 @@ impl ModelRegistry {
                 *status_by_provider
                     .entry(model.provider.as_str())
                     .or_insert_with(|| {
-                        let status = self.auth.get_auth_status(&model.provider);
+                        let status = self.auth.get_auth_status_local(&model.provider);
                         status.source != Some(crate::auth::types::AuthSource::Stale)
                             && status.label.as_deref() != Some("expired")
                     })
@@ -252,7 +258,29 @@ impl ModelRegistry {
     /// classifying unauthenticated vs stale providers read this instead of
     /// probing for keys.
     pub fn get_provider_auth_status(&self, provider: &str) -> crate::auth::types::AuthStatus {
-        self.auth.get_auth_status(provider)
+        use crate::auth::types::{AuthSource, AuthStatus};
+        let status = self.auth.get_auth_status_local(provider);
+        if status.configured && status.source != Some(AuthSource::Stale) {
+            return status;
+        }
+        let Some(config) = self.provider_request_configs.get(provider) else {
+            return status;
+        };
+        if !self.has_configured_provider_request_auth(provider) {
+            return status;
+        }
+        let (source, label) = match config.api_key.as_deref() {
+            Some(key) if key.starts_with('!') => (AuthSource::ModelsJsonCommand, None),
+            Some(key) if std::env::var(key).is_ok_and(|value| !value.is_empty()) => {
+                (AuthSource::Environment, Some(key.to_string()))
+            }
+            Some(_) | None => (AuthSource::ModelsJsonKey, None),
+        };
+        AuthStatus {
+            configured: true,
+            source: Some(source),
+            label,
+        }
     }
 
     /// `set_model`'s model resolution: an available model resolves directly; a
@@ -310,15 +338,16 @@ impl ModelRegistry {
         if config.headers.is_some() || config.auth_header.is_some() {
             return true;
         }
-        config.api_key.as_deref().is_some_and(|key| {
-            crate::auth::resolve_config_value::resolve_config_value(key).is_some()
-        })
+        config.api_key.as_deref().is_some_and(|key| !key.is_empty())
     }
 
     /// Reload built-in + custom models and provider request configs from disk,
     /// adopting the on-disk private Prime Inference authorization cache without
     /// network access. Sync callers must call this before `get_available`.
     pub fn load_private_authorization_from_cache(&mut self) {
+        if !self.can_resolve_catalog_auth_locally(PRIME_INFERENCE_PROVIDER_ID) {
+            return;
+        }
         let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID);
         let team_headers = self.auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID);
         let team_id = team_headers
@@ -328,14 +357,36 @@ impl ModelRegistry {
             return;
         };
         let fingerprint = private_prime_authorization_fingerprint(&api_key, &team_id);
+        let revisioned = super::private_auth::private_catalog_cache(
+            self.models_json_path.as_deref(),
+            self.catalog.prime_inference_base_url(),
+        );
+        if revisioned.has_revocation(&fingerprint) {
+            self.authorized_private_ids.clear();
+            self.authorized_private_models.clear();
+            self.authorized_team_id = None;
+            return;
+        }
         let Some(models_json_path) = self.models_json_path.clone() else {
             return;
         };
+        let cached = revisioned
+            .get(&fingerprint)
+            .map(|authorized| PrivatePrimeAuthorizationCache {
+                fingerprint: fingerprint.clone(),
+                items: authorized.items,
+                models: authorized.models,
+                refreshed_at: revisioned
+                    .status(&fingerprint)
+                    .checked_at
+                    .unwrap_or_default(),
+            })
+            .or_else(|| read_private_prime_authorization_cache(&models_json_path));
         let Some(PrivatePrimeAuthorizationCache {
             fingerprint: cached_fingerprint,
             models,
             ..
-        }) = read_private_prime_authorization_cache(&models_json_path)
+        }) = cached
         else {
             return;
         };
@@ -366,7 +417,7 @@ impl ModelRegistry {
             .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
         let stale_status = matches!(
             self.auth
-                .get_auth_status(PRIME_INFERENCE_PROVIDER_ID)
+                .get_auth_status_local(PRIME_INFERENCE_PROVIDER_ID)
                 .source,
             Some(crate::auth::types::AuthSource::Stale)
         );
@@ -403,8 +454,34 @@ impl ModelRegistry {
             private_models.insert(model.id.clone(), model.clone());
         }
 
-        let credentials = self.prime_credentials();
-        let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
+        let credentials = if self.can_resolve_catalog_auth_locally(PRIME_INFERENCE_PROVIDER_ID) {
+            self.prime_credentials()
+        } else {
+            None
+        };
+        // Resolve discovery auth against the model this load will actually serve, including
+        // user transport overrides. A first load has no previous self.models to consult.
+        let ollama_model = result
+            .models
+            .iter()
+            .find(|model| model.provider == "ollama-cloud")
+            .cloned()
+            .or_else(|| {
+                let mut model =
+                    pa_models::ollama_cloud::pinned_models(self.catalog.ollama_base_url())
+                        .into_iter()
+                        .next()?;
+                if let Some(base_url) = result
+                    .provider_overrides
+                    .get("ollama-cloud")
+                    .and_then(|config| config.base_url.as_ref())
+                {
+                    model.base_url.clone_from(base_url);
+                }
+                Some(model)
+            });
+        let discovery = self.discovery_credentials_for_ollama(true, ollama_model);
+        let mut built_in = self.load_built_in_models(&result, credentials.as_ref(), &discovery);
         built_in.extend(private_models.into_values());
         self.models = Self::merge_custom_models(built_in, result.models);
         self.apply_subscription_model_adaptations();
@@ -439,7 +516,7 @@ impl ModelRegistry {
             Some(AuthCredential::Oauth { .. })
         ) && self
             .auth
-            .get_auth_status(crate::auth::XAI_PROVIDER_ID)
+            .get_auth_status_local(crate::auth::XAI_PROVIDER_ID)
             .source
             == Some(crate::auth::types::AuthSource::Stored);
         if xai_stored {
@@ -466,11 +543,21 @@ impl ModelRegistry {
         };
         let mut result = load_custom_models(
             &content,
-            &|provider| !pa_ai::models_generated::get_models(provider).is_empty(),
             &|provider| {
-                pa_ai::models_generated::get_models(provider)
-                    .first()
-                    .map(|model| (model.api.clone(), model.base_url.clone()))
+                provider == "ollama-cloud"
+                    || !pa_ai::models_generated::get_models(provider).is_empty()
+            },
+            &|provider| {
+                if provider == "ollama-cloud" {
+                    Some((
+                        "openai-completions".to_string(),
+                        format!("{}/v1", self.catalog.ollama_base_url()),
+                    ))
+                } else {
+                    pa_ai::models_generated::get_models(provider)
+                        .first()
+                        .map(|model| (model.api.clone(), model.base_url.clone()))
+                }
             },
         );
         // Provider/model request config from the parsed document.
@@ -546,9 +633,10 @@ impl ModelRegistry {
         &self,
         custom: &CustomModelsResult,
         credentials: Option<&pa_models::PrimeCredentials>,
+        discovery: &pa_models::DiscoveryCredentials,
     ) -> Vec<Model> {
         self.catalog
-            .resolve(credentials)
+            .resolve_with_discovery(credentials, discovery)
             .into_iter()
             .map(|mut model| {
                 if let Some(provider_override) = custom.provider_overrides.get(&model.provider) {
@@ -612,9 +700,16 @@ impl ModelRegistry {
         let previous_team = self.authorized_team_id.clone();
         let previous_models = self.authorized_private_models.clone();
         self.refresh();
-        let credentials = self.prime_credentials();
+        let credentials = if !is_offline_mode_enabled()
+            || self.can_resolve_catalog_auth_locally(PRIME_INFERENCE_PROVIDER_ID)
+        {
+            self.prime_credentials()
+        } else {
+            None
+        };
+        let discovery = self.discovery_credentials(is_offline_mode_enabled());
         self.catalog
-            .refresh_with_credentials(force, credentials.as_ref())
+            .refresh_catalog_sources(force, credentials.as_ref(), &discovery, None)
             .await;
         self.load_models();
         self.refresh_private_prime_inference_authorization(
@@ -633,6 +728,11 @@ impl ModelRegistry {
         previous_team: Option<String>,
         previous_models: Vec<Model>,
     ) {
+        if is_offline_mode_enabled()
+            && !self.can_resolve_catalog_auth_locally(PRIME_INFERENCE_PROVIDER_ID)
+        {
+            return self.clear_private_authorization();
+        }
         let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID);
         let team_headers = self.auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID);
         let team_id = team_headers
@@ -646,8 +746,26 @@ impl ModelRegistry {
         };
 
         let fingerprint = private_prime_authorization_fingerprint(&api_key, &team_id);
+        let revisioned = super::private_auth::private_catalog_cache(
+            self.models_json_path.as_deref(),
+            self.catalog.prime_inference_base_url(),
+        );
+        if revisioned.has_revocation(&fingerprint) {
+            return self.clear_private_authorization();
+        }
         if let Some(cache_path) = self.models_json_path.clone() {
-            let cached = read_private_prime_authorization_cache(&cache_path);
+            let cached = revisioned
+                .get(&fingerprint)
+                .map(|authorized| PrivatePrimeAuthorizationCache {
+                    fingerprint: fingerprint.clone(),
+                    items: authorized.items,
+                    models: authorized.models,
+                    refreshed_at: revisioned
+                        .status(&fingerprint)
+                        .checked_at
+                        .unwrap_or_default(),
+                })
+                .or_else(|| read_private_prime_authorization_cache(&cache_path));
             if let Some(PrivatePrimeAuthorizationCache {
                 fingerprint: cached_fingerprint,
                 models,
@@ -682,16 +800,26 @@ impl ModelRegistry {
             return self.clear_private_authorization();
         }
 
-        let public_ids = self.public_prime_inference_ids();
-        let fetched = fetch_authorized_private_prime_inference_models(
-            self.catalog.prime_inference_base_url(),
-            &api_key,
-            &team_headers,
-            &public_ids,
-            PRIVATE_MODEL_TIMEOUT_MS,
-        )
-        .await;
-        if let Ok(authorized) = fetched {
+        let mut headers: Vec<_> = team_headers.into_iter().collect();
+        headers.push(("Authorization".into(), format!("Bearer {api_key}")));
+        let fetched = revisioned
+            .refresh_report(
+                &fingerprint,
+                pa_models::cache::RefreshOptions {
+                    force: true,
+                    headers,
+                    is_current: self.catalog_publication_guard(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        if matches!(
+            fetched.outcome,
+            pa_models::cache::CatalogRefreshOutcome::Revoked { .. }
+        ) {
+            return self.clear_private_authorization();
+        }
+        if let Some(authorized) = fetched.models {
             self.authorized_private_ids = authorized
                 .models
                 .iter()
@@ -701,7 +829,13 @@ impl ModelRegistry {
                 .clone_from(&authorized.models);
             self.authorized_team_id = Some(team_id);
             self.load_models();
-            if let Some(cache_path) = self.models_json_path.clone() {
+            if let Some(cache_path) = self.models_json_path.clone().filter(|_| {
+                matches!(
+                    fetched.outcome,
+                    pa_models::cache::CatalogRefreshOutcome::Updated
+                        | pa_models::cache::CatalogRefreshOutcome::NotModified
+                )
+            }) {
                 write_private_prime_authorization_cache(
                     &cache_path,
                     &PrivatePrimeAuthorizationCache {
@@ -729,16 +863,45 @@ impl ModelRegistry {
         fingerprint: String,
         cache_path: PathBuf,
     ) {
-        let public_ids = self.public_prime_inference_ids();
-        let Ok(authorized) = fetch_authorized_private_prime_inference_models(
+        let revisioned = super::private_auth::private_catalog_cache(
+            self.models_json_path.as_deref(),
             self.catalog.prime_inference_base_url(),
-            &api_key,
-            &team_headers,
-            &public_ids,
-            PRIVATE_BACKGROUND_TIMEOUT_MS,
+        );
+        let mut headers: Vec<_> = team_headers.into_iter().collect();
+        headers.push(("Authorization".into(), format!("Bearer {api_key}")));
+        let refresh = revisioned.refresh_report(
+            &fingerprint,
+            pa_models::cache::RefreshOptions {
+                force: true,
+                headers,
+                is_current: self.catalog_publication_guard(),
+                ..Default::default()
+            },
+        );
+        let Ok(report) = tokio::time::timeout(
+            std::time::Duration::from_millis(PRIVATE_BACKGROUND_TIMEOUT_MS),
+            refresh,
         )
         .await
         else {
+            return;
+        };
+        if matches!(
+            report.outcome,
+            pa_models::cache::CatalogRefreshOutcome::Revoked { .. }
+        ) {
+            return self.clear_private_authorization();
+        }
+        // A failed fetch can carry last-good models. It does not renew their
+        // authorization freshness or publish a new compatibility snapshot.
+        if !matches!(
+            report.outcome,
+            pa_models::cache::CatalogRefreshOutcome::Updated
+                | pa_models::cache::CatalogRefreshOutcome::NotModified
+        ) {
+            return;
+        }
+        let Some(authorized) = report.models else {
             return;
         };
         // Apply only if the credentials did not change while fetching.
@@ -763,20 +926,6 @@ impl ModelRegistry {
                 refreshed_at: now_millis(),
             },
         );
-    }
-
-    /// The public Prime Inference ids the resolved catalog serves (the
-    /// live-or-offline snapshot): the private-authorization fetch skips
-    /// these and reports only the account's private entitlements.
-    fn public_prime_inference_ids(&self) -> HashSet<String> {
-        self.models
-            .iter()
-            .filter(|model| {
-                model.provider == PRIME_INFERENCE_PROVIDER_ID
-                    && !is_private_prime_inference_model(model)
-            })
-            .map(|model| model.id.clone())
-            .collect()
     }
 
     fn clear_private_authorization(&mut self) {

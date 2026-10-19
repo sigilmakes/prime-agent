@@ -214,6 +214,10 @@ pub fn stream_simple_mistral(
 pub struct MistralConversationsProvider;
 
 impl Provider for MistralConversationsProvider {
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
+    }
+
     fn api(&self) -> &str {
         API_MISTRAL_CONVERSATIONS
     }

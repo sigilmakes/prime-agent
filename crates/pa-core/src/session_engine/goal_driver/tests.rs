@@ -119,6 +119,7 @@ fn wire_error_turn(
         response_model: None,
         response_id: None,
         diagnostics: Some(vec![pa_types::ai::AssistantMessageDiagnostic {
+            rest: pa_types::JsonMap::new(),
             type_: "provider_stream_failure".to_string(),
             timestamp: 0,
             error: None,

@@ -80,7 +80,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
     /// Process one parsed stream event. Errors mirror the TS thrown `StreamFailureError`s.
     // Long by design: mirrors the provider's stream shape.
     #[allow(clippy::too_many_lines)]
-    pub fn handle_event(&mut self, event: &Value) -> Result<(), ProviderError> {
+    pub async fn handle_event(&mut self, event: &Value) -> Result<(), ProviderError> {
         let event_type = event
             .get("type")
             .and_then(|value| value.as_str())
@@ -119,10 +119,12 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 redacted: None,
                                 rest: Map::default(),
                             }));
-                        self.writer.push(AssistantMessageEvent::ThinkingStart {
-                            content_index: content_index as u64,
-                            partial: self.output.clone(),
-                        });
+                        self.writer
+                            .send(AssistantMessageEvent::ThinkingStart {
+                                content_index: content_index as u64,
+                                partial: self.output.clone(),
+                            })
+                            .await?;
                         if let Some(index) = output_index {
                             self.slots.insert(
                                 index,
@@ -142,10 +144,12 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 text_signature: None,
                                 rest: Map::default(),
                             }));
-                        self.writer.push(AssistantMessageEvent::TextStart {
-                            content_index: content_index as u64,
-                            partial: self.output.clone(),
-                        });
+                        self.writer
+                            .send(AssistantMessageEvent::TextStart {
+                                content_index: content_index as u64,
+                                partial: self.output.clone(),
+                            })
+                            .await?;
                         if let Some(index) = output_index {
                             self.slots.insert(
                                 index,
@@ -184,10 +188,12 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 thought_signature: None,
                                 rest: Map::default(),
                             }));
-                        self.writer.push(AssistantMessageEvent::ToolcallStart {
-                            content_index: content_index as u64,
-                            partial: self.output.clone(),
-                        });
+                        self.writer
+                            .send(AssistantMessageEvent::ToolcallStart {
+                                content_index: content_index as u64,
+                                partial: self.output.clone(),
+                            })
+                            .await?;
                         if let Some(index) = output_index {
                             self.slots.insert(
                                 index,
@@ -251,11 +257,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             {
                                 block.thinking.push_str(delta);
                             }
-                            self.writer.push(AssistantMessageEvent::ThinkingDelta {
-                                content_index: content_index as u64,
-                                delta: delta.to_string(),
-                                partial: self.output.clone(),
-                            });
+                            self.writer
+                                .send(AssistantMessageEvent::ThinkingDelta {
+                                    content_index: content_index as u64,
+                                    delta: delta.to_string(),
+                                    partial: self.output.clone(),
+                                })
+                                .await?;
                         }
                     }
                 }
@@ -287,11 +295,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                         {
                             block.thinking.push_str("\n\n");
                         }
-                        self.writer.push(AssistantMessageEvent::ThinkingDelta {
-                            content_index: content_index as u64,
-                            delta: "\n\n".to_string(),
-                            partial: self.output.clone(),
-                        });
+                        self.writer
+                            .send(AssistantMessageEvent::ThinkingDelta {
+                                content_index: content_index as u64,
+                                delta: "\n\n".to_string(),
+                                partial: self.output.clone(),
+                            })
+                            .await?;
                     }
                 }
             }
@@ -310,11 +320,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                         {
                             block.thinking.push_str(delta);
                         }
-                        self.writer.push(AssistantMessageEvent::ThinkingDelta {
-                            content_index: content_index as u64,
-                            delta: delta.to_string(),
-                            partial: self.output.clone(),
-                        });
+                        self.writer
+                            .send(AssistantMessageEvent::ThinkingDelta {
+                                content_index: content_index as u64,
+                                delta: delta.to_string(),
+                                partial: self.output.clone(),
+                            })
+                            .await?;
                     }
                 }
             }
@@ -374,11 +386,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             {
                                 block.text.push_str(delta);
                             }
-                            self.writer.push(AssistantMessageEvent::TextDelta {
-                                content_index: content_index as u64,
-                                delta: delta.to_string(),
-                                partial: self.output.clone(),
-                            });
+                            self.writer
+                                .send(AssistantMessageEvent::TextDelta {
+                                    content_index: content_index as u64,
+                                    delta: delta.to_string(),
+                                    partial: self.output.clone(),
+                                })
+                                .await?;
                         }
                     }
                 }
@@ -419,11 +433,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             {
                                 block.text.push_str(delta);
                             }
-                            self.writer.push(AssistantMessageEvent::TextDelta {
-                                content_index: content_index as u64,
-                                delta: delta.to_string(),
-                                partial: self.output.clone(),
-                            });
+                            self.writer
+                                .send(AssistantMessageEvent::TextDelta {
+                                    content_index: content_index as u64,
+                                    delta: delta.to_string(),
+                                    partial: self.output.clone(),
+                                })
+                                .await?;
                         }
                     }
                 }
@@ -450,11 +466,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                     parsed.as_object().cloned().unwrap_or_default();
                             }
                         }
-                        self.writer.push(AssistantMessageEvent::ToolcallDelta {
-                            content_index: content_index as u64,
-                            delta: delta.to_string(),
-                            partial: self.output.clone(),
-                        });
+                        self.writer
+                            .send(AssistantMessageEvent::ToolcallDelta {
+                                content_index: content_index as u64,
+                                delta: delta.to_string(),
+                                partial: self.output.clone(),
+                            })
+                            .await?;
                     }
                 }
             }
@@ -484,28 +502,30 @@ impl<'a> ResponsesStreamProcessor<'a> {
                         }
                         if let Some(delta) = arguments.strip_prefix(&previous_partial) {
                             if !delta.is_empty() {
-                                self.writer.push(AssistantMessageEvent::ToolcallDelta {
-                                    content_index: content_index as u64,
-                                    delta: delta.to_string(),
-                                    partial: self.output.clone(),
-                                });
+                                self.writer
+                                    .send(AssistantMessageEvent::ToolcallDelta {
+                                        content_index: content_index as u64,
+                                        delta: delta.to_string(),
+                                        partial: self.output.clone(),
+                                    })
+                                    .await?;
                             }
                         }
                     }
                 }
             }
             "response.output_item.done" => {
-                if let Some(index) = output_index {
-                    self.slots.remove(&index);
-                }
+                // Finalized slots must leave abort cleanup before awaited End
+                // delivery, while their index and argument buffer remain usable.
+                let completed_slot = output_index
+                    .or(self.current_output_index)
+                    .and_then(|index| self.slots.remove(&index));
                 let item = event.get("item").cloned().unwrap_or(Value::Null);
                 let item_type = item
                     .get("type")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                let content_index = self
-                    .current_slot(output_index)
-                    .map(|slot| slot.content_index);
+                let content_index = completed_slot.as_ref().map(|slot| slot.content_index);
                 match item_type {
                     "reasoning" => {
                         if let Some(content_index) = content_index {
@@ -554,11 +574,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                     block.thinking.clone_from(&final_text);
                                     block.thinking_signature = Some(item.to_string());
                                 }
-                                self.writer.push(AssistantMessageEvent::ThinkingEnd {
-                                    content_index: content_index as u64,
-                                    content: final_text,
-                                    partial: self.output.clone(),
-                                });
+                                self.writer
+                                    .send(AssistantMessageEvent::ThinkingEnd {
+                                        content_index: content_index as u64,
+                                        content: final_text,
+                                        partial: self.output.clone(),
+                                    })
+                                    .await?;
                             }
                         }
                     }
@@ -607,27 +629,23 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                     block.text.clone_from(&text);
                                     block.text_signature = Some(signature);
                                 }
-                                self.writer.push(AssistantMessageEvent::TextEnd {
-                                    content_index: content_index as u64,
-                                    content: text,
-                                    partial: self.output.clone(),
-                                });
+                                self.writer
+                                    .send(AssistantMessageEvent::TextEnd {
+                                        content_index: content_index as u64,
+                                        content: text,
+                                        partial: self.output.clone(),
+                                    })
+                                    .await?;
                             }
                         }
                     }
                     "function_call" => {
-                        let content_index = content_index.or_else(|| {
-                            output_index
-                                .and_then(|index| self.slots.get(&index))
-                                .map(|slot| slot.content_index)
-                        });
                         if let Some(content_index) = content_index {
                             if self.block_kind(content_index) == Some("toolCall") {
-                                let slot_json =
-                                    match self.slots.get(&output_index.unwrap_or_default()) {
-                                        Some(slot) => slot.partial_json.text().to_string(),
-                                        None => String::new(),
-                                    };
+                                let slot_json = match completed_slot.as_ref() {
+                                    Some(slot) => slot.partial_json.text().to_string(),
+                                    None => String::new(),
+                                };
                                 let arguments_text = item
                                     .get("arguments")
                                     .and_then(|value| value.as_str())
@@ -662,11 +680,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 {
                                     *block = tool_call.clone();
                                 }
-                                self.writer.push(AssistantMessageEvent::ToolcallEnd {
-                                    content_index: content_index as u64,
-                                    tool_call,
-                                    partial: self.output.clone(),
-                                });
+                                self.writer
+                                    .send(AssistantMessageEvent::ToolcallEnd {
+                                        content_index: content_index as u64,
+                                        tool_call,
+                                        partial: self.output.clone(),
+                                    })
+                                    .await?;
                             } else {
                                 // No live block: emit a synthesized tool call.
                                 let arguments_text = item
@@ -705,11 +725,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                     }
                                     _ => unreachable!("just pushed a tool call"),
                                 };
-                                self.writer.push(AssistantMessageEvent::ToolcallEnd {
-                                    content_index: content_index as u64,
-                                    tool_call,
-                                    partial: self.output.clone(),
-                                });
+                                self.writer
+                                    .send(AssistantMessageEvent::ToolcallEnd {
+                                        content_index: content_index as u64,
+                                        tool_call,
+                                        partial: self.output.clone(),
+                                    })
+                                    .await?;
                             }
                         }
                     }
@@ -779,6 +801,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                         .unwrap_or(0);
                     // OpenAI includes cached tokens in input_tokens; subtract them.
                     self.output.usage = Usage {
+                        rest: pa_types::JsonMap::new(),
                         input: input_tokens.saturating_sub(cached_tokens),
                         output: usage
                             .get("output_tokens")

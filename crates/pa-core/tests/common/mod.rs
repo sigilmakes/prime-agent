@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,7 +33,31 @@ impl MockServer {
         let port = listener.local_addr().unwrap().port();
         let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
         let responses: ResponseQueue = Arc::new(Mutex::new(VecDeque::from(scripts)));
-        let handle = tokio::spawn(run(listener, Arc::clone(&requests), responses));
+        let handle = tokio::spawn(run(listener, Arc::clone(&requests), responses, None));
+        Self {
+            port,
+            requests,
+            _handle: handle,
+        }
+    }
+
+    /// Answer scripts by exact request path, independent of concurrent arrival order.
+    pub async fn start_routed(routes: HashMap<String, Vec<Scripted>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind routed mock server");
+        let port = listener.local_addr().unwrap().port();
+        let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+        let routes = routes
+            .into_iter()
+            .map(|(path, scripts)| (path, VecDeque::from(scripts)))
+            .collect();
+        let handle = tokio::spawn(run(
+            listener,
+            Arc::clone(&requests),
+            Arc::new(Mutex::new(VecDeque::new())),
+            Some(Arc::new(Mutex::new(routes))),
+        ));
         Self {
             port,
             requests,
@@ -51,6 +75,7 @@ impl MockServer {
 }
 
 type ResponseQueue = Arc<Mutex<VecDeque<Scripted>>>;
+type RoutedResponses = Arc<Mutex<HashMap<String, VecDeque<Scripted>>>>;
 
 /// One scripted server behavior: raw bytes, raw bytes after a delay (a slow catalog fetch), or a
 /// held connection that never answers (a fetch that never settles).
@@ -60,13 +85,19 @@ pub enum Scripted {
     Hang,
 }
 
-async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQueue) {
+async fn run(
+    listener: TcpListener,
+    requests: RequestLog,
+    responses: ResponseQueue,
+    routes: Option<RoutedResponses>,
+) {
     loop {
         let Ok((mut socket, _)) = listener.accept().await else {
             return;
         };
         let requests = Arc::clone(&requests);
         let responses = Arc::clone(&responses);
+        let routes = routes.clone();
         tokio::spawn(async move {
             let mut buffer = [0u8; 8_192];
             let mut read = 0usize;
@@ -86,10 +117,23 @@ async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQue
                 }
             }
             let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let request_path = head.split_whitespace().nth(1).unwrap_or("").to_string();
             requests.lock().unwrap().push(head);
-            let scripted = responses.lock().unwrap().pop_front().unwrap_or_else(|| {
-                Scripted::Response(b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec())
-            });
+            let drained = if routes.is_some() {
+                b"HTTP/1.1 503 Drained\r\ncontent-length: 0\r\n\r\n".to_vec()
+            } else {
+                b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec()
+            };
+            let scripted = if let Some(routes) = routes {
+                routes
+                    .lock()
+                    .unwrap()
+                    .get_mut(&request_path)
+                    .and_then(VecDeque::pop_front)
+            } else {
+                responses.lock().unwrap().pop_front()
+            }
+            .unwrap_or(Scripted::Response(drained));
             match scripted {
                 Scripted::Response(response) => {
                     let _ = socket.write_all(&response).await;

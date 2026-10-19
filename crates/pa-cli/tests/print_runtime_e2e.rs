@@ -249,6 +249,136 @@ fn print_mode_no_session_writes_nothing() {
     assert!(session_files(home.path()).is_empty());
 }
 
+/// A regular file at the lease root forces EEXIST before any persistent admission.
+/// Exercise all initial in-process modes with a real, test-owned HTTP provider.
+#[test]
+fn fresh_lease_failure_rejects_print_json_and_rpc_before_model_http_or_journal_append() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let provider = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = provider.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_calls = Arc::clone(&calls);
+    let server_stop = Arc::clone(&stop);
+    // A regression gets an immediate fatal HTTP response, never an unbounded model wait.
+    let server = std::thread::spawn(move || loop {
+        let (mut stream, _) = provider.accept().unwrap();
+        if server_stop.load(Ordering::SeqCst) {
+            break;
+        }
+        server_calls.fetch_add(1, Ordering::SeqCst);
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut buffer = [0; 8192];
+        let _ = stream.read(&mut buffer);
+        let body =
+            r#"{"error":{"message":"unexpected model HTTP","type":"invalid_request_error"}}"#;
+        let _ = write!(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    });
+    // Non-loopback catalog traffic cannot leave this fixture, even under a regression.
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let mut results = Vec::new();
+    for args in [
+        vec!["-p", "must not run"],
+        vec!["--mode", "json", "-p", "must not run"],
+        vec!["--mode", "rpc"],
+    ] {
+        let home = isolated_home();
+        let agent = home.path().join(".prime/agent");
+        let sessions = agent.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let previous = sessions.join("previous.jsonl");
+        std::fs::write(&previous, "existing journal stays unchanged\n").unwrap();
+        let blocker = agent.join("session-leases");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        std::fs::write(agent.join("models.json"), serde_json::json!({"providers":{"lease-fixture":{
+            "baseUrl":format!("http://{address}/v1"), "api":"openai-completions", "apiKey":"none",
+            "models":[{"id":"lease-model","name":"Lease model","reasoning":false,"input":["text"],
+                "contextWindow":10000,"maxTokens":1000,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}]
+        }}}).to_string()).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+            .args(&args)
+            .args(["--provider", "lease-fixture", "--model", "lease-model"])
+            .env("HOME", home.path())
+            .env("PRIME_AGENT_CODING_AGENT_DIR", &agent)
+            .env("PI_OFFLINE", "1")
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env("all_proxy", &proxy_url)
+            .env("NO_PROXY", "127.0.0.1,localhost,::1")
+            .env("no_proxy", "127.0.0.1,localhost,::1")
+            .env_remove("PRIME_AGENT_FAUX_SCRIPT")
+            .env_remove("PRIME_AGENT_SESSION_DIR")
+            .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
+            .env_remove("RLM_DEPTH")
+            .stdin(std::process::Stdio::null())
+            .current_dir(home.path())
+            .output()
+            .unwrap();
+        results.push((
+            args,
+            output,
+            session_files(home.path()),
+            std::fs::read(previous).unwrap(),
+            std::fs::read(blocker).unwrap(),
+        ));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let _wake = TcpStream::connect(address).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "failed admission reached the model provider"
+    );
+    assert!(matches!(proxy.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    for (args, output, files, previous, blocker) in results {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(output.stdout.is_empty(), "{args:?}: {:?}", output.stdout);
+        assert!(
+            stderr.contains("Could not lease the fresh session file"),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(
+            files.len(),
+            1,
+            "{args:?}: failed admission created {files:?}"
+        );
+        assert_eq!(previous, b"existing journal stays unchanged\n");
+        assert_eq!(blocker, b"not a directory");
+        eprintln!("{args:?}: exit=1, model_http=0, journal unchanged; {stderr}");
+    }
+}
+
+#[test]
+fn fresh_lease_failure_does_not_block_no_session_mode() {
+    let home = isolated_home();
+    let agent = home.path().join(".prime/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let blocker = agent.join("session-leases");
+    std::fs::write(&blocker, "not a directory").unwrap();
+    let (stdout, stderr, code) = run_in_home(
+        home.path(),
+        &["-p", "hi", "--no-session"],
+        &serde_json::json!({"responses":["unleased answer"]}),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "unleased answer\n");
+    assert!(session_files(home.path()).is_empty());
+    assert_eq!(std::fs::read(blocker).unwrap(), b"not a directory");
+}
+
 #[test]
 fn print_mode_resume_appends_to_the_same_session_file() {
     let home = isolated_home();
@@ -389,6 +519,8 @@ fn print_mode_thinking_clamps_to_off_for_non_reasoning_models() {
 fn write_compaction_settings(home: &std::path::Path, settings: &serde_json::Value) {
     let agent = home.join(".prime/agent");
     std::fs::create_dir_all(&agent).unwrap();
+    let mut settings = settings.clone();
+    settings["plugins"] = serde_json::json!({"harness":{"enabled":false}});
     std::fs::write(agent.join("settings.json"), settings.to_string()).unwrap();
 }
 
@@ -482,9 +614,6 @@ fn print_mode_overflow_retry_recovers_the_turn() {
             overflow_error(0),
             {"text": "the summary"},
             {"text": "recovered reply"},
-            // The compact-trigger auto-refine review the recovered turn's
-            // checkpoint runs: a decline, so the review stays silent.
-            r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#,
         ]
     });
     let seed = format!("seed turn {}", "x".repeat(48_000));
@@ -660,9 +789,6 @@ fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
         "responses": [
             {"text": "the stale recovery summary"},
             {"text": "recovered after the resume"},
-            // The compact-trigger auto-refine review the recovered turn's
-            // checkpoint runs: a decline, so the review stays silent.
-            r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#,
         ]
     });
     let (stdout, stderr, code) =
@@ -682,65 +808,8 @@ fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
 
 // The json event stream's TS parity surface (verified against the TS binary).
 
-/// The harness digest pair (TS commit-time injection): the first turn
-/// streams the digest pair between `turn_start` and the user pair.
-#[test]
-fn print_mode_json_streams_the_harness_digest_pair() {
-    let home = isolated_home();
-    let script = serde_json::json!({ "responses": ["json answer"] });
-    let (stdout, stderr, code) = run_in_home(home.path(), &["--mode", "json", "-p", "hi"], &script);
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let events: Vec<serde_json::Value> = stdout
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let digest_at = events
-        .iter()
-        .position(|event| {
-            event["type"] == "message_start"
-                && event["message"]["role"] == "custom"
-                && event["message"]["customType"] == "harness_digest"
-        })
-        .expect("the digest message_start event");
-    let turn_start_at = events
-        .iter()
-        .position(|event| event["type"] == "turn_start")
-        .expect("turn_start");
-    let user_at = events
-        .iter()
-        .position(|event| event["type"] == "message_start" && event["message"]["role"] == "user")
-        .expect("the user message pair");
-    assert!(turn_start_at < digest_at && digest_at < user_at);
-    let digest = &events[digest_at]["message"];
-    assert!(digest["content"].is_string());
-    assert!(digest["content"]
-        .as_str()
-        .unwrap()
-        .starts_with("[harness-digest]"));
-    assert!(digest["content"]
-        .as_str()
-        .unwrap()
-        .ends_with("</harness_state>"));
-    assert_eq!(digest["display"], false);
-    assert!(digest["details"]["digest"].is_string());
-    assert!(digest["details"]["digest"]
-        .as_str()
-        .unwrap()
-        .contains("# Continual Harness State"));
-    let digest_end_at = events
-        .iter()
-        .position(|event| {
-            event["type"] == "message_end"
-                && event["message"]["role"] == "custom"
-                && event["message"]["customType"] == "harness_digest"
-        })
-        .expect("the digest message_end event");
-    assert_eq!(
-        events[digest_at]["message"],
-        events[digest_end_at]["message"]
-    );
-}
+// Optional harness context is model-only, not a canonical message pair. Its persisted-session
+// regression lives in plugin_headless_e2e::harness with a private plugin fixture.
 
 /// The streaming deltas (TS `message_update`): the wire carries the slim
 /// deltas (`partial` never rides the wire).

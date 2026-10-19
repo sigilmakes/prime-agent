@@ -1666,3 +1666,111 @@ fn settled_rows_survive_a_cache_roundtrip() {
         "a fresh view renders the same rows (the Took clock may move)"
     );
 }
+
+#[test]
+fn restored_replay_appends_the_full_transcript_despite_a_prior_flush() {
+    let mut v = view();
+    for index in 0..1200 {
+        v.push(TranscriptItem::UserMessage {
+            text: format!("restored-entry-{index:04}"),
+        });
+    }
+    let previous = flush_bytes(&mut v, 80, 24);
+    assert!(!previous.is_empty());
+    let mut replay = b"existing shell history\r\n".to_vec();
+    v.stream_replay_to(&mut replay, 80, 24).unwrap();
+    let replay = String::from_utf8(replay).unwrap();
+    assert!(replay.starts_with("existing shell history\r\n"));
+    let first = replay.find("restored-entry-0000").unwrap();
+    let middle = replay.find("restored-entry-0600").unwrap();
+    let last = replay.find("restored-entry-1199").unwrap();
+    assert!(first < middle && middle < last);
+    for index in 0..1200 {
+        assert_eq!(
+            replay
+                .matches(&format!("restored-entry-{index:04}"))
+                .count(),
+            1
+        );
+    }
+    assert!(!replay.contains("\x1b[2J") && !replay.contains("\x1b[3J"));
+    assert!(flush_bytes(&mut v, 80, 24).is_empty());
+    assert!(flush_bytes(&mut v, 80, 24).is_empty());
+    // A resize may repaint the last screenful, but cannot replay old transcript entries.
+    let resized = flush_bytes(&mut v, 40, 10);
+    let resized = String::from_utf8(resized).unwrap();
+    assert!(!resized.contains("restored-entry-0000"));
+    assert!(!resized.contains("restored-entry-0600"));
+    assert!(!resized.contains("\x1b[3J"));
+    assert!(flush_bytes(&mut v, 40, 10).is_empty());
+}
+
+#[test]
+fn restored_replay_bounds_every_writer_chunk_even_for_an_oversized_row() {
+    #[derive(Default)]
+    struct BoundedWriter {
+        bytes: Vec<u8>,
+        largest: usize,
+    }
+    impl std::io::Write for BoundedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.largest = self.largest.max(bytes.len());
+            if bytes.len() > 32 * 1024 {
+                return Err(std::io::Error::other("unbounded scrollback chunk"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut v = view();
+    v.push(TranscriptItem::UserMessage {
+        text: "large-row-".to_owned() + &"x".repeat(40_000) + "-end",
+    });
+    let mut out = BoundedWriter::default();
+    v.stream_replay_to(&mut out, 50_000, 24).unwrap();
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(text.contains(&("large-row-".to_owned() + &"x".repeat(40_000) + "-end")));
+    assert!(out.largest <= 32 * 1024);
+    assert!(flush_bytes(&mut v, 50_000, 24).is_empty());
+}
+
+#[test]
+fn a_failed_restored_replay_returns_the_error_without_an_exit_retry() {
+    struct FailingWriter {
+        calls: usize,
+    }
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            // Accept the small cursor-anchor writes, then reject transcript output.
+            if bytes.len() > 100 {
+                self.calls += 1;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed terminal",
+                ));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut v = view();
+    for index in 0..1200 {
+        v.push(TranscriptItem::UserMessage {
+            text: format!("failed-replay-{index:04}"),
+        });
+    }
+    let mut out = FailingWriter { calls: 0 };
+    assert_eq!(
+        v.stream_replay_to(&mut out, 80, 24).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    // No more writes go to a failed terminal. The complete diff base also prevents an implicit
+    // retry if the caller follows the error path with the ordinary exit flush.
+    assert_eq!(out.calls, 1);
+    assert!(flush_bytes(&mut v, 80, 24).is_empty());
+}

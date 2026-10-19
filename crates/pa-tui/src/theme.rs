@@ -149,41 +149,58 @@ impl ThemeBg {
 pub struct ThemeJson {
     name: String,
     #[serde(default)]
-    vars: BTreeMap<String, String>,
+    vars: BTreeMap<String, serde_json::Value>,
     colors: BTreeMap<String, serde_json::Value>,
 }
 
-/// Resolve one var reference: an unknown name stays as-is, so the slot
-/// drops at hex parsing.
-fn resolve_var_ref<'a>(value: &'a str, vars: &'a BTreeMap<String, String>) -> &'a str {
-    if value.is_empty() || value.starts_with('#') {
-        return value;
+/// Resolve transitive references without recursion: even an unusually long
+/// variable chain cannot exhaust the render thread's stack.
+fn resolve_var_ref<'a>(
+    mut value: &'a serde_json::Value,
+    vars: &'a BTreeMap<String, serde_json::Value>,
+) -> Result<&'a serde_json::Value> {
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(name) = value.as_str() {
+        if name.is_empty() || name.starts_with('#') {
+            break;
+        }
+        anyhow::ensure!(
+            visited.insert(name),
+            "circular variable reference: {name:?}"
+        );
+        value = vars
+            .get(name)
+            .with_context(|| format!("variable reference not found: {name:?}"))?;
     }
-    vars.get(value).map_or(value, String::as_str)
+    Ok(value)
 }
 
-/// Resolve a color value: hex string, var reference, or "" (default).
-fn resolve_color(value: &serde_json::Value, vars: &BTreeMap<String, String>) -> Option<Color> {
-    let Some(s) = value.as_str() else {
-        return value
-            .as_u64()
-            .map(|n| Color::Indexed(u8::try_from(n).unwrap_or(255)));
-    };
-    let s = resolve_var_ref(s, vars);
-    if s.is_empty() {
-        return Some(Color::Reset);
+/// Resolve a color value: hex string, var reference, index, or reset.
+fn resolve_color(
+    value: &serde_json::Value,
+    vars: &BTreeMap<String, serde_json::Value>,
+) -> Option<Color> {
+    let value = resolve_var_ref(value, vars).ok()?;
+    if let Some(s) = value.as_str() {
+        return if s.is_empty() {
+            Some(Color::Reset)
+        } else {
+            hex_to_color(s)
+        };
     }
-    hex_to_color(s)
+    value
+        .as_u64()
+        .and_then(|n| u8::try_from(n).ok())
+        .map(Color::Indexed)
 }
 
-/// The theme record's `background` (the onboarding wash canvas): only
-/// the 6-hex shape parses after var resolution.
+/// The onboarding canvas only accepts six hex digits after resolution.
 fn parse_theme_background(
     value: &serde_json::Value,
-    vars: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, serde_json::Value>,
 ) -> Option<(u8, u8, u8)> {
-    let raw = value.as_str()?;
-    let trimmed = resolve_var_ref(raw, vars).trim();
+    let raw = resolve_var_ref(value, vars).ok()?.as_str()?;
+    let trimmed = raw.trim();
     let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -194,6 +211,9 @@ fn parse_theme_background(
 
 fn hex_to_color(s: &str) -> Option<Color> {
     let hex = s.strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     if hex.len() == 3 {
         let rgb: Vec<u8> = hex
             .chars()
@@ -787,18 +807,164 @@ pub fn builtin_theme_json(name: &str) -> ThemeJson {
         .unwrap_or_else(|_| serde_json::from_str(PRIME_JSON).expect("prime.json is valid"))
 }
 
-/// Load a theme from a JSON file path.
+/// Names are portable file stems, never paths or terminal control text.
+fn valid_theme_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Builtins always win name collisions. Missing user directories are normal;
+/// unreadable directories are errors, not an empty successful discovery.
+pub(crate) fn available_theme_names() -> Result<Vec<String>> {
+    let dir = pa_types::platform::agent_dir().context("agent directory is unavailable")?;
+    available_theme_names_in(&dir.join("themes"))
+}
+
+fn available_theme_names_in(dir: &std::path::Path) -> Result<Vec<String>> {
+    let mut names: std::collections::BTreeSet<String> = pa_types::themes::BUILTIN_THEME_NAMES
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(names.into_iter().collect());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading themes {}", dir.display()))
+        }
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading themes {}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "json") && path.is_file() {
+            if let Some(name) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|name| valid_theme_name(name))
+            {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+/// Resolve the product theme name from `<agent_dir>/themes/<name>.json`.
+/// Empty means the default, not a file. No directory scan on builtin startup.
+pub(crate) fn load_named_theme(name: &str, mode: ColorMode) -> Result<Theme> {
+    ThemeSource::resolve(name)?.load(mode)
+}
+
+/// A validated name and captured source, with no file I/O during resolution.
+/// Background readers must not discover HOME or the agent directory after
+/// the owning surface (or an isolated test environment) has retired.
+pub(crate) enum ThemeSource {
+    Builtin(String),
+    File {
+        name: String,
+        path: std::path::PathBuf,
+    },
+}
+
+impl ThemeSource {
+    pub(crate) fn resolve(name: &str) -> Result<Self> {
+        let name = if name.is_empty() { "prime" } else { name };
+        anyhow::ensure!(valid_theme_name(name), "invalid theme name: {name:?}");
+        if pa_types::themes::builtin_theme_json(name).is_some() {
+            return Ok(Self::Builtin(name.to_string()));
+        }
+        let dir = pa_types::platform::agent_dir().context("agent directory is unavailable")?;
+        let path = std::path::absolute(dir.join("themes").join(format!("{name}.json")))
+            .context("resolving the theme path")?;
+        Ok(Self::File {
+            name: name.to_string(),
+            path,
+        })
+    }
+
+    pub(crate) fn load(self, mode: ColorMode) -> Result<Theme> {
+        match self {
+            Self::Builtin(name) => Ok(Theme::builtin(&name, mode)),
+            Self::File { name, path } => {
+                let mut theme = load_theme_from_path(&path, mode)
+                    .with_context(|| format!("loading theme {name:?}"))?;
+                // The settings/preview identity is the filename, not the JSON label.
+                theme.name = name;
+                Ok(theme)
+            }
+        }
+    }
+}
+
+/// Load and validate a custom theme from a JSON file path.
 ///
 /// # Errors
 ///
-/// Returns `Err` when the file cannot be read or its JSON cannot be parsed.
+/// Returns `Err` when the file cannot be read, the JSON is invalid, a required
+/// slot is missing, or any color/variable cannot resolve to a valid color.
 pub fn load_theme_from_path(path: &std::path::Path, mode: ColorMode) -> Result<Theme> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading theme {}", path.display()))?;
-    let json: ThemeJson =
+    let mut json: ThemeJson =
         serde_json::from_str(&raw).with_context(|| format!("parsing theme {}", path.display()))?;
+    anyhow::ensure!(
+        !json.name.trim().is_empty() && !json.name.chars().any(char::is_control),
+        "invalid theme label in {}",
+        path.display()
+    );
+    for (section, entries) in [("vars", &json.vars), ("colors", &json.colors)] {
+        for (name, value) in entries {
+            let resolved = resolve_var_ref(value, &json.vars).with_context(|| {
+                format!("invalid {section} token {name:?} in {}", path.display())
+            })?;
+            anyhow::ensure!(
+                resolve_color(resolved, &json.vars).is_some(),
+                "invalid {section} token {name:?} in {}: expected hex, an integer from 0 to 255, or an empty reset",
+                path.display()
+            );
+        }
+    }
+    // Match the TS schema: mdBody and refinement slots are optional. All
+    // other renderer slots are required so an incomplete file never silently
+    // paints unstyled text. The canvas and export metadata are not required.
+    let defaults = builtin_theme_json("prime");
+    for name in defaults.colors.keys() {
+        if (fg_name_lookup(name).is_some() || bg_name_lookup(name).is_some())
+            && !matches!(
+                name.as_str(),
+                "mdBody" | "refinementHeader" | "refinementSummary"
+            )
+        {
+            anyhow::ensure!(
+                json.colors.contains_key(name),
+                "missing required color token {name:?} in {}",
+                path.display()
+            );
+        }
+    }
+    let text = json.colors["text"].clone();
+    json.colors.entry("mdBody".to_string()).or_insert(text);
+    let refinement_defaults = builtin_theme_json(if json.name == "light" {
+        "light"
+    } else {
+        "prime"
+    });
+    for name in ["refinementHeader", "refinementSummary"] {
+        json.colors
+            .entry(name.to_string())
+            .or_insert_with(|| refinement_defaults.colors[name].clone());
+    }
     Ok(Theme::from_json(&json, mode))
 }
+
+#[cfg(test)]
+#[path = "theme_custom_tests.rs"]
+mod custom_tests;
 
 #[cfg(test)]
 mod tests {

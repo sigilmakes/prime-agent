@@ -42,6 +42,77 @@ fn storage_with_env(data: &serde_json::Value, env: ScriptedEnv) -> AuthStorage {
 }
 
 #[test]
+fn local_status_does_not_resolve_deferred_credentials() {
+    struct ForbiddenOAuth;
+    impl OAuthIntegration for ForbiddenOAuth {
+        fn api_key_for(&self, _provider: &str, _credential: &AuthCredential) -> Option<String> {
+            panic!("local status must not invoke the OAuth adapter")
+        }
+        fn refresh(
+            &self,
+            _provider: &str,
+            _credentials: &AuthStorageData,
+        ) -> Option<AuthCredential> {
+            panic!("local status must not refresh OAuth")
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("command-ran");
+    let command = format!("!touch '{}'; printf local-test-key", marker.display());
+    let data = AuthStorageData(serde_json::json!({
+        "command-provider": { "type": "api_key", "key": command },
+        "oauth-provider": { "type": "oauth", "access": "expired", "refresh": "dummy", "expires": 0 }
+    }).as_object().unwrap().clone());
+    let mut auth = AuthStorage::in_memory_without_env(&data, Arc::new(ForbiddenOAuth));
+    auth.set_fallback_resolver(Arc::new(|_| {
+        panic!("local status must not invoke fallback")
+    }));
+    let configured = AuthStatus {
+        configured: true,
+        source: Some(AuthSource::Stored),
+        label: None,
+    };
+    assert_eq!(auth.get_auth_status_local("command-provider"), configured);
+    assert_eq!(auth.get_auth_status_local("oauth-provider"), configured);
+    assert_eq!(
+        auth.get_auth_status_local("missing-provider"),
+        AuthStatus::default()
+    );
+    assert!(!marker.exists(), "local status executed a command key");
+
+    for provider in ["command-provider", "oauth-provider"] {
+        auth.mark_auth_source_stale(AuthSourceToken {
+            provider: provider.to_string(),
+            source: AuthSource::Stored,
+            identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
+            value_fingerprint: "previously-rejected-value".to_string(),
+        });
+        assert_eq!(
+            auth.get_auth_status_local(provider),
+            AuthStatus {
+                configured: false,
+                source: Some(AuthSource::Stale),
+                label: Some("expired".to_string()),
+            }
+        );
+        auth.set_runtime_api_key(provider, "request-override".to_string());
+        assert_eq!(
+            auth.get_auth_status_local(provider),
+            AuthStatus {
+                configured: true,
+                source: Some(AuthSource::Runtime),
+                label: None,
+            }
+        );
+    }
+    assert!(
+        !marker.exists(),
+        "stale local status executed a command key"
+    );
+}
+
+#[test]
 fn runtime_override_wins() {
     // Non-prime provider: runtime beats stored; stored outranks env,
     // so ambient env cannot interfere.
@@ -603,65 +674,91 @@ fn an_unexpired_oauth_credential_serves_without_a_fetch() {
 }
 
 #[test]
-fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_credential() {
-    // The fetch runs outside every lock: a locked writer lands mid-fetch, and the
-    // write phase keeps the peer's fresher credential.
-    let oauth = Arc::new(CountingOAuth {
-        calls: std::sync::atomic::AtomicUsize::new(0),
-        delay_ms: 120,
-    });
-    let (mut auth, backend) =
-        storage_over_backend_with(oauth.clone(), "x-peer", &expired_oauth("old-access"));
+fn the_token_fetch_holds_the_document_lock_through_commit() {
+    struct HeldOAuth {
+        entered: std::sync::mpsc::Sender<()>,
+        released: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl OAuthIntegration for HeldOAuth {
+        fn api_key_for(&self, _: &str, credential: &AuthCredential) -> Option<String> {
+            match credential {
+                AuthCredential::Oauth { access, .. } => Some(access.clone()),
+                AuthCredential::ApiKey { .. } | AuthCredential::McpStaticToken { .. } => None,
+            }
+        }
+        fn refresh(&self, _: &str, _: &AuthStorageData) -> Option<AuthCredential> {
+            self.entered.send(()).unwrap();
+            self.released
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            Some(CountingOAuth::fetched_credential())
+        }
+    }
+    let backend: Arc<dyn AuthStorageBackend> =
+        Arc::new(crate::auth::InMemoryAuthStorageBackend::default());
+    let mut data = AuthStorageData::default();
+    data.insert("x-peer", &expired_oauth("old-access"));
+    backend
+        .with_lock(&mut |_| Ok(((), Some(serde_json::to_string(&data).unwrap()))))
+        .unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend),
+        Arc::new(HeldOAuth {
+            entered: entered_tx,
+            released: std::sync::Mutex::new(release_rx),
+        }),
+    );
+    let refresh = std::thread::spawn(move || auth.get_api_key("x-peer"));
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (wrote_tx, wrote_rx) = std::sync::mpsc::channel();
     let writer_backend = Arc::clone(&backend);
-    let (wrote_tx, wrote_rx) = std::sync::mpsc::channel::<std::time::Duration>();
-    std::thread::spawn(move || {
-        // Mid-fetch: the resolving thread is inside the token fetch.
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        let mut peer = AuthStorageData::default();
-        peer.insert(
-            "x-peer",
-            &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
-        );
-        let content = serde_json::to_string_pretty(&peer.0).unwrap_or_default();
-        let t0 = std::time::Instant::now();
+    let writer = std::thread::spawn(move || {
+        attempt_tx.send(()).unwrap();
         writer_backend
             .with_lock(&mut |current| {
-                let _ = current;
-                Ok(((), Some(content.clone())))
+                let mut data = parse_storage_data(current.as_deref())?;
+                data.insert(
+                    "x-peer",
+                    &oauth_credential("peer-access", 4_000_000_000_000),
+                );
+                Ok(((), Some(serde_json::to_string(&data)?)))
             })
-            .ok();
-        wrote_tx
-            .send(t0.elapsed())
-            .expect("the test main thread still waits for the write");
+            .unwrap();
+        wrote_tx.send(()).unwrap();
     });
-    let api_key = auth.get_api_key("x-peer");
-    let write_wall = wrote_rx
+    attempt_rx
         .recv_timeout(std::time::Duration::from_secs(3))
-        .expect("the peer's locked write completed; a token fetch must not hold the document lock");
-    assert!(
-        write_wall < std::time::Duration::from_millis(60),
-        "the concurrent locked write waited {write_wall:?}: the fetch holds no lock"
-    );
+        .unwrap();
+    // Negative observation: a cooperative writer cannot enter the transaction
+    // while a single-use token is being spent by the current owner.
+    assert!(wrote_rx
+        .recv_timeout(std::time::Duration::from_millis(50))
+        .is_err());
+    release_tx.send(()).unwrap();
+    assert_eq!(refresh.join().unwrap().as_deref(), Some("fetched-access"));
+    writer.join().unwrap();
+    wrote_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    let current = backend.read().unwrap();
     assert_eq!(
-        api_key.as_deref(),
-        Some("peer-access"),
-        "the peer's fresher credential wins over this attempt's own fetch"
-    );
-    let stored = auth.get_all().credential("x-peer").unwrap();
-    let AuthCredential::Oauth { access, .. } = stored else {
-        panic!("the stored credential stays OAuth");
-    };
-    assert_eq!(access, "peer-access");
-    assert_eq!(
-        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "exactly one fetch ran"
+        parse_storage_data(current.as_deref())
+            .unwrap()
+            .credential("x-peer"),
+        Some(oauth_credential("peer-access", 4_000_000_000_000))
     );
 }
 
 #[test]
 fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
-    // Two resolutions race: the flight gate serializes them, and the
+    // Two resolutions race: the document lock serializes them, and the
     // second serves the first's fresh credential.
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),

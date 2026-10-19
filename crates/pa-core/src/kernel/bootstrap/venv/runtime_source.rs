@@ -39,9 +39,14 @@ fn resolve_runtime_source_dir(package: &Path, checkout: Option<&Path>) -> Option
         // Always pass an absolute filesystem path to uv, including when
         // PI_PACKAGE_DIR was relative. A manifest alone is not a runtime.
         let candidate = candidate.canonicalize().ok()?;
-        if !["pyproject.toml", "src/rlm/__init__.py", "src/rlm/repl.py"]
-            .iter()
-            .all(|file| candidate.join(file).is_file())
+        if ![
+            "pyproject.toml",
+            "uv.lock",
+            "src/rlm/__init__.py",
+            "src/rlm/repl.py",
+        ]
+        .iter()
+        .all(|file| candidate.join(file).is_file())
         {
             return None;
         }
@@ -54,7 +59,7 @@ fn resolve_runtime_source_dir(package: &Path, checkout: Option<&Path>) -> Option
 
 pub(in crate::kernel::bootstrap) fn require_runtime_source_dir() -> anyhow::Result<PathBuf> {
     resolve_runtime_source_dir(&package_dir(), crate::packages::source_checkout_root()).context(
-        "Prime Agent requires a local prime-agent-runtime directory containing its pyproject.toml and src/rlm sources; reinstall Prime Agent with the runtime beside the binary, or set PI_PACKAGE_DIR to the complete trusted package directory. The runtime will not be downloaded from a package index.",
+        "Prime Agent requires a local prime-agent-runtime directory containing its pyproject.toml, uv.lock and src/rlm sources; reinstall Prime Agent with the runtime beside the binary, or set PI_PACKAGE_DIR to the complete trusted package directory. The runtime will not be downloaded from a package index.",
     )
 }
 
@@ -64,7 +69,10 @@ pub(in crate::kernel::bootstrap) fn hash_runtime_source(
     source_dir: &Path,
 ) -> anyhow::Result<String> {
     let rlm_dir = source_dir.join("src").join("rlm");
-    let mut files = vec![source_dir.join("pyproject.toml")];
+    let mut files = vec![
+        source_dir.join("pyproject.toml"),
+        source_dir.join("uv.lock"),
+    ];
     collect_python_files(&rlm_dir, &mut files)?;
     collect_package_data_files(&rlm_dir.join("machines"), &mut files)?;
     files.sort();
@@ -132,6 +140,20 @@ mod tests {
             temp.join("pyproject.toml"),
             "[project]\nname = 'prime-agent-runtime'\n",
         )?;
+        std::fs::write(temp.join("uv.lock"), "version = 1\n")?;
+        Ok(())
+    }
+
+    #[test]
+    fn lockfile_changes_invalidate_identity_and_missing_lock_fails() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        runtime_fixture(temp.path(), "machine")?;
+        std::fs::write(temp.path().join("uv.lock"), "version = 1\n")?;
+        let before = hash_runtime_source(temp.path())?;
+        std::fs::write(temp.path().join("uv.lock"), "version = 2\n")?;
+        assert_ne!(before, hash_runtime_source(temp.path())?);
+        std::fs::remove_file(temp.path().join("uv.lock"))?;
+        assert!(hash_runtime_source(temp.path()).is_err());
         Ok(())
     }
 
@@ -142,7 +164,12 @@ mod tests {
         assert_eq!(resolve_runtime_source_dir(package, None), None);
         let runtime = package.join("prime-agent-runtime");
         runtime_fixture(&runtime, "machine")?;
-        for file in ["pyproject.toml", "src/rlm/__init__.py", "src/rlm/repl.py"] {
+        for file in [
+            "pyproject.toml",
+            "uv.lock",
+            "src/rlm/__init__.py",
+            "src/rlm/repl.py",
+        ] {
             let path = runtime.join(file);
             let contents = std::fs::read(&path)?;
             std::fs::remove_file(&path)?;
@@ -186,14 +213,40 @@ mod tests {
 
     #[test]
     fn relative_package_paths_are_never_returned_as_requirements() -> anyhow::Result<()> {
-        let cwd = std::env::current_dir()?;
-        let temp = tempfile::tempdir_in(&cwd)?;
-        let runtime = temp.path().join("prime-agent-runtime");
-        runtime_fixture(&runtime, "machine")?;
-        let relative = temp.path().strip_prefix(&cwd)?;
-        assert_eq!(
-            resolve_runtime_source_dir(relative, None),
-            Some(runtime.canonicalize()?)
+        const CHILD_ROOT: &str = "PA_TEST_RELATIVE_RUNTIME_SOURCE_ROOT";
+        const CHECKED: &str = "relative-runtime-source-checked";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let cwd = std::env::current_dir()?;
+            anyhow::ensure!(cwd == PathBuf::from(root).canonicalize()?);
+            let temp = tempfile::tempdir_in(&cwd)?;
+            let runtime = temp.path().join("prime-agent-runtime");
+            runtime_fixture(&runtime, "machine")?;
+            let relative = temp.path().strip_prefix(&cwd)?;
+            assert!(!relative.is_absolute());
+            assert_eq!(
+                resolve_runtime_source_dir(relative, None),
+                Some(runtime.canonicalize()?)
+            );
+            std::fs::write(cwd.join(CHECKED), b"checked")?;
+            return Ok(());
+        }
+
+        // Keep relative-path coverage without writing into the source checkout
+        // or changing the working directory of other parallel tests.
+        let root = tempfile::tempdir()?;
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "kernel::bootstrap::venv::runtime_source::tests::relative_package_paths_are_never_returned_as_requirements",
+            ])
+            .env(CHILD_ROOT, root.path())
+            .current_dir(root.path())
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        anyhow::ensure!(status.success(), "isolated relative runtime fixture failed");
+        anyhow::ensure!(
+            root.path().join(CHECKED).is_file(),
+            "relative fixture did not run"
         );
         Ok(())
     }

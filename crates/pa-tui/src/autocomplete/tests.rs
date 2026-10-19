@@ -161,9 +161,10 @@ fn slash_completion_applies_separator_by_argument() {
     assert_eq!(result.lines[0], "/goal ");
     assert_eq!(result.cursor_col, 6);
     // Bare command: no trailing separator.
-    let result = provider.apply_completion(&["/refi".to_string()], 0, 5, &item("refine"), "/refi");
-    assert_eq!(result.lines[0], "/refine");
-    assert_eq!(result.cursor_col, 7);
+    let result =
+        provider.apply_completion(&["/refre".to_string()], 0, 6, &item("refresh"), "/refre");
+    assert_eq!(result.lines[0], "/refresh");
+    assert_eq!(result.cursor_col, 8);
 }
 
 #[test]
@@ -981,4 +982,36 @@ fn at_index_tracks_watcher_events() {
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+}
+
+#[test]
+fn plugin_catalog_replacement_does_not_follow_the_skill_toggle() {
+    let mut provider = CombinedAutocompleteProvider::from_registry(std::path::PathBuf::from("."));
+    let commands = serde_json::json!({"commands": [
+        {"name":"fixture-ping", "source":"plugin", "description":"Inspect Lua", "argumentHint":"request"},
+        {"name":"skill:web", "source":"skill"}
+    ]});
+    provider.set_plugin_commands(plugin_command_entries(&commands));
+    provider.set_skill_commands(Vec::new());
+    let suggestions = provider.slash_suggestions("/fixture-ping");
+    assert_eq!(
+        suggestions,
+        vec![CompletionItem {
+            value: "fixture-ping".into(),
+            label: "fixture-ping".into(),
+            description: Some("Inspect Lua".into()),
+            argument_hint: Some("request".into()),
+            source_tag: Some("#plugin".into()),
+        }]
+    );
+    let result = provider.apply_slash_completion(
+        &["/fixture-p".into()],
+        0,
+        10,
+        &suggestions[0],
+        "/fixture-p",
+    );
+    assert_eq!(result.lines, vec!["/fixture-ping "]);
+    provider.set_plugin_commands(plugin_command_entries(&serde_json::json!({"commands":[]})));
+    assert!(provider.slash_suggestions("/fixture-ping").is_empty());
 }

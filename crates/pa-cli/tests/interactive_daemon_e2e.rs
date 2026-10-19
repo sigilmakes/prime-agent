@@ -270,80 +270,8 @@ async fn run_headless_bounded(
     }
 }
 
-/// Kill supervisors leaked by earlier runs (a dead binary runs no `Drop`, so
-/// its daemons are reparented to init): a daemon matches when its socket dir
-/// is a `tempfile`-created `.tmpXXXXXX` dir and its parent is dead.
-fn sweep_orphan_test_daemons() {
-    static SWEEPED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if SWEEPED.set(()).is_err() {
-        return; // a later test's spawn: the first spawn already swept
-    }
-    let mut swept = 0;
-    for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-            continue;
-        };
-        // /proc cmdline is NUL-separated.
-        let args: Vec<String> = cmdline
-            .split(|b| *b == 0)
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-            .collect();
-        let flag = |needle: &str| args.iter().any(|a| a == needle);
-        let arg_after = |needle: &str| {
-            args.iter()
-                .position(|a| a == needle)
-                .and_then(|idx| args.get(idx + 1))
-                .cloned()
-        };
-        if !flag("--mode") || arg_after("--mode").as_deref() != Some("daemon") {
-            continue;
-        }
-        let Some(socket) = arg_after("--daemon-socket") else {
-            continue;
-        };
-        // A live run's daemon keeps its owning test binary as the parent, and
-        // the user's product daemons fail the socket-dir test, so neither is swept.
-        let orphan_socket_dir = Path::new(&socket)
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".tmp"));
-        if !orphan_socket_dir {
-            continue;
-        }
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        let Some((_, rest)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let Ok(parsed_ppid) = rest
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
-            .parse::<u32>()
-        else {
-            continue;
-        };
-        if parsed_ppid != 1 && process_alive(parsed_ppid) {
-            continue; // a live run's daemon: its test binary is still up
-        }
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
-        }
-        swept += 1;
-    }
-    if swept > 0 {
-        eprintln!("swept {swept} orphan test daemon(s) (socket dir gone) before spawning");
-    }
-}
-
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
-    sweep_orphan_test_daemons();
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -434,7 +362,7 @@ async fn create_session_via_daemon(
                 "sessionDir": session_dir.display().to_string(),
                 "script": script_path.display().to_string(),
             })),
-            telemetry_disabled: None,
+            telemetry_disabled: Some(true),
             runtime_metadata: None,
             lifecycle: None,
             env: None,
@@ -496,12 +424,9 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -620,26 +545,9 @@ impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
             .get_onboarding_shown()
     }
 
-    fn agent_traces_choice_written(&self) -> bool {
-        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
-            .agent_traces_choice_written()
-    }
-
-    fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()> {
-        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
-            .set_agent_traces_enabled(enabled)
-    }
-
     fn mark_onboarding_complete(&self) -> anyhow::Result<()> {
         pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
             .set_onboarding_shown(true)
-    }
-
-    fn onboarding_incomplete(
-        &self,
-        _outcome: &'static str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(std::future::ready(()))
     }
 }
 
@@ -655,160 +563,9 @@ impl pa_tui::interactive::OnboardingSink for FailingMarkOnboardingSink {
             .get_onboarding_shown()
     }
 
-    fn agent_traces_choice_written(&self) -> bool {
-        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
-            .agent_traces_choice_written()
-    }
-
-    fn set_agent_traces_enabled(&self, _enabled: bool) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn mark_onboarding_complete(&self) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("settings disk full"))
     }
-
-    fn onboarding_incomplete(
-        &self,
-        _outcome: &'static str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(std::future::ready(()))
-    }
-}
-
-/// A fresh install asks the trace question exactly once; TS asks unconditionally (divergence).
-#[tokio::test]
-async fn fresh_home_asks_the_trace_question_once_and_completes() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
-    std::fs::create_dir_all(&session_dir).expect("session dir");
-    let supervisor = spawn_supervisor(dir.path());
-
-    let script = serde_json::json!({ "responses": [
-        { "text": "hello fresh home", "delayMs": 20 },
-    ] });
-    std::fs::write(
-        dir.path().join("script.json"),
-        serde_json::to_string(&script).expect("script json"),
-    )
-    .expect("script.json");
-
-    // The task mounts exactly as the product's model-ready gate builds it.
-    let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
-        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-        }),
-        model_ready: std::sync::Arc::new(|| true),
-        current_model: None,
-        provider_auth: None,
-    });
-    let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        ],
-        width: 100,
-        height: 30,
-    };
-    let outcome = run_headless_bounded(options, plan)
-        .await
-        .expect("interactive run");
-
-    let rendered = outcome.frames.join("\n");
-    assert!(
-        rendered.contains("Share agent traces"),
-        "the onboarding question rendered once for the fresh home:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("hello fresh home"),
-        "the answered dialog released the pane and the first turn ran:\n{rendered}"
-    );
-    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(
-        settings.get_onboarding_shown(),
-        "the answered flow marked onboarding shown"
-    );
-    assert!(
-        settings.get_agent_traces_enabled(),
-        "the pre-selected Share answer persisted"
-    );
-    drop(supervisor);
-}
-
-/// A provisioned home (sharing explicitly opted out) never sees the question
-/// (TS #2368 asks it; the operator's existing-user ruling removes it here).
-#[tokio::test]
-async fn provisioned_opt_out_home_completes_silently_without_the_question() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
-    std::fs::create_dir_all(&session_dir).expect("session dir");
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        r#"{ "agentTraces": { "enabled": false } }"#,
-    )
-    .expect("provisioned settings");
-    let supervisor = spawn_supervisor(dir.path());
-
-    let script = serde_json::json!({ "responses": [
-        { "text": "hello provisioned home", "delayMs": 20 },
-    ] });
-    std::fs::write(
-        dir.path().join("script.json"),
-        serde_json::to_string(&script).expect("script json"),
-    )
-    .expect("script.json");
-
-    let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
-        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-        }),
-        model_ready: std::sync::Arc::new(|| true),
-        current_model: None,
-        provider_auth: None,
-    });
-    // No key step answers anything: the flow must complete before the submission runs.
-    let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![
-            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        ],
-        width: 100,
-        height: 30,
-    };
-    let outcome = run_headless_bounded(options, plan)
-        .await
-        .expect("interactive run");
-
-    let rendered = outcome.frames.join("\n");
-    assert!(
-        rendered.contains("hello provisioned home"),
-        "the session started directly and completed its first turn:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("Share agent traces"),
-        "the question never owned a session frame:\n{rendered}"
-    );
-
-    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(
-        !settings.get_agent_traces_enabled(),
-        "the standing opt-out survived the silent completion"
-    );
-    assert!(
-        settings.get_onboarding_shown(),
-        "the silent flow marked onboarding shown"
-    );
-    drop(supervisor);
 }
 
 /// The scripted provider-auth surface the full-flow verifier drives: the
@@ -1027,8 +784,6 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
             enter(),
             wait_render("\u{2713}"),
             enter(),
-            wait_render("Share agent traces"),
-            enter(),
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
             pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         ],
@@ -1057,10 +812,6 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
         "the providers picker rendered:\n{rendered}"
     );
     assert!(
-        rendered.contains("Share agent traces"),
-        "the trace question ended the flow:\n{rendered}"
-    );
-    assert!(
         rendered.contains("hello full flow"),
         "the completed flow released the pane and the first turn ran:\n{rendered}"
     );
@@ -1079,10 +830,6 @@ async fn fresh_home_runs_the_full_sign_in_flow_to_completion() {
     assert!(
         settings.get_onboarding_shown(),
         "the completed flow marked onboarding shown"
-    );
-    assert!(
-        settings.get_agent_traces_enabled(),
-        "the Share answer persisted"
     );
     let auth = pa_core::auth::AuthStorage::create(&agent_dir);
     assert!(
@@ -1104,11 +851,6 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        r#"{ "agentTraces": { "enabled": false } }"#,
-    )
-    .expect("provisioned settings");
     let supervisor = spawn_supervisor(dir.path());
 
     let script = serde_json::json!({ "responses": [
@@ -1148,10 +890,6 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
         "the session ran its first turn despite the failed write:\n{rendered}"
     );
     assert!(
-        !rendered.contains("Share agent traces"),
-        "the standing choice never re-opened the question:\n{rendered}"
-    );
-    assert!(
         rendered.contains("could not be saved"),
         "the failed persistence surfaced as a warning row:\n{rendered}"
     );
@@ -1159,100 +897,6 @@ async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() 
     assert!(
         !settings.get_onboarding_shown(),
         "the failed write left the marker unset"
-    );
-    drop(supervisor);
-}
-
-/// The re-show regression: the agents-view flow re-runs the onboarding phase
-/// per session open, so the phase gates on the persisted marker itself.
-#[tokio::test]
-async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
-    std::fs::create_dir_all(&session_dir).expect("session dir");
-    let supervisor = spawn_supervisor(dir.path());
-
-    // The faux queue spans one session (each created session replays from the top).
-    let script = serde_json::json!({ "responses": [
-        { "text": "hello each session", "delayMs": 20 },
-    ] });
-    std::fs::write(
-        dir.path().join("script.json"),
-        serde_json::to_string(&script).expect("script json"),
-    )
-    .expect("script.json");
-
-    // The SAME options object backs both session runs, as the agents-view flow clones `base`.
-    let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
-        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-        }),
-        model_ready: std::sync::Arc::new(|| true),
-        current_model: None,
-        provider_auth: None,
-    });
-    // Down + Enter answers `Not now` (the answer that used to re-show), then the turn runs.
-    let first_plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Down,
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        ],
-        width: 100,
-        height: 30,
-    };
-    let first = run_headless_bounded(options.clone(), first_plan)
-        .await
-        .expect("first interactive run");
-    let first_rendered = first.frames.join("\n");
-    assert!(
-        first_rendered.contains("Share agent traces"),
-        "the fresh home was asked once:\n{first_rendered}"
-    );
-    assert!(
-        first_rendered.contains("hello each session"),
-        "the answered dialog released the pane and the first turn ran:\n{first_rendered}"
-    );
-    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(
-        !settings.get_agent_traces_enabled(),
-        "the Not-now answer persisted (the opt-out)"
-    );
-    assert!(
-        settings.get_onboarding_shown(),
-        "the completion flag persisted with the answer"
-    );
-
-    // The second session, same task: no key answers anything; the marker must gate itself.
-    let second_plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![
-            pa_tui::interactive::HeadlessStep::Submit("again".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        ],
-        width: 100,
-        height: 30,
-    };
-    let second = run_headless_bounded(options, second_plan)
-        .await
-        .expect("second interactive run");
-    let second_rendered = second.frames.join("\n");
-    assert!(
-        second_rendered.contains("hello each session"),
-        "the second session started directly and completed its turn:\n{second_rendered}"
-    );
-    assert!(
-        !second_rendered.contains("Share agent traces"),
-        "the completed flow never reopened the question:\n{second_rendered}"
     );
     drop(supervisor);
 }
@@ -1302,12 +946,9 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -1384,12 +1025,9 @@ async fn tui_dispatches_slash_commands_menu_and_suggestions() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -1598,12 +1236,9 @@ async fn tui_model_picker_applies_and_effort_reports() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -1744,12 +1379,9 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -1843,12 +1475,9 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -1962,12 +1591,9 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2133,12 +1759,9 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         fullscreen_mouse: true,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2306,12 +1929,9 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2423,12 +2043,9 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         // The exact load path the CLI uses: the fixture overrides the default set.
         keybindings: pa_tui::keybindings::KeybindingsManager::create(&agent_dir),
         session_rlm_depth: None,
@@ -2573,12 +2190,9 @@ async fn tui_prompts_queued_behind_a_turn_render_the_queue_strip() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2685,12 +2299,9 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2813,12 +2424,9 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2973,9 +2581,7 @@ fn base_options(
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -2983,7 +2589,6 @@ fn base_options(
         restore_dock_focus: false,
         client_settings: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
     }
 }
@@ -3529,7 +3134,6 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -3551,10 +3155,8 @@ async fn tui_prompt_stash_round_trips_across_in_place_switch() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
@@ -3662,7 +3264,6 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
     let make_options = || pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -3684,10 +3285,8 @@ async fn tui_prompt_stash_survives_the_agents_view_handoff() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::create(&agent_dir),
         prompt_stash: prompt_stash.clone(),
         session_rlm_depth: None,
@@ -3823,7 +3422,6 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -3845,10 +3443,8 @@ async fn tui_prompt_stash_restores_a_pasted_image_with_the_draft() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
@@ -3948,7 +3544,6 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -3970,10 +3565,8 @@ async fn tui_ctrl_s_stashes_and_restores_the_prompt_draft() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
@@ -4107,7 +3700,6 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -4129,10 +3721,8 @@ async fn tui_ctrl_s_stash_keeps_a_held_draft_and_reports_the_empty_editor() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
@@ -4251,7 +3841,6 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -4273,10 +3862,8 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::create(&agent_dir),
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
@@ -4396,7 +3983,6 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
     let options = pa_tui::interactive::InteractiveOptions {
         models: None,
         provider_auth: None,
-        traces: None,
         update_commands: None,
         socket_path: supervisor.socket.clone(),
         cwd: dir.path().to_path_buf(),
@@ -4418,10 +4004,8 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
         client_settings: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         prompt_stash: std::sync::Arc::default(),
         session_rlm_depth: None,
@@ -5125,12 +4709,9 @@ async fn tui_two_back_to_back_submits_reach_the_daemon_in_order() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -5246,12 +4827,9 @@ async fn tui_submit_outlived_by_switch_stays_silent_on_the_new_session() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -5359,12 +4937,9 @@ async fn tui_headless_done_with_a_turn_settling_parks_the_closed_input_channel()
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -5478,12 +5053,9 @@ async fn tui_refused_submit_restores_the_draft_after_the_round_trip() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -5601,12 +5173,9 @@ async fn tui_accepted_then_killed_turn_renders_closed_error() {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),
@@ -5754,12 +5323,9 @@ async fn assert_close_reason_survives_late_turn_status(reason: &str, explanation
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),

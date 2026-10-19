@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 
@@ -31,18 +31,28 @@ pub trait AuthStorageBackend: Send + Sync {
 
     /// # Errors
     ///
-    /// Returns an error when the backend fails to lock, the `update` callback fails, or writing the
-    /// document fails; an unreadable file reaches the callback as `None`.
+    /// Returns an error when locking, reading, updating or writing fails.
+    /// An unreadable document must not be treated as an absent credential store.
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()>;
+
+    /// Run a rotating-token refresh with the same document lock, allowing a
+    /// bounded longer acquisition wait. The callback owns the authoritative
+    /// snapshot until its result is committed, including the token request.
+    ///
+    /// # Errors
+    /// Returns lock, callback, compromise or persistence failures.
+    fn with_refresh_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
+    ) -> Result<()> {
+        self.with_lock(update)
+    }
 }
 
-use crate::platform::lock_dir::LockDir as LockGuard;
-
-/// Staleness for the sync auth lock (TS proper-lockfile default: 10s).
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+use super::document_lock::{AuthDocumentGuard, TransactionKind};
 
 pub struct FileAuthStorageBackend {
     auth_path: PathBuf,
@@ -75,7 +85,7 @@ impl FileAuthStorageBackend {
             Ok(mut file) => {
                 // The TS initializer writes exactly "{}".
                 use std::io::Write;
-                let _ = file.write_all(b"{}");
+                file.write_all(b"{}")?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
@@ -83,45 +93,49 @@ impl FileAuthStorageBackend {
         Ok(())
     }
 
-    /// TS `acquireLockSyncWithRetry`: 10 attempts, 20ms apart, retrying only
-    /// contention (ELOCKED); other errors fail fast.
-    fn acquire_lock(&self) -> Result<LockGuard> {
-        let mut last_error: Option<std::io::Error> = None;
-        for _ in 1..=10 {
-            match LockGuard::acquire(&self.auth_path, STALE_AFTER) {
-                Ok(guard) => return Ok(guard),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if last_error.is_none() {
-                        last_error = Some(error);
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        Err(anyhow::anyhow!(
-            "Failed to acquire auth storage lock: {}",
-            last_error.map_or_else(|| "busy".into(), |e| e.to_string())
-        ))
+    fn canonical_path(&self) -> Result<PathBuf> {
+        self.ensure_parent_dir()?;
+        self.ensure_file_exists()?;
+        // TS async locking and atomic writes resolve the leaf target. Lock,
+        // read and rename that same document; never replace an auth symlink.
+        Ok(fs::canonicalize(&self.auth_path)?)
     }
-}
 
-/// Same-process serialization for one auth document.
-///
-/// TS's synchronous auth lock runs on one thread, so same-process calls never
-/// contend; the threaded Rust engine would pay the 10x20ms retry against itself.
-/// The file protocol is the correctness mechanism.
-fn process_lock(path: &Path) -> MutexGuard<'static, ()> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
-    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let lock = {
-        let mut registry = registry.lock().expect("auth process-lock registry");
-        *registry
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
-    };
-    lock.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn transact(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
+        kind: TransactionKind,
+    ) -> Result<()> {
+        let path = self.canonical_path()?;
+        let guard = AuthDocumentGuard::acquire(&path, kind)?;
+        let identity = fs::metadata(&path)
+            .ok()
+            .and_then(|meta| stat_identity(&meta));
+        let current = fs::read_to_string(&path)?;
+        let ((), next) = update(Some(current.clone()))?;
+        guard.ensure_owned()?;
+        if let Some(next) = next {
+            // Reject bypass changes already visible here, including logout or
+            // grant replacement during the token fetch. This check and rename
+            // are not an atomic compare-and-swap against arbitrary writers.
+            anyhow::ensure!(
+                identity
+                    == fs::metadata(&path)
+                        .ok()
+                        .and_then(|meta| stat_identity(&meta))
+                    && fs::read_to_string(&path).ok().as_deref() == Some(current.as_str()),
+                "auth document changed during transaction"
+            );
+            guard.ensure_owned()?;
+            super::super::settings::storage::atomic_write_with(
+                &path,
+                &next,
+                super::super::settings::storage::AtomicWriteOptions { fsync: true },
+            )?;
+        }
+        guard.ensure_owned()?;
+        Ok(())
+    }
 }
 
 /// The stat identity a cached read is validated against: every writer renames the document in
@@ -183,67 +197,56 @@ fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
 }
 
 impl AuthStorageBackend for FileAuthStorageBackend {
-    /// On a hit, one `stat` and the cached content; on a miss, the full
-    /// locked protocol cycle, which also populates the cache.
     fn read(&self) -> Result<Option<String>> {
-        let _process_guard = process_lock(&self.auth_path);
-        let now_identity = fs::metadata(&self.auth_path)
+        let path = self.canonical_path()?;
+        let now_identity = fs::metadata(&path)
             .ok()
-            .and_then(|metadata| stat_identity(&metadata));
+            .and_then(|meta| stat_identity(&meta));
+        // A validated cached snapshot is safe while a refresh holds the document
+        // lock. Do not block ordinary status reads behind the token transport.
         if let Some(identity) = now_identity {
             let cache = read_cache()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = cache.get(&self.auth_path) {
+            if let Some(entry) = cache.get(&path) {
                 if entry.identity == identity {
                     return Ok(Some(entry.content.clone()));
                 }
             }
         }
-        self.ensure_parent_dir()?;
-        self.ensure_file_exists()?;
-        // A read can arrive before the initializer created the document,
-        // so re-stat for the identity that pairs with this read.
-        let now_identity = fs::metadata(&self.auth_path)
+        let guard = AuthDocumentGuard::acquire(&path, TransactionKind::Ordinary)?;
+        let identity = fs::metadata(&path)
             .ok()
-            .and_then(|metadata| stat_identity(&metadata));
-        let guard = self.acquire_lock()?;
-        let content = fs::read_to_string(&self.auth_path).ok();
-        drop(guard);
-        if let (Some(identity), Some(content)) = (now_identity, content.as_deref()) {
+            .and_then(|meta| stat_identity(&meta));
+        let content = fs::read_to_string(&path)?;
+        guard.ensure_owned()?;
+        if let Some(identity) = identity {
             read_cache()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(
-                    self.auth_path.clone(),
+                    path,
                     CachedRead {
                         identity,
-                        content: content.to_string(),
+                        content: content.clone(),
                     },
                 );
         }
-        Ok(content)
+        Ok(Some(content))
     }
 
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()> {
-        let _process_guard = process_lock(&self.auth_path);
-        self.ensure_parent_dir()?;
-        self.ensure_file_exists()?;
-        let guard = self.acquire_lock()?;
-        let current = fs::read_to_string(&self.auth_path).ok();
-        let ((), next) = update(current)?;
-        if let Some(next) = next {
-            super::super::settings::storage::atomic_write_with(
-                &self.auth_path,
-                &next,
-                super::super::settings::storage::AtomicWriteOptions { fsync: true },
-            )?;
-        }
-        drop(guard);
-        Ok(())
+        self.transact(update, TransactionKind::Ordinary)
+    }
+
+    fn with_refresh_lock(
+        &self,
+        update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
+    ) -> Result<()> {
+        self.transact(update, TransactionKind::Refresh)
     }
 }
 
@@ -287,6 +290,28 @@ pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn ordinary_file_auth_survives_unsupported_rotating_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+        backend
+            .with_lock(&mut |_| Ok(((), Some("{}".into()))))
+            .unwrap();
+        let mut entered = false;
+        assert!(backend
+            .with_refresh_lock(&mut |_| {
+                entered = true;
+                Ok(((), None))
+            })
+            .is_err());
+        assert!(
+            !entered,
+            "unsupported rotating refresh reached token callback"
+        );
+        assert_eq!(backend.read().unwrap().as_deref(), Some("{}"));
+    }
 
     #[test]
     fn file_backend_round_trip_and_modes() {

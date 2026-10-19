@@ -39,8 +39,6 @@ pub(crate) async fn build_faux_engine_with(
     options: &RunOptions,
     script: &serde_json::Value,
     session_manager: Option<pa_core::session::manager::SessionManager>,
-    // The execution mode label carries through the real path only.
-    _execution_mode: &str,
     embedding: &HeadlessEmbedding,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
@@ -138,18 +136,20 @@ pub(crate) async fn build_faux_engine_with(
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message: None,
+            context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
+            context_startup_admitted_user_ids: Vec::new(),
+            on_initial_context_selection: None,
             cron_store: None,
-            // Faux verification harness: no product telemetry.
             semantic_edges: None,
             steering_mode: None,
             follow_up_mode: None,
-            telemetry: None,
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
             mcp_manager: None,
             model: Some(agent_model),
             thinking_level,
             stream_fn: Some(stream_fn),
+            ollama_cloud: None,
             tools: super::builtin_tools(&config.cwd),
             custom_system_prompt: config.system_prompt.clone(),
             prompt_guidelines: config.append_system_prompt.clone(),

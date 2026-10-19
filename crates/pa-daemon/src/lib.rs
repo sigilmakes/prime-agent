@@ -36,7 +36,6 @@ pub(crate) mod bash_notices;
 pub(crate) mod boot_reap;
 pub mod branch_navigation;
 pub(crate) mod child_status_notices;
-mod compact_autorefine;
 pub mod compaction;
 mod compaction_outcome;
 pub(crate) mod compaction_supervision;
@@ -60,6 +59,7 @@ pub mod mcp_login;
 pub(crate) mod messaging;
 pub mod model_allowlist;
 pub(crate) mod model_catalog;
+mod model_refresh_worker;
 pub(crate) mod model_switch;
 mod overflow_compaction;
 pub mod ownership;
@@ -68,6 +68,7 @@ pub(crate) mod peer;
 pub(crate) mod peer_client;
 pub(crate) mod peer_tickets;
 pub mod platform;
+pub(crate) mod plugin_commands;
 pub mod prompt_admission;
 pub mod protocol;
 pub(crate) mod queue_commands;
@@ -123,8 +124,3 @@ pub(crate) mod user_bash;
 pub mod util;
 pub mod worker;
 pub(crate) mod worker_stderr;
-
-#[cfg(test)]
-pub(crate) mod test_support;
-#[cfg(test)]
-pub(crate) mod trace_test_env;

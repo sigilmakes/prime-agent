@@ -287,25 +287,6 @@ fn dominant_bash<'a>(details: &'a IpythonDetails, code: &str) -> Option<&'a Bash
         .filter(|bash| bash.lines * BASH_DOMINANCE_DIVISOR >= input_line_count(code))
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct BashCellStats {
-    pub(crate) bash_lines: usize,
-    pub(crate) cell_lines: usize,
-    pub(crate) count: usize,
-}
-
-/// The bash stats of a settled ipython card that renders as bash.
-pub(crate) fn bash_dominated_stats(card: &ToolCallCard) -> Option<BashCellStats> {
-    let code = cell_code(card).trim_end();
-    let details = IpythonDetails::parse(&card.result.as_ref()?.details);
-    let bash = dominant_bash(&details, code)?;
-    Some(BashCellStats {
-        bash_lines: bash.lines,
-        cell_lines: input_line_count(code),
-        count: bash.count,
-    })
-}
-
 /// `\u{2191}in \u{2193}out lines` (TS `lineCounts`): non-empty input
 /// lines; output from the structured fields (edits show the diff, so
 /// count zero).

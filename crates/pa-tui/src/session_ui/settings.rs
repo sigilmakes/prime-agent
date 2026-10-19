@@ -9,7 +9,7 @@ use super::{
 
 /// The `/reload` task's report: the daemon reloaded the session's live
 /// inputs, or the failure message.
-pub(crate) type ReloadNote = Result<(), String>;
+pub(crate) type ReloadNote = Result<serde_json::Value, String>;
 
 /// The question a pending confirm answers (callers await inline in TS;
 /// the TUI loop parks the continuation instead).
@@ -259,14 +259,20 @@ impl SessionUi {
             // No settings seam: the tier row reads "default", never a blank value.
             values.default_service_tier = "default".to_string();
         }
-        // This surface ships the builtin themes.
-        values.available_themes = pa_types::themes::BUILTIN_THEME_NAMES
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        values.available_themes = match crate::theme::available_theme_names() {
+            Ok(names) => names,
+            Err(error) => {
+                self.error_row(&format!("{error:#}"), view);
+                pa_types::themes::BUILTIN_THEME_NAMES
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            }
+        };
+        // The row reports the actual palette, including a startup fallback.
+        values.theme.clone_from(&view.theme.name);
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
-        self.track_menu_opened("settings", "command");
         self.dirty = true;
     }
 
@@ -292,13 +298,10 @@ impl SessionUi {
             crate::settings_menu::SettingsMenuAction::Cancel => {
                 view.settings_menu = None;
             }
-            crate::settings_menu::SettingsMenuAction::PreviewTheme { name } => {
-                // Switch live without persisting.
-                view.theme = crate::app::load_theme(&name);
-            }
-            crate::settings_menu::SettingsMenuAction::RestoreTheme { name } => {
-                // Preview the row's theme back.
-                view.theme = crate::app::load_theme(&name);
+            crate::settings_menu::SettingsMenuAction::PreviewTheme { name }
+            | crate::settings_menu::SettingsMenuAction::RestoreTheme { name } => {
+                // Switch live without persisting; failed previews are visible.
+                self.apply_theme(&name, view);
             }
             crate::settings_menu::SettingsMenuAction::Change { id, value } => {
                 self.apply_settings_change(id, &value, view).await;
@@ -580,17 +583,41 @@ impl SessionUi {
                 self.apply_thinking_level(value, view).await;
             }
             "theme" => {
+                // Validate before persisting. An invalid file must never become
+                // a saved preference while silently painting another palette.
+                let Some(theme) = self.resolve_theme(value, view) else {
+                    return;
+                };
                 if let Some(settings) = &self.client_settings {
                     if let Err(error) = settings.set_theme(value) {
                         self.error_row(&format!("{error:#}"), view);
                         return;
                     }
                 }
-                view.theme = crate::app::load_theme(value);
+                view.theme = theme;
             }
             other => {
                 self.error_row(&format!("Unknown setting: {other}"), view);
             }
+        }
+    }
+
+    /// Resolve through the same product loader as startup, but report errors
+    /// inside the UI instead of writing through the mounted terminal.
+    fn resolve_theme(&mut self, name: &str, view: &mut AgentView) -> Option<crate::theme::Theme> {
+        match crate::theme::load_named_theme(name, view.theme.mode) {
+            Ok(theme) => Some(theme),
+            Err(error) => {
+                view.theme = crate::theme::Theme::builtin("prime", view.theme.mode);
+                self.error_row(&format!("{error:#}; using prime theme."), view);
+                None
+            }
+        }
+    }
+
+    fn apply_theme(&mut self, name: &str, view: &mut AgentView) {
+        if let Some(theme) = self.resolve_theme(name, view) {
+            view.theme = theme;
         }
     }
 
@@ -777,20 +804,28 @@ impl SessionUi {
     /// The reload box replaces the editor while the daemon reload runs; the
     /// run loop folds the outcome in when it lands.
     pub(super) fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
-        view.reload_box = Some("Reloading keybindings, skills, prompts, themes...".to_string());
+        if !self.client.supports_plugin_commands() {
+            self.error_row(
+                "Native plugin reload is not supported by this worker.",
+                view,
+            );
+            return Ok(());
+        }
+        view.reload_box =
+            Some("Reloading plugins, keybindings, skills, prompts, themes...".to_string());
         self.dirty = true;
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let notes = self.reload_notes.clone();
         let task = tokio::spawn(async move {
             let outcome = client
-                .request_ok(DaemonCommand::Reload {
+                .request_ok(DaemonCommand::PluginCommand {
                     id: None,
                     active_session_id,
+                    text: "/reload".to_string(),
                     rest: Map::default(),
                 })
                 .await
-                .map(|_| ())
                 .map_err(|error| format!("{error:#}"));
             let _ = notes.send(outcome);
         });
@@ -804,7 +839,7 @@ impl SessionUi {
         self.reload = None;
         view.reload_box = None;
         match outcome {
-            Ok(()) => {
+            Ok(data) => {
                 // The view rebuilds from the durable session store, so client status rows
                 // drop exactly like the TS re-mount.
                 self.rebuild_transcript(view).await;
@@ -813,23 +848,29 @@ impl SessionUi {
                 let mut keybindings = view.editor.keybindings().clone();
                 keybindings.reload();
                 view.editor.set_keybindings(keybindings);
-                // An unknown theme name keeps the current theme (the startup loader's
-                // fallback).
-                if let Some(settings) = &self.client_settings {
-                    if let Some(name) = settings.theme() {
-                        view.theme = crate::app::load_theme(&name);
-                    }
-                }
                 // The model catalog re-fetch lands through the run loop's channel.
                 self.spawn_model_catalog_refresh();
                 // The same refresh re-fetches the slash-command catalog (skills may have
                 // changed).
                 self.spawn_command_catalog_refresh();
                 // Tracked, so a back-to-back status rewrites it in place.
-                self.note("Reloaded keybindings, skills, prompts, themes", view);
+                let text = data
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Reloaded plugins, keybindings, skills, prompts, themes");
+                self.note(text, view);
+                if let Some(name) = self
+                    .client_settings
+                    .as_ref()
+                    .and_then(|settings| settings.theme())
+                {
+                    self.apply_theme(&name, view);
+                }
             }
             Err(error) => {
                 self.error_row(&format!("Reload failed: {error}"), view);
+                // Disabled generations may have retired despite a failed replacement.
+                self.spawn_command_catalog_refresh();
             }
         }
         self.dirty = true;

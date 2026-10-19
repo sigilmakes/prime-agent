@@ -9,8 +9,7 @@ use super::{
 
 impl SessionUi {
     /// Slash-command dispatch: builtin client commands without a UI report unavailability, session
-    /// commands forward to the session, unknown commands get the suggestion error or pass through
-    /// as a prompt; `behavior` passes through, so a slash-prefixed follow-up keeps its lane.
+    /// commands forward to the session, unknown commands get an explicit rejection, never a model prompt; `behavior` passes through, so a slash-prefixed follow-up keeps its lane.
     pub(super) async fn handle_slash(
         &mut self,
         text: &str,
@@ -63,38 +62,146 @@ impl SessionUi {
         }
 
         let Some(resolved) = registry.parse(text) else {
-            // Oversized names are prompts; close typos get the suggestion error,
-            // everything else passes through to the model.
-            if name.chars().count() > 64 {
+            // Input can arrive before the background discovery settles. Only this explicit
+            // command path waits for discovery; first paint never waits for it.
+            if !name.starts_with("skill:") && self.plugin_catalog.is_null() {
+                self.command_refresh_epoch += 1;
+                match self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::GetCommands {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            rest: Map::default(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(data) => self.apply_command_catalog(
+                        CommandCatalogUpdate {
+                            epoch: self.command_refresh_epoch,
+                            skill_commands: crate::autocomplete::skill_command_entries(&data),
+                            plugin_catalog: data,
+                        },
+                        view,
+                    ),
+                    Err(error) => {
+                        self.error_row(&format!("Command discovery failed: {error:#}"), view);
+                        return Ok(());
+                    }
+                }
+            }
+            // A plugin name takes precedence over a prompt template with the same name.
+            let is_plugin = self
+                .plugin_catalog
+                .get("commands")
+                .and_then(Value::as_array)
+                .is_some_and(|commands| {
+                    commands.iter().any(|entry| {
+                        entry.get("name").and_then(Value::as_str) == Some(name.as_str())
+                            && entry.get("source").and_then(Value::as_str) == Some("plugin")
+                    })
+                });
+            if is_plugin {
+                return self.handle_plugin_command(text, view).await;
+            }
+            // Skills and prompt templates keep their existing expansion path. Plugin commands
+            // and unknown slash input must never become paid model prompts.
+            if name.starts_with("skill:")
+                || self
+                    .plugin_catalog
+                    .get("commands")
+                    .and_then(Value::as_array)
+                    .is_some_and(|commands| {
+                        commands.iter().any(|entry| {
+                            entry.get("name").and_then(Value::as_str) == Some(name.as_str())
+                                && entry.get("source").and_then(Value::as_str) == Some("prompt")
+                        })
+                    })
+            {
                 return self.send_prompt(text, behavior, view);
             }
+            if self.client.supports_plugin_commands() {
+                return self.handle_plugin_command(text, view).await;
+            }
             let candidates = registry.suggestion_candidates();
-            return match pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
+            if let Some(suggestion) =
+                pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
             {
-                Some(suggestion) => {
-                    self.note(
-                        &format!("Unknown command: /{name}. Did you mean /{suggestion}?"),
-                        view,
-                    );
-                    Ok(())
-                }
-                None => self.send_prompt(text, behavior, view),
-            };
+                self.note(
+                    &format!("Unknown command: /{name}. Did you mean /{suggestion}?"),
+                    view,
+                );
+            } else {
+                self.error_row(&format!("Unknown command: /{name}. Plugin commands are not supported by this worker."), view);
+            }
+            return Ok(());
         };
 
         let command = registry
             .get(resolved.name)
             .expect("resolved name is builtin");
-        // `agent command used` (TS `captureAgentCommandUsed`): one report
-        // per submitted builtin, client and session commands alike, by its
-        // canonical name, before the command runs.
-        self.track_command_used(resolved.name);
         match command.execution {
             SlashCommandExecution::Session => self.send_prompt(text, behavior, view),
             SlashCommandExecution::Client => {
                 self.dispatch_client_command(&resolved, text, view).await
             }
         }
+    }
+
+    /// Dispatch user plugin input without crossing the model-prompt seam. Metadata from the
+    /// offered command binds invocation to its generation; a reload cannot silently retarget it.
+    async fn handle_plugin_command(&mut self, text: &str, view: &mut AgentView) -> Result<()> {
+        if !self.client.supports_plugin_commands() {
+            self.error_row("Plugin commands are not supported by this worker.", view);
+            return Ok(());
+        }
+        let mut rest = Map::default();
+        let target = pa_types::slash_commands::parse_slash_command(text).and_then(|(name, _)| {
+            self.plugin_catalog
+                .get("commands")
+                .and_then(Value::as_array)
+                .and_then(|commands| {
+                    commands.iter().find(|entry| {
+                        entry.get("source").and_then(Value::as_str) == Some("plugin")
+                            && entry.get("name").and_then(Value::as_str) == Some(name.as_str())
+                    })
+                })
+                .and_then(|entry| entry.get("target"))
+        });
+        if let Some(target) = target {
+            rest.insert("target".to_string(), target.clone());
+        }
+        match self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::PluginCommand {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    text: text.to_string(),
+                    rest,
+                },
+            )
+            .await
+        {
+            Ok(data) => {
+                if let Some(text) = data.get("text").and_then(Value::as_str) {
+                    self.plain_row(text, view);
+                }
+                self.spawn_command_catalog_refresh();
+            }
+            Err(error) => {
+                self.error_row(&format!("{error:#}"), view);
+                // A valid reconcile can retire disabled generations before another
+                // replacement fails. Re-query instead of retaining those stale rows.
+                if pa_types::slash_commands::parse_slash_command(text)
+                    .is_some_and(|(name, _)| matches!(name.as_str(), "plugins" | "reload"))
+                {
+                    self.spawn_command_catalog_refresh();
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Create a fresh session and rebind the view to it (the `/new` flow,
@@ -110,7 +217,6 @@ impl SessionUi {
         view.editor.clear_history();
         view.editor.set_text("");
         self.note(&format!("started session {id}"), view);
-        self.track_feature_outcome("new", "completed", None);
         Ok(())
     }
 
@@ -194,8 +300,6 @@ impl SessionUi {
                     return Ok(());
                 }
                 self.open_model_picker(view, "").await?;
-                self.track_menu_opened("model", "command");
-                self.track_feature_outcome("model", "initiated", None);
             }
             "effort" => {
                 let Some(state) = self.connection_state(view).await else {
@@ -225,7 +329,6 @@ impl SessionUi {
                 match effort_picker::effort_command(&levels, current.as_deref(), &resolved.args) {
                     effort_picker::EffortCommandOutcome::Open(picker) => {
                         view.choice_picker = Some(picker);
-                        self.track_feature_outcome("effort", "initiated", None);
                     }
                     effort_picker::EffortCommandOutcome::Unsupported => {
                         self.note("Current model does not support thinking", view);
@@ -248,7 +351,6 @@ impl SessionUi {
             }
             "tree" => {
                 if resolved.args.is_empty() {
-                    self.track_feature_outcome("tree", "initiated", None);
                     self.open_tree_selector(view, None).await?;
                 } else {
                     self.note("Usage: /tree", view);
@@ -256,7 +358,6 @@ impl SessionUi {
             }
             "fork" => {
                 if resolved.args.is_empty() {
-                    self.track_feature_outcome("fork", "initiated", None);
                     self.open_fork_selector(view).await?;
                 } else {
                     self.note("Usage: /fork", view);
@@ -264,7 +365,6 @@ impl SessionUi {
             }
             "clone" => {
                 if resolved.args.is_empty() {
-                    self.track_feature_outcome("clone", "initiated", None);
                     self.handle_clone_command(view).await?;
                 } else {
                     self.note("Usage: /clone", view);
@@ -285,7 +385,6 @@ impl SessionUi {
                 if resolved.args.is_empty() {
                     self.open_provider_auth(AuthSelectorKind::Login, view)
                         .await?;
-                    self.track_feature_outcome("login", "initiated", None);
                 } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
@@ -296,7 +395,6 @@ impl SessionUi {
                 if resolved.args.is_empty() {
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
                         .await?;
-                    self.track_feature_outcome("logout", "initiated", None);
                 } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
@@ -310,9 +408,6 @@ impl SessionUi {
                     format!("/import {}", resolved.args)
                 };
                 self.open_import_confirm(&command_text, view);
-            }
-            "traces" => {
-                self.handle_traces_command(resolved, view).await?;
             }
             // `/nightly [on|off|status]` (TS `interactive-mode.ts`
             // 5455-5484): status resolves the effective channel; on (or
@@ -487,28 +582,6 @@ impl SessionUi {
                     _ => self.error_row("Usage: /factory [on|off|status]", view),
                 }
             }
-            // `/telemetry [status|on|off]`: the report (on/off and why, the
-            // endpoint, the installation id), or the persisted switch the
-            // running telemetry clients re-read at their next send.
-            "telemetry" => {
-                let Some(settings) = &self.client_settings else {
-                    self.note("/telemetry is not available in this client yet", view);
-                    return Ok(());
-                };
-                let report = match resolved.args.trim().to_lowercase().as_str() {
-                    "" | "status" => Ok(settings.telemetry_status()),
-                    "on" => settings.set_telemetry_enabled(true),
-                    "off" => settings.set_telemetry_enabled(false),
-                    _ => {
-                        self.error_row("Usage: /telemetry [status|on|off]", view);
-                        return Ok(());
-                    }
-                };
-                match report {
-                    Ok(report) => self.note(&report, view),
-                    Err(error) => self.error_row(&format!("{error:#}"), view),
-                }
-            }
             // `/update` (the TS->Rust migration path): the confirm, then
             // the download+install runs OUT-OF-BAND (a background task —
             // the TUI stays mounted, the daemon keeps running, and the
@@ -546,17 +619,8 @@ impl SessionUi {
             // The auth flows run in the client process; other management subcommands
             // surface through the `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
-            // `/plugins [search]` opens the `/mcp` view (this client folds the
-            // catalog into it); an argument prefills its search field.
-            "plugins" => {
-                self.open_mcp_view("/plugins", view, "").await?;
-                let search = resolved.args.trim();
-                if !search.is_empty() {
-                    if let Some(mcp) = view.mcp_view.as_mut() {
-                        mcp.paste(search);
-                    }
-                }
-            }
+            // Native Lua lifecycle management is worker-owned. MCP connections live at /mcp.
+            "plugins" => self.handle_plugin_command(text, view).await?,
             // An explicit `.jsonl` path exports the current branch; anything else
             // exports HTML.
             "export" => {
@@ -588,7 +652,6 @@ impl SessionUi {
                     Some("Hotkeys".to_string()),
                     InfoContent::Markdown(crate::hotkeys::hotkeys_guide(view.editor.keybindings())),
                 );
-                self.track_menu_opened("hotkeys", "command");
             }
 
             "session" => {
@@ -618,7 +681,6 @@ impl SessionUi {
                                 name.as_deref(),
                             )),
                         );
-                        self.track_menu_opened("session", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -660,7 +722,6 @@ impl SessionUi {
                                 &tree, width, scope,
                             )),
                         );
-                        self.track_menu_opened("context", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -695,7 +756,6 @@ impl SessionUi {
                         rows.push(Vec::new());
                         rows.extend(info_commands::system_prompt_body_rows(prompt));
                         self.open_info_panel(view, None, InfoContent::Rows(rows));
-                        self.track_menu_opened("system-prompt", "command");
                     }
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -722,7 +782,6 @@ impl SessionUi {
                     None,
                     InfoContent::Rows(info_commands::logs_rows(&agent_dir.join("logs"))),
                 );
-                self.track_menu_opened("logs", "command");
             }
             // The shipped CHANGELOG.md entries, newest first; the TS accent `What's
             // New` title is the panel's title.
@@ -739,7 +798,6 @@ impl SessionUi {
                         &Self::changelog_path(),
                     )),
                 );
-                self.track_menu_opened("changelog", "command");
             }
             "settings" => {
                 if !resolved.args.is_empty() {
@@ -796,6 +854,58 @@ impl SessionUi {
                     _ => !self.speed_display_enabled,
                 };
                 self.set_speed_display(enable, view);
+            }
+            "refresh" => {
+                if !resolved.args.is_empty() {
+                    view.editor.set_text(text);
+                    self.error_row("Usage: /refresh", view);
+                    return Ok(());
+                }
+                if self.turn_active
+                    || view.working.is_some()
+                    || self.work_in_flight()
+                    || view.compaction.is_some()
+                {
+                    self.note_as(
+                        "Wait for the current response to finish before refreshing models.",
+                        StatusKind::Warning,
+                        view,
+                    );
+                    return Ok(());
+                }
+                let client = self.client.clone();
+                let active_session_id = self.active_session_id.clone();
+                let updates = self.catalog_updates.clone();
+                // The request is user-triggered background work, never a paint/key-path await.
+                tokio::spawn(async move {
+                    let fetched = tokio::time::timeout(
+                        Duration::from_secs(120),
+                        client.request_ok(DaemonCommand::RefreshModels {
+                            id: None,
+                            active_session_id: active_session_id.clone(),
+                            sources: None,
+                            rest: Map::default(),
+                        }),
+                    )
+                    .await;
+                    let outcome = match fetched {
+                        Ok(Ok(value)) => serde_json::from_value(value).map_err(|_| {
+                            "Model catalog refresh failed. Check the agent log for details."
+                                .to_string()
+                        }),
+                        Ok(Err(error)) if error.to_string().contains("cannot refresh models") => Err(
+                            "The running Prime Agent daemon cannot refresh models; restart or update it and try again.".to_string(),
+                        ),
+                        Ok(Err(_)) | Err(_) => Err(
+                            "Model catalog refresh failed. Check the agent log for details."
+                                .to_string(),
+                        ),
+                    };
+                    let _ = updates.send(super::ModelCatalogUpdate::Refresh {
+                        active_session_id,
+                        outcome,
+                    });
+                });
             }
             "reload" => {
                 if !resolved.args.is_empty() {
@@ -873,18 +983,8 @@ impl SessionUi {
         }
     }
 
-    /// Report a menu surface opening (`tui menu opened`), fire-and-forget;
-    /// `menu` names the surface, `source` how it opened.
-    pub(super) fn track_menu_opened(&self, menu: &'static str, source: &'static str) {
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.menu_opened(menu, source).await;
-            });
-        }
-    }
-
     /// Fetch the session's slash-command catalog in the background: the response carries the
-    /// `skill:` commands; a fetch races a rebind silently — the epoch drops the stale response.
+    /// skills, templates, and plugin commands; an epoch drops stale responses after rebind.
     pub(crate) fn spawn_command_catalog_refresh(&mut self) {
         self.command_refresh_epoch += 1;
         let epoch = self.command_refresh_epoch;
@@ -893,6 +993,7 @@ impl SessionUi {
         let _ = self.command_updates.send(CommandCatalogUpdate {
             epoch,
             skill_commands: Vec::new(),
+            plugin_catalog: Value::Null,
         });
         let updates = self.command_updates.clone();
         let client = self.client.clone();
@@ -908,14 +1009,15 @@ impl SessionUi {
                 client.request_ok(request),
             )
             .await;
-            let skill_commands = match fetched {
-                Ok(Ok(data)) => crate::autocomplete::skill_command_entries(&data),
+            let plugin_catalog = match fetched {
+                Ok(Ok(data)) => data,
                 // The catalog clears on failure.
-                Ok(Err(_)) | Err(_) => Vec::new(),
+                Ok(Err(_)) | Err(_) => Value::Null,
             };
             let _ = updates.send(CommandCatalogUpdate {
                 epoch,
-                skill_commands,
+                skill_commands: crate::autocomplete::skill_command_entries(&plugin_catalog),
+                plugin_catalog,
             });
         });
     }
@@ -943,6 +1045,13 @@ impl SessionUi {
             Vec::new()
         };
         view.editor.set_autocomplete_skill_commands(skills);
+        self.plugin_catalog = update.plugin_catalog;
+        let plugins = if self.client.supports_plugin_commands() {
+            crate::autocomplete::plugin_command_entries(&self.plugin_catalog)
+        } else {
+            Vec::new()
+        };
+        view.editor.set_autocomplete_plugin_commands(plugins);
         self.dirty = true;
     }
 

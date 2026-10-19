@@ -17,6 +17,7 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -80,13 +81,41 @@ fn prime_auth(api_key: &str, team_id: &str) -> AuthStorage {
 /// Install a catalog whose both fetch layers point at the mock server and
 /// whose bundled-asset dir is empty (the compiled fallback is the base).
 fn install_mock_catalog(agent_dir: &Path, bundled_dir: &Path, server: &common::MockServer) {
-    let catalog = ModelCatalog::with_urls(
+    let blocked = server.url("/blocked/discovery");
+    let discovery = ["openrouter", "openai", "anthropic", "google", "default"]
+        .into_iter()
+        .map(|id| (id.to_string(), blocked.clone()))
+        .collect();
+    let catalog = ModelCatalog::with_discovery_urls(
         Some(agent_dir.join("models")),
         Some(bundled_dir.to_path_buf()),
         &server.url("/catalog"),
         &server.url("/api/v1"),
+        &discovery,
+        &blocked,
     );
     install_catalog(&agent_dir.join("models.json"), Arc::new(catalog));
+}
+
+/// The original scripts describe curated, then public/private Prime responses.
+/// Route them by source path so concurrent source starts cannot swap payloads.
+async fn catalog_scripted(mut scripts: Vec<common::Scripted>) -> common::MockServer {
+    let curated = scripts.remove(0);
+    common::MockServer::start_routed(HashMap::from([
+        ("/catalog".to_string(), vec![curated]),
+        ("/api/v1/models".to_string(), scripts),
+    ]))
+    .await
+}
+
+async fn catalog_server(responses: Vec<Vec<u8>>) -> common::MockServer {
+    catalog_scripted(
+        responses
+            .into_iter()
+            .map(common::Scripted::Response)
+            .collect(),
+    )
+    .await
 }
 
 /// A layer-A (provider catalog) entry riding a compiled transport tuple
@@ -109,6 +138,31 @@ fn layer_a_entry(id: &str, input: f64) -> Value {
         "contextWindow": 400_000,
         "maxTokens": 128_000,
     })
+}
+
+/// The trusted aggregate is complete; the probe extends it rather than
+/// replacing required provider coverage with a sparse fixture.
+fn layer_a_payload() -> String {
+    let mut models: Vec<Value> = pa_models::transports::compiled_models()
+        .iter()
+        .filter(|model| model.provider != "prime-inference")
+        .map(|model| {
+            json!({
+                "id": model.id,
+                "name": model.name,
+                "api": model.api,
+                "provider": model.provider,
+                "baseUrl": model.base_url,
+                "reasoning": model.reasoning,
+                "input": model.input,
+                "cost": model.cost,
+                "contextWindow": model.context_window,
+                "maxTokens": model.max_tokens,
+            })
+        })
+        .collect();
+    models.push(layer_a_entry(LAYER_A_PROBE_ID, 1.25));
+    json!({ "schemaVersion": 1, "models": models }).to_string()
 }
 
 /// The Prime Inference `/models` payload: every compiled entry repriced
@@ -165,15 +219,9 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
     let pi = pi_payload("z-ai/glm-5.3", 7.0);
-    let server = common::MockServer::start(vec![
+    let server = catalog_server(vec![
         // Layer A (unauthenticated provider catalog).
-        common::ok_json(
-            &json!({ "schemaVersion": 1, "models": [
-                layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-            ]})
-            .to_string(),
-            None,
-        ),
+        common::ok_json(&layer_a_payload(), None),
         // Layer B (credentialed public Prime Inference).
         common::ok_json(&pi.clone(), None),
         // The private-authorization fetch.
@@ -218,12 +266,30 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
 
     // Exactly the three fetches (layer A, layer B, private lane).
     let requests = server.recorded_requests();
-    assert_eq!(requests.len(), 3, "got {}: {requests:#?}", requests.len());
+    let curated: Vec<_> = requests
+        .iter()
+        .filter(|head| head.contains("GET /catalog "))
+        .collect();
+    let inference: Vec<_> = requests
+        .iter()
+        .filter(|head| head.contains("GET /api/v1/models "))
+        .collect();
+    assert_eq!(curated.len(), 1, "exactly one curated fetch: {requests:#?}");
+    assert_eq!(
+        inference.len(),
+        2,
+        "public and private Prime fetches: {requests:#?}"
+    );
+    assert!(
+        requests.iter().all(|head| head.contains("GET /catalog ")
+            || head.contains("GET /api/v1/models ")
+            || head.contains("GET /blocked/discovery ")),
+        "all sources stay on explicit loopback routes"
+    );
     // Layer A is unauthenticated.
-    assert!(requests[0].contains("GET /catalog"));
-    assert!(!requests[0].to_lowercase().contains("authorization:"));
+    assert!(!curated[0].to_lowercase().contains("authorization:"));
     // The credentialed fetches carry Bearer + team (TS parity).
-    for request in &requests[1..] {
+    for request in inference {
         let head = request.to_lowercase();
         assert!(head.contains("get /api/v1/models"), "{request}");
         assert!(head.contains("authorization: bearer test-key"), "{request}");
@@ -236,14 +302,8 @@ async fn startup_refresh_warms_the_process_shared_catalog() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
     write_prime_auth(agent_dir.path(), "test-key", "team-1");
-    let server = common::MockServer::start(vec![
-        common::ok_json(
-            &json!({ "schemaVersion": 1, "models": [
-                layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-            ]})
-            .to_string(),
-            None,
-        ),
+    let server = catalog_server(vec![
+        common::ok_json(&layer_a_payload(), None),
         common::ok_json(&pi_payload("z-ai/glm-5.3", 7.0), None),
     ])
     .await;
@@ -277,8 +337,7 @@ async fn startup_refresh_warms_the_process_shared_catalog() {
 async fn without_credentials_the_compiled_fallback_serves_unchanged() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
-    let server =
-        common::MockServer::start(vec![common::status(500, "Internal Server Error")]).await;
+    let server = catalog_server(vec![common::status(500, "Internal Server Error")]).await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     let auth = AuthStorage::in_memory_without_env(
@@ -312,14 +371,7 @@ async fn without_credentials_the_compiled_fallback_serves_unchanged() {
 async fn layer_a_fetch_adds_entries_the_compiled_fallback_lacks() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
-    let server = common::MockServer::start(vec![common::ok_json(
-        &json!({ "schemaVersion": 1, "models": [
-            layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-        ]})
-        .to_string(),
-        None,
-    )])
-    .await;
+    let server = catalog_server(vec![common::ok_json(&layer_a_payload(), None)]).await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     let auth = AuthStorage::in_memory_without_env(
@@ -352,14 +404,8 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
     ) -> (tempfile::TempDir, ModelRegistry) {
         let agent_dir = tempfile::tempdir().unwrap();
         let bundled_dir = tempfile::tempdir().unwrap();
-        let server = common::MockServer::start(vec![
-            common::ok_json(
-                &json!({ "schemaVersion": 1, "models": [
-                    layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-                ]})
-                .to_string(),
-                None,
-            ),
+        let server = catalog_server(vec![
+            common::ok_json(&layer_a_payload(), None),
             common::ok_json(&pi_payload("z-ai/glm-5.3", 7.0), None),
         ])
         .await;
@@ -420,12 +466,9 @@ async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
     let pi = pi_payload("z-ai/glm-5.3", 7.0);
-    let layer_a = json!({ "schemaVersion": 1, "models": [
-        layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-    ]})
-    .to_string();
+    let layer_a = layer_a_payload();
     let slow = std::time::Duration::from_millis(300);
-    let server = common::MockServer::start_scripted(vec![
+    let server = catalog_scripted(vec![
         common::Scripted::Delayed(common::ok_json(&layer_a, None), slow),
         common::Scripted::Delayed(common::ok_json(&pi.clone(), None), slow),
         common::Scripted::Delayed(common::ok_json(&pi, None), slow),
@@ -454,7 +497,7 @@ async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
 async fn session_model_restore_is_bounded_when_the_fetch_never_lands() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
-    let server = common::MockServer::start_scripted(vec![common::Scripted::Hang]).await;
+    let server = catalog_scripted(vec![common::Scripted::Hang]).await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     let mut registry = ModelRegistry::create(
@@ -481,11 +524,8 @@ async fn session_model_restore_fast_path_never_fetches() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
     let pi = pi_payload("z-ai/glm-5.3", 7.0);
-    let layer_a = json!({ "schemaVersion": 1, "models": [
-        layer_a_entry(LAYER_A_PROBE_ID, 1.25),
-    ]})
-    .to_string();
-    let server = common::MockServer::start(vec![
+    let layer_a = layer_a_payload();
+    let server = catalog_server(vec![
         common::ok_json(&layer_a, None),
         common::ok_json(&pi.clone(), None),
         common::ok_json(&pi, None),

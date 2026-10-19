@@ -61,7 +61,7 @@ fn assistant_usage(message: &AgentMessage) -> Option<pa_types::ai::Usage> {
     };
     match assistant.stop_reason {
         pa_types::ai::StopReason::Aborted | pa_types::ai::StopReason::Error => None,
-        _ => Some(assistant.usage),
+        _ => Some(assistant.usage.clone()),
     }
 }
 
@@ -379,6 +379,19 @@ pub struct CutPointResult {
     pub is_split_turn: bool,
 }
 
+fn first_kept_is_user(entries: &[FileEntry]) -> bool {
+    entries
+        .iter()
+        .find_map(|entry| match entry {
+            FileEntry::Message { message, .. } => Some(matches!(message, AgentMessage::User(_))),
+            FileEntry::Compaction { .. }
+            | FileEntry::CustomMessage { .. }
+            | FileEntry::BranchSummary { .. } => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 /// Find the cut point keeping approximately `keep_recent_tokens`.
 ///
 /// # Panics
@@ -433,13 +446,7 @@ pub fn find_cut_point(
             _ => cut_index -= 1,
         }
     }
-    let is_user_message = matches!(
-        &entries[cut_index],
-        FileEntry::Message {
-            message: AgentMessage::User(_),
-            ..
-        }
-    );
+    let is_user_message = first_kept_is_user(&entries[cut_index..end_index.min(entries.len())]);
     let turn_start_index = if is_user_message {
         None
     } else {
@@ -531,6 +538,7 @@ mod tests {
                 response_id: None,
                 diagnostics: None,
                 usage: pa_types::ai::Usage {
+                    rest: pa_types::JsonMap::new(),
                     input: 100,
                     output: 50,
                     cache_read: 0,
@@ -571,6 +579,7 @@ mod tests {
             response_id: None,
             diagnostics: None,
             usage: pa_types::ai::Usage {
+                rest: pa_types::JsonMap::new(),
                 input: usage_total,
                 output: 0,
                 cache_read: 0,
@@ -588,6 +597,7 @@ mod tests {
 
     fn compaction_summary(timestamp: u64) -> AgentMessage {
         AgentMessage::CompactionSummary(pa_types::session::CompactionSummaryMessage {
+            rest: pa_types::JsonMap::new(),
             summary: "the story so far".to_string(),
             tokens_before: 100,
             retained_message_count: None,
@@ -756,6 +766,7 @@ mod tests {
         });
         assert_eq!(estimate_tokens(&user), 2);
         let usage = pa_types::ai::Usage {
+            rest: pa_types::JsonMap::new(),
             input: 10,
             output: 5,
             cache_read: 1,
@@ -864,6 +875,7 @@ mod tests {
                     response_id: None,
                     diagnostics: None,
                     usage: pa_types::ai::Usage {
+                        rest: pa_types::JsonMap::new(),
                         input: 1,
                         output: 1,
                         cache_read: 0,
@@ -881,5 +893,99 @@ mod tests {
         ];
         let usage = get_last_assistant_usage(&entries).unwrap();
         assert_eq!(usage.total_tokens, 150);
+    }
+    fn selection_entry() -> FileEntry {
+        serde_json::from_value(serde_json::json!({
+            "type": "custom", "id": "selection", "parentId": "a1",
+            "customType": "context_strategy_selection",
+            "data": {"version": 1, "strategy": "original"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn metadata_cut_before_user_preserves_exact_first_kept_without_split() {
+        let entries = vec![
+            user_entry("u1", "root", "old user"),
+            assistant_entry("a1", "u1"),
+            selection_entry(),
+            user_entry("u2", "selection", "new user"),
+            assistant_entry("a2", "u2"),
+        ];
+        let before = entries.clone();
+        let keep = match (&entries[3], &entries[4]) {
+            (
+                FileEntry::Message { message: user, .. },
+                FileEntry::Message {
+                    message: assistant, ..
+                },
+            ) => estimate_tokens(user) + estimate_tokens(assistant),
+            _ => unreachable!(),
+        };
+        let cut = find_cut_point(&entries, 0, entries.len(), keep);
+        assert_eq!(cut.first_kept_entry_index, 2);
+        assert_eq!(entries[cut.first_kept_entry_index], selection_entry());
+        assert!(
+            !cut.is_split_turn,
+            "metadata before a user is not a split turn"
+        );
+        assert_eq!(cut.turn_start_index, None);
+        assert_eq!(
+            entries, before,
+            "classification must not change history or metadata"
+        );
+    }
+
+    #[test]
+    fn metadata_cut_before_assistant_preserves_real_split() {
+        let entries = vec![
+            user_entry("u1", "root", "old user"),
+            assistant_entry("a1", "u1"),
+            user_entry("u2", "a1", "new user"),
+            selection_entry(),
+            assistant_entry("a2", "selection"),
+        ];
+        let cut = find_cut_point(&entries, 0, entries.len(), 1);
+        assert_eq!(cut.first_kept_entry_index, 3);
+        assert_eq!(entries[cut.first_kept_entry_index], selection_entry());
+        assert!(cut.is_split_turn);
+        assert_eq!(cut.turn_start_index, Some(2));
+    }
+
+    #[test]
+    fn metadata_cut_stops_at_each_meaningful_boundary_before_later_user() {
+        let mut boundaries = vec![
+            assistant_entry("a1", "u1"),
+            message_entry("summary", "u1", compaction_summary(1)),
+        ];
+        for value in [
+            serde_json::json!({"type": "compaction", "summary": "old summary", "firstKeptEntryId": "u1", "tokensBefore": 10}),
+            serde_json::json!({"type": "custom_message", "customType": "test", "content": "custom", "display": false}),
+            serde_json::json!({"type": "branch_summary", "fromId": "branch", "summary": "branch summary"}),
+            serde_json::json!({"type": "message", "message": {"role": "custom", "customType": "test", "content": "custom", "display": false, "timestamp": 0}}),
+        ] {
+            let entry: FileEntry = serde_json::from_value(value).unwrap();
+            assert!(matches!(
+                entry,
+                FileEntry::Message { .. }
+                    | FileEntry::Compaction { .. }
+                    | FileEntry::CustomMessage { .. }
+                    | FileEntry::BranchSummary { .. }
+            ));
+            boundaries.push(entry);
+        }
+        for boundary in boundaries {
+            let entries = [
+                selection_entry(),
+                boundary,
+                user_entry("u2", "selection", "later user"),
+            ];
+            assert!(
+                !first_kept_is_user(&entries),
+                "must stop at {:?}",
+                entries[1]
+            );
+        }
+        assert!(!first_kept_is_user(&[selection_entry()]));
     }
 }

@@ -220,6 +220,11 @@ pub async fn run_installer_from(
     channel: Option<&'static str>,
     output: InstallerOutput,
 ) -> std::result::Result<Installed, UpdateFailure> {
+    if let Some(message) = super::managed::self_update_refusal() {
+        return Err(UpdateFailure {
+            message: message.to_string(),
+        });
+    }
     current_target().map_err(|error| UpdateFailure {
         message: format!("{error:#}"),
     })?;
@@ -247,6 +252,11 @@ pub async fn run_bundled_installer(
     prefix: &Path,
     args: &[&std::ffi::OsStr],
 ) -> std::result::Result<Installed, UpdateFailure> {
+    if let Some(message) = super::managed::self_update_refusal() {
+        return Err(UpdateFailure {
+            message: message.to_string(),
+        });
+    }
     // `mut` serves the Windows handoff's post-pre-flight rewind; the
     // unix path only ever borrows the handle.
     #[cfg_attr(not(windows), allow(unused_mut))]

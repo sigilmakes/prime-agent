@@ -403,14 +403,14 @@ fn fail_pending_resolves_a_transport_failure_not_a_refusal() {
 
 /// A scripted worker socket for the direct-link tests: hello frame,
 /// `peer_auth` acceptance, one attach response, then one streamed event.
-async fn spawn_mock_worker(listener: tokio::net::UnixListener) {
+async fn spawn_mock_worker(listener: tokio::net::UnixListener, hello: Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let (stream, _) = listener.accept().await.expect("worker accept");
     let (mut reader, mut writer) = stream.into_split();
     let hello = pa_types::daemon::framing::encode_private_frame(
         &serde_json::json!({ "kind": "outbound", "outboundType": "daemon_hello" }),
-        br#"{"type":"daemon_hello","protocol":{"name":"prime-agent.daemon","version":7}}"#,
+        &serde_json::to_vec(&hello).unwrap(),
         pa_types::daemon::framing::DEFAULT_PRIVATE_FRAME_LIMITS,
     )
     .unwrap();
@@ -451,6 +451,9 @@ async fn spawn_mock_worker(listener: tokio::net::UnixListener) {
                             "snapshot": { "messages": [], "summary": {} },
                         })),
                     )
+                }
+                "refresh_models" | "apply_model_snapshots" | "plugin_command" => {
+                    (true, Some(serde_json::json!({ "directRefresh": true })))
                 }
                 "get_state" => (
                     true,
@@ -500,14 +503,17 @@ async fn spawn_mock_worker(listener: tokio::net::UnixListener) {
     }
 }
 
-#[tokio::test]
-async fn direct_upgrade_routes_attach_and_streams_events() {
+async fn direct_upgrade_routes_attach_and_streams_events(
+    worker_hello: Value,
+    supervisor_hello: Value,
+    refresh_direct: bool,
+) {
     let dir = tempfile::TempDir::new().unwrap();
     let socket = dir.path().join("d.sock");
     let worker_socket = dir.path().join("w.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let worker_listener = tokio::net::UnixListener::bind(&worker_socket).unwrap();
-    tokio::spawn(async move { spawn_mock_worker(worker_listener).await });
+    tokio::spawn(async move { spawn_mock_worker(worker_listener, worker_hello).await });
 
     // Scripted supervisor: advertises direct_peer_transport, answers the
     // ticket request with a ticket for the mock worker socket.
@@ -517,11 +523,7 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
         let (reader, mut writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
         let mut line = String::new();
-        let hello = serde_json::json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": ["direct_peer_transport"],
-        });
+        let hello = supervisor_hello;
         writer
             .write_all(format!("{hello}\n").as_bytes())
             .await
@@ -582,8 +584,8 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
             active_session_id: "s1".to_string(),
             client_id: None,
             capabilities: None,
-            resume_cursor: None,
             telemetry_disabled: None,
+            resume_cursor: None,
             recovery_config: None,
             env: None,
             launch_env: None,
@@ -592,6 +594,51 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
         .await
         .unwrap();
     assert_eq!(data["activeSessionId"], "s1");
+    // Each request must use metadata from the peer that actually serves it.
+    for command in [
+        DaemonCommand::RefreshModels {
+            id: None,
+            active_session_id: "s1".to_string(),
+            sources: None,
+            rest: Map::default(),
+        },
+        DaemonCommand::ApplyModelSnapshots {
+            id: None,
+            active_session_id: "s1".to_string(),
+            since: None,
+            rest: Map::default(),
+        },
+        DaemonCommand::PluginCommand {
+            id: None,
+            active_session_id: "s1".to_string(),
+            text: "/hello".into(),
+            rest: Map::default(),
+        },
+    ] {
+        let data = client.request_ok(command.clone()).await.unwrap();
+        assert_eq!(
+            data,
+            if refresh_direct {
+                json!({"directRefresh": true})
+            } else {
+                json!({"ok": true})
+            },
+        );
+        if refresh_direct && client.hello()["schemaRevision"] == 31 {
+            // An explicit supervisor-only request cannot borrow the worker's capability.
+            let error = client
+                .request_supervisor_with_id(command.clone(), "forced", 100)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(
+                if matches!(command, DaemonCommand::PluginCommand { .. }) {
+                    "cannot execute native plugin commands"
+                } else {
+                    "cannot refresh models"
+                }
+            ));
+        }
+    }
     let state = client
         .request_ok(DaemonCommand::GetState {
             id: None,
@@ -614,6 +661,34 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
     );
     client.close();
     let _ = supervisor.await;
+}
+
+#[tokio::test]
+async fn optional_refresh_routes_against_each_peers_negotiated_metadata() {
+    for (worker_revision, worker_capability, supervisor_revision, expected_direct) in [
+        (None, false, 32, false),
+        (Some(31), true, 32, false),
+        (Some(32), false, 32, false),
+        (Some(32), true, 32, true),
+        (Some(32), true, 31, true),
+    ] {
+        direct_upgrade_routes_attach_and_streams_events(
+            json!({
+                "type": "daemon_hello",
+                "protocol": {"name": "prime-agent.daemon", "version": 7},
+                "schemaRevision": worker_revision,
+                "serverCapabilities": if worker_capability {vec!["model_refresh", "plugin_commands"]} else {vec![]},
+            }),
+            json!({
+                "type": "daemon_hello",
+                "protocol": {"name": "prime-agent.daemon", "version": 7},
+                "schemaRevision": supervisor_revision,
+                "serverCapabilities": ["direct_peer_transport", "model_refresh", "plugin_commands"],
+            }),
+            expected_direct,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -679,5 +754,73 @@ async fn without_capability_upgrade_is_a_no_op() {
     ));
     assert!(!client.upgrade_direct("s1").await.unwrap());
     assert_eq!(client.direct_session_id(), None);
+    client.close();
+}
+
+#[tokio::test]
+async fn optional_commands_refuse_before_registering_any_socket_request() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("d.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move { spawn_mock_daemon(listener).await });
+    let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
+    for command in [
+        DaemonCommand::RefreshModels {
+            id: None,
+            active_session_id: "s1".to_string(),
+            sources: None,
+            rest: Map::default(),
+        },
+        DaemonCommand::ApplyModelSnapshots {
+            id: None,
+            active_session_id: "s1".to_string(),
+            since: None,
+            rest: Map::default(),
+        },
+        DaemonCommand::RefreshAllModels {
+            id: None,
+            rest: Map::default(),
+        },
+    ] {
+        let error = client.request_ok(command.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("cannot refresh models"));
+        let error = client
+            .request_supervisor_with_id(command, "daemon_optional", 100)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot refresh models"));
+        assert!(client.shared.pending.lock().unwrap().is_empty());
+    }
+    assert_eq!(client.next_request_id.load(Ordering::SeqCst), 0);
+    client.close();
+}
+
+#[tokio::test]
+async fn plugin_commands_refuse_legacy_daemon_without_any_socket_write() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket = dir.path().join("plugin.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move { spawn_mock_daemon(listener).await });
+    let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
+    assert!(!client.supports_plugin_commands());
+    for text in ["/hello", "/reload", "/plugins"] {
+        let error = client
+            .request_ok(DaemonCommand::PluginCommand {
+                id: None,
+                active_session_id: "s1".into(),
+                text: text.into(),
+                rest: Map::default(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot execute native plugin commands"),
+            "{error}"
+        );
+        assert!(client.shared.pending.lock().unwrap().is_empty());
+    }
+    assert_eq!(client.next_request_id.load(Ordering::SeqCst), 0);
     client.close();
 }

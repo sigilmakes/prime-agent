@@ -1,0 +1,2 @@
+# Unified diff context lines must retain their leading space.
+vendor/mlua/PRIME_PATCH.patch whitespace=-blank-at-eol

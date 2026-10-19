@@ -1,5 +1,5 @@
 //! The runtime bootstrap code injected into each kernel right after start or
-//! restore: binds the `rlm`, `bash`, and MCP surfaces and pre-imports every
+//! restore: binds the `rlm`, `bash`, plugin, and MCP surfaces and pre-imports every
 //! Python skill.
 
 use super::KernelPythonSkill;
@@ -46,8 +46,9 @@ except Exception as _prime_agent_rlm_error:
         def _raise_missing(self):
             raise RuntimeError(
                 "prime-agent-runtime is not installed in this kernel. "
-                "Remove ~/.prime/agent/kernel-venv so prime-agent can rebuild it, or set "
-                "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
+                "Repair the dedicated Rust environment ~/.prime/agent/kernel-venv-rust "
+                "(or your PRIME_AGENT_KERNEL_VENV override), preserving the TypeScript runtime. "
+                "Alternatively, set PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )
 
@@ -70,10 +71,21 @@ except Exception as _prime_agent_rlm_error:
 
     def bash(command):
         rlm._raise_missing()
+
+# Bind identity without host I/O: the session dispatcher may still be starting.
+# Re-running the bootstrap must not replace the owner of saved plugin views.
+_prime_agent_plugin_session = _prime_agent_os.environ.get("PRIME_AGENT_PLUGIN_SESSION_ID", "")
+if _prime_agent_plugin_session:
+    from rlm.plugins import PluginNamespace as _PrimeAgentPluginNamespace
+    if "_prime_agent_plugin_namespace" not in globals():
+        _prime_agent_plugin_namespace = _PrimeAgentPluginNamespace(_prime_agent_plugin_session)
+    elif _prime_agent_plugin_namespace.session != _prime_agent_plugin_session:
+        raise RuntimeError("plugin namespace belongs to another session")
+    plugin = _prime_agent_plugin_namespace
 "#;
 
-/// The code the session injects right after kernel start/restore: binds the `rlm`, `bash`, and MCP
-/// surfaces, imports every Python skill.
+/// The code the session injects right after kernel start/restore: binds the `rlm`, `bash`, plugin,
+/// and MCP surfaces, imports every Python skill. Plugin catalog I/O waits for user execution.
 #[must_use]
 pub fn build_rlm_bootstrap_code(python_skills: &[KernelPythonSkill]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
@@ -183,6 +195,17 @@ mod tests {
         let code = build_rlm_bootstrap_code(&[]);
         assert!(code.contains("import rlm as _prime_agent_rlm_module"));
         assert!(!code.contains("_PrimeAgentUnavailableSkill"));
+    }
+
+    #[test]
+    fn bootstrap_recovery_advice_preserves_typescript_runtime() {
+        let code = build_rlm_bootstrap_code(&[]);
+        assert!(
+            code.contains("Repair the dedicated Rust environment ~/.prime/agent/kernel-venv-rust")
+        );
+        assert!(code.contains("preserving the TypeScript runtime"));
+        assert!(code.contains("PRIME_AGENT_KERNEL_VENV override"));
+        assert!(!code.contains("Remove ~/.prime/agent/kernel-venv "));
     }
 
     #[test]

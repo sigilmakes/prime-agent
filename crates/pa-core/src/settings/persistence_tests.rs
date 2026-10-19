@@ -54,15 +54,13 @@ fn stale_managers_preserve_other_writers_and_explicit_same_value_choices() {
         fixture(r#"{"theme":"light","telemetry":{"enabled":false,"futureSetting":"keep"}}"#);
     let mut second = SettingsManager::from_storage(storage.clone());
     second.set_theme("dark".into()).unwrap();
-    second.set_telemetry_notice_shown(true).unwrap();
     first.set_theme("light".into()).unwrap();
-    first.set_telemetry_enabled(true).unwrap();
     second.set_quiet_startup(true).unwrap();
     assert_eq!(
         document(storage.as_ref()),
         json!({
             "theme":"light", "quietStartup":true,
-            "telemetry":{"enabled":true,"noticeShown":true,"futureSetting":"keep"}
+            "telemetry":{"enabled":false,"futureSetting":"keep"}
         })
     );
 }
@@ -270,4 +268,179 @@ fn project_percentage_overrides_global_and_stale_writes_preserve_external_settin
     first.set_compaction_threshold_percent(90.0).unwrap();
     first.reload().unwrap();
     assert_eq!(first.get_compaction_threshold_percent(), 60.5);
+}
+
+#[test]
+fn aliased_settings_scopes_have_one_global_authority() {
+    for alias in [
+        "same",
+        "directory",
+        "file",
+        "dangling-file",
+        "missing-file",
+        "missing-tree",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let project = cwd.join(".prime/agent");
+        let global = dir.path().join("global");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&global).unwrap();
+        let agent = match alias {
+            "same" => project.clone(),
+            #[cfg(unix)]
+            "directory" | "missing-file" => {
+                std::fs::create_dir_all(cwd.join(".prime")).unwrap();
+                std::os::unix::fs::symlink(&global, &project).unwrap();
+                global.clone()
+            }
+            #[cfg(unix)]
+            "file" | "dangling-file" => {
+                std::fs::create_dir_all(&project).unwrap();
+                std::os::unix::fs::symlink(
+                    global.join("settings.json"),
+                    project.join("settings.json"),
+                )
+                .unwrap();
+                global.clone()
+            }
+            #[cfg(unix)]
+            "missing-tree" => {
+                std::os::unix::fs::symlink(&cwd, dir.path().join("alias")).unwrap();
+                dir.path().join("alias/.prime/agent")
+            }
+            _ => continue,
+        };
+        if !matches!(alias, "missing-file" | "missing-tree" | "dangling-file") {
+            std::fs::create_dir_all(&agent).unwrap();
+            std::fs::write(
+                agent.join("settings.json"),
+                r#"{"theme":"old","terminal":{"showImages":true,"future":"keep"}}"#,
+            )
+            .unwrap();
+        }
+        let mut manager = SettingsManager::create(&cwd, &agent);
+        assert_eq!(
+            serde_json::to_value(manager.project_settings()).unwrap(),
+            serde_json::to_value(super::Settings::default()).unwrap(),
+            "{alias}"
+        );
+        manager.set_theme("new".into()).unwrap();
+        manager.set_show_images(false).unwrap();
+        assert_eq!(manager.get_theme(), Some("new"), "{alias}");
+        assert!(!manager.get_show_images(), "{alias}");
+        manager.set_project_packages(vec![json!("project")]);
+        assert_eq!(
+            manager.global_settings().packages,
+            Some(vec![json!("project")]),
+            "{alias}"
+        );
+        manager.set_packages(vec![json!("global")]);
+        assert_eq!(
+            manager.settings().packages,
+            Some(vec![json!("global")]),
+            "{alias}"
+        );
+        manager.set_project_resource_array("skills", vec!["project-skill".into()]);
+        assert_eq!(
+            manager.global_settings().skills,
+            Some(vec!["project-skill".into()]),
+            "{alias}"
+        );
+        manager.set_global_resource_array("skills", vec!["global-skill".into()]);
+        assert_eq!(
+            manager.settings().skills,
+            Some(vec!["global-skill".into()]),
+            "{alias}"
+        );
+        manager.reload().unwrap();
+        manager.set_show_images(true).unwrap();
+        manager.set_show_images(false).unwrap();
+        let restarted = SettingsManager::create(&cwd, &agent);
+        assert_eq!(restarted.get_theme(), Some("new"), "{alias}");
+        assert!(!restarted.get_show_images(), "{alias}");
+        assert_eq!(
+            restarted.settings().packages,
+            Some(vec![json!("global")]),
+            "{alias}"
+        );
+        assert_eq!(
+            restarted.settings().skills,
+            Some(vec!["global-skill".into()]),
+            "{alias}"
+        );
+        assert_eq!(
+            serde_json::to_value(manager.project_settings()).unwrap(),
+            serde_json::to_value(super::Settings::default()).unwrap(),
+            "{alias}"
+        );
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(project.join("settings.json")).unwrap())
+                .unwrap();
+        if !matches!(alias, "missing-file" | "missing-tree" | "dangling-file") {
+            assert_eq!(saved["terminal"]["future"], "keep", "{alias}");
+        }
+        #[cfg(unix)]
+        if matches!(alias, "file" | "dangling-file") {
+            assert!(std::fs::symlink_metadata(project.join("settings.json"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn global_settings_file_symlink_survives_atomic_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let target = dir.path().join("target.json");
+    std::fs::write(&target, r#"{"theme":"old","terminal":{"showImages":true}}"#).unwrap();
+    std::os::unix::fs::symlink(&target, agent.join("settings.json")).unwrap();
+    let mut manager = SettingsManager::create(dir.path().join("cwd"), &agent);
+    manager.set_theme("new".into()).unwrap();
+    manager.set_show_images(false).unwrap();
+    assert!(std::fs::symlink_metadata(agent.join("settings.json"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        json!({"theme":"new","terminal":{"showImages":false}})
+    );
+    assert_eq!(manager.reopen().get_theme(), Some("new"));
+}
+
+#[test]
+fn tree_filter_falls_back_to_default_but_keeps_explicit_preferences() {
+    let mut manager = SettingsManager::in_memory(&super::Settings::default());
+    assert_eq!(manager.get_tree_filter_mode(), "default");
+    for mode in ["user-only", "no-tools", "labeled-only", "all", "default"] {
+        manager.set_tree_filter_mode(mode).unwrap();
+        assert_eq!(manager.reopen().get_tree_filter_mode(), mode);
+    }
+    manager.set_tree_filter_mode("invalid").unwrap();
+    assert_eq!(manager.reopen().get_tree_filter_mode(), "default");
+}
+
+#[test]
+fn in_memory_scopes_remain_independent_by_default() {
+    let (storage, mut manager) = fixture(r#"{"packages":["global"],"skills":["global-skill"]}"#);
+    manager.set_project_packages(vec![json!("project")]);
+    manager.set_project_resource_array("skills", vec!["project-skill".into()]);
+    manager.set_packages(vec![json!("changed-global")]);
+    manager.set_global_resource_array("skills", vec!["changed-global-skill".into()]);
+    let restarted = SettingsManager::from_storage(storage);
+    assert_eq!(
+        restarted.global_settings().packages,
+        Some(vec![json!("changed-global")])
+    );
+    assert_eq!(restarted.settings().packages, Some(vec![json!("project")]));
+    assert_eq!(
+        restarted.settings().skills,
+        Some(vec!["project-skill".into()])
+    );
 }

@@ -48,6 +48,7 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
         })
         .unwrap(),
     );
+    let _canonical_owner = own_canonical_store(&engine, store);
     // The turn-end seam: the engine has no worker, so a collector
     // stands in for the queue-lane admission sink.
     let goal_work = goal_admission_collector(&engine);
@@ -246,6 +247,7 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         queued_steering_probe: None,
     })
     .unwrap();
+    let _canonical_owner = own_canonical_store(&engine, store);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,

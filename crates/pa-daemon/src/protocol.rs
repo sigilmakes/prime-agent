@@ -95,10 +95,14 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "get_session_stats",
     "get_context_tree",
     "get_commands",
+    "plugin_command",
     "get_resource_snapshot",
     "replace_acp_mcp_servers",
     "get_model_catalog",
     "get_available_models",
+    "refresh_models",
+    "apply_model_snapshots",
+    "refresh_all_models",
     "get_queue",
     "mutate_queued_message",
     "clear_queue",
@@ -320,6 +324,7 @@ pub fn supported_client_capabilities() -> &'static [&'static str] {
         "client_owned_sessions",
         "elide_snapshot_images",
         "windowed_snapshot",
+        "display_transcript",
     ]
 }
 
@@ -333,6 +338,8 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "heartbeat_catalog",
                 "heartbeat_management",
                 "model_catalog",
+                "model_refresh",
+                "plugin_commands",
                 "side_question_transcript",
                 "transient_bash",
                 "kernel_bash_activity",
@@ -714,6 +721,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::GetCommands {
             active_session_id, ..
         }
+        | DaemonCommand::PluginCommand {
+            active_session_id, ..
+        }
         | DaemonCommand::GetResourceSnapshot {
             active_session_id, ..
         }
@@ -730,6 +740,12 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
             active_session_id, ..
         }
         | DaemonCommand::GetModelCatalog {
+            active_session_id, ..
+        }
+        | DaemonCommand::RefreshModels {
+            active_session_id, ..
+        }
+        | DaemonCommand::ApplyModelSnapshots {
             active_session_id, ..
         }
         | DaemonCommand::GetAvailableModels {
@@ -913,7 +929,8 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
             active_session_id, ..
         } => active_session_id.as_deref(),
         // Control-plane commands carry no session selector.
-        DaemonCommand::List { .. }
+        DaemonCommand::RefreshAllModels { .. }
+        | DaemonCommand::List { .. }
         | DaemonCommand::ListAgentPeers { .. }
         | DaemonCommand::GetWorkerPeerTransport { .. }
         | DaemonCommand::RosterSubscribe { .. }
@@ -987,6 +1004,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetSessionStats { .. } => "get_session_stats",
         DaemonCommand::GetContextTree { .. } => "get_context_tree",
         DaemonCommand::GetCommands { .. } => "get_commands",
+        DaemonCommand::PluginCommand { .. } => "plugin_command",
         DaemonCommand::GetResourceSnapshot { .. } => "get_resource_snapshot",
         DaemonCommand::GetMcpConnections { .. } => "get_mcp_connections",
         DaemonCommand::SetMcpStaticToken { .. } => "set_mcp_static_token",
@@ -994,6 +1012,9 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::ReplaceAcpMcpServers { .. } => "replace_acp_mcp_servers",
         DaemonCommand::GetModelCatalog { .. } => "get_model_catalog",
         DaemonCommand::GetAvailableModels { .. } => "get_available_models",
+        DaemonCommand::RefreshModels { .. } => "refresh_models",
+        DaemonCommand::ApplyModelSnapshots { .. } => "apply_model_snapshots",
+        DaemonCommand::RefreshAllModels { .. } => "refresh_all_models",
         DaemonCommand::GetQueue { .. } => "get_queue",
         DaemonCommand::MutateQueuedMessage { .. } => "mutate_queued_message",
         DaemonCommand::ClearQueue { .. } => "clear_queue",

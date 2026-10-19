@@ -300,17 +300,6 @@ impl AgentSessionEngine {
         };
         match outcome {
             Ok(Ok(CompactOutcome::Ran(run))) => {
-                // Adoption telemetry: every completed compaction counts into
-                // the active run.
-                {
-                    let guard = self.session.blocking_lock();
-                    if let Some(telemetry) = guard
-                        .as_deref()
-                        .and_then(|engine| engine.telemetry.as_ref())
-                    {
-                        telemetry.note_compaction(Some(run.duration_ms));
-                    }
-                }
                 // The post-compaction kernel notice goes out before the
                 // settled end: its `message_start`/`message_end` pair
                 // precedes `compaction_end`.
@@ -321,9 +310,6 @@ impl AgentSessionEngine {
                         return OverflowAttempt::Cancelled;
                     }
                 }
-                // The compaction arms the compact-trigger review; the
-                // retried turn's settled boundary services it.
-                self.mark_compact_auto_refine_pending();
                 // The wire result is the `CompactionResult` shape; the
                 // end event carries `willRetry: true` (the turn re-issues).
                 let result = crate::compaction::compaction_result_value(&run.result, &run.entry);

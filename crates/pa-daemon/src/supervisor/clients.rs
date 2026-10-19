@@ -624,6 +624,17 @@ impl Supervisor {
     ) -> (Vec<Value>, bool) {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
+            DaemonCommand::RefreshAllModels { .. } => {
+                let report = self.refresh_resident_models().await;
+                (
+                    vec![response_line(&response_success(
+                        Some(&command_id),
+                        &type_name,
+                        Some(json!(report)),
+                    ))],
+                    false,
+                )
+            }
             DaemonCommand::Restart { .. } | DaemonCommand::Shutdown { .. } => {
                 // WHO asked: the request's client id and command id land in the daemon log
                 // the moment the drain commits, so the client that stopped the daemon is

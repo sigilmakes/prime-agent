@@ -56,9 +56,9 @@ _RESULT_TRUNCATION_MARKER = f"\n[... result truncated at {_RESULT_TEXT_CAP} char
 _PAYLOAD_CAP = 16 * 1024 * 1024
 
 # Names the session bootstrap re-creates on every start; never snapshotted.
-_ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
-# IPython-injected names that may appear in a snapshot payload; never restored.
-_RESTORE_SKIP = {"In", "Out", "get_ipython"}
+_ALWAYS_SKIP = {"rlm", "mcp", "bash", "plugin", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
+# Legacy IPython names and live plugin bindings are never restored from snapshot data.
+_RESTORE_SKIP = {"In", "Out", "get_ipython", "plugin", "_prime_agent_plugin_namespace"}
 # The target of the last successful snapshot, remembered so an EOF shutdown
 # (the host process died without a graceful dispose) can flush the final
 # namespace before exit. `None` until this process has committed a snapshot:
@@ -183,6 +183,9 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
     try:
         _send({"event": "host_request", "id": rid, "data": data})
         return await future
+    except BaseException:  # cancellation/KeyboardInterrupt must retire native work too
+        _send({"event": "host_cancel", "id": rid})
+        raise
     finally:
         _pending_host.pop(rid, None)
 
@@ -192,8 +195,9 @@ def _fail_pending_host_requests() -> None:
     awaiting cell must unblock or the queued shutdown would never be served."""
     global _host_closed
     _host_closed = True
-    for future in _pending_host.values():
+    for rid, future in _pending_host.items():
         if not future.done():
+            _send({"event": "host_cancel", "id": rid})
             future.set_exception(RuntimeError("host connection closed; host_request cannot be answered"))
 
 
@@ -610,7 +614,17 @@ def _compile_cell(code: str, filename: str) -> tuple[list[types.CodeType], bool]
     return codes, trailing is not None
 
 
-async def _run_codes(codes: list[types.CodeType], ns: dict[str, Any]) -> Any:
+async def _run_codes(
+    codes: list[types.CodeType], ns: dict[str, Any], *, refresh_plugins: bool = False
+) -> Any:
+    if refresh_plugins:
+        # Keep the bootstrap-owned namespace, not a user-rebound alias. Refresh is
+        # part of the guarded execution so host errors/interrupts prevent the cell.
+        namespace = ns.get("_prime_agent_plugin_namespace")
+        if namespace is None:
+            raise RuntimeError("plugin namespace was not initialized by the session bootstrap")
+        await namespace.refresh()
+        ns["plugin"] = namespace
     value: Any = None
     for code_obj in codes:
         value = eval(code_obj, ns)  # noqa: S307 - executing the model's cell is the runtime's job
@@ -661,7 +675,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     try:
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
-        task = _loop.create_task(_run_codes(codes, ns))
+        task = _loop.create_task(_run_codes(codes, ns, refresh_plugins=req.get("refresh_plugins") is True))
         execution.owner = task
         status, value, error = await _run_guarded(task, cell_id)
         result_text: str | None = None
@@ -768,6 +782,18 @@ def _read_snapshot_records(fh: Any, max_bytes: int, max_variable_bytes: int) -> 
     return records
 
 
+def _reject_plugin_snapshot_reference(value: Any) -> None:
+    """Plugin authority is live host state, never portable Python namespace data.
+
+    Pickler persistent_id visits nested containers, instance attributes, closures,
+    defaults and dill's captured globals too; checking only top-level names would
+    let a saved alias smuggle a retired generation into the next kernel.
+    """
+    cls = value if isinstance(value, type) else type(value)
+    if any(base.__module__ == "rlm.plugins" for base in cls.__mro__):
+        raise pickle.PicklingError("live plugin references are not restored from snapshots")
+
+
 def _snapshot_state(
     ns: dict[str, Any],
     path: str,
@@ -784,6 +810,11 @@ def _snapshot_state(
     except Exception as err:  # noqa: BLE001 - dill is provisioned by the host, not a hard dep
         return {"error": f"dill unavailable: {err}"}
     dill.settings["recurse"] = True
+
+    class SnapshotPickler(dill.Pickler):
+        def persistent_id(self, value: Any) -> None:
+            _reject_plugin_snapshot_reference(value)
+            return None
 
     saved: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -854,7 +885,7 @@ def _snapshot_state(
                     limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, budget)
                     buffer = io.BytesIO()
                     try:
-                        dill.dump(value, _CappedWriter(buffer, limit))
+                        SnapshotPickler(_CappedWriter(buffer, limit)).dump(value)
                         blob = buffer.getvalue()
                     except _SnapshotSizeLimitExceeded:
                         if not prune_oversized and budget < max_variable_bytes:
@@ -944,6 +975,7 @@ def _revive_with_live_globals(
     to apply at commit (live ns values always win)."""
     import functools
 
+    _reject_plugin_snapshot_reference(value)
     if memo is None:
         memo = {}
     if id(value) in memo:
@@ -1087,6 +1119,7 @@ def _snapshot_unpickler(dill: Any) -> type:
     class GuardedUnpickler(dill.Unpickler):
         def find_class(self, module: str, name: str) -> Any:
             target = super().find_class(module, name)
+            _reject_plugin_snapshot_reference(target)
             return refuse_raw_fd if target is create_filehandle else target
 
     return GuardedUnpickler
@@ -1130,7 +1163,7 @@ def _restore_state(
     staged: dict[str, Any] = {}
     failed: list[dict[str, str]] = []
     for name, blob in payload.items():
-        if name in _RESTORE_SKIP:
+        if name in _RESTORE_SKIP or name.startswith("_prime_agent_plugin_"):
             continue
         try:
             staged[name] = unpickler(io.BytesIO(blob)).load()

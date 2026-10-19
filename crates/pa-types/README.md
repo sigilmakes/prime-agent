@@ -10,6 +10,8 @@ Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/
 
 Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui/pa-cli) live here because pa-tui depends on pa-types alone:
 - `daemon::framing`: the private-frame codec of the worker socket (direct-attach clients speak it too).
+- `daemon::compatibility`: optional command capability and minimum-schema gates.
+- `model_refresh`: credential-free catalog refresh and local snapshot reports.
 - `daemon::plane`: the session/control command-plane table (worker-side peer gating and client-side socket routing both read it).
 - `daemon::{DaemonPeerTransportTicket, DaemonWorkerPeerGrant, DaemonPeerCommand}`: the direct-transport ticket and grant wire shapes.
 - `goal`: the thread-goal wire state (`GoalState`/`GoalStatus`) shared by the

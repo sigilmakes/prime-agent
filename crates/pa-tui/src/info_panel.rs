@@ -1,6 +1,6 @@
 //! The read-only inline info panel (the operator's 2026-09-26 directive): the client info displays
-//! (`/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`, `/hotkeys`, the `/traces`
-//! blocks, `/list`) render as the docked popup panel over the editor dock instead of flooding the
+//! (`/context`, `/session`, `/system-prompt`, `/logs`, `/changelog`, `/hotkeys`, `/list`)
+//! render as the docked popup panel over the editor dock instead of flooding the
 //! transcript. The content builders are unchanged, so only the mount point moves: ESC closes, focus
 //! returns to the chat (TS renders these displays as chat rows; the panel is a deliberate,
 //! operator-directed Rust delta). Scrollable, because the payloads are unbounded.

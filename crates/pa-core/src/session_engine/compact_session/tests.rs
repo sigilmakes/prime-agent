@@ -28,6 +28,7 @@ fn session_with_turns(cwd: &std::path::Path, turns: usize) -> SessionManager {
                 response_id: None,
                 diagnostics: None,
                 usage: pa_types::ai::Usage {
+                    rest: pa_types::JsonMap::new(),
                     input: 100,
                     output: 20,
                     cache_read: 0,

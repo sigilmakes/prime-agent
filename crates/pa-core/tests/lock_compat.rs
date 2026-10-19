@@ -10,8 +10,11 @@
 
 //! Lock-artifact compatibility through the production call sites: the backends must leave the TS
 //! `proper-lockfile` artifacts — an empty DIRECTORY at `{file}.lock` (a holder removes it on
-//! release, a crashed holder leaves it stale, a contender judges staleness) — and heal a pre-compat
-//! regular FILE at the lock path (`ENOTDIR`).
+//! release, a crashed holder leaves it stale, a contender judges staleness).
+//! Unix auth deliberately rejects legacy regular FILE artifacts, even after a flock is released.
+//! Transition from that legacy Rust protocol requires quiescent offline resolution, never automatic
+//! artifact healing: a momentarily unheld flock does not exclude an older process with an open inode.
+//! Settings retain their separate shared-lock behavior.
 #![cfg(unix)]
 
 use std::path::Path;
@@ -123,64 +126,100 @@ fn settings_write_reports_contention_on_a_live_lock_directory() {
     drop(guard);
 }
 
+/// Existing source auth and foreign artifact identity must survive a failed acquisition.
+/// Reads may update atime; it is not part of the lock ownership or preservation contract.
+#[derive(Debug, PartialEq, Eq)]
+struct AuthArtifacts {
+    auth: Vec<u8>,
+    lock: Vec<u8>,
+    lock_identity: (u64, u64, u32, i64, i64),
+}
+
+fn artifacts(auth: &Path, lock: &Path) -> AuthArtifacts {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(lock).unwrap();
+    AuthArtifacts {
+        auth: std::fs::read(auth).unwrap(),
+        lock: std::fs::read(lock).unwrap(),
+        lock_identity: (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        ),
+    }
+}
+
+fn assert_legacy_refused(auth: &Path, lock: &Path, expected: &AuthArtifacts) {
+    #[derive(Debug)]
+    enum Transaction {
+        Ordinary,
+        Refresh,
+    }
+    let backend = FileAuthStorageBackend::new(auth);
+    for transaction in [Transaction::Ordinary, Transaction::Refresh] {
+        let mut called = false;
+        let mut update = |_| {
+            called = true;
+            Ok(((), Some("{}".to_string())))
+        };
+        let result = match transaction {
+            Transaction::Ordinary => backend.with_lock(&mut update),
+            Transaction::Refresh => backend.with_refresh_lock(&mut update),
+        };
+        assert!(
+            !called,
+            "unsupported {transaction:?} lock entered update callback"
+        );
+        assert_eq!(
+            &artifacts(auth, lock),
+            expected,
+            "unsupported {transaction:?} lock changed source auth or foreign artifact"
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported),
+            "legacy {transaction:?} artifacts require offline resolution, not contention: {error}"
+        );
+    }
+}
+
+const SOURCE_AUTH: &str = r#"{
+    "fixture": { "type": "api_key", "key": "fixture-only-never-real",
+        "futureMetadata": { "nested": [null, false, { "keep": "exact" }] } },
+    "unknown-provider": { "type": "future_kind", "opaque": [null, { "keep": 17 }] }
+}
+"#;
+
 #[test]
-fn auth_write_heals_a_pre_compat_lock_file_artifact() {
+fn auth_write_rejects_a_stale_legacy_file_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.json");
     let lock = lock_path(&auth);
+    std::fs::write(&auth, SOURCE_AUTH).unwrap();
     std::fs::write(&lock, "pre-compat flock artifact").unwrap();
     age(&lock);
-    let backend = FileAuthStorageBackend::new(&auth);
-    backend
-        .with_lock(&mut |current| {
-            assert_eq!(current.as_deref(), Some("{}"));
-            Ok((
-                (),
-                Some(r#"{ "prime": { "type": "api_key", "key": "sk" } }"#.to_string()),
-            ))
-        })
-        .unwrap();
-    assert!(
-        auth.is_file(),
-        "the healed artifact did not block the write"
-    );
-    assert!(!lock.exists(), "the write released its own lock");
+    let expected = artifacts(&auth, &lock);
+    assert_legacy_refused(&auth, &lock, &expected);
 }
 
 #[test]
-fn auth_write_waits_on_a_live_legacy_flock_holder() {
-    // A live pre-compat Rust build still holds the flock on the artifact
-    // FILE: reclaiming it mid-write would corrupt that process's write, so
-    // the heal must treat a held flock as contention, not as garbage.
+fn auth_write_rejects_a_held_and_released_legacy_flock_without_mutation() {
+    // Even a released flock cannot prove that no legacy writer already has
+    // this inode open. Never unlink it or silently switch locking protocols.
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.json");
     let lock = lock_path(&auth);
-    std::fs::write(&auth, "{}").unwrap();
+    std::fs::write(&auth, SOURCE_AUTH).unwrap();
     std::fs::write(&lock, "pre-compat flock artifact").unwrap();
+    age(&lock);
+    let expected = artifacts(&auth, &lock);
     let flock = Flock::hold(&lock);
-    let backend = FileAuthStorageBackend::new(&auth);
-    let error = backend
-        .with_lock(&mut |_| Ok(((), Some("{}".to_string()))))
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("Failed to acquire auth storage lock"),
-        "a live legacy flock holder must look like contention: {error}"
-    );
-    assert!(
-        lock.is_file(),
-        "the failed acquisition must not clobber the live legacy lock"
-    );
+    assert_legacy_refused(&auth, &lock, &expected);
     drop(flock);
-    backend
-        .with_lock(&mut |current| {
-            assert_eq!(current.as_deref(), Some("{}"));
-            Ok((
-                (),
-                Some(r#"{ "prime": { "type": "api_key", "key": "sk" } }"#.to_string()),
-            ))
-        })
-        .unwrap();
-    assert!(!lock.exists(), "the write healed the artifact and released");
+    assert_legacy_refused(&auth, &lock, &expected);
 }

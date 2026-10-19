@@ -17,15 +17,6 @@ use tokio::sync::Mutex;
 /// The status heartbeat interval.
 pub const STATUS_HEARTBEAT_MS: u64 = 5_000;
 
-/// The telemetry outcome names for terminal states (a rollback that ends
-/// serving is `complete` on the old version, the rollback in the message).
-pub const UPDATE_TELEMETRY_STATE_NAMES: &[(UpdateState, &str)] = &[
-    (UpdateState::Complete, "complete"),
-    (UpdateState::Skipped, "skipped"),
-    (UpdateState::Aborted, "aborted"),
-    (UpdateState::Failed, "failed"),
-];
-
 /// Reads and writes one status file.
 pub struct StatusWriter {
     path: PathBuf,

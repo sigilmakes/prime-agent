@@ -13,7 +13,7 @@ pub(crate) enum ModelScope {
 }
 
 impl ModelPicker {
-    /// The scope row's active side (the adoption event's `scoped` value).
+    /// Whether the picker currently shows the session's scoped list.
     pub(crate) fn scoped_side(&self) -> bool {
         matches!(self.scope, ModelScope::Scoped)
     }

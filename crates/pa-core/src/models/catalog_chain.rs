@@ -76,10 +76,16 @@ pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
 #[must_use]
 pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
-    catalog.trigger_refresh_with_credentials(
-        pa_models::RefreshTrigger::Startup,
-        prime_credentials_for_dir(agent_dir),
-    );
+    let dir = agent_dir.to_path_buf();
+    tokio::spawn(async move {
+        let mut registry = super::registry::ModelRegistry::create(
+            AuthStorage::create(&dir),
+            dir.join("models.json"),
+        );
+        registry
+            .refresh_available_models_with_trigger(pa_models::RefreshTrigger::Startup)
+            .await;
+    });
     catalog
 }
 
@@ -90,5 +96,11 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
 pub fn spawn_hourly_refresh(agent_dir: &Path) {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
     let dir = agent_dir.to_path_buf();
-    catalog.spawn_hourly_refresh(move || prime_credentials_for_dir(&dir));
+    catalog.spawn_hourly_refresh_with_discovery(move || {
+        let mut registry = super::registry::ModelRegistry::create(
+            AuthStorage::create(&dir),
+            dir.join("models.json"),
+        );
+        registry.catalog_refresh_credentials()
+    });
 }

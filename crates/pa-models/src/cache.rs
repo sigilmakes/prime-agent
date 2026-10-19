@@ -1,48 +1,211 @@
-//! Scope-keyed last-good catalog cache with hourly, coalesced refresh.
+//! Scope-keyed last-good catalogs with coalesced refresh and disk coherence.
 //!
-//! One last-good snapshot per source URL; a scope change discards the
-//! previous view (an account's models never leak across scopes).
+//! A source owns one path. Scope changes discard the active view. Persistent
+//! locks serialize publishers, while durable scoped tombstones invalidate even
+//! writers that fetched before a revocation. Readers observe external writes.
 
+use std::fs::File;
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::fetch::{CatalogFetcher, FetchOutcome};
+use crate::fetch::{CatalogFetcher, FetchError, FetchOutcome, MAX_RESPONSE_BYTES};
 use crate::offline::is_catalog_offline;
 use crate::CATALOG_REFRESH_INTERVAL_MS;
 
-/// The unauthenticated scope shared by both remote catalog URLs.
+/// The unauthenticated scope shared by the aggregate catalog URLs.
 pub const PUBLIC_SCOPE: &str = "public";
 
 /// Parser turning a fetched payload into the cache's value type.
 pub type CatalogParse<T> = Arc<dyn Fn(&serde_json::Value, &str) -> Result<T, String> + Send + Sync>;
 
+/// Merge validated partial metadata with a previous provider-owned payload.
+/// The callback validates the input envelope and prunes absent IDs. The cache
+/// validates the merged output and persists it, not just its derived models.
+pub type CatalogMergePayload = Arc<
+    dyn Fn(&serde_json::Value, Option<&serde_json::Value>) -> Result<serde_json::Value, String>
+        + Send
+        + Sync,
+>;
+
+/// An optional provider-owned fetch (for discovery protocols with multiple
+/// endpoints). Its result uses the same validation and publication machinery.
+pub type CatalogFetchPayload = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<serde_json::Value, FetchError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Credential-free failure categories. Never contain URLs, headers, parser
+/// diagnostics, file paths, response bodies, or underlying transport errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CatalogRefreshError {
+    #[error("Invalid catalog JSON")]
+    InvalidJson,
+    #[error("Invalid catalog payload")]
+    InvalidPayload,
+    #[error("Catalog request failed with status {status}")]
+    Http { status: u16 },
+    #[error("Catalog refresh failed")]
+    RequestFailed,
+    #[error("Catalog cache persistence failed")]
+    PersistenceFailed,
+}
+
+/// Result category of one refresh (including a shared/coalesced attempt).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CatalogRefreshOutcome {
+    Updated,
+    NotModified,
+    Cached,
+    Offline,
+    Error { error: CatalogRefreshError },
+    MemoryOnly,
+    Revoked { status: u16 },
+    Cancelled,
+}
+
+/// A refresh result with last-good models on recoverable failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogRefreshReport<T> {
+    pub models: Option<T>,
+    pub outcome: CatalogRefreshOutcome,
+}
+
+impl<T> CatalogRefreshReport<T> {
+    fn cancelled() -> Self {
+        Self {
+            models: None,
+            outcome: CatalogRefreshOutcome::Cancelled,
+        }
+    }
+}
+
+/// The current state of a source's active scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogCacheState {
+    Idle,
+    Refreshing,
+    Fresh,
+    Stale,
+    Error,
+}
+
+/// Where the active snapshot came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogCacheSource {
+    None,
+    Disk,
+    Network,
+    Memory,
+}
+
+/// Credential-free freshness information for one source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogCacheStatus {
+    pub state: CatalogCacheState,
+    pub source: CatalogCacheSource,
+    pub fetched_at: Option<u64>,
+    pub checked_at: Option<u64>,
+    pub last_attempt: Option<u64>,
+    pub error: Option<CatalogRefreshError>,
+}
+
 #[derive(Clone)]
 struct Snapshot<T> {
-    scope: String,
-    fetched_at: u64,
-    etag: Option<String>,
-    payload: serde_json::Value,
+    file: SnapshotFile,
     models: T,
 }
 
-/// The disk form of a snapshot (`{url, scope, fetchedAt, etag?, payload}`).
-#[derive(Serialize, Deserialize)]
+/// Older snapshots have neither checkedAt nor revision. Both remain readable.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotFile {
     url: String,
     scope: String,
     fetched_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    checked_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    /// The tombstone epoch observed before this request began. Tombstones stay
+    /// on disk so a writer with no prior snapshot cannot resurrect a revocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revocation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     etag: Option<String>,
     payload: serde_json::Value,
 }
 
+#[derive(Serialize, Deserialize)]
+struct RevocationFile {
+    url: String,
+    scope: String,
+    revision: String,
+}
+
+/// Compare content, not mtime or wall-clock ordering: independent processes can
+/// complete in one millisecond, and revocation can happen without a snapshot.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct DiskVersion {
+    snapshot: Option<[u8; 32]>,
+    revoked: Option<[u8; 32]>,
+}
+
+struct DiskView {
+    version: DiskVersion,
+    snapshot: Option<Vec<u8>>,
+    revoked: Option<Vec<u8>>,
+    unreadable_revocation: bool,
+}
+
+impl DiskView {
+    fn read(path: &Path, url: &str, scope: &str) -> Self {
+        let snapshot = std::fs::read(path).ok();
+        // Read the tombstone AFTER the payload so revocation racing a read
+        // hides a snapshot that was just read from disk.
+        let (revoked, unreadable_revocation) =
+            match std::fs::read(revocation_path(path, url, scope)) {
+                Ok(bytes) => (Some(bytes), false),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, false),
+                Err(_) => (None, true),
+            };
+        Self {
+            version: DiskVersion {
+                snapshot: snapshot
+                    .as_deref()
+                    .map(|bytes| Sha256::digest(bytes).into()),
+                revoked: if unreadable_revocation {
+                    Some([0; 32])
+                } else {
+                    revoked.as_deref().map(|bytes| Sha256::digest(bytes).into())
+                },
+            },
+            snapshot,
+            revoked,
+            unreadable_revocation,
+        }
+    }
+
+    fn revocation(&self, url: &str, scope: &str) -> Option<String> {
+        let revoked: RevocationFile = serde_json::from_slice(self.revoked.as_deref()?).ok()?;
+        (revoked.url == url && revoked.scope == scope).then_some(revoked.revision)
+    }
+}
+
 struct InFlight<T> {
-    result: OnceLock<Option<T>>,
+    result: OnceLock<CatalogRefreshReport<T>>,
     notify: tokio::sync::Notify,
 }
 
@@ -58,9 +221,13 @@ impl<T> InFlight<T> {
 struct CacheState<T> {
     scope: Option<String>,
     snapshot: Option<Snapshot<T>>,
+    observed_disk: DiskVersion,
     pending: Option<Arc<InFlight<T>>>,
     last_attempt: Option<u64>,
     generation: u64,
+    source: CatalogCacheSource,
+    error: Option<CatalogRefreshError>,
+    revoked: bool,
 }
 
 /// Options for [`CatalogCache::refresh`].
@@ -68,13 +235,17 @@ struct CacheState<T> {
 pub struct RefreshOptions {
     /// Skip the hourly gating window (startup, picker open, auth change).
     pub force: bool,
-    /// Extra request headers (credentials for the Prime Inference catalog).
+    /// Extra request headers. Never included in results or status.
     pub headers: Vec<(String, String)>,
     /// Additional staleness guard consulted before applying any result.
     pub is_current: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Provider-specific validation/normalization, before parsing the merged payload.
+    pub merge_payload: Option<CatalogMergePayload>,
+    /// Override the ordinary single-URL HTTP request with provider discovery.
+    pub fetch_payload: Option<CatalogFetchPayload>,
 }
 
-/// The last-good cache for one catalog source.
+/// The last-good cache for one catalog source and its active auth scope.
 pub struct CatalogCache<T> {
     url: Arc<str>,
     cache_path: Option<PathBuf>,
@@ -86,11 +257,35 @@ pub struct CatalogCache<T> {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        // Epoch millis fit u64 for any real clock; overflow degrades to the
-        // same default as an unreadable clock rather than truncating.
         .ok()
         .and_then(|since| u64::try_from(since.as_millis()).ok())
         .unwrap_or_default()
+}
+
+fn revision() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{nanos}-{count}", std::process::id())
+}
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn revocation_path(path: &Path, url: &str, scope: &str) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(url.as_bytes());
+    digest.update([0]);
+    digest.update(scope.as_bytes());
+    sidecar(
+        path,
+        &format!(".revoked-{}", hex::encode(digest.finalize())),
+    )
 }
 
 impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
@@ -108,9 +303,13 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             state: Mutex::new(CacheState {
                 scope: None,
                 snapshot: None,
+                observed_disk: DiskVersion::default(),
                 pending: None,
                 last_attempt: None,
                 generation: 0,
+                source: CatalogCacheSource::None,
+                error: None,
+                revoked: false,
             }),
         }
     }
@@ -123,130 +322,258 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
         self.cache_path.as_deref()
     }
 
-    /// Serve the last-good snapshot for `scope`, loading and re-validating the
-    /// disk snapshot on first access. A scope change discards the previous
-    /// account's view entirely.
+    /// Serve validated last-good data, reloading changed disk state even when
+    /// the scope is unchanged. Unchanged disk state preserves memory-only data.
+    /// A changed scope or disk version invalidates old in-flight publications.
     ///
     /// # Panics
-    ///
     /// Panics if the cache mutex is poisoned.
     pub fn get(&self, scope: &str) -> Option<T> {
         let mut state = self.state.lock().unwrap();
-        if state.scope.as_deref() == Some(scope) {
-            return state
-                .snapshot
+        let disk = self
+            .cache_path
+            .as_deref()
+            .map(|path| DiskView::read(path, &self.url, scope));
+        let changed = state.scope.as_deref() != Some(scope)
+            || disk
                 .as_ref()
-                .map(|snapshot| snapshot.models.clone());
+                .is_some_and(|disk| disk.version != state.observed_disk);
+        if changed {
+            state.scope = Some(scope.to_string());
+            state.generation += 1;
+            state.pending = None;
+            state.last_attempt = None;
+            state.error = None;
+            state.snapshot = disk
+                .as_ref()
+                .and_then(|disk| self.read_snapshot(disk, scope));
+            state.revoked = state.snapshot.is_none()
+                && disk
+                    .as_ref()
+                    .is_some_and(|disk| disk.unreadable_revocation || disk.revoked.is_some());
+            state.observed_disk = disk.map_or_else(DiskVersion::default, |disk| disk.version);
+            state.source = if state.snapshot.is_some() {
+                CatalogCacheSource::Disk
+            } else {
+                CatalogCacheSource::None
+            };
         }
-        state.scope = Some(scope.to_string());
-        state.generation += 1;
-        state.pending = None;
-        state.snapshot = None;
-        state.last_attempt = None;
-        let path = self.cache_path.clone()?;
-        match self.read_snapshot(&path, scope) {
-            Ok(snapshot) => {
-                let models = snapshot.models.clone();
-                state.snapshot = Some(snapshot);
-                Some(models)
-            }
-            // Invalid or missing disk state falls back to the bundled catalog.
-            Err(_) => None,
-        }
+        state
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.models.clone())
     }
 
-    /// The scope recorded in the disk snapshot, when one exists: a fresh
-    /// process's first auth-scope observation seeds its comparison from it,
-    /// so a credential change that predates the process is detected. `None`
-    /// when no snapshot is stored, or it belongs to another source URL.
+    /// Force a disk reload and invalidate any prior in-flight publication.
+    ///
+    /// # Panics
+    /// Panics if the cache mutex is poisoned.
+    pub fn reload_from_disk(&self, scope: &str) -> Option<T> {
+        self.state.lock().unwrap().scope = None;
+        self.get(scope)
+    }
+
+    /// The stored scope for this URL, including older-format snapshots. Used
+    /// only to seed a fresh process's auth-change comparison.
     pub fn stored_scope(&self) -> Option<String> {
-        let path = self.cache_path.as_ref()?;
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = std::fs::read(self.cache_path.as_deref()?).ok()?;
         let stored: SnapshotFile = serde_json::from_slice(&bytes).ok()?;
         (stored.url == self.url.as_ref()).then_some(stored.scope)
     }
 
-    /// Drop the snapshot for `scope` (401/403 revocation); other scopes keep
-    /// their own snapshots.
+    /// Whether this scope was revoked and has no validated newer snapshot.
+    /// Use this to prevent an older private-cache format from restoring access
+    /// after a rejection. A failed local tombstone write still returns true.
     ///
     /// # Panics
+    /// Panics if the cache mutex is poisoned.
+    pub fn has_revocation(&self, scope: &str) -> bool {
+        self.get(scope);
+        self.state.lock().unwrap().revoked
+    }
+
+    /// Drop this scope and invalidate old requests across processes. Other
+    /// scopes' snapshots are not removed. The durable tombstone is written
+    /// before trying the publisher lock, so a held lock cannot hide revocation.
     ///
-    /// Panics if the cache mutex is poisoned (a panicking thread held it).
+    /// # Panics
+    /// Panics if the cache mutex is poisoned.
     pub fn clear(&self, scope: &str) {
+        self.revoke(scope);
+    }
+
+    fn revoke(&self, scope: &str) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.scope.as_deref() != Some(scope) {
-            return;
+            return true;
         }
+        state.generation += 1;
+        state.pending = None;
         state.snapshot = None;
-        if let Some(path) = &self.cache_path {
-            if let Err(error) = std::fs::remove_file(path) {
-                // Read-only cache directories do not prevent model discovery.
-                tracing::debug!(path = %path.display(), %error, "catalog cache clear failed");
+        state.revoked = true;
+        state.source = CatalogCacheSource::None;
+        state.error = None;
+        state.last_attempt = None;
+        let Some(path) = &self.cache_path else {
+            return true;
+        };
+        let revocation = RevocationFile {
+            url: self.url.to_string(),
+            scope: scope.to_string(),
+            revision: revision(),
+        };
+        let persisted_marker = serde_json::to_vec(&revocation).is_ok_and(|bytes| {
+            write_atomic(&revocation_path(path, &self.url, scope), &bytes).is_ok()
+        });
+        // Never unlink the lock file: its inode must stay shared by all users.
+        // A failed try-lock is safe because the tombstone hides the old payload
+        // and any publisher bound to the previous revocation epoch.
+        if let Some(_lock) = open_lock(path).ok().filter(|lock| lock.try_lock().is_ok()) {
+            let disk = DiskView::read(path, &self.url, scope);
+            let matches = disk.snapshot.as_deref().is_some_and(|bytes| {
+                serde_json::from_slice::<SnapshotFile>(bytes)
+                    .is_ok_and(|stored| stored.url == self.url.as_ref() && stored.scope == scope)
+            });
+            if matches {
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::debug!(%error, "catalog cache removal failed");
+                }
             }
+        }
+        state.observed_disk = DiskView::read(path, &self.url, scope).version;
+        // Deletion alone is insufficient: an old fetch with no previous
+        // snapshot also needs a durable epoch to compare before publication.
+        if !persisted_marker {
+            state.error = Some(CatalogRefreshError::PersistenceFailed);
+        }
+        persisted_marker
+    }
+
+    /// Freshness and source information without credentials or raw errors.
+    ///
+    /// # Panics
+    /// Panics if the cache mutex is poisoned.
+    pub fn status(&self, scope: &str) -> CatalogCacheStatus {
+        self.get(scope);
+        let state = self.state.lock().unwrap();
+        let fetched_at = state
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.file.fetched_at);
+        let checked_at = state
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.file.checked_at.unwrap_or(snapshot.file.fetched_at));
+        let status = if state.pending.is_some() {
+            CatalogCacheState::Refreshing
+        } else if state.error.is_some() {
+            CatalogCacheState::Error
+        } else if state.snapshot.is_none() {
+            CatalogCacheState::Idle
+        } else if checked_at
+            .is_some_and(|at| now_ms().saturating_sub(at) < CATALOG_REFRESH_INTERVAL_MS)
+        {
+            CatalogCacheState::Fresh
+        } else {
+            CatalogCacheState::Stale
+        };
+        CatalogCacheStatus {
+            state: status,
+            source: state.source,
+            fetched_at,
+            checked_at,
+            last_attempt: state.last_attempt,
+            error: state.error,
         }
     }
 
-    /// Refresh the snapshot for `scope`: coalesces with an in-flight refresh,
-    /// skips fetches attempted less than an hour ago unless forced, and
-    /// returns the last-good value on every failure path.
+    /// Legacy models-only API. See [`Self::refresh_report`] for attempt status.
     ///
     /// # Panics
-    ///
-    /// Panics if the cache mutex is poisoned; in debug builds, also if a refresh
-    /// settles its shared result twice (the current code never does).
+    /// Panics if the cache mutex is poisoned.
     pub async fn refresh(&self, scope: &str, opts: RefreshOptions) -> Option<T> {
+        self.refresh_report(scope, opts).await.models
+    }
+
+    /// Refresh, coalescing one scope's pending request. Hourly gating, offline
+    /// behavior and last-good fallback remain identical to `refresh`.
+    /// Dropping a coalesced waiter does not cancel the driving request. Dropping
+    /// the driver resolves all its waiters as cancelled and releases its gate.
+    ///
+    /// # Panics
+    /// Panics if the cache mutex is poisoned or an internal gate settles twice.
+    pub async fn refresh_report(
+        &self,
+        scope: &str,
+        opts: RefreshOptions,
+    ) -> CatalogRefreshReport<T> {
         enum Gate<T> {
             Coalesced(Arc<InFlight<T>>),
             Gated,
-            Start(Arc<InFlight<T>>, Option<Snapshot<T>>, u64),
+            Start(Arc<InFlight<T>>, Option<Box<Snapshot<T>>>, u64, DiskVersion),
         }
         let cached = self.get(scope);
-        if is_catalog_offline() {
-            return cached;
+        if opts.is_current.as_ref().is_some_and(|check| !check()) {
+            return CatalogRefreshReport::cancelled();
         }
-        // The mutex guard must never live across an await: decide under the
-        // lock, then act outside it.
+        if is_catalog_offline() {
+            return CatalogRefreshReport {
+                models: cached,
+                outcome: CatalogRefreshOutcome::Offline,
+            };
+        }
         let gate = {
             let mut state = self.state.lock().unwrap();
-            let coalesced = state
-                .pending
-                .clone()
-                .filter(|_| state.scope.as_deref() == Some(scope));
-            if let Some(pending) = coalesced {
+            if let Some(pending) = state.pending.clone() {
                 Gate::Coalesced(pending)
             } else {
-                let checked_at = state
-                    .last_attempt
-                    .or_else(|| state.snapshot.as_ref().map(|snapshot| snapshot.fetched_at));
-                if !opts.force
-                    && checked_at.is_some_and(|at| {
-                        now_ms() >= at && now_ms() - at < CATALOG_REFRESH_INTERVAL_MS
+                let checked_at = state.last_attempt.or_else(|| {
+                    state.snapshot.as_ref().map(|snapshot| {
+                        snapshot.file.checked_at.unwrap_or(snapshot.file.fetched_at)
                     })
+                });
+                let now = now_ms();
+                if !opts.force
+                    && checked_at
+                        .is_some_and(|at| now >= at && now - at < CATALOG_REFRESH_INTERVAL_MS)
                 {
                     Gate::Gated
                 } else {
-                    state.last_attempt = Some(now_ms());
+                    state.last_attempt = Some(now);
+                    state.error = None;
                     let inflight = Arc::new(InFlight::new());
                     state.pending = Some(Arc::clone(&inflight));
-                    Gate::Start(inflight, state.snapshot.clone(), state.generation)
+                    Gate::Start(
+                        inflight,
+                        state.snapshot.clone().map(Box::new),
+                        state.generation,
+                        state.observed_disk.clone(),
+                    )
                 }
             }
         };
-        let (inflight, previous, generation) = match gate {
+        let (inflight, previous, generation, disk_version) = match gate {
             Gate::Coalesced(pending) => return await_inflight(pending).await,
-            Gate::Gated => return cached,
-            Gate::Start(inflight, previous, generation) => (inflight, previous, generation),
+            Gate::Gated => {
+                return CatalogRefreshReport {
+                    models: cached,
+                    outcome: CatalogRefreshOutcome::Cached,
+                }
+            }
+            Gate::Start(inflight, previous, generation, version) => (
+                inflight,
+                previous.map(|snapshot| *snapshot),
+                generation,
+                version,
+            ),
         };
-        // The driver owns the gate's settlement: a caller that drops
-        // `refresh` mid-fetch must not leave the shared `pending` gate
-        // set with no settle left to run — coalesced callers would await
-        // a notify that never comes. The guard resolves the gate as a
-        // failed refresh and wakes every waiter.
         let _driver = SettleOnDrop {
             cache: self,
             inflight: Arc::clone(&inflight),
         };
-        let result = self.drive_refresh(scope, &opts, previous, generation).await;
+        let result = self
+            .drive_refresh(scope, &opts, previous, generation, &disk_version)
+            .await;
         {
             let mut state = self.state.lock().unwrap();
             if state
@@ -258,8 +585,6 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             }
         }
         if inflight.result.set(result.clone()).is_err() {
-            // Only reachable if a future revision settles twice; the first
-            // result stays authoritative for all coalesced callers.
             debug_assert!(false, "catalog refresh settled twice");
         }
         inflight.notify.notify_waiters();
@@ -267,135 +592,352 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
     }
 
     fn is_current(&self, scope: &str, generation: u64, opts: &RefreshOptions) -> bool {
+        if opts.is_current.as_ref().is_some_and(|check| !check()) {
+            return false;
+        }
         let state = self.state.lock().unwrap();
-        state.scope.as_deref() == Some(scope)
-            && state.generation == generation
-            && opts.is_current.as_ref().is_none_or(|check| check())
+        state.scope.as_deref() == Some(scope) && state.generation == generation
     }
 
+    // Keep HTTP, 304, merge validation, and revocation transitions together;
+    // splitting this protocol into single-use helpers obscures its guards.
+    #[allow(clippy::too_many_lines)]
     async fn drive_refresh(
         &self,
         scope: &str,
         opts: &RefreshOptions,
         previous: Option<Snapshot<T>>,
         generation: u64,
-    ) -> Option<T> {
-        let etag = previous.as_ref().and_then(|snapshot| snapshot.etag.clone());
-        let fetch = self
-            .fetcher
-            .fetch_with(&self.url, etag.as_deref(), &opts.headers);
-        match fetch.await {
+        version: &DiskVersion,
+    ) -> CatalogRefreshReport<T> {
+        let etag = previous
+            .as_ref()
+            .and_then(|snapshot| snapshot.file.etag.as_deref());
+        let result = if let Some(fetch) = &opts.fetch_payload {
+            match fetch().await {
+                Ok(payload) => serde_json::to_vec(&payload)
+                    .map_err(|_| FetchError::Transport {
+                        message: "Invalid catalog payload".into(),
+                    })
+                    .and_then(|body| {
+                        if body.len() > MAX_RESPONSE_BYTES {
+                            Err(FetchError::Transport {
+                                message: "Catalog is too large".into(),
+                            })
+                        } else {
+                            Ok(FetchOutcome::Fresh { body, etag: None })
+                        }
+                    }),
+                Err(error) => Err(error),
+            }
+        } else {
+            self.fetcher
+                .fetch_with(&self.url, etag, &opts.headers)
+                .await
+        };
+        if !self.is_current(scope, generation, opts) {
+            return CatalogRefreshReport::cancelled();
+        }
+        let (mut snapshot, outcome) = match result {
             Ok(FetchOutcome::NotModified) => {
-                if !self.is_current(scope, generation, opts) {
-                    return None;
-                }
-                let mut snapshot = previous?;
-                snapshot.fetched_at = now_ms();
-                let models = snapshot.models.clone();
-                self.store_snapshot(scope, &snapshot);
-                Some(models)
+                let Some(mut snapshot) = previous else {
+                    return self.keep_last_good(
+                        scope,
+                        generation,
+                        opts,
+                        CatalogRefreshError::InvalidPayload,
+                    );
+                };
+                snapshot.file.checked_at = Some(now_ms());
+                (snapshot, CatalogRefreshOutcome::NotModified)
             }
             Ok(FetchOutcome::Fresh { body, etag }) => {
-                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                if body.len() > MAX_RESPONSE_BYTES {
+                    return self.keep_last_good(
+                        scope,
+                        generation,
+                        opts,
+                        CatalogRefreshError::InvalidPayload,
+                    );
+                }
+                let received: serde_json::Value = match serde_json::from_slice(&body) {
                     Ok(payload) => payload,
-                    Err(_) => return self.keep_last_good(scope, generation, opts),
+                    Err(_) => {
+                        return self.keep_last_good(
+                            scope,
+                            generation,
+                            opts,
+                            CatalogRefreshError::InvalidJson,
+                        )
+                    }
+                };
+                // The provider merge validates/normalizes its own envelope.
+                // Partial records may not parse alone (for example an unknown
+                // OpenRouter ID whose capabilities exist only in last-good).
+                let payload = if let Some(merge) = &opts.merge_payload {
+                    let merged = merge(
+                        &received,
+                        previous.as_ref().map(|snapshot| &snapshot.file.payload),
+                    );
+                    let Ok(merged) = merged else {
+                        return self.keep_last_good(
+                            scope,
+                            generation,
+                            opts,
+                            CatalogRefreshError::InvalidPayload,
+                        );
+                    };
+                    if serde_json::to_vec(&merged)
+                        .map_or(true, |bytes| bytes.len() > MAX_RESPONSE_BYTES)
+                    {
+                        return self.keep_last_good(
+                            scope,
+                            generation,
+                            opts,
+                            CatalogRefreshError::InvalidPayload,
+                        );
+                    }
+                    merged
+                } else {
+                    received
                 };
                 let Ok(models) = (self.parse)(&payload, scope) else {
-                    return self.keep_last_good(scope, generation, opts);
+                    return self.keep_last_good(
+                        scope,
+                        generation,
+                        opts,
+                        CatalogRefreshError::InvalidPayload,
+                    );
                 };
-                if !self.is_current(scope, generation, opts) {
-                    return None;
-                }
-                let snapshot = Snapshot {
-                    scope: scope.to_string(),
-                    fetched_at: now_ms(),
-                    etag,
-                    payload,
-                    models,
-                };
-                let served = snapshot.models.clone();
-                self.store_snapshot(scope, &snapshot);
-                Some(served)
+                (
+                    Snapshot {
+                        file: SnapshotFile {
+                            url: self.url.to_string(),
+                            scope: scope.to_string(),
+                            fetched_at: now_ms(),
+                            checked_at: Some(now_ms()),
+                            revision: None,
+                            revocation: None,
+                            etag,
+                            payload,
+                        },
+                        models,
+                    },
+                    CatalogRefreshOutcome::Updated,
+                )
             }
             Err(error) => {
-                if self.is_current(scope, generation, opts)
-                    && scope != PUBLIC_SCOPE
-                    && matches!(error.status(), Some(401 | 403))
+                if let Some(status) = error
+                    .status()
+                    .filter(|status| scope != PUBLIC_SCOPE && matches!(status, 401 | 403))
                 {
-                    self.clear(scope);
-                    return None;
+                    self.revoke(scope);
+                    let mut state = self.state.lock().unwrap();
+                    // Keep the attempt gate after rejection; non-forced calls
+                    // must not hammer an unauthorized endpoint every frame.
+                    state.last_attempt = Some(now_ms());
+                    if state.error.is_none() {
+                        state.error = Some(CatalogRefreshError::Http { status });
+                    }
+                    return CatalogRefreshReport {
+                        models: None,
+                        outcome: CatalogRefreshOutcome::Revoked { status },
+                    };
                 }
-                self.keep_last_good(scope, generation, opts)
+                let error = error
+                    .status()
+                    .map_or(CatalogRefreshError::RequestFailed, |status| {
+                        CatalogRefreshError::Http { status }
+                    });
+                return self.keep_last_good(scope, generation, opts, error);
             }
+        };
+        snapshot.file.revision = Some(revision());
+        // Lock acquisition is bounded and asynchronous. The render-side get()
+        // never waits on the publisher lock, and no mutex lives across await.
+        let lock = if let Some(path) = &self.cache_path {
+            acquire_lock(path).await.ok()
+        } else {
+            None
+        };
+        if !self.is_current(scope, generation, opts) {
+            return CatalogRefreshReport::cancelled();
+        }
+        self.store_snapshot(scope, generation, version, snapshot, outcome, lock.as_ref())
+    }
+
+    fn keep_last_good(
+        &self,
+        scope: &str,
+        generation: u64,
+        opts: &RefreshOptions,
+        error: CatalogRefreshError,
+    ) -> CatalogRefreshReport<T> {
+        // Observe revocation/external updates even on an HTTP or parse failure.
+        self.get(scope);
+        if !self.is_current(scope, generation, opts) {
+            return CatalogRefreshReport::cancelled();
+        }
+        let mut state = self.state.lock().unwrap();
+        state.error = Some(error);
+        CatalogRefreshReport {
+            models: state
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.models.clone()),
+            outcome: CatalogRefreshOutcome::Error { error },
         }
     }
 
-    fn keep_last_good(&self, scope: &str, generation: u64, opts: &RefreshOptions) -> Option<T> {
-        if !self.is_current(scope, generation, opts) {
+    fn store_snapshot(
+        &self,
+        scope: &str,
+        generation: u64,
+        version: &DiskVersion,
+        mut snapshot: Snapshot<T>,
+        outcome: CatalogRefreshOutcome,
+        lock: Option<&File>,
+    ) -> CatalogRefreshReport<T> {
+        let mut state = self.state.lock().unwrap();
+        if state.scope.as_deref() != Some(scope) || state.generation != generation {
+            return CatalogRefreshReport::cancelled();
+        }
+        let disk = self
+            .cache_path
+            .as_deref()
+            .map(|path| DiskView::read(path, &self.url, scope));
+        if let Some(disk) = &disk {
+            if &disk.version != version {
+                // A newer publication or revocation always wins, irrespective
+                // of wall-clock granularity and even when it deleted the file.
+                state.snapshot = self.read_snapshot(disk, scope);
+                state.revoked = state.snapshot.is_none()
+                    && (disk.unreadable_revocation || disk.revoked.is_some());
+                state.observed_disk = disk.version.clone();
+                state.source = if state.snapshot.is_some() {
+                    CatalogCacheSource::Disk
+                } else {
+                    CatalogCacheSource::None
+                };
+                return CatalogRefreshReport {
+                    models: state
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.models.clone()),
+                    outcome: if state.snapshot.is_some() {
+                        CatalogRefreshOutcome::Cached
+                    } else {
+                        CatalogRefreshOutcome::Cancelled
+                    },
+                };
+            }
+            snapshot.file.revocation = disk.revocation(&self.url, scope);
+        }
+        let persisted = if let (Some(path), Some(_lock)) = (&self.cache_path, lock) {
+            serde_json::to_vec(&snapshot.file).is_ok_and(|bytes| write_atomic(path, &bytes).is_ok())
+        } else {
+            false
+        };
+        if let Some(path) = self.cache_path.as_ref().filter(|_| persisted) {
+            let disk = DiskView::read(path, &self.url, scope);
+            // Tombstones do not wait for the lock. Detect revocation that
+            // raced the atomic rename, rather than serving a rejected result.
+            state.snapshot = self.read_snapshot(&disk, scope);
+            state.revoked =
+                state.snapshot.is_none() && (disk.unreadable_revocation || disk.revoked.is_some());
+            state.observed_disk = disk.version;
+            if state.snapshot.is_none() {
+                state.source = CatalogCacheSource::None;
+                return CatalogRefreshReport::cancelled();
+            }
+        } else {
+            state.snapshot = Some(snapshot);
+            state.revoked = false;
+        }
+        state.source = if persisted {
+            CatalogCacheSource::Network
+        } else {
+            CatalogCacheSource::Memory
+        };
+        state.error = (!persisted).then_some(CatalogRefreshError::PersistenceFailed);
+        CatalogRefreshReport {
+            models: state
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.models.clone()),
+            outcome: if persisted {
+                outcome
+            } else {
+                CatalogRefreshOutcome::MemoryOnly
+            },
+        }
+    }
+
+    fn read_snapshot(&self, disk: &DiskView, scope: &str) -> Option<Snapshot<T>> {
+        if disk.unreadable_revocation {
             return None;
         }
-        let state = self.state.lock().unwrap();
-        state
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.models.clone())
-    }
-
-    fn store_snapshot(&self, scope: &str, snapshot: &Snapshot<T>) {
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.scope.as_deref() != Some(scope) {
-                return;
-            }
-            state.snapshot = Some(Snapshot {
-                scope: snapshot.scope.clone(),
-                fetched_at: snapshot.fetched_at,
-                etag: snapshot.etag.clone(),
-                payload: snapshot.payload.clone(),
-                models: snapshot.models.clone(),
-            });
+        let bytes = disk.snapshot.as_deref()?;
+        let stored: SnapshotFile = serde_json::from_slice(bytes).ok()?;
+        if stored.url != self.url.as_ref() || stored.scope != scope {
+            return None;
         }
-        if let Some(path) = &self.cache_path {
-            let stored = SnapshotFile {
-                url: self.url.to_string(),
-                scope: snapshot.scope.clone(),
-                fetched_at: snapshot.fetched_at,
-                etag: snapshot.etag.clone(),
-                payload: snapshot.payload.clone(),
-            };
-            let Ok(bytes) = serde_json::to_vec(&stored) else {
-                return;
-            };
-            if let Err(error) = write_atomic(path, &bytes) {
-                // Keep the validated in-memory snapshot if persistence fails.
-                tracing::debug!(path = %path.display(), %error, "catalog cache write failed");
+        if let Some(bytes) = &disk.revoked {
+            // A malformed existing tombstone fails closed, not back to an
+            // otherwise readable private snapshot.
+            let revoked: RevocationFile = serde_json::from_slice(bytes).ok()?;
+            if revoked.url == self.url.as_ref()
+                && revoked.scope == scope
+                && stored.revocation.as_deref() != Some(revoked.revision.as_str())
+            {
+                return None;
             }
         }
-    }
-
-    /// Load + validate a disk snapshot through the parse function; only fully
-    /// validated payloads are ever served.
-    fn read_snapshot(&self, path: &Path, scope: &str) -> Result<Snapshot<T>, String> {
-        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-        let stored: SnapshotFile =
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        if stored.url.as_str() != self.url.as_ref() || stored.scope != scope {
-            return Err("catalog cache belongs to another source or scope".into());
-        }
-        let models = (self.parse)(&stored.payload, scope)?;
-        Ok(Snapshot {
-            scope: stored.scope,
-            fetched_at: stored.fetched_at,
-            etag: stored.etag,
-            payload: stored.payload,
+        let models = (self.parse)(&stored.payload, scope).ok()?;
+        Some(Snapshot {
+            file: stored,
             models,
         })
     }
 }
 
-/// The driving refresh's settle guard: when the driver is dropped before
-/// settling, the shared gate is resolved as a failed refresh (`None`) and
-/// every waiter is woken.
+/// Persistent advisory locks are released by the OS on close/process exit.
+/// Never remove the lock path (that would split publishers across two inodes).
+fn open_lock(path: &Path) -> std::io::Result<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(sidecar(path, ".lock"))
+}
+
+async fn acquire_lock(path: &Path) -> std::io::Result<File> {
+    let file = open_lock(path)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "catalog cache lock busy",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+}
+
+/// A dropped driver must not strand coalesced waiters or the pending gate.
 struct SettleOnDrop<'a, T: Clone + Send + Sync + 'static> {
     cache: &'a CatalogCache<T>,
     inflight: Arc<InFlight<T>>,
@@ -403,9 +945,6 @@ struct SettleOnDrop<'a, T: Clone + Send + Sync + 'static> {
 
 impl<T: Clone + Send + Sync + 'static> Drop for SettleOnDrop<'_, T> {
     fn drop(&mut self) {
-        // The happy path settles before dropping (no await between the
-        // settle and the scope exit), so an unset result means the driver
-        // was cancelled mid-fetch.
         if self.inflight.result.get().is_some() {
             return;
         }
@@ -419,21 +958,18 @@ impl<T: Clone + Send + Sync + 'static> Drop for SettleOnDrop<'_, T> {
                 state.pending = None;
             }
         }
-        let _ = self.inflight.result.set(None);
+        let _ = self.inflight.result.set(CatalogRefreshReport::cancelled());
         self.inflight.notify.notify_waiters();
     }
 }
 
-async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
+async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> CatalogRefreshReport<T> {
     loop {
         let notified = inflight.notify.notified();
         if let Some(result) = inflight.result.get() {
             return result.clone();
         }
         notified.await;
-        if let Some(result) = inflight.result.get() {
-            return result.clone();
-        }
     }
 }
 
@@ -523,3 +1059,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "cache_regression.rs"]
+mod regression;

@@ -147,6 +147,9 @@ impl PackageManager {
                 }
                 builtin_skill_overrides
                     .extend(self.extra_builtin_skill_overrides().iter().cloned());
+                // The optional Lua plugin owns refinement exports and commands.
+                // Never advertise the obsolete host-request skill, even when explicitly included.
+                builtin_skill_overrides.push("-refine/SKILL.md".to_string());
                 add_resources(
                     accumulator,
                     ResourceType::Skills,

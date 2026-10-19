@@ -143,6 +143,10 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
 
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
+        context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
+        context_startup_admitted_user_ids: Vec::new(),
+        on_initial_context_selection: None,
+        ollama_cloud: None,
         semantic_edges: None,
         cron_store: None,
         steering_mode: None,
@@ -168,7 +172,6 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         progress_note_emit: None,
         rlm_depth: None,
         daemonless: true,
-        telemetry: None,
         model_info: None,
         mcp_manager: None,
         prewarm_ipython_kernel: None,

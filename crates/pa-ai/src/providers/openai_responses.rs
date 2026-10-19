@@ -6,8 +6,8 @@ use serde_json::{json, Map, Value};
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
-    AssistantMessageEventWriter,
+    create_assistant_message_event_stream, create_provider_event_stream, AssistantMessageEvent,
+    AssistantMessageEventStream, AssistantMessageEventWriter,
 };
 use crate::models::{clamp_thinking_level, supports_thinking};
 use crate::providers::openai_responses_shared::{
@@ -105,11 +105,21 @@ pub fn stream_openai_responses(
     options: Option<&OpenAIResponsesOptions>,
 ) -> AssistantMessageEventStream {
     let options = options.cloned();
+    let native = options
+        .as_ref()
+        .is_some_and(|options| options.base.native_responses_input.is_some());
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(reader) => return reader,
+        };
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: model.api.clone(),
@@ -129,10 +139,12 @@ pub fn stream_openai_responses(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -147,14 +159,19 @@ pub fn stream_openai_responses(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if native || bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -187,18 +204,29 @@ fn build_headers(
 }
 
 fn build_params(model: &Model, context: &Context, options: &OpenAIResponsesOptions) -> Value {
-    let messages = convert_responses_messages(
-        model,
-        context,
-        &OPENAI_TOOL_CALL_PROVIDERS,
-        ConvertResponsesMessagesOptions::include_system_prompt(),
-    );
+    // Native input is authoritative. Never pass its retained prefix through the
+    // portable assistant-message converter or a Value serialization round-trip.
+    let messages = if options.base.native_responses_input.is_some() {
+        Vec::new()
+    } else {
+        convert_responses_messages(
+            model,
+            context,
+            &OPENAI_TOOL_CALL_PROVIDERS,
+            ConvertResponsesMessagesOptions::include_system_prompt(),
+        )
+    };
 
     let cache_retention = resolve_cache_retention(options.base.cache_retention);
     let compat = get_responses_compat(model);
     let mut params = Map::new();
     params.insert("model".into(), json!(model.id));
     params.insert("input".into(), json!(messages));
+    if options.base.native_responses_input.is_some() {
+        if let Some(instructions) = &context.system_prompt {
+            params.insert("instructions".into(), json!(instructions));
+        }
+    }
     params.insert("stream".into(), json!(true));
     if cache_retention != CacheRetention::None {
         if let Some(session_id) = &options.base.session_id {
@@ -282,6 +310,9 @@ async fn run_stream(
     writer: &AssistantMessageEventWriter,
 ) -> Result<(), ProviderError> {
     let options = options.cloned().unwrap_or_default();
+    if let Some(native) = &options.base.native_responses_input {
+        native.validate(model, context, &options.base)?;
+    }
     let api_key = options
         .base
         .api_key
@@ -297,10 +328,45 @@ async fn run_stream(
 
     let mut params = build_params(model, context, &options);
     if let Some(on_payload) = &options.base.on_payload {
+        // Hooks get a read/write mirror. Only unrelated changes are accepted;
+        // the original raw array remains authoritative, even when the hook returns
+        // an otherwise unchanged mirror with normalized numbers or string escapes.
+        if let Some(native) = &options.base.native_responses_input {
+            params["input"] = serde_json::from_str(native.input_json())
+                .map_err(|_| ProviderError::Message("Invalid native Responses input".into()))?;
+        }
+        let original_input = params.get("input").cloned();
         if let Some(next) = on_payload(params.clone(), model) {
+            if options.base.native_responses_input.is_some()
+                && (next.get("input") != original_input.as_ref()
+                    || next.get("model") != params.get("model")
+                    || next.get("previous_response_id").is_some()
+                    || next.get("conversation").is_some())
+            {
+                return Err(ProviderError::Message(
+                    "Payload hook conflicts with authoritative native Responses input or model"
+                        .into(),
+                ));
+            }
             params = next;
         }
     }
+    let body = if let Some(native) = &options.base.native_responses_input {
+        // Serialize only unrelated fields, then embed the validated raw array.
+        // In particular, params.to_string() with the mirrored input is lossy.
+        let object = params.as_object_mut().ok_or_else(|| {
+            ProviderError::Message("Native Responses payload must be an object".into())
+        })?;
+        object.remove("input");
+        let mut body = params.to_string();
+        body.pop();
+        body.push_str(",\"input\":");
+        body.push_str(native.input_json());
+        body.push('}');
+        body
+    } else {
+        params.to_string()
+    };
 
     let url = format!("{}/responses", model.base_url.trim_end_matches('/'));
     let headers = build_headers(model, &api_key, &options, cache_session_id.as_deref());
@@ -308,7 +374,7 @@ async fn run_stream(
         method: reqwest::Method::POST,
         url,
         headers,
-        body: Some(params.to_string()),
+        body: Some(body),
         signal: options.base.signal.clone(),
         timeout_ms: options.base.timeout_ms,
         connection: crate::utils_inner::stream_failure::ConnectionErrorProfile::Sdk,
@@ -336,9 +402,11 @@ async fn run_stream(
         ));
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
 
     let model_id = model.id.clone();
     let hooks = ResponsesStreamHooks {
@@ -371,7 +439,7 @@ async fn run_stream(
                         Ok(event) => event,
                         Err(_) => parse_streaming_json(Some(&sse.data)),
                     };
-                    processor.handle_event(&event)?;
+                    processor.handle_event(&event).await?;
                 }
             }
             for sse in decoder.finish() {
@@ -382,7 +450,7 @@ async fn run_stream(
                     Ok(event) => event,
                     Err(_) => parse_streaming_json(Some(&sse.data)),
                 };
-                processor.handle_event(&event)?;
+                processor.handle_event(&event).await?;
             }
             processor.finish()?;
             if options
@@ -421,9 +489,12 @@ pub fn stream_simple_openai_responses(
     context: &Context,
     options: Option<&SimpleStreamOptions>,
 ) -> AssistantMessageEventStream {
-    let api_key = options
-        .and_then(|options| options.base.api_key.clone())
-        .or_else(|| get_env_api_key(&model.provider));
+    let mut api_key = options.and_then(|options| options.base.api_key.clone());
+    if api_key.is_none()
+        && options.is_none_or(|options| options.base.native_responses_input.is_none())
+    {
+        api_key = get_env_api_key(&model.provider);
+    }
     let Some(api_key) = api_key else {
         let (writer, reader) = create_assistant_message_event_stream();
         let message = AssistantMessage {
@@ -468,6 +539,14 @@ pub struct OpenAIResponsesProvider;
 impl Provider for OpenAIResponsesProvider {
     fn api(&self) -> &str {
         API_OPENAI_RESPONSES
+    }
+
+    fn supports_native_responses_input(&self) -> bool {
+        true
+    }
+
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
     }
 
     fn stream(

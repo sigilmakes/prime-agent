@@ -14,6 +14,7 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
         "openai" | "azure-openai-responses" | "github-copilot" => "gpt-5.4",
         "openai-codex" => "gpt-5.5",
         "prime-inference" => PRIME_INFERENCE_DEFAULT_MODEL_ID,
+        "ollama-cloud" | "zai" => "glm-5.3",
         "deepseek" => "deepseek-v4-pro",
         "google" | "google-vertex" => "gemini-3.1-pro-preview",
         "openrouter" => "moonshotai/kimi-k2.6",
@@ -21,7 +22,6 @@ pub fn default_model_per_provider(provider: &str) -> Option<&'static str> {
         "xai" => "grok-4.20-0309-reasoning",
         "groq" => "openai/gpt-oss-120b",
         "cerebras" => "gpt-oss-120b",
-        "zai" => "glm-5.3",
         "mistral" => "devstral-medium-latest",
         "minimax" | "minimax-cn" => "MiniMax-M2.7",
         "moonshotai" | "moonshotai-cn" | "opencode" | "opencode-go" => "kimi-k2.6",
@@ -250,6 +250,15 @@ fn parse_model_pattern<'a>(
         return result;
     }
     if strict {
+        return ParsedModelResult {
+            model: None,
+            thinking_level: None,
+            warning: None,
+        };
+    }
+    // An exact prefix makes an unknown suffix a possible provider tag, not shorthand.
+    // Never silently replace a missing tagged id with a different, untagged model.
+    if find_exact_model_reference_match(prefix, available_models).is_some() {
         return ParsedModelResult {
             model: None,
             thinking_level: None,
@@ -694,6 +703,43 @@ mod tests {
     }
 
     #[test]
+    fn scoped_colon_tags_do_not_collapse_to_exact_prefixes() {
+        let mut models = catalog();
+        models.push(model("ollama-cloud", "deepseek-v4.1-flash", "DeepSeek"));
+        for pattern in [
+            "deepseek-v4.1-flash:1017",
+            "ollama-cloud/deepseek-v4.1-flash:1017",
+            "deepseek-v4.1-flash:1017:high",
+        ] {
+            assert!(
+                resolve_model_scope_from_models(&[pattern.into()], &models).is_empty(),
+                "{pattern}"
+            );
+        }
+        let shorthand = resolve_model_scope_from_models(&["sonnet:random".into()], &models);
+        assert_eq!(shorthand.len(), 1);
+        assert_eq!(shorthand[0].model.id, "claude-sonnet-4-5");
+        assert_eq!(shorthand[0].thinking_level, None);
+        models.push(model(
+            "ollama-cloud",
+            "deepseek-v4.1-flash:1017",
+            "DeepSeek snapshot",
+        ));
+        for (pattern, thinking) in [
+            ("deepseek-v4.1-flash:1017", None),
+            (
+                "ollama-cloud/deepseek-v4.1-flash:1017:high",
+                Some(ThinkingLevel::High),
+            ),
+        ] {
+            let scoped = resolve_model_scope_from_models(&[pattern.into()], &models);
+            assert_eq!(scoped.len(), 1, "{pattern}");
+            assert_eq!(scoped[0].model.id, "deepseek-v4.1-flash:1017");
+            assert_eq!(scoped[0].thinking_level, thinking);
+        }
+    }
+
+    #[test]
     fn scoped_patterns_and_thinking_levels() {
         let catalog = catalog();
         let patterns = vec!["claude-sonnet".to_string(), "z-ai/glm-5.3:high".to_string()];
@@ -902,5 +948,9 @@ mod tests {
         let model = find_initial_model(&continued).expect("saved default resolves");
         assert_eq!(model.provider, "prime-inference");
         assert_eq!(model.id, "z-ai/glm-5.3");
+    }
+    #[test]
+    fn ollama_cloud_default_matches_pinned_fallback() {
+        assert_eq!(default_model_per_provider("ollama-cloud"), Some("glm-5.3"));
     }
 }

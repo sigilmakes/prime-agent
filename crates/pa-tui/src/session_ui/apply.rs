@@ -1,5 +1,5 @@
 //! The streamed-event pump: client events, turn updates, assistant/tool
-//! rows, compaction aborts, and the telemetry seams.
+//! rows, and compaction aborts.
 use super::{
     assistant_message_parts, event_to_update, last_assistant_text_of, pop_superseded_attempt_row,
     AgentView, ChatEntry, CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand,
@@ -110,8 +110,11 @@ impl SessionUi {
     /// A compaction succeeded and the durable transcript was rebuilt: re-fetch it. Best effort — a
     /// failed fetch keeps the pushed outcome row instead of an empty transcript.
     pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
-        let incomplete_history =
-            self.pending_backfill.is_some() || self.transcript_backfill.is_some();
+        let incomplete_history = self.transcript_incomplete
+            || self.pending_backfill.is_some()
+            || self.transcript_backfill.is_some();
+        let replay_on_success =
+            self.transcript_incomplete || self.native_replay_epoch == Some(self.transcript_epoch);
         self.transcript_stale = false;
         self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
         self.transcript_backfill = None;
@@ -125,8 +128,15 @@ impl SessionUi {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     before: None,
-                    capabilities: None,
-                    rest: Map::default(),
+                    capabilities: Some(crate::session_ui::attach_capabilities()),
+                    rest: if self.attach_event_generation.is_empty() {
+                        Map::default()
+                    } else {
+                        Map::from_iter([(
+                            "historyGeneration".to_owned(),
+                            Value::String(self.attach_event_generation.clone()),
+                        )])
+                    },
                 },
             )
             .await;
@@ -137,6 +147,8 @@ impl SessionUi {
             .and_then(Value::as_array)
         else {
             if incomplete_history {
+                self.transcript_incomplete = true;
+                self.native_replay_epoch = None;
                 view.push_entry(ChatEntry::Status {
                     text: "Transcript refresh failed; displayed history may be incomplete or stale. Reopen the session to retry.".to_string(),
                     kind: StatusKind::Warning,
@@ -145,7 +157,20 @@ impl SessionUi {
             }
             return;
         };
-        let entries = crate::snapshot::transcript_to_entries(messages);
+        self.display_transcript = data
+            .as_ref()
+            .ok()
+            .and_then(|data| data.get("displayTranscript"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        let entries = if self.display_transcript {
+            crate::snapshot::display_transcript_to_entries(messages)
+        } else {
+            crate::snapshot::transcript_to_entries(messages)
+        };
+        self.transcript_incomplete = false;
+        self.native_replay_epoch =
+            (replay_on_success && self.display_transcript).then_some(self.transcript_epoch);
         view.clear_chat();
         for entry in entries {
             view.push_entry(entry);
@@ -165,6 +190,7 @@ impl SessionUi {
         let active_session_id = self.active_session_id.clone();
         let epoch = self.transcript_epoch;
         let compaction_count = self.backfill_compaction_count;
+        let generation = self.attach_event_generation.clone();
         let leaf_id = self.backfill_leaf_id.clone();
         let session_id = self.session_id.clone();
         let notes = self.backfill_notes.clone();
@@ -172,22 +198,27 @@ impl SessionUi {
             let entries: Result<Vec<ChatEntry>> = async {
                 let leaf_id =
                     leaf_id.ok_or_else(|| anyhow::anyhow!("missing history branch anchor"))?;
+                let mut rest =
+                    Map::from_iter([("historyLeafId".to_owned(), Value::String(leaf_id.clone()))]);
+                if !generation.is_empty() {
+                    rest.insert(
+                        "historyGeneration".to_owned(),
+                        Value::String(generation.clone()),
+                    );
+                }
                 let command = DaemonCommand::GetMessages {
                     id: None,
                     active_session_id: active_session_id.clone(),
                     before: Some(before as u64),
                     capabilities: Some(crate::session_ui::attach_capabilities()),
-                    rest: Map::from_iter([(
-                        "historyLeafId".to_owned(),
-                        Value::String(leaf_id.clone()),
-                    )]),
+                    rest,
                 };
                 // A read-only request can safely retry once on a live link. Keep
                 // the same cursor; a second failure must not masquerade as an empty page.
                 let mut data = match client.request_ok(command.clone()).await {
                     Ok(data) => data,
                     Err(error) if crate::daemon_client::is_daemon_timeout(&error) => {
-                        return Err(error)
+                        return Err(error);
                     }
                     Err(_) => client.request_ok(command).await?,
                 };
@@ -213,17 +244,33 @@ impl SessionUi {
                 {
                     return Err(anyhow::anyhow!("history changed during backfill"));
                 }
+                let chronological =
+                    data.get("displayTranscript").and_then(Value::as_bool) == Some(true);
+                if chronological
+                    && !generation.is_empty()
+                    && data.get("generation").and_then(Value::as_str) != Some(generation.as_str())
+                {
+                    return Err(anyhow::anyhow!("history worker generation changed"));
+                }
                 let Some(Value::Array(messages)) = data.get_mut("messages").map(Value::take) else {
                     return Err(anyhow::anyhow!("missing messages in history response"));
                 };
                 Ok(tokio::task::spawn_blocking(move || {
-                    crate::snapshot::transcript_to_entries(&messages)
+                    if chronological {
+                        crate::snapshot::display_transcript_to_entries(&messages)
+                    } else {
+                        crate::snapshot::transcript_to_entries(&messages)
+                    }
                 })
                 .await?)
             }
             .await;
             let entries = entries.map_err(|error| error.to_string());
-            let _ = notes.send(TranscriptBackfillNote { epoch, entries });
+            let _ = notes.send(TranscriptBackfillNote {
+                epoch,
+                entries,
+                replacement: None,
+            });
         }));
         self.transcript_backfill = Some(task);
     }
@@ -237,9 +284,50 @@ impl SessionUi {
             return;
         }
         self.transcript_backfill = None;
+        if let Some(replacement) = note.replacement {
+            // Prepare before clearing. A failed full fetch may still carry the selected
+            // branch's model context; never keep the previous branch after navigation.
+            let (entries, failure) = match note.entries {
+                Ok(entries) => (entries, None),
+                Err(error) => (Vec::new(), Some(error)),
+            };
+            view.clear_chat();
+            self.last_status_index = None;
+            self.pressed_click = None;
+            self.pending_tools.clear();
+            self.aborted_tools.clear();
+            for entry in entries {
+                view.push_entry(entry);
+            }
+            if let Some(state) = replacement.state {
+                if let Some(id) = state.get("sessionId").and_then(Value::as_str) {
+                    self.session_id = id.to_string();
+                }
+                self.backfill_leaf_id = state
+                    .get("leafId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.backfill_compaction_count =
+                    state.get("compactionCount").and_then(Value::as_u64);
+            }
+            self.display_transcript = replacement.complete;
+            self.transcript_incomplete = !replacement.complete;
+            self.native_replay_epoch = replacement.complete.then_some(self.transcript_epoch);
+            if let Some(warning) = failure.or(replacement.warning) {
+                view.push_entry(ChatEntry::Status {
+                    text: warning,
+                    kind: StatusKind::Warning,
+                });
+            }
+            view.follow();
+            self.dirty = true;
+            return;
+        }
         let mut entries = match note.entries {
             Ok(entries) => entries,
             Err(error) => {
+                self.transcript_incomplete = true;
+                self.native_replay_epoch = None;
                 view.push_entry(ChatEntry::Status {
                     text: format!(
                         "Older history could not be loaded: {error}. Reopen the session to retry."
@@ -270,47 +358,6 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Report the first scroll action of the run (`tui_scroll_count`),
-    /// fire-and-forget so the keypress never waits on the telemetry flush.
-    pub(super) fn track_scroll(&mut self, action: &'static str, resumed_following: bool) {
-        if self.scroll_adoption_emitted {
-            return;
-        }
-        self.scroll_adoption_emitted = true;
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.scroll_used(action, resumed_following).await;
-            });
-        }
-    }
-
-    /// Report the run's first selection copy (`tui selection used`),
-    /// fire-and-forget. `lines` is the copied text's line count.
-    pub(super) fn track_selection(&mut self, lines: usize) {
-        if self.selection_adoption_emitted {
-            return;
-        }
-        self.selection_adoption_emitted = true;
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.selection_used(lines).await;
-            });
-        }
-    }
-
-    /// The run's first click-driven interaction (`tui click used`).
-    pub(crate) fn track_click(&mut self, surface: &'static str) {
-        if self.click_adoption_emitted {
-            return;
-        }
-        self.click_adoption_emitted = true;
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.click_used(surface).await;
-            });
-        }
-    }
-
     /// Take a pending `app.suspend` request: the interactive loop owns the
     /// renderer that hands the terminal over.
     pub(crate) fn take_suspend_request(&mut self) -> bool {
@@ -321,48 +368,6 @@ impl SessionUi {
     /// performs the editor child's terminal handoff.
     pub(crate) fn take_external_editor_request(&mut self) -> Option<String> {
         self.external_editor_request.take()
-    }
-
-    /// Report the run's first suspend cycle (`tui suspend used`),
-    /// fire-and-forget. `outcome` is `resumed` or `failed`.
-    pub(crate) fn track_suspend_used(&mut self, outcome: &'static str) {
-        if self.suspend_adoption_emitted {
-            return;
-        }
-        self.suspend_adoption_emitted = true;
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.suspend_used(outcome).await;
-            });
-        }
-    }
-
-    /// Report a builtin command submission (`agent command used`),
-    /// fire-and-forget like the scroll event: the command's handling never
-    /// waits on the telemetry flush.
-    pub(super) fn track_command_used(&mut self, command: &'static str) {
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry.command_used(command).await;
-            });
-        }
-    }
-
-    /// Report a feature attempt's observed outcome (`agent feature
-    /// outcome`), fire-and-forget.
-    pub(super) fn track_feature_outcome(
-        &mut self,
-        feature: &'static str,
-        outcome: &'static str,
-        duration_ms: Option<u64>,
-    ) {
-        if let Some(telemetry) = self.telemetry.clone() {
-            tokio::spawn(async move {
-                telemetry
-                    .feature_outcome(feature, outcome, duration_ms)
-                    .await;
-            });
-        }
     }
 
     pub(crate) fn apply_client_event(&mut self, event: DaemonClientEvent, view: &mut AgentView) {
@@ -503,6 +508,7 @@ impl SessionUi {
     fn apply_update(&mut self, update: TurnUpdate, view: &mut AgentView) {
         match update {
             TurnUpdate::TurnStarted => {
+                self.working_messages.start_turn();
                 self.turn_active = true;
                 self.turn_error_shown = false;
                 // No card from a previous run settles on this one's failure.
@@ -587,11 +593,12 @@ impl SessionUi {
                 if self.apply_tool_result(&tool_call_id, &result, is_error, false, view) {
                     Self::set_working_activity("Waiting", false, view);
                     if let Some(working) = &mut view.working {
-                        working.message = None;
+                        working.message = self.working_messages.selected();
                     }
                 }
             }
             TurnUpdate::TurnEnded { error } => {
+                self.working_messages.reset();
                 // Only the engine's own turn_end clears the busy state: trailing frames
                 // from the previous turn must not cancel a turn admitted in between.
                 self.streaming_index = None;
@@ -810,10 +817,6 @@ impl SessionUi {
     /// compaction run, a streaming turn aborts through `abort_and_send_queued`, and a running user
     /// bash aborts alongside. The side-question abort stays at the call sites.
     pub(super) fn interrupt_running_work(&self, view: &AgentView) {
-        // Abort the trace upload sweep first.
-        if let Some(run) = &self.trace_upload {
-            run.cancel.cancel();
-        }
         if view.compaction.is_some() {
             // The interrupt cancels the compaction run only — the agent is not
             // streaming, so no turn abort goes out.
@@ -957,6 +960,11 @@ impl SessionUi {
             None
         };
         if abort_text.is_some() || stop_reason == Some("error") {
+            let had_custom_message = self.working_messages.selected().is_some();
+            self.working_messages.reset();
+            if let Some(working) = view.working.as_mut().filter(|_| had_custom_message) {
+                working.message = None;
+            }
             let settle_text = abort_text.clone().unwrap_or_else(|| {
                 message
                     .get("errorMessage")
@@ -1040,32 +1048,12 @@ impl SessionUi {
                 if !partial {
                     card.ended_at = Some(std::time::Instant::now());
                     self.pending_tools.remove(tool_call_id);
-                    self.track_ipython_bash_rendered(card);
                 }
                 view.mark_entry_stale(index);
                 return true;
             }
         }
         false
-    }
-
-    /// `tui ipython bash rendered`: the settled ipython card that renders
-    /// as bash reports its bash share, primitives only.
-    fn track_ipython_bash_rendered(&self, card: &crate::tool_card::ToolCallCard) {
-        if !pa_types::ai::is_python_tool_name(&card.name) {
-            return;
-        }
-        let Some(stats) = crate::tool_card::ipython::bash_dominated_stats(card) else {
-            return;
-        };
-        let Some(telemetry) = self.telemetry.clone() else {
-            return;
-        };
-        tokio::spawn(async move {
-            telemetry
-                .ipython_bash_rendered(stats.bash_lines, stats.cell_lines, stats.count)
-                .await;
-        });
     }
 
     /// Update the loader activity label (agent-activity tracker subset).

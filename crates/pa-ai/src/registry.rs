@@ -12,6 +12,19 @@ pub trait Provider: Send + Sync {
     /// The `api` identifier this provider serves, e.g. "openai-completions".
     fn api(&self) -> &str;
 
+    /// Opt in only when this adapter preserves route-bound native Responses input
+    /// byte-for-byte and rejects mismatches before network. The default is unsupported.
+    fn supports_native_responses_input(&self) -> bool {
+        false
+    }
+
+    /// Opt in only when every event emission awaits available capacity, consumer
+    /// drop retires the producer, and result-only callers cannot deadlock the queue.
+    /// This is an event-count promise, not a byte/frame/total-memory bound.
+    fn supports_bounded_event_delivery(&self) -> bool {
+        false
+    }
+
     fn stream(
         &self,
         model: &Model,

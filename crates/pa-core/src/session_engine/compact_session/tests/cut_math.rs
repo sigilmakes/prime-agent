@@ -17,6 +17,7 @@ fn cut_and_tokens_computed_from_entries() {
 fn message_extraction_skips_compaction_and_tool_results() {
     let mut compaction = FileEntry::Compaction {
         payload: pa_types::session::CompactionEntry {
+            context_archive: None,
             summary: "s".to_string(),
             first_kept_entry_id: "x".to_string(),
             tokens_before: 1,
@@ -97,6 +98,7 @@ fn tokens_before_anchors_on_last_valid_usage_plus_trailing() {
     let tmp = tempfile::tempdir().unwrap();
     let mut session = SessionManager::in_memory(tmp.path());
     let settled = pa_types::ai::Usage {
+        rest: pa_types::JsonMap::new(),
         input: 20,
         output: 10,
         cache_read: 80,

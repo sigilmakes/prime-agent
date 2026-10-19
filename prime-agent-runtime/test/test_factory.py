@@ -102,7 +102,7 @@ from rlm.factory import (
     validate_factory_machine,
     validate_factory_spec,
 )
-from rlm.harness import HarnessState
+from types import SimpleNamespace
 
 
 # ---------------------------------------------------------------------------
@@ -2464,7 +2464,8 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn("`/factory on` (`/factory off` disables it again, `/factory status` reports it;", flat)
         self.assertIn("the persisted setting is `factory.enabled` in the agent dir's settings.json", flat)
         self.assertIn("every `rlm.factory` call except `help()`", flat)
-        self.assertIn("every factory harness write (`create_factory` and updates of factory entries)", flat)
+        self.assertIn("The default executor uses the machine library, not a persistent harness store", flat)
+        self.assertIn("FactoryExecutor(harness=entry_store)", doc)
         self.assertIn(factory_module.FACTORY_DISABLED_MESSAGE, flat)
         self.assertIn("`help()` answers while disabled", flat)
         # Guards: the op set evaluated over the from-state's latest settle.
@@ -2994,10 +2995,40 @@ class DeadNoticeHost(FakeHost):
 # ---------------------------------------------------------------------------
 
 
+class _EntryStore:
+    """Test-only injected entries; no file resolution or persistence policy."""
+
+    def __init__(self) -> None:
+        self.entries: dict[tuple[str, str], SimpleNamespace] = {}
+
+    def get(self, kind: str, entry_id: str) -> Any:
+        return self.entries.get((kind, entry_id))
+
+    def list(self, kind: str) -> list:
+        return [entry for (entry_kind, _), entry in self.entries.items() if entry_kind == kind]
+
+    def create_subagent(self, title: str, content: str, *, id: str, metadata: dict | None = None) -> Any:
+        entry = SimpleNamespace(id=id, title=title, content=content, metadata=metadata or {})
+        self.entries[("subagent", id)] = entry
+        return entry
+
+    def create_factory(
+        self, title: str, content: str, *, id: str | None = None,
+        dag: Any = None, machine: Any = None,
+    ) -> Any:
+        entry_id = id or title.lower().replace(" ", "_")
+        entry = SimpleNamespace(
+            id=entry_id, title=title, content=content,
+            arguments={"machine": machine} if machine is not None else {"dag": dag},
+        )
+        self.entries[("factory", entry_id)] = entry
+        return entry
+
+
 class _ExecutorTestCase(unittest.TestCase):
     """The scripted in-memory kernel every executor test runs against.
 
-    A temp-dir harness with a real subagent entry, an injected clock and
+    An injected in-memory entry store, a clock and
     sleeps, a ``FakeHost`` behind the ``host_request`` patch seam, and the
     per-test default executor. The factory opt-in gate reads the
     ``factory.enabled`` setting from the agent dir's settings file, so the
@@ -3008,9 +3039,7 @@ class _ExecutorTestCase(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.harness = HarnessState(Path(temp.name) / "harness_state.json")
+        self.harness = _EntryStore()
         self.harness.create_subagent("Worker", "Do the work carefully.", id="worker")
         self.clock = FakeClock()
         self.host = FakeHost(clock=self.clock)
@@ -3072,9 +3101,8 @@ class FactoryOptInGateTest(_ExecutorTestCase):
 
     The factory ships disabled; the user turns it on with /factory on (the
     persisted `factory.enabled` setting in the agent dir's settings.json).
-    While it is off, every rlm.factory call except help() and every factory
-    harness write refuses with ONE exact message, and nothing starts or
-    persists behind the refusal.
+    While it is off, every rlm.factory call except help() refuses with ONE
+    exact message, and nothing starts behind the refusal.
     """
 
     # -- namespace gate --------------------------------------------------------
@@ -3162,64 +3190,6 @@ class FactoryOptInGateTest(_ExecutorTestCase):
         doc = rlm_module.rlm.factory.help()
         self.assertEqual(doc, factory_module.FACTORY_HELP)
         self.assertIn("The factory is opt-in", doc)
-
-    # -- harness write gate ----------------------------------------------------
-
-    def test_create_factory_refuses_while_disabled(self) -> None:
-        self.disable_factory()
-        with self.assertRaises(ValueError) as raised:
-            self.harness.create_factory("Factory", "Never stores.", id="sw", dag={"nodes": [self.node("a")]})
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        self.assertEqual(self.harness.list("factory"), [])
-        # The refusal precedes spec validation: an invalid spec never gets
-        # the spec error while the factory is off, only the one message.
-        with self.assertRaises(ValueError) as raised:
-            self.harness.create_factory("Broken", "Never stores.", id="bad", dag={"nodes": []})
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        self.assertEqual(self.harness.list("factory"), [])
-        # The generic create path refuses identically.
-        with self.assertRaises(ValueError) as raised:
-            self.harness.create(
-                "factory",
-                "Generic",
-                "content",
-                id="generic",
-                arguments={"dag": {"nodes": [self.node("a")]}},
-            )
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        self.assertEqual(self.harness.list("factory"), [])
-
-    def test_factory_entry_updates_refuse_while_disabled(self) -> None:
-        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
-        self.disable_factory()
-        with self.assertRaises(ValueError) as raised:
-            self.harness.update_factory("sw", "Factory", "content updated")
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        with self.assertRaises(ValueError) as raised:
-            self.harness.update("factory", "sw", "Factory", "content updated")
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        with self.assertRaises(ValueError) as raised:
-            self.harness.upsert(
-                "factory",
-                "Factory",
-                "content",
-                id="upserted",
-                arguments={"dag": {"nodes": [self.node("a")]}},
-            )
-        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
-        # The stored entry is untouched behind the refusals.
-        self.assertEqual(self.harness.get("factory", "sw").content, "Factory content")
-        self.assertEqual(self.harness.list("factory"), [self.harness.get("factory", "sw")])
-
-    def test_delete_stays_available_while_disabled(self) -> None:
-        # Deleting is cleanup, not authoring or execution: the gate list is
-        # run/status/stop/resume (and the later graph/watch) plus creates and
-        # updates, so an operator can still clear stale entries while off.
-        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
-        self.disable_factory()
-        self.assertTrue(self.harness.delete_factory("sw"))
-        self.assertIsNone(self.harness.get("factory", "sw"))
-
 
 class FactoryExecutorTest(_ExecutorTestCase):
 
@@ -8443,7 +8413,7 @@ class MachineCliDispatchTest(unittest.TestCase):
         (self.agent_home / "settings.json").write_text(
             json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
         )
-        harness = HarnessState(Path(self.agent_home) / "harness_state.json")
+        harness = _EntryStore()
         previous_executor = factory_module._DEFAULT_EXECUTOR
         factory_module._DEFAULT_EXECUTOR = FactoryExecutor(harness=harness)
         self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
@@ -8497,15 +8467,13 @@ class ExportMachineTest(unittest.TestCase):
         self.library = root / "machines"
         self.out_dir = root / "out"
         self.out_dir.mkdir(parents=True)
-        self.harness = HarnessState(root / "harness_state.json")
+        self.harness = _EntryStore()
         self.previous_executor = factory_module._DEFAULT_EXECUTOR
         self.executor = FactoryExecutor(harness=self.harness)
         factory_module._DEFAULT_EXECUTOR = self.executor
         self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", self.previous_executor))
-        # The opt-in gate: create_factory (below) refuses while the
-        # `factory.enabled` setting is off, so the agent dir points at an
-        # isolated temp dir whose settings file writes the real document
-        # shape the daemon writes -- the core's enabled-fixture pattern.
+        # Keep settings resolution isolated, using the same document shape
+        # as the daemon and the core's enabled-fixture pattern.
         agent_temp = TemporaryDirectory()
         self.addCleanup(agent_temp.cleanup)
         self._isolate_agent_dir(agent_temp.name)
@@ -8684,7 +8652,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name).resolve()
         self.library = root / "machines"
-        self.harness = HarnessState(root / "harness_state.json")
+        self.harness = _EntryStore()
         self.harness.create_subagent("Worker", "Do the work carefully.", id="worker")
         self.clock = FakeClock()
         self.host = FakeHost(clock=self.clock)
@@ -8722,6 +8690,31 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
             encoding="utf-8",
         )
         return path
+
+    @async_test
+    async def test_default_executor_runs_inline_library_machine_without_entry_store(self) -> None:
+        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps)
+        factory_module._DEFAULT_EXECUTOR = self.executor
+        path = self.store_machine_file("inline", {
+            "states": [{"id": "check", "entry": True, "subagent": {"prompt": "Check this."}}],
+        })
+        result = await rlm_module.rlm.factory.run("inline")
+        self.assertEqual((result["machine"], result["machine_path"], result["started"]),
+                         ("inline", str(path), ["check"]))
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(len(self.host.calls_of("rlm.run")), 1)
+
+    @async_test
+    async def test_default_executor_reports_unresolved_named_subagent(self) -> None:
+        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps)
+        factory_module._DEFAULT_EXECUTOR = self.executor
+        self.store_machine_file("named", {
+            "states": [{"id": "check", "entry": True, "subagent": "worker"}],
+        })
+        with self.assertRaisesRegex(ValueError, "state 'check' references unknown subagent 'worker'"):
+            await rlm_module.rlm.factory.run("named")
+        self.assertEqual(self.host.calls, [])
 
     @async_test
     async def test_run_resolves_machine_names_from_the_library(self) -> None:

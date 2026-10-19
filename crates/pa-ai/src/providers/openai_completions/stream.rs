@@ -7,8 +7,10 @@ use serde_json::{json, Map, Value};
 
 use crate::cache_pricing::{get_anthropic_cache_write_cost, has_standard_anthropic_cache_pricing};
 use crate::env_api_keys::get_env_api_key;
+#[cfg(test)]
+use crate::event_stream::create_assistant_message_event_stream;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
+    create_provider_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
 use crate::providers::openai_completions::convert::{map_stop_reason, parse_chunk_usage};
@@ -68,9 +70,12 @@ impl StreamingState {
         }
     }
 
-    fn ensure_text_block(&mut self, writer: &AssistantMessageEventWriter) -> usize {
+    async fn ensure_text_block(
+        &mut self,
+        writer: &AssistantMessageEventWriter,
+    ) -> Result<usize, ProviderError> {
         if let Some(index) = self.text_block {
-            return index;
+            return Ok(index);
         }
         self.output
             .content
@@ -81,20 +86,22 @@ impl StreamingState {
             }));
         let index = self.output.content.len() - 1;
         self.text_block = Some(index);
-        writer.push(AssistantMessageEvent::TextStart {
-            content_index: index as u64,
-            partial: self.output.clone(),
-        });
-        index
+        writer
+            .send(AssistantMessageEvent::TextStart {
+                content_index: index as u64,
+                partial: self.output.clone(),
+            })
+            .await?;
+        Ok(index)
     }
 
-    fn ensure_thinking_block(
+    async fn ensure_thinking_block(
         &mut self,
         thinking_signature: &str,
         writer: &AssistantMessageEventWriter,
-    ) -> usize {
+    ) -> Result<usize, ProviderError> {
         if let Some(index) = self.thinking_block {
-            return index;
+            return Ok(index);
         }
         self.output
             .content
@@ -106,19 +113,21 @@ impl StreamingState {
             }));
         let index = self.output.content.len() - 1;
         self.thinking_block = Some(index);
-        writer.push(AssistantMessageEvent::ThinkingStart {
-            content_index: index as u64,
-            partial: self.output.clone(),
-        });
-        index
+        writer
+            .send(AssistantMessageEvent::ThinkingStart {
+                content_index: index as u64,
+                partial: self.output.clone(),
+            })
+            .await?;
+        Ok(index)
     }
 
-    fn ensure_tool_call_block(
+    async fn ensure_tool_call_block(
         &mut self,
         stream_index: Option<u64>,
         id: Option<&str>,
         writer: &AssistantMessageEventWriter,
-    ) -> usize {
+    ) -> Result<usize, ProviderError> {
         let mut block =
             stream_index.and_then(|index| self.tool_call_blocks_by_index.get(&index).copied());
         if block.is_none() {
@@ -133,7 +142,7 @@ impl StreamingState {
             if let Some(id) = id {
                 self.tool_call_blocks_by_id.insert(id.to_string(), index);
             }
-            return index;
+            return Ok(index);
         }
         self.output
             .content
@@ -151,29 +160,40 @@ impl StreamingState {
         if let Some(id) = id {
             self.tool_call_blocks_by_id.insert(id.to_string(), index);
         }
-        writer.push(AssistantMessageEvent::ToolcallStart {
-            content_index: index as u64,
-            partial: self.output.clone(),
-        });
-        index
+        writer
+            .send(AssistantMessageEvent::ToolcallStart {
+                content_index: index as u64,
+                partial: self.output.clone(),
+            })
+            .await?;
+        Ok(index)
     }
 }
 
 /// Finish all open blocks, emitting `*_end` events (port of `finishBlock`).
-fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWriter) {
+async fn finish_blocks(
+    state: &mut StreamingState,
+    writer: &AssistantMessageEventWriter,
+) -> Result<(), ProviderError> {
     for index in 0..state.output.content.len() {
         match &state.output.content[index] {
-            AssistantContent::Text(text) => writer.push(AssistantMessageEvent::TextEnd {
-                content_index: index as u64,
-                content: text.text.clone(),
-                partial: state.output.clone(),
-            }),
+            AssistantContent::Text(text) => {
+                writer
+                    .send(AssistantMessageEvent::TextEnd {
+                        content_index: index as u64,
+                        content: text.text.clone(),
+                        partial: state.output.clone(),
+                    })
+                    .await?;
+            }
             AssistantContent::Thinking(thinking) => {
-                writer.push(AssistantMessageEvent::ThinkingEnd {
-                    content_index: index as u64,
-                    content: thinking.thinking.clone(),
-                    partial: state.output.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ThinkingEnd {
+                        content_index: index as u64,
+                        content: thinking.thinking.clone(),
+                        partial: state.output.clone(),
+                    })
+                    .await?;
             }
             AssistantContent::ToolCall(_) => {
                 let partial_args = state.tool_call_partial_args.remove(&index);
@@ -189,28 +209,31 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
                     AssistantContent::ToolCall(tool_call) => tool_call.clone(),
                     _ => unreachable!("index points at a tool call"),
                 };
-                writer.push(AssistantMessageEvent::ToolcallEnd {
-                    content_index: index as u64,
-                    tool_call,
-                    partial: state.output.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ToolcallEnd {
+                        content_index: index as u64,
+                        tool_call,
+                        partial: state.output.clone(),
+                    })
+                    .await?;
             }
         }
     }
+    Ok(())
 }
 
-/// Handle one parsed SSE chunk. Returns the chunk value for testability.
+/// Handle one parsed SSE chunk, awaiting delivery of each emitted event.
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
-fn handle_chunk(
+async fn handle_chunk(
     chunk: &Value,
     model: &Model,
     cache_write_cost: Option<f64>,
     state: &mut StreamingState,
     writer: &AssistantMessageEventWriter,
-) {
+) -> Result<(), ProviderError> {
     if !chunk.is_object() {
-        return;
+        return Ok(());
     }
     if let Some(id) = chunk.get("id").and_then(|value| value.as_str()) {
         if state.output.response_id.is_none() {
@@ -239,7 +262,7 @@ fn handle_chunk(
         .and_then(|choices| choices.as_array())
         .and_then(|choices| choices.first())
     else {
-        return;
+        return Ok(());
     };
 
     // Fallback: some providers (e.g., Moonshot) return usage in choice.usage.
@@ -261,20 +284,22 @@ fn handle_chunk(
     }
 
     let Some(delta) = choice.get("delta").and_then(|value| value.as_object()) else {
-        return;
+        return Ok(());
     };
 
     if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
         if !content.is_empty() {
-            let index = state.ensure_text_block(writer);
+            let index = state.ensure_text_block(writer).await?;
             if let Some(AssistantContent::Text(text)) = state.output.content.get_mut(index) {
                 text.text.push_str(content);
             }
-            writer.push(AssistantMessageEvent::TextDelta {
-                content_index: index as u64,
-                delta: content.to_string(),
-                partial: state.output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::TextDelta {
+                    content_index: index as u64,
+                    delta: content.to_string(),
+                    partial: state.output.clone(),
+                })
+                .await?;
         }
     }
 
@@ -290,22 +315,26 @@ fn handle_chunk(
         }
     }
     if let Some((field, reasoning_delta)) = found_reasoning_field {
-        let index = state.ensure_thinking_block(field, writer);
+        let index = state.ensure_thinking_block(field, writer).await?;
         if let Some(AssistantContent::Thinking(thinking)) = state.output.content.get_mut(index) {
             thinking.thinking.push_str(reasoning_delta);
         }
-        writer.push(AssistantMessageEvent::ThinkingDelta {
-            content_index: index as u64,
-            delta: reasoning_delta.to_string(),
-            partial: state.output.clone(),
-        });
+        writer
+            .send(AssistantMessageEvent::ThinkingDelta {
+                content_index: index as u64,
+                delta: reasoning_delta.to_string(),
+                partial: state.output.clone(),
+            })
+            .await?;
     }
 
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
         for tool_call in tool_calls {
             let stream_index = tool_call.get("index").and_then(serde_json::Value::as_u64);
             let id = tool_call.get("id").and_then(|value| value.as_str());
-            let index = state.ensure_tool_call_block(stream_index, id, writer);
+            let index = state
+                .ensure_tool_call_block(stream_index, id, writer)
+                .await?;
             if let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(index) {
                 if block.id.is_empty() {
                     if let Some(id) = id {
@@ -343,11 +372,13 @@ fn handle_chunk(
                     }
                 }
             }
-            writer.push(AssistantMessageEvent::ToolcallDelta {
-                content_index: index as u64,
-                delta: delta_text,
-                partial: state.output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ToolcallDelta {
+                    content_index: index as u64,
+                    delta: delta_text,
+                    partial: state.output.clone(),
+                })
+                .await?;
         }
     }
 
@@ -416,12 +447,15 @@ fn handle_chunk(
                 }));
             let index = state.output.content.len() - 1;
             state.reasoning_details_block = Some(index);
-            writer.push(AssistantMessageEvent::ThinkingStart {
-                content_index: index as u64,
-                partial: state.output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ThinkingStart {
+                    content_index: index as u64,
+                    partial: state.output.clone(),
+                })
+                .await?;
         }
     }
+    Ok(())
 }
 
 /// Encode the merged reasoning-details signature once at stream end and on the error path, not on
@@ -475,9 +509,16 @@ pub fn stream_openai_completions(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: model.api.clone(),
@@ -497,10 +538,12 @@ pub fn stream_openai_completions(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -515,14 +558,19 @@ pub fn stream_openai_completions(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -625,62 +673,67 @@ async fn run_stream(
         ));
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
 
     let mut state = StreamingState::new(output.clone());
-    let mut decoder = SseDecoder::new();
-    loop {
-        let chunk = match response.next_text().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
-            Err(error) => {
-                // TS catch: encode the reasoning-details signature, then settle the partial tool
-                // calls before the error event carries the message.
-                encode_reasoning_details_signature(&mut state);
-                settle_partial_tool_calls(&mut state);
-                *output = state.output;
-                return Err(error);
+    let stream_result: Result<(), ProviderError> = async {
+        let mut decoder = SseDecoder::new();
+        loop {
+            let Some(chunk) = response.next_text().await? else {
+                break;
+            };
+            let events = decoder.push_text(&chunk);
+            for event in &events {
+                if mark_done_marker(event, &mut state) {
+                    // A held-open body past [DONE] never EOFs; the marker
+                    // ends the stream.
+                    break;
+                }
+                if let Some(chunk) = parse_sse_event_data(event) {
+                    handle_chunk(&chunk, model, cache_write_cost, &mut state, writer).await?;
+                }
             }
-        };
-        let events = decoder.push_text(&chunk);
-        for event in &events {
-            if mark_done_marker(event, &mut state) {
-                // A held-open body past [DONE] never EOFs; the marker
-                // ends the stream.
+            if state.saw_done_marker {
                 break;
             }
-            if let Some(chunk) = parse_sse_event_data(event) {
-                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
+        }
+        if !state.saw_done_marker {
+            for event in decoder.finish() {
+                if mark_done_marker(&event, &mut state) {
+                    continue;
+                }
+                if let Some(chunk) = parse_sse_event_data(&event) {
+                    handle_chunk(&chunk, model, cache_write_cost, &mut state, writer).await?;
+                }
             }
         }
-        if state.saw_done_marker {
-            break;
+        // The multiplier table is OpenAI's own; gateways price tiers per endpoint
+        // (OpenRouter reports its cost in usage instead, see parse_chunk_usage).
+        if model.provider == "openai" {
+            apply_service_tier_pricing(
+                &mut state.output.usage,
+                state.response_service_tier.as_deref(),
+                &model.id,
+            );
         }
-    }
-    if !state.saw_done_marker {
-        for event in decoder.finish() {
-            if mark_done_marker(&event, &mut state) {
-                continue;
-            }
-            if let Some(chunk) = parse_sse_event_data(&event) {
-                handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
-            }
-        }
-    }
-    // The multiplier table is OpenAI's own; gateways price tiers per endpoint
-    // (OpenRouter reports its cost in usage instead, see parse_chunk_usage).
-    if model.provider == "openai" {
-        apply_service_tier_pricing(
-            &mut state.output.usage,
-            state.response_service_tier.as_deref(),
-            &model.id,
-        );
-    }
 
-    encode_reasoning_details_signature(&mut state);
-    finish_blocks(&mut state, writer);
+        encode_reasoning_details_signature(&mut state);
+        finish_blocks(&mut state, writer).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = stream_result {
+        // TS catch: encode reasoning details and settle partial tool calls, including when an
+        // awaited event delivery is cancelled before the next HTTP read.
+        encode_reasoning_details_signature(&mut state);
+        settle_partial_tool_calls(&mut state);
+        *output = state.output;
+        return Err(error);
+    }
     *output = state.output;
 
     if base_options

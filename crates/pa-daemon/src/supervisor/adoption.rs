@@ -58,8 +58,7 @@ pub(super) enum AdoptionBoot {
     PlainStartup,
 }
 
-/// One descriptor's boot-adoption decision, reported as a count in the
-/// pass's `worker_adoption` event (counts only, never session payload).
+/// One descriptor's boot-adoption decision.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum AdoptionOutcome {
     /// Live socket adopted (incl. a worker that re-registered before the
@@ -77,87 +76,25 @@ pub(super) enum AdoptionOutcome {
 }
 
 impl Supervisor {
-    /// Emit the boot adoption pass's `worker_adoption` event: the boot kind
-    /// and per-outcome counts, primitives only — never session payload.
-    #[allow(clippy::too_many_arguments)]
-    fn note_worker_adoption(
-        &self,
-        boot: &str,
-        adopted_live: usize,
-        revived: usize,
-        skipped_idle: usize,
-        stopped: usize,
-        failed: usize,
-    ) {
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_worker_adoption(
-                client,
-                boot,
-                adopted_live,
-                revived,
-                skipped_idle,
-                stopped,
-                failed,
-            );
-        }
-    }
-
     /// Adopt or relaunch persisted workers, concurrently: one dead worker's relaunch must
     /// not delay adopting live sessions; the fan-out is capped at
     /// [`crate::recovery_pacing::ADOPTION_CONCURRENCY`] to avoid a relaunch storm.
     pub(super) async fn adopt_persisted_workers(self: &Arc<Self>, boot: AdoptionBoot) {
         let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
-        let adopted_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let revived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let skipped_idle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let failed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let jobs: Vec<_> = descriptors
             .into_iter()
             .map(|(path, descriptor)| {
                 let supervisor = Arc::clone(self);
                 let boot = boot.clone();
-                let adopted_live = Arc::clone(&adopted_live);
-                let revived = Arc::clone(&revived);
-                let skipped_idle = Arc::clone(&skipped_idle);
-                let stopped = Arc::clone(&stopped);
-                let failed = Arc::clone(&failed);
                 move || async move {
-                    let outcome = supervisor
+                    supervisor
                         .adopt_persisted_worker(path, descriptor, boot)
                         .await;
-                    let counter = match outcome {
-                        AdoptionOutcome::AdoptedLive => adopted_live,
-                        AdoptionOutcome::Revived => revived,
-                        AdoptionOutcome::SkippedIdle => skipped_idle,
-                        AdoptionOutcome::Stopped => stopped,
-                        AdoptionOutcome::Failed => failed,
-                    };
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             })
             .collect();
         crate::recovery_pacing::run_bounded(jobs, crate::recovery_pacing::ADOPTION_CONCURRENCY)
             .await;
-        let adopted_live = adopted_live.load(std::sync::atomic::Ordering::Relaxed);
-        let revived = revived.load(std::sync::atomic::Ordering::Relaxed);
-        let skipped_idle = skipped_idle.load(std::sync::atomic::Ordering::Relaxed);
-        let stopped = stopped.load(std::sync::atomic::Ordering::Relaxed);
-        let failed = failed.load(std::sync::atomic::Ordering::Relaxed);
-        if adopted_live + revived + skipped_idle + stopped + failed > 0 {
-            let boot_label = match boot {
-                AdoptionBoot::UpdateRoster { .. } => "update",
-                AdoptionBoot::PlainStartup => "plain",
-            };
-            self.note_worker_adoption(
-                boot_label,
-                adopted_live,
-                revived,
-                skipped_idle,
-                stopped,
-                failed,
-            );
-        }
         // TS arms the owner cleanup for every adopted worker: an owner that
         // does not reconnect within the grace loses its worker.
         for resident in self.registry.list().await {
@@ -443,14 +380,13 @@ impl Supervisor {
                 Ok(resident) => (resident, false),
                 Err(error) => {
                     let message = format!("{error:#}");
-                    // The definitive unknown-worker refusal is observable (log + telemetry)
+                    // The definitive unknown-worker refusal is observable in the local log
                     // and the worker retires on it: a live worker this supervisor will
                     // never adopt would otherwise hold its lease forever.
                     if message.starts_with(crate::registration::UNKNOWN_SESSION_WORKER_PREFIX) {
                         self.log_line(&format!(
                             "session worker {active_session_id} registration refused; the worker retires"
                         ));
-                        self.note_daemon_event("registration_refused", None);
                     }
                     return fail(&message);
                 }

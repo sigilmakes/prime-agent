@@ -115,6 +115,15 @@ impl AgentView {
                     width,
                 )
             }
+            ChatEntry::BranchSummary { summary } => {
+                usize::from(spacing)
+                    + crate::branch_row::count_branch_summary(
+                        summary,
+                        detail.tool_output_expanded(),
+                        &self.theme,
+                        width,
+                    )
+            }
             ChatEntry::CompactionSummary {
                 summary,
                 tokens_before,
@@ -316,6 +325,7 @@ mod tests {
                 .prop_map(|(text, kind)| ChatEntry::Status { text, kind }),
             1 => markdown_text().prop_map(|text| ChatEntry::User { text }),
             1 => markdown_text().prop_map(|text| ChatEntry::SlashCommand { text }),
+            1 => markdown_text().prop_map(|summary| ChatEntry::BranchSummary { summary }),
             1 => (
                 markdown_text(),
                 any::<u64>(),

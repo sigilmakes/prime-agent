@@ -14,6 +14,38 @@ fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, Pro
         .ok_or_else(|| ProviderError::Message(format!("No API provider registered for api: {api}")))
 }
 
+fn validate_stream_options(
+    provider: &dyn crate::registry::Provider,
+    model: &Model,
+    context: &Context,
+    options: Option<&StreamOptions>,
+) -> Result<(), ProviderError> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    if let Some(capacity) = options.event_buffer_capacity {
+        if capacity == 0 {
+            return Err(ProviderError::Message(
+                "Event buffer capacity must be greater than zero".into(),
+            ));
+        }
+        if !provider.supports_bounded_event_delivery() {
+            return Err(ProviderError::Message(
+                "Provider adapter does not support bounded event delivery".into(),
+            ));
+        }
+    }
+    if let Some(native) = &options.native_responses_input {
+        native.validate(model, context, options)?;
+        if !provider.supports_native_responses_input() {
+            return Err(ProviderError::Message(
+                "Provider adapter does not support native Responses input".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Estimate a request's input tokens before it is sent: chars/4 over the text the provider will
 /// serialize, images at 1,200 tokens each (the session engine's compaction policy, restated:
 /// `pa-core` cannot be a dependency here).
@@ -88,8 +120,11 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
     let Some(options) = options else {
         return;
     };
-    if model.context_window == 0 {
-        return; // combined ceiling unknown — leave the request alone
+    if model.context_window == 0 || options.native_responses_input.is_some() {
+        // Native ciphertext, unknown items and image encodings do not reveal
+        // their model-token size. The host/provider owns that budget; a raw
+        // chars/4 estimate would silently squash valid output requests.
+        return;
     }
     let requested = options
         .max_tokens
@@ -119,6 +154,7 @@ pub fn stream(
 ) -> Result<AssistantMessageEventStream, ProviderError> {
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
+    validate_stream_options(provider.as_ref(), model, context, options.as_ref())?;
     clamp_output_budget(model, context, options.as_mut());
     Ok(provider.stream(model, context, options.as_ref()))
 }
@@ -155,6 +191,7 @@ pub fn stream_simple(
     // so materialize the options to clamp that default too. The
     // materialized default builds the same request otherwise.
     let simple = options.get_or_insert_with(SimpleStreamOptions::default);
+    validate_stream_options(provider.as_ref(), model, context, Some(&simple.base))?;
     clamp_output_budget(model, context, Some(&mut simple.base));
     Ok(provider.stream_simple(model, context, options.as_ref()))
 }

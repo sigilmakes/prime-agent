@@ -198,8 +198,8 @@ pub(crate) async fn execute_prepared_tool_call(
                 }
             }
             ExecutedToolCallOutcome {
+                is_error: result.is_error,
                 result,
-                is_error: false,
             }
         }
         Err(error) => {
@@ -285,6 +285,7 @@ pub(crate) async fn finalize_executed_tool_call(
         }
     }
 
+    result.is_error = is_error;
     Ok(FinalizedToolCallOutcome {
         tool_call: prepared.tool_call.clone(),
         result,

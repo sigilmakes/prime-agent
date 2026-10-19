@@ -11,6 +11,11 @@ yanked = "deny"
 # Triaged exceptions — every entry must carry a reason and a review date;
 # a landed fix upstream means the entry is removed instead of silenced.
 ignore = [
+  # fontdue parses only our bundled Silver.ttf, not caller-supplied font bytes.
+  # Silver SHA256: 7adcf56d93142ded08ff18196f78fcaaf552411b9a94dc559dac90eb5c91cef1.
+  # This is a maintenance advisory, not a vulnerability exemption. Revisit when
+  # fontdue adopts a maintained parser or the renderer changes. Reviewed 2026-10-19.
+  { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser via fontdue; only pinned bundled Silver.ttf is parsed, no external fonts (reviewed 2026-10-19)" },
   # Marvin Attack timing sidechannel in rsa; no patch exists upstream
   # (RustCrypto/RSA#626 tracks it). `rsa` is currently a dead dependency in
   # pa-ai (declared, never referenced); no signing path executes it, so no

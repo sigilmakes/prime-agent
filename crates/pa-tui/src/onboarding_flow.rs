@@ -310,8 +310,6 @@ pub enum OnboardingPanel {
     },
     /// The connect-more-providers picker.
     Providers(ProviderPicker),
-    /// The trace question (TS `askOnboardingTraceOptIn`'s choice).
-    Question(OnboardingChoice),
     /// The Prime team question (no heading, so the brand line returns). The pick answers the flow's
     /// `SelectTeam` request directly: the login flow settles through its own future.
     TeamQuestion {
@@ -342,9 +340,7 @@ impl OnboardingPanel {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.render(theme, width, kb),
             OnboardingPanel::Providers(picker) => picker.render(theme, width),
-            OnboardingPanel::Question(choice) | OnboardingPanel::TeamQuestion { choice, .. } => {
-                choice.render(theme, width)
-            }
+            OnboardingPanel::TeamQuestion { choice, .. } => choice.render(theme, width),
         }
     }
 
@@ -365,23 +361,6 @@ impl OnboardingPanel {
             }
             OnboardingPanel::Providers(picker) => {
                 picker.handle_key(key, kb).map(OnboardingDecision::Pick)
-            }
-            OnboardingPanel::Question(choice) => {
-                if kb.matches(key, "tui.select.cancel") {
-                    return Some(OnboardingDecision::Cancelled);
-                }
-                if kb.matches(key, "tui.select.up") {
-                    choice.move_selection(-1);
-                    return None;
-                }
-                if kb.matches(key, "tui.select.down") {
-                    choice.move_selection(1);
-                    return None;
-                }
-                if kb.matches(key, "tui.select.confirm") {
-                    return Some(OnboardingDecision::Selected(choice.selected()));
-                }
-                None
             }
             // The choice answers its own oneshot (index 0 the personal account, 1.. the teams; a
             // cancel keeps the stored selection).
@@ -420,7 +399,7 @@ impl OnboardingPanel {
         match self {
             OnboardingPanel::Auth { panel, .. } => panel.handle_paste(text),
             OnboardingPanel::Providers(picker) => picker.handle_paste(text),
-            OnboardingPanel::Question(_) | OnboardingPanel::TeamQuestion { .. } => {}
+            OnboardingPanel::TeamQuestion { .. } => {}
         }
     }
 

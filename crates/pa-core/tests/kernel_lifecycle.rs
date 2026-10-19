@@ -206,7 +206,7 @@ async fn rlm_bootstrap_injects_the_kernel_surface() {
 
     let result = execute(
         &manager,
-        "callable(rlm.spawn) and callable(rlm.find_models) and hasattr(rlm, 'harness') and callable(bash) and hasattr(rlm, 'get_harness_state')",
+        "import rlm as _runtime\nassert not hasattr(_runtime, 'harness') and not hasattr(_runtime, 'get_harness_state'), 'hardwired continual harness APIs must stay absent'\nassert not hasattr(rlm, 'harness') and not hasattr(rlm, 'get_harness_state'), 'hardwired continual harness APIs must stay absent'\ncallable(rlm.spawn) and callable(rlm.find_models) and callable(bash) and callable(mcp.list_tools) and callable(mcp.call_tool)",
     )
     .await;
     assert_eq!(
@@ -217,7 +217,7 @@ async fn rlm_bootstrap_injects_the_kernel_surface() {
     assert_eq!(
         result.result.as_deref(),
         Some("True"),
-        "rlm/bash/harness must be usable"
+        "rlm/bash/mcp must be usable without a hardwired continual harness"
     );
 
     manager

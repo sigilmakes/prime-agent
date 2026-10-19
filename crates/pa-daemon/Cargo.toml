@@ -6,11 +6,10 @@ license.workspace = true
 description = "Session supervisor, worker processes, and wire protocol."
 
 [dependencies]
-pa-types = { path = "../pa-types" }
-pa-core = { path = "../pa-core" }
-pa-agent = { path = "../pa-agent" }
-pa-ai = { path = "../pa-ai" }
-pa-telemetry = { path = "../pa-telemetry" }
+pa-types = { path = "../pa-types", version = "0.10.0" }
+pa-core = { path = "../pa-core", version = "0.10.0" }
+pa-agent = { path = "../pa-agent", version = "0.10.0" }
+pa-ai = { path = "../pa-ai", version = "0.10.0" }
 anyhow = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
@@ -36,7 +35,7 @@ proptest = { workspace = true }
 # catalog-repo child-resolution regression writes the layer-A disk cache
 # in the pa-models snapshot shape; the crate's runtime surface goes
 # through pa-core.
-pa-models = { path = "../pa-models" }
+pa-models = { path = "../pa-models", version = "0.10.0" }
 url = "2"
 # The MCP catalog e2e seeds the fetch lane's snapshot envelope: the real
 # catalog url/scope constants keep the seeded cache byte-honest.

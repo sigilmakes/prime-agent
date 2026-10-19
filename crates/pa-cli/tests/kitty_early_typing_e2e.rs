@@ -401,7 +401,18 @@ fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
         .arg("--exact")
         .arg("early_typing_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
+        // This fixture answers the probe itself. Do not inherit a terminal class
+        // or transport hint that can skip or replace the capability query.
+        .env("TERM", "xterm-256color")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("KITTY_WINDOW_ID")
+        .env_remove("GHOSTTY_RESOURCES_DIR")
+        .env_remove("WEZTERM_PANE")
         .env_remove("TMUX")
+        .env_remove("STY")
+        .env_remove("ZELLIJ")
+        .env_remove("SSH_CONNECTION")
+        .env_remove("SSH_TTY")
         .stdin(slave_as_stdio(slave))
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
@@ -441,12 +452,9 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: std::sync::Arc::default(),

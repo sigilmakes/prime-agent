@@ -10,6 +10,21 @@ dependencies = [
 
 [dependency-groups]
 dev = ["dill"]
+kernel = [
+  "dill",
+  "requests",
+  "httpx",
+  "pyyaml",
+  "tomli",
+  "python-dotenv",
+  "pandas",
+  "numpy",
+  "scipy",
+  "beautifulsoup4",
+  "lxml",
+  "pydantic",
+  "tyro",
+]
 
 [build-system]
 requires = ["hatchling"]

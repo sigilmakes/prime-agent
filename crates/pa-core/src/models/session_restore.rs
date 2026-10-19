@@ -33,15 +33,22 @@ pub async fn find_session_model_with_readiness_wait(
     model_id: &str,
     readiness_timeout_ms: u64,
 ) -> Option<Model> {
+    if !registry.get_provider_auth_status(provider).configured {
+        return None;
+    }
     let direct = find_restorable(registry, provider, model_id);
     if direct.is_some() {
         return direct;
     }
+    // The budget bounds only this caller. The owned publication task retains
+    // successful discoveries even when HTTP or a sibling cache lock runs longer.
     let _ = tokio::time::timeout(
         Duration::from_millis(readiness_timeout_ms),
-        registry.refresh_available_models(),
+        registry.wait_for_catalog_publication(),
     )
     .await;
+    registry.refresh();
+    registry.load_private_authorization_from_cache();
     find_restorable(registry, provider, model_id)
 }
 

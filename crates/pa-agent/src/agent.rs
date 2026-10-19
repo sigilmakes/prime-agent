@@ -1096,6 +1096,32 @@ impl Agent {
         self.clear_steering_queue();
     }
 
+    /// Publish an idle context only after a synchronous durable commit succeeds.
+    /// The commit callback must not await or re-enter this Agent. Run admission
+    /// and context snapshots cannot pass this short publication transaction.
+    ///
+    /// # Errors
+    /// Returns an error when a run is active or the commit callback fails.
+    ///
+    /// # Panics
+    /// Panics if the run mutex is poisoned.
+    pub async fn commit_idle_messages(
+        &self,
+        messages: Vec<AgentMessage>,
+        commit: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let mut shared = self.inner.shared.lock().await;
+        let run = self.inner.run.lock().unwrap();
+        if run.is_some() {
+            anyhow::bail!(
+                "Agent is busy; wait for the active run before selecting a context strategy"
+            );
+        }
+        commit()?;
+        shared.state.messages = messages;
+        Ok(())
+    }
+
     /// Run the loop with a new prompt.
     ///
     /// # Errors

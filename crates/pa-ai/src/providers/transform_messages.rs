@@ -71,11 +71,10 @@ fn downgrade_unsupported_images(messages: &[Message], model: &Model) -> Vec<Mess
 
 type Normalizer<'a> = dyn Fn(&str, &Model, &AssistantMessage) -> Option<String> + 'a;
 
-/// Tool-call ID normalization plus synthetic tool results for unanswered calls, dropping errored
-/// assistant turns (TS `transformMessages`).
-// Long by design: mirrors the provider's stream shape.
-#[allow(clippy::too_many_lines)]
-pub fn transform_messages_with_normalizer(
+/// Normalize only fresh portable messages. Unlike complete-conversation repair,
+/// this does not remove tool results whose call is retained in a native prefix,
+/// or invent answers for calls outside the selected slice.
+pub(crate) fn normalize_messages_with_normalizer(
     messages: &[Message],
     model: &Model,
     normalize_tool_call_id: &Normalizer<'_>,
@@ -83,7 +82,7 @@ pub fn transform_messages_with_normalizer(
     let mut tool_call_id_map: HashMap<String, String> = HashMap::new();
     let image_aware = downgrade_unsupported_images(messages, model);
 
-    let transformed: Vec<Message> = image_aware
+    image_aware
         .iter()
         .map(|msg| match msg {
             Message::User(_) => msg.clone(),
@@ -159,7 +158,19 @@ pub fn transform_messages_with_normalizer(
                 })
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Tool-call ID normalization plus synthetic tool results for unanswered calls, dropping errored
+/// assistant turns (TS `transformMessages`).
+// Long by design: mirrors the provider's stream shape.
+#[allow(clippy::too_many_lines)]
+pub fn transform_messages_with_normalizer(
+    messages: &[Message],
+    model: &Model,
+    normalize_tool_call_id: &Normalizer<'_>,
+) -> Vec<Message> {
+    let transformed = normalize_messages_with_normalizer(messages, model, normalize_tool_call_id);
 
     // This preserves thinking signatures and satisfies API requirements
     let mut result: Vec<Message> = Vec::new();

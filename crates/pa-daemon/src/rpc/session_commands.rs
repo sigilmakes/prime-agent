@@ -443,7 +443,7 @@ async fn export_html(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
             let manager = persistence.lock().await;
             manager.get_leaf_id().map(str::to_string)
         },
-        system_prompt: Some(handle.engine.system_prompt.clone()),
+        system_prompt: Some(handle.engine.assembled_system_prompt()),
         tools: Some(tools),
         rendered_tools: None,
     };
@@ -605,6 +605,7 @@ async fn get_commands(state: &Arc<RpcState>) -> Result<ResponseData, String> {
         }
         commands.push(entry);
     }
+    commands.extend(crate::plugin_commands::command_inventory(engine));
     Ok(ResponseData::Present(json!({ "commands": commands })))
 }
 

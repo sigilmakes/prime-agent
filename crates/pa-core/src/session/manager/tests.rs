@@ -2,6 +2,154 @@
 
 use super::*;
 
+fn canonical_in_memory_header_fixture() -> SessionHeader {
+    serde_json::from_value(serde_json::json!({
+        "version": 17,
+        "id": "canonical-mirror-session",
+        "timestamp": "2001-02-03T04:05:06.789Z",
+        "cwd": "/literal/source/project",
+        "parentSession": "/literal/source/parent.jsonl",
+        "rlmDepth": 4,
+        "git": {
+            "repoUrl": "ssh://example.invalid/exact/repo",
+            "commit": "abc123",
+            "branch": "original-branch",
+            "futureGit": {"nested": [null, true, {"opaque": "git bytes"}]}
+        },
+        "futureSession": {"nested": [false, 42, {"opaque": "header bytes"}]}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn in_memory_from_header_preserves_authoritative_header_without_io() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("canonical.jsonl");
+    let header = canonical_in_memory_header_fixture();
+    let expected = serde_json::to_value(&header).unwrap();
+    let original = format!(
+        "  {}\n",
+        serde_json::to_string(&FileEntry::Header {
+            header: header.clone()
+        })
+        .unwrap()
+    );
+    std::fs::write(&source, &original).unwrap();
+    let runtime_cwd = tmp.path().join("runtime-project");
+    let session_dir = tmp.path().join("session-owned-artifacts");
+    let mut manager =
+        SessionManager::in_memory_from_header(&runtime_cwd, &session_dir, header).unwrap();
+
+    assert_eq!(manager.get_session_id(), "canonical-mirror-session");
+    assert_eq!(
+        serde_json::to_value(manager.get_header()).unwrap(),
+        expected
+    );
+    assert_eq!(manager.get_cwd(), runtime_cwd);
+    assert_eq!(manager.get_session_dir(), session_dir);
+    assert!(manager.has_session_dir());
+    assert!(!manager.persist);
+    assert!(manager.get_session_file().is_none());
+    assert_eq!(manager.append_ownership, window::AppendOwnership::Unleased);
+    assert_eq!(manager.file_entries.len(), 1);
+    assert!(matches!(manager.file_entries[0], FileEntry::Header { .. }));
+    assert!(manager.get_leaf_id().is_none());
+    assert!(manager.by_id.is_empty());
+    assert!(manager.labels_by_id.is_empty());
+    assert!(manager.label_timestamps_by_id.is_empty());
+    assert!(manager.admitted_user_rows.is_empty());
+    assert!(manager.persist_listeners.is_empty());
+    assert!(manager.window.is_none());
+
+    manager
+        .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("first mirrored prompt".into()),
+            timestamp: 0,
+            rest: pa_types::JsonMap::new(),
+        }))
+        .unwrap();
+    manager.flush_now().unwrap();
+    assert_eq!(manager.get_session_id(), "canonical-mirror-session");
+    assert_eq!(
+        serde_json::to_value(manager.get_header()).unwrap(),
+        expected
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), original.as_bytes());
+    assert!(!runtime_cwd.exists());
+    assert!(!session_dir.exists());
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn in_memory_from_header_accepts_a_header_only_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let header = canonical_in_memory_header_fixture();
+    let manager = SessionManager::in_memory_from_header(tmp.path(), tmp.path(), header).unwrap();
+    assert!(manager.get_entries().is_empty());
+    assert!(manager.active_context().messages.is_empty());
+    assert!(manager.active_context().archive.is_none());
+    assert!(manager.get_leaf_id().is_none());
+    assert!(manager.get_session_file().is_none());
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn in_memory_from_header_rejects_an_empty_id_without_io() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut header = canonical_in_memory_header_fixture();
+    header.id.clear();
+    let error = SessionManager::in_memory_from_header(tmp.path(), tmp.path(), header)
+        .err()
+        .expect("an empty authoritative id is not a request to invent one");
+    assert_eq!(error, "canonical session header id is empty");
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn in_memory_from_header_keeps_metadata_after_verified_window_adoption() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("canonical.jsonl");
+    let mut header = canonical_in_memory_header_fixture();
+    header.version = Some(3);
+    let expected = serde_json::to_value(&header).unwrap();
+    let bytes = format!(
+        "  {}\n{}\n",
+        serde_json::to_string(&FileEntry::Header { header }).unwrap(),
+        serde_json::json!({
+            "type": "message", "id": "canonical-user", "parentId": null,
+            "timestamp": "2001-02-03T04:05:07.000Z",
+            "message": {"role": "user", "content": "canonical question", "timestamp": 0}
+        })
+    );
+    std::fs::write(&path, &bytes).unwrap();
+    let window = window::WindowedSessionStore::open(&path)
+        .unwrap()
+        .expect("a verified canonical window");
+    let FileEntry::Header { header } = &window.entries()[0] else {
+        panic!("the verified window starts with its canonical header");
+    };
+    let mut manager =
+        SessionManager::in_memory_from_header(tmp.path(), tmp.path(), header.clone()).unwrap();
+    manager.adopt_window(window);
+    assert_eq!(manager.get_session_id(), "canonical-mirror-session");
+    assert_eq!(
+        serde_json::to_value(manager.get_header()).unwrap(),
+        expected
+    );
+    assert_eq!(manager.get_leaf_id(), Some("canonical-user"));
+    assert_eq!(manager.active_context().messages.len(), 1);
+    assert!(!manager.persist);
+    assert!(manager.get_session_file().is_none());
+    assert_eq!(manager.append_ownership, window::AppendOwnership::Unleased);
+    manager.append_custom_entry("mirror-only", None).unwrap();
+    manager.flush_now().unwrap();
+    assert_eq!(
+        serde_json::to_value(manager.get_header()).unwrap(),
+        expected
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+}
+
 #[test]
 fn generated_entry_ids_are_unique_and_link_to_previous_entry() {
     let mut manager = SessionManager::in_memory(Path::new("/tmp"));
@@ -28,6 +176,7 @@ fn append_compaction_serializes_the_full_ts_record() {
     let mut manager = SessionManager::in_memory(tmp.path());
     manager
         .append_compaction(pa_types::session::CompactionEntry {
+            context_archive: None,
             summary: "the overflow summary".to_string(),
             first_kept_entry_id: "e4".to_string(),
             tokens_before: 214,
@@ -38,6 +187,7 @@ fn append_compaction_serializes_the_full_ts_record() {
             from_hook: Some(false),
             custom_instructions: None,
             usage: Some(pa_types::ai::Usage {
+                rest: pa_types::JsonMap::new(),
                 input: 20,
                 output: 10,
                 cache_read: 80,

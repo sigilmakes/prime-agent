@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Development rules for Prime Agent (Rust) on PrimeIntellect-ai/prime-agent, branch `main`.
+Development rules for the downstream Prime Agent Rust fork at `sigilzero/prime-agent`.
 Every contributor (human or agent) must read this before working on this repo.
 
 ## Repository
@@ -16,15 +16,19 @@ Every contributor (human or agent) must read this before working on this repo.
   suggestions, not as attribution for work merged from branches. A PR's commits carry
   one identity: the ambient git config's. Fabricated or hand-written trailers (including
   noreply forms) misattribute commits to unrelated GitHub accounts.
-- The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `main` branch.
-- PRs go to the org repo with base `main`:
-  `gh pr create --repo PrimeIntellect-ai/prime-agent --base main`.
-- CI runs on the org's billing: `.github/workflows/continuous.yml` on `main` pushes and
-  `release.yml` on version tags.
-- Parity ground truth is unchanged: a read-only checkout of the TS implementation (this
-  repo at tag `v0.9.8`, the last TS release before the Rust port merged to `main`). Clone
-  it to `~/prime-agent`, the conventional location the parity scripts and code fall back
-  to; tooling that honors an override reads `PA_TS_REFERENCE`.
+- Mnemosyne `origin` is the source of truth. Forgejo mirrors branches and tags to GitHub.
+  Push only to `origin`; do not publish to `github` or `upstream`.
+- Keep this repository, its history, issues, and remotes. `upstream/main` is reference
+  material, not an automatic merge target. Preserve a TypeScript rollback checkpoint.
+- Use Forgejo issues and PRs. Upstream release scripts and archived workflows are
+  reference material, not this fork's publication procedure.
+- Routine validated commits and pushes are authorized for this fork. Releases and
+  installation changes need explicit authorization for the change being deployed.
+- Test with isolated home, agent, session, kernel-venv, harness, temporary, and daemon
+  socket paths. Use local fake providers and MCP servers, never live user credentials.
+- TypeScript parity reference for downstream behavior is the preserved fork checkpoint
+  `archive/typescript-2026-10-18` (`239dbe344fcaf671af9898906ff952be73995614`), not
+  upstream `v0.9.8`. Set `PA_TS_REFERENCE` to a read-only checkout of that checkpoint.
 
 ## Style and structure
 
@@ -88,48 +92,19 @@ Every contributor (human or agent) must read this before working on this repo.
 
 ## Performance and the critical path
 
-The UI critical path is paint-latency-critical. First paint, and every
-frame the user waits on, must never block on network, disk sync, or
-background bookkeeping. The launch benchmarks measure this surface
-(cold/warm ready, first paint); a merge that regresses them undoes the
-product's core claim.
-
-Rules:
-
-- Nothing user-visible awaits the network. Any HTTP/socket call on a
-  render path (telemetry, catalog fetch, update check) runs on a
-  background worker; the paint path hands the work off and returns
-  immediately. Delivery semantics (timeout, retry, ordering) live with
-  the worker, not the caller.
-- Telemetry is fire-and-forget from user-facing code. `pa-telemetry`'s
-  background worker owns delivery end to end; no startup, session
-  create, tab open, or first-render path may hold a flush or await a
-  sink.
-- Fire-and-forget boundaries need a red-first test: a hanging sink
-  (one that never replies) must not delay paint. The test fails if any
-  await on the critical path reaches the worker's delivery.
-- Tests that mock a sink or run offline cannot prove the above (the
-  benchmark's mock hides the POST). The regression test with a hanging
-  sink is the required verifier.
-
-Example (the #3288 regression this rule exists to prevent): the
-telemetry startup flush was awaited on the interactive launch path, so
-the analytics POST — a real HTTPS round-trip, ~157 ms — ran before the
-first frame. Every CI check passed because tests set DO_NOT_TRACK=1 and
-the benchmark mocked the provider offline; only real-network launches
-paid the cost. The fix moved the flush to the background worker and
-added `the_startup_flush_never_blocks_the_first_frame` (a hanging sink
-must not delay paint) as the permanent guard. Any change touching the
-launch path must keep that test red-first.
-
+First paint and interactive frames must not wait for network calls, disk sync, or
+background bookkeeping. Catalog discovery, refresh, and cache publication run away
+from the paint path. Explicit refresh can await its job while the UI stays responsive.
+Use hanging-provider regression tests to verify this boundary; offline mocks alone
+do not establish it.
 
 ## Merge gates
 
 - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace` must pass before every merge. Run `make check` — the local mirror of
-  the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` on `main`
-  pushes; `release.yml` on version tags). The PR-only codebase-health check reports growth
-  past 2,000 lines as review guidance; it never blocks a merge.
+  `cargo test --workspace` and the downstream Nix checks must pass before integration is
+  published. `make check` mirrors the local checks; `.forgejo/workflows/ci.yml` is the
+  downstream CI entry point. Archived upstream workflows are reference material, not
+  publication authority. Growth past 2,000 lines is review guidance, not a merge limit.
 - **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
   that touches a user-visible surface must include a "parity-diff evidence" section in its
   description showing the TS-binary comparison for what it changed: (1) rendered output —
@@ -150,13 +125,15 @@ launch path must keep that test red-first.
   parity fixture `crates/pa-models/tests/fixtures/catalog.v1.json` refreshes with
   `scripts/generate-catalog-fixture.py`. Bulk data files are exempt from the size guidance.
 
-## Adoption telemetry
+## Privacy
 
-Every user-visible feature ships its adoption telemetry event in the same PR as the feature:
-the event name + properties join the versioned schema (`pa-telemetry`), and a
-seam emits it from day one. Telemetry properties never carry prompt, session, or file content
-(primitives only; see `pa-telemetry`); delivery is fire-and-forget from user-facing code
-(see Performance and the critical path).
+This fork removes vendor analytics, installation identity generation, trace-only
+credentials, and transcript uploaders from source and shipped artifacts. An opt-out
+setting is not equivalent. Preserve local sessions, ledgers, harness data, diagnostics,
+and actual model-provider and MCP authentication.
+
+Validate release artifacts as well as lifecycle behavior with old opt-in settings
+present. Debug-build behavior alone is not privacy evidence.
 
 ## Branding
 
@@ -172,12 +149,16 @@ EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible wit
 
 
 
-## Surface contract (must not change)
+## Surface contract
 
+- Read `GLOSSARY.md` when changing session, plugin, provider, context, compaction, or continual-harness behavior. Keep domain definitions there and implementation decisions in the authorized vault plan.
 - Tools exposed to the model: `bash`, `edit`, `python_repl` (internal helpers: `rename`, `stdout`).
-- RLM kernel API in the persistent Python REPL: `rlm.spawn/find_models/collect/list_subagents/delete_subagent/create_session/progress_note`, `rlm.harness` CRUD, `agent_message.send`, `agent_observe`, `compact`, `goal`, `refine`, `attach_image`, skills (markdown + Python) per the skill contract in the base system prompt.
-- System prompt structure: layered — cache-stable static layer files (core harness description with the full API surface, mandatory usage rules, opinionated guidelines, per-model additions from the model-prompts TOML rule map) followed by one dynamic tail (packages, project context, skills inventory, MCP servers, environment, session role); the harness digest stays a separate `[harness-digest]` user message. `prime-agent prompt` dumps the assembled prompt with its layer breakdown.
-- CLI shape: `prime-agent` with the same commands/flags as the TS product; headless modes (RPC/daemon/session-worker) with identical behavior.
+- Preserve core RLM execution and messaging: `rlm.spawn/find_models/collect/list_subagents/delete_subagent/create_session/progress_note`, `agent_message.send`, `agent_observe`, `compact`, `goal`, `attach_image`, and the markdown/Python skill contract.
+- Willow explicitly authorized replacing the harness interface with plugin-owned `plugin.<name>.*` exports and plugin slash commands. Preserve accumulated data, not obsolete function names. A disabled plugin contributes no callable namespace, commands, instructions, hooks, jobs, or context; its saved data remains intact.
+- The continual harness is an optional first-party plugin. Core supplies generic execution, storage, scheduling, and context contribution capabilities; harness policy must not remain unconditionally active behind Lua glue.
+- Keep canonical history independent of the model-facing context view. A session selects one context strategy. That strategy may use an explicit ordered compaction chain; server-side compaction, Snapcompact, and standard summarization can be fallback strategies. OptChat-style summary-tree context is a separate context strategy, not a compaction fallback.
+- Keep cache-stable mandatory prompt layers followed by a dynamic tail. Plugin instructions, callable inventories, and digest contributions reflect active plugins. `prime-agent prompt` exposes the assembled prompt and its layer breakdown without requiring the continual harness.
+- Preserve existing CLI/headless behavior except for the explicitly authorized plugin/harness changes. Negotiate optional daemon command/metadata changes; keep startup usable with older peers.
 
 ## Crates
 
@@ -188,14 +169,13 @@ The table summarizes each crate's current direct workspace dependencies:
 | Crate | Purpose | Direct workspace dependencies |
 | --- | --- | --- |
 | `pa-types` | Shared wire and domain types | none |
-| `pa-telemetry` | Events and sinks | none |
 | `pa-agent` | Provider-independent agent loop | none |
 | `pa-ai` | Providers, model registry, streaming | `pa-types` |
 | `pa-models` | Live model catalog and transport | `pa-ai`, `pa-types` |
-| `pa-core` | Session engine, tools, skills, kernel, settings | `pa-types`, `pa-ai`, `pa-models`, `pa-agent`, `pa-telemetry` |
-| `pa-daemon` | Supervisor, workers, wire protocol | `pa-types`, `pa-core`, `pa-agent`, `pa-ai`, `pa-telemetry`, `pa-models` |
+| `pa-core` | Session engine, tools, skills, kernel, settings | `pa-types`, `pa-ai`, `pa-models`, `pa-agent` |
+| `pa-daemon` | Supervisor, workers, wire protocol | `pa-types`, `pa-core`, `pa-agent`, `pa-ai`, `pa-models` |
 | `pa-tui` | Terminal UI, daemon-wire client | `pa-types` |
-| `pa-cli` | `prime-agent` binary, composition root | `pa-types`, `pa-core`, `pa-ai`, `pa-agent`, `pa-daemon`, `pa-tui`, `pa-telemetry` |
+| `pa-cli` | `prime-agent` binary, composition root | `pa-types`, `pa-core`, `pa-ai`, `pa-agent`, `pa-daemon`, `pa-tui` |
 | `pa-perf` | Performance corpora + pty bench harness (dev/CI tooling, never shipped) | `pa-types`, `pa-core`, `pa-daemon` |
 
 Layering rules:

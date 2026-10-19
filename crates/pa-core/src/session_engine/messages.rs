@@ -324,6 +324,8 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                         | SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
                         | REFINEMENT_OUTCOME_CUSTOM_TYPE
+                        | REFINEMENT_NOTICE_CUSTOM_TYPE
+                        | "harness_digest"
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                         | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
                 ) {
@@ -350,23 +352,14 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 timestamp: summary.timestamp,
                 rest: serde_json::Map::default(),
             }),
-            AgentMessage::CompactionSummary(summary) => {
-                let digest_block = summary
-                    .harness_digest
-                    .as_deref()
-                    .map(|digest| {
-                        format!("{HARNESS_DIGEST_PREFIX}{digest}{HARNESS_DIGEST_SUFFIX}\n\n")
-                    })
-                    .unwrap_or_default();
-                AgentMessage::User(UserMessage {
-                    content: UserContent::Blocks(vec![text_block(format!(
-                        "{digest_block}{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
-                        summary.summary
-                    ))]),
-                    timestamp: summary.timestamp,
-                    rest: serde_json::Map::default(),
-                })
-            }
+            AgentMessage::CompactionSummary(summary) => AgentMessage::User(UserMessage {
+                content: UserContent::Blocks(vec![text_block(format!(
+                    "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
+                    summary.summary
+                ))]),
+                timestamp: summary.timestamp,
+                rest: serde_json::Map::default(),
+            }),
             AgentMessage::User(_) | AgentMessage::Assistant(_) | AgentMessage::ToolResult(_) => {
                 message.clone()
             }
@@ -382,7 +375,7 @@ pub type LlmToolResultMessage = ToolResultMessage;
 
 /// The loop-boundary LLM conversion wired into the agent's seam: standard rows pass
 /// through; custom rows cross through the session wire shape so the session conversion
-/// rules apply (what lets the harness-digest row ride the loop to the provider).
+/// rules apply, including unconditional suppression of legacy harness metadata.
 #[must_use]
 pub fn loop_convert_to_llm(
     messages: Vec<pa_agent::types::AgentMessage>,
@@ -521,11 +514,13 @@ mod tests {
                 rest: serde_json::Map::default(),
             }),
             AgentMessage::BranchSummary(pa_types::session::BranchSummaryMessage {
+                rest: pa_types::JsonMap::new(),
                 summary: "the branch".to_string(),
                 from_id: "x".to_string(),
                 timestamp: 0,
             }),
             AgentMessage::CompactionSummary(pa_types::session::CompactionSummaryMessage {
+                rest: pa_types::JsonMap::new(),
                 summary: "the story".to_string(),
                 tokens_before: 1,
                 retained_message_count: None,
@@ -553,10 +548,10 @@ mod tests {
             AgentMessage::User(user) => user.content.text(),
             _ => panic!("expected user"),
         };
-        assert!(compaction.contains("[harness-digest]"));
-        assert!(compaction.contains("<harness_state>\ndigest\n</harness_state>"));
-        assert!(compaction.contains("[compaction-summary]"));
-        assert!(compaction.contains("the story"));
+        assert_eq!(
+            compaction,
+            format!("{COMPACTION_SUMMARY_PREFIX}the story{COMPACTION_SUMMARY_SUFFIX}")
+        );
     }
 
     #[test]
@@ -587,32 +582,13 @@ state
         let unknown_row: pa_agent::types::AgentMessage =
             serde_json::from_value(serde_json::json!({ "role": "arbitrary", "payload": "x" }))
                 .unwrap();
-        let user = pa_agent::types::AgentMessage::user("keep");
+        // Even byte-for-byte framing in a real user row remains ordinary text.
+        let quote = format!("{HARNESS_DIGEST_PREFIX}state{HARNESS_DIGEST_SUFFIX}");
+        let user = pa_agent::types::AgentMessage::user(&quote);
+        let expected = loop_convert_to_llm(vec![user.clone()]);
         let converted = loop_convert_to_llm(vec![digest_row, user, outcome_row, unknown_row]);
-        assert_eq!(converted.len(), 2);
-        match &converted[0] {
-            pa_agent::types::Message::User(user) => {
-                // The digest row converts to a text-part array, not a
-                // bare string.
-                assert!(
-                    matches!(&user.content, pa_agent::types::UserContent::Parts(parts)
-                        if parts.iter().any(|part| matches!(part,
-                            pa_agent::types::UserPart::Text(text)
-                                if text.text.contains("[harness-digest]"))))
-                );
-                assert_eq!(user.timestamp, 5);
-            }
-            _ => panic!("expected user message"),
-        }
-        match &converted[1] {
-            pa_agent::types::Message::User(user) => {
-                assert!(
-                    matches!(&user.content, pa_agent::types::UserContent::Text(text)
-                        if text == "keep")
-                );
-            }
-            _ => panic!("expected user message"),
-        }
+        assert_eq!(converted, expected);
+        assert_eq!(converted.len(), 1);
     }
 
     #[test]
@@ -713,6 +689,7 @@ state
     #[test]
     fn bash_execution_becomes_user_text() {
         let bash = AgentMessage::BashExecution(pa_types::session::BashExecutionMessage {
+            rest: pa_types::JsonMap::new(),
             command: "cargo test".to_string(),
             output: "ok".to_string(),
             exit_code: Some(0),
@@ -731,6 +708,7 @@ state
             _ => panic!("expected user"),
         }
         let excluded = AgentMessage::BashExecution(pa_types::session::BashExecutionMessage {
+            rest: pa_types::JsonMap::new(),
             exclude_from_context: Some(true),
             command: "secret".to_string(),
             output: String::new(),

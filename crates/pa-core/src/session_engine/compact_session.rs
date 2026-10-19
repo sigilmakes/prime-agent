@@ -7,7 +7,7 @@ use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult}
 use super::compaction_exec;
 use super::compaction_exec::{
     build_summarization_request, build_turn_prefix_request, compaction_entry_for,
-    complete_summary_call, details_for, file_ops_block, split_summary, summed_usage,
+    complete_summary_call_routed, details_for, file_ops_block, split_summary, summed_usage,
     CompactionDetails, CompactionResult, SummaryDeltaSink, SummarySlice, NO_PRIOR_HISTORY,
 };
 use super::compaction_utils;
@@ -29,11 +29,13 @@ mod prepare;
 pub use prepare::{compute_cut, prepare_compaction, CompactSkip, CompactionPreparation};
 
 #[cfg(test)]
-use super::{compaction, harness_digest, messages, session_message_to_loop};
+use super::{compaction, messages, session_message_to_loop};
 #[cfg(test)]
 mod tests;
 
 pub struct CompactOptions<'a> {
+    /// Per-session plugin inference routing for auxiliary summary calls.
+    pub(crate) inference: Option<std::sync::Arc<super::inference_router::AuxiliaryInference>>,
     pub model: pa_types::ai::Model,
     /// Resolved API key (None falls back to provider env resolution).
     pub api_key: Option<String>,
@@ -43,9 +45,6 @@ pub struct CompactOptions<'a> {
     /// Checked before the summarizer request and again before the commit — a
     /// late abort never lands a committed compaction; `None` without a trigger.
     pub abort: Option<&'a pa_agent::abort::AbortSignal>,
-    /// The snapshot rides the durable row as `harnessDigest`; the disk read
-    /// happens at the commit, so mid-run state is a fresh read.
-    pub harness_digest: Option<super::harness_digest::HarnessDigestInputs>,
     /// When present, the summarizer calls resolve their model through the `auxiliaryModel`
     /// setting with a context-window fit check, falling back to the session model.
     pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
@@ -81,6 +80,7 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
         }
         FileEntry::BranchSummary { payload, .. } => Some(AgentMessage::BranchSummary(
             pa_types::session::BranchSummaryMessage {
+                rest: pa_types::JsonMap::new(),
                 summary: payload.summary.clone(),
                 from_id: payload.from_id.clone(),
                 timestamp: crate::session::timestamp_to_millis(entry.timestamp()),
@@ -124,7 +124,7 @@ pub enum CompactOutcome {
 pub(crate) struct CompactionAttempt {
     /// The session leaf at prepare: the commit is valid while the active
     /// branch still grows through it with no compaction between.
-    prefix_leaf: Option<String>,
+    pub(super) prefix_leaf: Option<String>,
     cut: CutPointResult,
     previous_summary: Option<String>,
     recent_state_anchor: Option<String>,
@@ -133,7 +133,36 @@ pub(crate) struct CompactionAttempt {
     tokens_before: u64,
     details: CompactionDetails,
     first_kept_entry: String,
-    semantic_compaction: Option<super::semantic_edges::SemanticCompaction>,
+    pub(super) semantic_compaction: Option<super::semantic_edges::SemanticCompaction>,
+}
+
+impl CompactionAttempt {
+    pub(super) fn full_window(
+        leaf: Option<String>,
+        messages: Vec<AgentMessage>,
+        tokens_before: u64,
+        options: &CompactOptions<'_>,
+    ) -> Self {
+        Self {
+            prefix_leaf: leaf,
+            cut: CutPointResult {
+                first_kept_entry_index: 0,
+                is_split_turn: false,
+                turn_start_index: None,
+            },
+            previous_summary: None,
+            recent_state_anchor: None,
+            history: messages,
+            turn_prefix_messages: Vec::new(),
+            tokens_before,
+            details: CompactionDetails::default(),
+            first_kept_entry: String::new(),
+            semantic_compaction: options
+                .semantic_edges
+                .as_ref()
+                .map(|recorder| recorder.begin_compaction(options.abort)),
+        }
+    }
 }
 
 pub(crate) struct PreparedCompaction {
@@ -148,9 +177,17 @@ pub(crate) fn prepare_attempt(
     session: &SessionManager,
     options: &CompactOptions<'_>,
 ) -> Result<CompactionAttempt, CompactSkip> {
-    let entries = session.retained_entries().to_vec();
-    let prefix_leaf = session.get_leaf_id().map(str::to_string);
-    let preparation = prepare_compaction(&entries, options.settings.keep_recent_tokens)?;
+    prepare_snapshot(session.retained_entries(), session.get_leaf_id(), options)
+}
+
+/// Standard rolling preparation over one immutable active branch snapshot.
+pub(crate) fn prepare_snapshot(
+    entries: &[FileEntry],
+    leaf: Option<&str>,
+    options: &CompactOptions<'_>,
+) -> Result<CompactionAttempt, CompactSkip> {
+    let prefix_leaf = leaf.map(str::to_string);
+    let preparation = prepare_compaction(entries, options.settings.keep_recent_tokens)?;
     // TS `beginCompaction` after the preparation resolved: a skipped
     // compaction makes no events (the begin comes after the skip throw).
     let semantic_compaction = options
@@ -191,7 +228,7 @@ pub(crate) fn prepare_attempt(
             "turnPrefixMessages": turn_prefix_messages.len(),
         }),
     );
-    let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    let tokens_before = context_tokens(entries, leaf);
     super::compaction_trace::trace(
         "compact.tokens_before_computed",
         &serde_json::json!({ "tokensBefore": tokens_before }),
@@ -203,8 +240,7 @@ pub(crate) fn prepare_attempt(
     // details.
     let mut file_op_messages = history.clone();
     file_op_messages.extend(turn_prefix_messages.iter().cloned());
-    let details: CompactionDetails =
-        details_for(&file_op_messages, &entries, prev_compaction_index);
+    let details: CompactionDetails = details_for(&file_op_messages, entries, prev_compaction_index);
     Ok(CompactionAttempt {
         prefix_leaf,
         cut,
@@ -315,7 +351,7 @@ pub(crate) async fn summarize_attempt(
             attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             |headers| {
-                complete_summary_call(
+                complete_summary_call_routed(
                     &model,
                     api_key.clone(),
                     headers,
@@ -323,6 +359,7 @@ pub(crate) async fn summarize_attempt(
                     request,
                     options.summary_delta.clone(),
                     "Summarization failed",
+                    options.inference.as_ref(),
                 )
             },
         )
@@ -337,7 +374,7 @@ pub(crate) async fn summarize_attempt(
             attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             |headers| {
-                complete_summary_call(
+                complete_summary_call_routed(
                     &model,
                     api_key.clone(),
                     headers,
@@ -352,6 +389,7 @@ pub(crate) async fn summarize_attempt(
                     // exact committed summary.
                     None,
                     "Turn prefix summarization failed",
+                    options.inference.as_ref(),
                 )
             },
         )
@@ -415,27 +453,12 @@ pub(crate) async fn summarize_attempt(
         tokens_before: attempt.tokens_before,
         usage: summed_usage(&slices),
     };
-    // The digest snapshot and its fingerprint attach at the commit and never flow
-    // through the summarizer; the read happens after the summarizer resolved.
-    let (harness_digest, harness_state_fingerprint) = options
-        .harness_digest
-        .as_ref()
-        .map(|inputs| {
-            let render =
-                super::harness_digest::HarnessDigestInputs::render_with_fingerprint(inputs);
-            (Some(render.digest), Some(render.state_fingerprint))
-        })
-        .unwrap_or_default();
-    super::compaction_trace::trace(
-        "compact.digest_rendered",
-        &serde_json::json!({ "digest": harness_digest.is_some() }),
-    );
     let entry = compaction_entry_for(
         &result,
         &attempt.details,
         options.custom_instructions,
-        harness_digest,
-        harness_state_fingerprint,
+        None,
+        None,
     );
     Ok(PreparedCompaction { result, entry })
 }

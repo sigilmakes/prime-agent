@@ -263,7 +263,6 @@ pub(crate) async fn run_archive_sweep(
             archived.len(),
             archive_dir(&agent_dir).display()
         ));
-        supervisor.note_sessions_archived(archived.len());
     }
     Ok(())
 }

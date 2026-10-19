@@ -101,16 +101,8 @@ fn resolve_dropped_ancestor(
 }
 
 impl SessionManager {
-    fn new_with(
-        cwd: PathBuf,
-        session_dir: PathBuf,
-        session_file: Option<PathBuf>,
-        persist: bool,
-    ) -> Self {
-        if persist && !session_dir.exists() {
-            let _ = std::fs::create_dir_all(&session_dir);
-        }
-        let mut manager = Self {
+    fn uninitialized(cwd: PathBuf, session_dir: PathBuf, persist: bool) -> Self {
+        Self {
             session_id: String::new(),
             session_file: None,
             session_dir,
@@ -128,7 +120,19 @@ impl SessionManager {
             leaf_id: None,
             admitted_user_rows: std::collections::VecDeque::new(),
             persist_listeners: Vec::new(),
-        };
+        }
+    }
+
+    fn new_with(
+        cwd: PathBuf,
+        session_dir: PathBuf,
+        session_file: Option<PathBuf>,
+        persist: bool,
+    ) -> Self {
+        if persist && !session_dir.exists() {
+            let _ = std::fs::create_dir_all(&session_dir);
+        }
+        let mut manager = Self::uninitialized(cwd, session_dir, persist);
         match session_file {
             Some(file) => manager.set_session_file(file, None),
             None => {
@@ -155,6 +159,32 @@ impl SessionManager {
         let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false);
         manager.session_dir_backed = true;
         manager
+    }
+
+    /// Create a non-persisted mirror of a caller-supplied authoritative header.
+    ///
+    /// The caller verifies disk authority and owns persistence and any lease.
+    /// This constructor does not read or write files, acquire a lease, migrate
+    /// metadata, or generate a new identity. `cwd` is the runtime working directory;
+    /// the literal `header.cwd` is retained unchanged. `session_dir` has the same
+    /// artifact-directory meaning as in [`Self::in_memory_in_session_dir`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied header has an empty session id.
+    pub fn in_memory_from_header(
+        cwd: &Path,
+        session_dir: &Path,
+        header: SessionHeader,
+    ) -> Result<Self, String> {
+        if header.id.is_empty() {
+            return Err("canonical session header id is empty".into());
+        }
+        let mut manager = Self::uninitialized(cwd.to_path_buf(), session_dir.to_path_buf(), false);
+        manager.session_id.clone_from(&header.id);
+        manager.session_dir_backed = true;
+        manager.file_entries.push(FileEntry::Header { header });
+        Ok(manager)
     }
 
     /// Whether the manager carries a session directory of its own:

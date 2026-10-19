@@ -19,12 +19,33 @@ impl AuthStorage {
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
             let existing = data.credential(PRIME_INFERENCE_PROVIDER_ID);
+            let previous = existing.clone();
+            let raw_team = data.get(PRIME_INFERENCE_PROVIDER_ID)
+                .and_then(|value| value.get("primeTeam")).cloned();
             let Some(credential) =
                 (update.take().expect("the lock runs the update once"))(existing)
             else {
                 return Ok(((), None));
             };
-            data.insert(PRIME_INFERENCE_PROVIDER_ID, &credential);
+            let same_key = matches!(
+                (previous.as_ref(), &credential),
+                (Some(AuthCredential::ApiKey { key: old, .. }), AuthCredential::ApiKey { key, .. }) if old == key
+            );
+            let same_team = matches!(
+                (previous.as_ref(), &credential),
+                (Some(AuthCredential::ApiKey { prime_team: old, .. }),
+                    AuthCredential::ApiKey { prime_team, .. }) if old == prime_team
+            );
+            if same_key {
+                data.insert_preserving_metadata(PRIME_INFERENCE_PROVIDER_ID, &credential);
+                if let (true, Some(team), Some(serde_json::Value::Object(map))) =
+                    (same_team, raw_team, data.0.get_mut(PRIME_INFERENCE_PROVIDER_ID))
+                {
+                    map.insert("primeTeam".into(), team);
+                }
+            } else {
+                data.insert(PRIME_INFERENCE_PROVIDER_ID, &credential);
+            }
             // TS writes `primeTeam: null` explicitly for the personal account; serde's
             // skip-if-none would omit it, so restore the key here.
             if let Some(serde_json::Value::Object(map)) =

@@ -241,7 +241,7 @@ fn onboarding_gate_follows_settings_and_auth() {
     let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent);
     settings.set_onboarding_shown(true).expect("set flag");
     let options = run_options(dir.path());
-    assert!(onboarding_task(&options, None).0.is_none());
+    assert!(onboarding_task(&options, None).is_none());
 
     settings.set_onboarding_shown(false).expect("reset flag");
 
@@ -272,9 +272,7 @@ fn onboarding_gate_follows_settings_and_auth() {
         .set_default_model_and_provider("onboard-test", "m1")
         .expect("saved default");
     let options = run_options(dir.path());
-    let task = onboarding_task(&options, None)
-        .0
-        .expect("the ready home mounts the flow");
+    let task = onboarding_task(&options, None).expect("the ready home mounts the flow");
     assert!(
         (task.model_ready)(),
         "the configured default model is ready (the question flow)"
@@ -285,9 +283,7 @@ fn onboarding_gate_follows_settings_and_auth() {
     let mut options = run_options(dir.path());
     options.config.provider = Some("onboard-naked".into());
     options.config.model = Some("m2".into());
-    let task = onboarding_task(&options, None)
-        .0
-        .expect("the flag alone mounts the flow");
+    let task = onboarding_task(&options, None).expect("the flag alone mounts the flow");
     assert!(
         !(task.model_ready)(),
         "the naked provider leaves the model not ready (the full flow)"
@@ -301,161 +297,19 @@ fn onboarding_gate_follows_settings_and_auth() {
 }
 
 #[test]
-fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    // The provisioned home: sharing opted out, telemetry off (no
-    // telemetry client for the completion event).
-    let mut provisioned = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    provisioned
-        .set_agent_traces_enabled(false)
-        .expect("provision the opt-out");
-    provisioned
-        .set_telemetry_enabled(false)
-        .expect("telemetry off");
-
-    let sink = SettingsOnboardingSink {
-        cwd: dir.path().to_path_buf(),
-        agent_dir: agent_dir.clone(),
-        created_at: std::time::Instant::now(),
-        onboarding_id: uuid::Uuid::new_v4().to_string(),
-        ready_emitted: std::sync::atomic::AtomicBool::new(false),
-        completion_reported: std::sync::atomic::AtomicBool::new(false),
-        probe: StartupModelProbe {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-            cli_provider: None,
-            cli_model: None,
-            models: None,
-            is_continuing: false,
-            api_key: None,
-        },
-    };
-    assert!(
-        !sink.onboarding_shown(),
-        "the never-completed home reads its missing flag through a fresh manager"
-    );
-    assert!(
-        sink.agent_traces_choice_written(),
-        "the provisioned opt-out reads through a fresh manager"
-    );
-    sink.mark_onboarding_complete().expect("silent completion");
-
-    // The next launch reads through its own fresh manager: the gate
-    // never mounts the task again.
-    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(settings.get_onboarding_shown(), "the flag persisted");
-    assert!(
-        !settings.get_agent_traces_enabled(),
-        "the standing opt-out survived the silent completion"
-    );
-}
-
-/// A flow that ran but did not complete reports `onboarding completed`
-/// with the `aborted` outcome (TS `runStartupOnboarding`'s `finally`), and
-/// a completed flow never reports a second, aborted outcome. Telemetry is
-/// on for this test (the repo's `cargo test` env opts out).
-#[test]
-fn settings_sink_reports_an_aborted_flow_once() {
-    crate::mode::tests::with_clean_telemetry_env(|| {
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(report_an_aborted_flow_once());
-    });
-}
-
-async fn report_an_aborted_flow_once() {
+fn settings_sink_persists_completion() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let sink = SettingsOnboardingSink {
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
-        created_at: std::time::Instant::now(),
-        onboarding_id: uuid::Uuid::new_v4().to_string(),
-        ready_emitted: std::sync::atomic::AtomicBool::new(false),
-        completion_reported: std::sync::atomic::AtomicBool::new(false),
-        probe: StartupModelProbe {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-            cli_provider: None,
-            cli_model: None,
-            models: None,
-            is_continuing: false,
-            api_key: None,
-        },
     };
-    // The sink's own report resolves only once the event is delivered.
-    pa_tui::interactive::OnboardingSink::onboarding_incomplete(&sink, "aborted").await;
-    let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
-    let lines: Vec<&str> = mirror.lines().collect();
-    assert_eq!(lines.len(), 1);
-    let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(event["name"], "onboarding completed");
-    assert_eq!(event["properties"]["outcome"], "aborted");
-    assert_eq!(event["properties"]["execution_mode"], "interactive");
-
-    sink.completion_reported
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        sink.track_incomplete("aborted").is_none(),
-        "a reported completion never adds an aborted outcome"
-    );
-}
-
-/// A fresh home (no choice written) is the one home the question still
-/// mounts for — the opt-in moment: the flow's `Share` answer persists
-/// beside the completion flag, and both read back through the next
-/// launch's fresh manager.
-#[test]
-fn settings_sink_persists_the_fresh_home_answer_with_the_flag() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let mut provisioned = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    provisioned
-        .set_telemetry_enabled(false)
-        .expect("telemetry off");
-
-    let sink = SettingsOnboardingSink {
-        cwd: dir.path().to_path_buf(),
-        agent_dir: agent_dir.clone(),
-        created_at: std::time::Instant::now(),
-        onboarding_id: uuid::Uuid::new_v4().to_string(),
-        ready_emitted: std::sync::atomic::AtomicBool::new(false),
-        completion_reported: std::sync::atomic::AtomicBool::new(false),
-        probe: StartupModelProbe {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-            cli_provider: None,
-            cli_model: None,
-            models: None,
-            is_continuing: false,
-            api_key: None,
-        },
-    };
-    assert!(
-        !sink.onboarding_shown(),
-        "a fresh home has no completion flag yet"
-    );
-    assert!(
-        !sink.agent_traces_choice_written(),
-        "a fresh home carries no trace choice (sharing stays off until a choice is made)"
-    );
-    sink.set_agent_traces_enabled(true).expect("answer Share");
+    assert!(!sink.onboarding_shown());
     sink.mark_onboarding_complete()
         .expect("complete onboarding");
-
     let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(
-        settings.get_onboarding_shown(),
-        "the flow marked onboarding shown"
-    );
-    assert!(
-        settings.get_agent_traces_enabled(),
-        "the Share answer persisted with the flag"
-    );
+    assert!(settings.get_onboarding_shown());
 }
 
 #[test]
@@ -492,7 +346,7 @@ fn build_tui_options_reads_code_block_indent_settings() {
         r#"{ "markdown": { "codeBlockIndent": "    " } }"#,
     )
     .expect("settings.json");
-    let (options, _) = build_tui_options(
+    let options = build_tui_options(
         &run_options(dir.path()),
         dir.path().join("d.sock"),
         std::sync::Arc::default(),
@@ -502,7 +356,7 @@ fn build_tui_options_reads_code_block_indent_settings() {
 
     let bare = tempfile::TempDir::new().expect("temp dir");
     std::fs::create_dir_all(bare.path().join("agent")).expect("agent dir");
-    let (options, _) = build_tui_options(
+    let options = build_tui_options(
         &run_options(bare.path()),
         bare.path().join("d.sock"),
         std::sync::Arc::default(),
@@ -810,7 +664,7 @@ fn build_tui_options_opens_a_fork_as_the_startup_session() {
     options.config.agent_dir = dir.path().join("agent");
     options.session.fork = Some(id);
     options.session.session_dir = Some(session_dir.clone());
-    let (tui, _) = build_tui_options(
+    let tui = build_tui_options(
         &options,
         dir.path().join("d.sock"),
         std::sync::Arc::default(),
@@ -862,193 +716,6 @@ fn a_fork_launch_never_opens_the_agents_view() {
     );
 }
 
-/// A sink whose `send_batch` hangs until the test releases it: the
-/// stand-in for the analytics POST's network round-trip (the same
-/// delivery contract the production sink carries, minus its own
-/// timeout — the point is that delivery takes longer than the paint).
-#[derive(Default)]
-struct GatedSink {
-    /// Send entry: `notify_one` when a batch reaches the sink; a
-    /// stored permit keeps the entry wait race-free in both orders.
-    entered_notify: tokio::sync::Notify,
-    /// The delivered batches' event names (delivery finished).
-    delivered: std::sync::Mutex<Vec<String>>,
-    /// The release flag the hanging send waits on.
-    released: std::sync::atomic::AtomicBool,
-    /// The hang gate's waker: `notify_waiters` on release, no
-    /// permits — a stale permit would unhang the sink before the
-    /// test releases it.
-    notify: tokio::sync::Notify,
-    /// Delivery completion: `notify_one` stores a permit when no
-    /// waiter is registered yet, so the completion future is
-    /// race-free in both orders and can be awaited directly.
-    delivered_notify: tokio::sync::Notify,
-}
-
-impl GatedSink {
-    fn release(&self) {
-        self.released
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.notify.notify_waiters();
-    }
-
-    fn delivered_names(&self) -> Vec<String> {
-        self.delivered.lock().expect("gate lock").clone()
-    }
-
-    /// The first send's entry future.
-    fn wait_until_entered(&self) -> impl std::future::Future<Output = ()> + '_ {
-        self.entered_notify.notified()
-    }
-
-    /// The first delivery's completion future.
-    fn wait_until_delivered(&self) -> impl std::future::Future<Output = ()> + '_ {
-        self.delivered_notify.notified()
-    }
-}
-
-impl pa_telemetry::TelemetrySink for GatedSink {
-    fn send_batch<'a>(
-        &'a self,
-        _install_id: &'a str,
-        events: Vec<pa_telemetry::TelemetryEvent>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = pa_telemetry::SinkOutcome> + Send + 'a>>
-    {
-        Box::pin(async move {
-            self.entered_notify.notify_one();
-            // Race-free wait, tokio's documented pattern: the waiter
-            // registers (or consumes a permit) BEFORE the flag check, so
-            // a release that fires between the check and the await is
-            // never lost — a naive `while !flag { notified().await }` can
-            // miss `notify_waiters` and hang.
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            loop {
-                notified.as_mut().enable();
-                if self.released.load(std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-                notified.as_mut().await;
-                notified.set(self.notify.notified());
-            }
-            let mut delivered = self.delivered.lock().expect("gate lock");
-            for event in &events {
-                delivered.push(event.name.clone());
-            }
-            self.delivered_notify.notify_one();
-            pa_telemetry::SinkOutcome::Sent
-        })
-    }
-}
-
-/// The interactive startup flush is fire-and-forget from the paint
-/// path's perspective: the first frame must never await the tracked
-/// `startup` events' delivery. The gated sink stands in for the
-/// analytics POST's network round-trip: the flush hand-off must
-/// complete while delivery still hangs, and the released drain must
-/// still deliver the tracked events.
-#[test]
-fn the_startup_flush_never_blocks_the_first_frame() {
-    tokio::runtime::Runtime::new()
-        .expect("runtime")
-        .block_on(startup_flush_never_blocks_the_first_frame());
-}
-
-async fn startup_flush_never_blocks_the_first_frame() {
-    let sink = std::sync::Arc::new(GatedSink::default());
-    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
-    config.batch_size = 20;
-    config.flush_interval = std::time::Duration::from_mins(10);
-    config.sinks = vec![sink.clone() as std::sync::Arc<dyn pa_telemetry::TelemetrySink>];
-    let client = pa_telemetry::TelemetryClient::spawn(config).expect("startup client");
-
-    // The composition root's startup tracks: the event and the ui_ready
-    // stage on the one-shot client.
-    let mut properties = pa_telemetry::base_properties("interactive");
-    properties.set("duration_ms", serde_json::Value::from(1));
-    client.track("startup", properties);
-    pa_telemetry::AgentStartupStage {
-        stage: "ui_ready",
-        outcome: "completed",
-        duration_ms: Some(1),
-        startup_kind: Some("cold"),
-        timing_scope: Some("system_work"),
-    }
-    .track(&client);
-
-    // The paint path's contract, run as its own task so a regression
-    // back to a blocking flush reds the timeout instead of wedging the
-    // suite (an inner assert failure reds through the join error).
-    let hand_off = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::spawn(async move {
-            // The hand-off: while the sink still hangs, it must already
-            // be done — the first frame paints with delivery pending.
-            let flush = flush_startup_telemetry(client);
-            // The batch must have entered the sink before the boundary
-            // is meaningful: a release that beats the send's entry
-            // drains without ever hanging, and the hand-off below would
-            // pass vacuously. The entry deadline sits under the outer
-            // hand-off bound, so a sink that never starts reports
-            // here, not as a blocked paint path.
-            let entered = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                sink.wait_until_entered(),
-            )
-            .await;
-            assert!(
-                entered.is_ok(),
-                "the tracked startup batch entered the gated sink"
-            );
-            assert!(
-                sink.delivered_names().is_empty(),
-                "delivery was still pending when the paint path proceeded"
-            );
-
-            // The released drain still delivers the tracked startup
-            // events: completion is awaited on the sink's own notify,
-            // the timeout only bounds failure — no polling loop.
-            sink.release();
-            let delivered = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                sink.wait_until_delivered(),
-            )
-            .await;
-            assert!(
-                delivered.is_ok(),
-                "the released drain delivered the tracked startup events"
-            );
-            let names = sink.delivered_names();
-            assert!(
-                names.contains(&"startup".to_string()),
-                "the startup event delivered: {names:?}"
-            );
-            assert!(
-                names.contains(&"agent startup stage".to_string()),
-                "the ui_ready stage delivered: {names:?}"
-            );
-
-            // The quick-exit seam: the composition root joins this
-            // handle under the shared exit bound when a run ends inside
-            // the delivery window — the join settles with the drain, so
-            // the events never die with the runtime teardown.
-            let joined = tokio::time::timeout(std::time::Duration::from_millis(500), flush).await;
-            assert!(
-                matches!(joined, Ok(Ok(()))),
-                "the exit join settled once the drain delivered"
-            );
-        }),
-    )
-    .await;
-    match hand_off {
-        Ok(Ok(())) => {}
-        Ok(Err(joined)) => panic!("the first-paint contract task panicked: {joined}"),
-        Err(elapsed) => panic!(
-            "the flush hand-off completed while the sink still hung (the paint path never waits out delivery): {elapsed}"
-        ),
-    }
-}
-
 #[test]
 fn interactive_resume_restores_saved_cwd_and_project_settings_unless_overridden() {
     let dir = tempfile::tempdir().unwrap();
@@ -1068,7 +735,7 @@ fn interactive_resume_restores_saved_cwd_and_project_settings_unless_overridden(
     for explicit in [true, false] {
         options.session.resume = Some(saved.to_string_lossy().into_owned());
         options.session.cwd_from_flag = explicit;
-        let (tui, _) = build_tui_options(
+        let tui = build_tui_options(
             &options,
             dir.path().join("d.sock"),
             std::sync::Arc::default(),
@@ -1089,4 +756,109 @@ fn interactive_resume_restores_saved_cwd_and_project_settings_unless_overridden(
         );
         assert_eq!(tui.code_block_indent, if explicit { "  " } else { "    " });
     }
+}
+
+#[test]
+fn onboarding_auth_readiness_resolves_commands_and_explicit_runtime_keys() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent = dir.path().join("agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let cases = [
+        ("failed", "!exit 1", false),
+        ("failed-output", "!printf 'not-a-usable-key'; exit 1", false),
+        ("empty", "!printf ''", false),
+        ("whitespace", "!printf '  '", false),
+        ("command", "!printf 'local-onboarding-key'", true),
+        ("literal", "local-literal-key", true),
+    ];
+    let mut providers = serde_json::Map::new();
+    for (name, key, _) in cases {
+        providers.insert(format!("onboarding-{name}"),serde_json::json!({"baseUrl":"https://onboarding.invalid","api":"openai-completions","apiKey":key,"models":[{"id":"m","name":"M"}]}));
+    }
+    providers.insert("onboarding-header".into(),serde_json::json!({"baseUrl":"https://onboarding.invalid","api":"openai-completions","apiKey":"!exit 1","headers":{"Authorization":"Bearer local-header-key"},"models":[{"id":"m","name":"M"}]}));
+    providers.insert("onboarding-empty-headers".into(),serde_json::json!({"baseUrl":"https://onboarding.invalid","api":"openai-completions","apiKey":"!exit 1","headers":{},"models":[{"id":"m","name":"M"}]}));
+    providers.insert("onboarding-blank-header".into(),serde_json::json!({"baseUrl":"https://onboarding.invalid","api":"openai-completions","apiKey":"!exit 1","headers":{"Authorization":"  "},"models":[{"id":"m","name":"M"}]}));
+
+    std::fs::write(
+        agent.join("models.json"),
+        serde_json::json!({"providers":providers}).to_string(),
+    )
+    .unwrap();
+    for (name, _, expected) in cases {
+        let mut options = run_options_for_continue(dir.path());
+        options.config.provider = Some(format!("onboarding-{name}"));
+        options.config.model = Some("m".into());
+        let task = onboarding_task(&options, None).unwrap();
+        assert!(
+            task.current_model
+                .as_ref()
+                .is_some_and(
+                    |model| model.provider == format!("onboarding-{name}") && model.id == "m"
+                )
+        );
+        assert_eq!((task.model_ready)(), expected, "credential case {name}");
+    }
+    let mut options = run_options_for_continue(dir.path());
+    options.config.provider = Some("onboarding-header".into());
+    options.config.model = Some("m".into());
+    assert!(
+        (onboarding_task(&options, None).unwrap().model_ready)(),
+        "resolved header authentication remains usable"
+    );
+    for provider in ["onboarding-empty-headers", "onboarding-blank-header"] {
+        options.config.provider = Some(provider.into());
+        assert!(
+            !(onboarding_task(&options, None).unwrap().model_ready)(),
+            "empty headers do not authorize a failed command key"
+        );
+    }
+    options.config.provider = Some("onboarding-failed".into());
+    for key in ["", "  ", "explicit-runtime-key"] {
+        options.config.api_key = Some(key.into());
+        assert_eq!(
+            (onboarding_task(&options, None).unwrap().model_ready)(),
+            !key.trim().is_empty(),
+            "runtime key readiness must match a nonempty explicit credential"
+        );
+    }
+}
+
+#[test]
+fn onboarding_readiness_rechecks_changed_credentials_in_the_live_task() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent = dir.path().join("agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let write_key = |key: &str| {
+        std::fs::write(agent.join("models.json"),serde_json::json!({"providers":{"onboarding-live":{"baseUrl":"https://onboarding.invalid","api":"openai-completions","apiKey":key,"models":[{"id":"m","name":"M"}]}}}).to_string()).unwrap();
+    };
+    write_key("!exit 1");
+    let mut options = run_options_for_continue(dir.path());
+    options.config.provider = Some("onboarding-live".into());
+    options.config.model = Some("m".into());
+    let task = onboarding_task(&options, None).unwrap();
+    assert!(!(task.model_ready)());
+    write_key("local-new-credential");
+    assert!((task.model_ready)());
+    write_key("!printf ''");
+    assert!(!(task.model_ready)());
+}
+
+#[test]
+fn onboarding_transport_headers_without_a_credential_do_not_authorize() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent = dir.path().join("agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::write(agent.join("models.json"),serde_json::json!({"providers":{"onboarding-transport-only":{"baseUrl":"https://onboarding.invalid","api":"openai-completions","apiKey":"","models":[{"id":"m","name":"M","headers":{"Content-Type":"application/json"}}]}}}).to_string()).unwrap();
+    let mut options = run_options_for_continue(dir.path());
+    options.config.provider = Some("onboarding-transport-only".into());
+    options.config.model = Some("m".into());
+    let task = onboarding_task(&options, None).unwrap();
+    assert!(task
+        .current_model
+        .as_ref()
+        .is_some_and(|model| model.id == "m"));
+    assert!(
+        !(task.model_ready)(),
+        "noncredential transport headers cannot make an empty configured key usable"
+    );
 }

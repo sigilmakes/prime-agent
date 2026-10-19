@@ -41,6 +41,9 @@ pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 /// The route budget of a client command: turn-long waits ride TS's 24 h
 /// worker-request budget; everything else is a short control route.
 pub(crate) fn client_route_timeout(command: &DaemonCommand) -> u64 {
+    if matches!(command, DaemonCommand::RefreshModels { .. }) {
+        return 120_000;
+    }
     if matches!(
         command,
         DaemonCommand::PromptAndWait { .. }
@@ -103,7 +106,6 @@ impl Supervisor {
             RouteAdmission::ClientRequest => match inflight.try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_saturated) => {
-                    self.note_daemon_event("worker_overloaded", None);
                     return Ok(WorkerReply::Typed(
                         crate::backpressure::overloaded_response(command_type, &resident.worker_id),
                     ));
@@ -124,6 +126,14 @@ impl Supervisor {
         // before the retire cannot enqueue behind it.
         if matches!(admission, RouteAdmission::ClientRequest) && resident.route_state().retired {
             return Err(anyhow!(WORKER_NOT_CONNECTED));
+        }
+        if matches!(command_type, "refresh_models" | "apply_model_snapshots")
+            && !resident.supports_model_refresh()
+        {
+            bail!("Resident worker does not support model refresh");
+        }
+        if command_type == "plugin_command" && !resident.supports_plugin_commands() {
+            bail!("Resident worker does not support native plugin commands");
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -151,7 +161,6 @@ impl Supervisor {
             match admission {
                 RouteAdmission::ClientRequest => {
                     resident.pending.lock().await.remove(&request_id);
-                    self.note_daemon_event("worker_overloaded", None);
                     return Ok(WorkerReply::Typed(
                         crate::backpressure::overloaded_response(command_type, &resident.worker_id),
                     ));
@@ -577,12 +586,10 @@ impl Supervisor {
             ..
         } = command
         {
-            let worker_disabled = {
-                let descriptor = resident.descriptor.lock().await;
-                descriptor.telemetry_disabled
-            };
+            let worker_disabled = resident.descriptor.lock().await.telemetry_disabled;
             if worker_disabled != Some(true) {
-                // A telemetry-disabled client may not attach to a worker with telemetry enabled.
+                // A live adopted worker can predate reporter removal. Only an
+                // explicit persisted opt-out proves that this generation is safe.
                 return (
                     vec![response_line(&response_failure(
                         Some(&command_id),
@@ -593,6 +600,34 @@ impl Supervisor {
                     false,
                 );
             }
+        }
+        if matches!(
+            command,
+            DaemonCommand::RefreshModels { .. } | DaemonCommand::ApplyModelSnapshots { .. }
+        ) && !resident.supports_model_refresh()
+        {
+            return (
+                vec![response_line(&response_failure(
+                    Some(&command_id),
+                    &type_name,
+                    "Resident worker does not support model refresh",
+                    None,
+                ))],
+                false,
+            );
+        }
+        if matches!(command, DaemonCommand::PluginCommand { .. })
+            && !resident.supports_plugin_commands()
+        {
+            return (
+                vec![response_line(&response_failure(
+                    Some(&command_id),
+                    &type_name,
+                    "Resident worker does not support native plugin commands; restart or update it",
+                    None,
+                ))],
+                false,
+            );
         }
         let timeout = client_route_timeout(command);
         let (worker_command, mut payload) = match client_command_payload(command, client_id) {
@@ -723,14 +758,6 @@ impl Supervisor {
                 let active_id = reply
                     .relayed_active_session_id()
                     .map_or_else(|| resident.worker_id.clone(), str::to_string);
-                self.note_daemon_event(
-                    if matches!(command, DaemonCommand::Reattach { .. }) {
-                        "reattach"
-                    } else {
-                        "attach"
-                    },
-                    None,
-                );
                 let (session_id, session_file) = {
                     let descriptor = resident.descriptor.lock().await;
                     (
@@ -779,14 +806,6 @@ impl Supervisor {
                                 .get("activeSessionId")
                                 .and_then(Value::as_str)
                                 .map_or_else(|| resident.worker_id.clone(), str::to_string);
-                            self.note_daemon_event(
-                                if matches!(command, DaemonCommand::Reattach { .. }) {
-                                    "reattach"
-                                } else {
-                                    "attach"
-                                },
-                                None,
-                            );
                             // The binding table learns the id the worker reports (a durable-id or
                             // file-stem attach resolves to the worker's current id).
                             let (session_id, session_file) = {
@@ -824,7 +843,6 @@ impl Supervisor {
                 }
                 if let DaemonCommand::Detach { .. } = command {
                     if response.success {
-                        self.note_daemon_event("detach", None);
                         // The retire removes the RESIDENT's active id — the id the attached list
                         // actually holds (the selector may be a durable-id alias). The registry
                         // entry goes first: delivery stops at the detach instant.
@@ -1121,7 +1139,7 @@ impl Supervisor {
             std::path::Path::new(&session_file),
             &live,
         );
-        self.capture_deleted_child_usage(&session_file, &child_id, "rlm_delete")
+        self.capture_deleted_child_usage(&session_file, &child_id)
             .await;
         crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
             &session_file,

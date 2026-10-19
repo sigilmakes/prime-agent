@@ -73,6 +73,7 @@ fn reads_branch_commit_and_normalized_repo_url() {
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             commit: Some(sha),
             branch: Some("main".to_string()),
+            rest: pa_types::JsonMap::new(),
         })
     );
 }
@@ -156,6 +157,7 @@ fn dirty_tree_does_not_change_capture() {
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             commit: Some(sha),
             branch: Some("main".to_string()),
+            rest: pa_types::JsonMap::new(),
         })
     );
 }
@@ -182,6 +184,7 @@ fn ts_binary_session_header_round_trips() {
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             commit: Some("5a0875f3b33b639d2d7a57ee51ca19d44fa7ce70".to_string()),
             branch: Some("main".to_string()),
+            rest: pa_types::JsonMap::new(),
         })
     );
     // The Rust side re-serializes to the same camelCase wire shape.
@@ -221,6 +224,7 @@ fn session_header_captures_git_context() {
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             commit: Some(sha),
             branch: Some("main".to_string()),
+            rest: pa_types::JsonMap::new(),
         })
     );
 }

@@ -4,7 +4,9 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::providers::transform_messages::transform_messages_with_normalizer;
+use crate::providers::transform_messages::{
+    normalize_messages_with_normalizer, transform_messages_with_normalizer,
+};
 use crate::types::{
     AssistantContent, AssistantMessage, Context, Model, ModelExt, TextSignaturePhase, Tool,
 };
@@ -68,14 +70,24 @@ pub const AZURE_TOOL_CALL_PROVIDERS: [&str; 4] = [
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
+pub enum ResponsesMessageScope {
+    #[default]
+    Conversation,
+    /// A partial portable slice appended after an authoritative native prefix.
+    FreshWindow,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ConvertResponsesMessagesOptions {
     pub include_system_prompt: bool,
+    pub scope: ResponsesMessageScope,
 }
 
 impl ConvertResponsesMessagesOptions {
     pub fn include_system_prompt() -> Self {
         Self {
             include_system_prompt: true,
+            ..Self::default()
         }
     }
 }
@@ -141,10 +153,17 @@ pub fn convert_responses_messages(
         format!("{normalized_call_id}|{normalized_item_id}")
     };
 
-    let transformed =
-        transform_messages_with_normalizer(&context.messages, model, &|id, _model, source| {
-            Some(normalize_tool_call_id(id, source))
-        });
+    let normalizer = |id: &str, _model: &Model, source: &AssistantMessage| {
+        Some(normalize_tool_call_id(id, source))
+    };
+    let transformed = match options.scope {
+        ResponsesMessageScope::Conversation => {
+            transform_messages_with_normalizer(&context.messages, model, &normalizer)
+        }
+        ResponsesMessageScope::FreshWindow => {
+            normalize_messages_with_normalizer(&context.messages, model, &normalizer)
+        }
+    };
 
     let include_system_prompt = options.include_system_prompt;
     if include_system_prompt {
@@ -478,6 +497,7 @@ mod tests {
             &OPENAI_TOOL_CALL_PROVIDERS,
             ConvertResponsesMessagesOptions {
                 include_system_prompt: false,
+                ..Default::default()
             },
         )
     }

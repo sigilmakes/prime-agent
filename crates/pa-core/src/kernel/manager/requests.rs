@@ -231,6 +231,22 @@ impl ReplKernelManager {
 
         let mut frame = request.to_json();
         frame["id"] = json!(request_id);
+        // Bootstrap only binds the namespace: fetching its catalog then can wait on
+        // a dispatcher whose startup is itself awaiting bootstrap. Refresh instead
+        // in the first (and every later) user cell, inside its cancellation scope.
+        if let Request::Execute { code } = &request {
+            if !execution.opts.internal
+                && self
+                    .inner
+                    .options
+                    .host_handlers
+                    .get("plugin.catalog")
+                    .is_some()
+                && self.inner.options.bootstrap_code.as_deref() != Some(code.as_str())
+            {
+                frame["refresh_plugins"] = json!(true);
+            }
+        }
 
         let (mut send_task, stdin_retire) = {
             let writer = lock(&self.inner.child).as_ref().map(|c| c.stdin.clone());
@@ -326,6 +342,59 @@ impl ReplKernelManager {
 #[cfg(test)]
 mod tests {
     use super::append_truncated;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_refresh_frame_is_deferred_past_bootstrap_and_internal_work() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let python = dir.path().join("echo-refresh-frame");
+        std::fs::write(
+            &python,
+            concat!(
+                "#!/usr/bin/env python3\n",
+                "import json, sys\n",
+                "print(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.14.0'}), flush=True)\n",
+                "for line in sys.stdin:\n",
+                "    request = json.loads(line)\n",
+                "    if request['type'] == 'execute':\n",
+                "        print(json.dumps({'event': 'result', 'id': request['id'], 'text': str(request.get('refresh_plugins', False))}), flush=True)\n",
+                "        print(json.dumps({'event': 'done', 'id': request['id'], 'status': 'ok'}), flush=True)\n",
+            ),
+        )
+        .expect("write fake kernel");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kernel");
+        let mut handlers = crate::kernel::shared::HostRequestHandlers::new();
+        handlers.register(
+            "plugin.catalog",
+            crate::kernel::shared::host_handler(|_| async { Ok(json!({})) }),
+        );
+        let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {
+            python: Some(python),
+            host_handlers: handlers,
+            bootstrap_code: Some("BOOTSTRAP".into()),
+            ..Default::default()
+        });
+        for (code, opts, expected) in [
+            ("BOOTSTRAP", ExecuteOptions::default(), "False"),
+            ("USER", ExecuteOptions::default(), "True"),
+            (
+                "INTERNAL",
+                ExecuteOptions {
+                    internal: true,
+                    ..Default::default()
+                },
+                "False",
+            ),
+        ] {
+            let result = manager.execute(code, opts).await.expect("execute");
+            assert_eq!(result.result.as_deref(), Some(expected), "{code}");
+        }
+        manager.kill();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

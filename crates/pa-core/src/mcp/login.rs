@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context as _, Result};
 use crate::auth::types::AuthCredential;
 use crate::auth::{AuthStorage, OAuthIntegration};
 
-use super::oauth::{mcp_login, McpLoginUi, McpOAuthConfig};
+use super::oauth::{McpLoginUi, McpOAuthConfig};
 use super::oauth_http::OAuthHttp;
 use super::{McpManager, McpServerConfig};
 
@@ -30,16 +30,31 @@ impl McpLoginContext {
     /// credential fails.
     pub async fn run(self, ui: &dyn McpLoginUi, http: &dyn OAuthHttp) -> Result<AuthCredential> {
         let provider_id = format!("mcp:{}", self.server);
-        let credential = mcp_login(http, &self.config, ui).await?;
-        let mut auth = self.auth_storage.lock().await;
-        if auth.load_error().is_some() {
-            return Err(anyhow!("auth storage failed to load; login was not saved"));
+        let deadline = tokio::time::Instant::now() + super::oauth::LOGIN_TIMEOUT;
+        tokio::select! {
+            biased;
+            () = ui.wait_cancelled() => Err(anyhow!("Login cancelled")),
+            () = tokio::time::sleep_until(deadline) => Err(anyhow!("Login timed out")),
+            result = async {
+                let credential = super::oauth::mcp_login_until(http, &self.config, ui, deadline, #[cfg(test)] None).await?;
+                let mut auth = self.auth_storage.lock().await;
+                // Acquiring storage can yield after exchange; never save a cancelled or expired run.
+                if ui.cancelled() {
+                    return Err(anyhow!("Login cancelled"));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(anyhow!("Login timed out"));
+                }
+                if auth.load_error().is_some() {
+                    return Err(anyhow!("auth storage failed to load; login was not saved"));
+                }
+                auth.set(&provider_id, credential.clone());
+                if let Some(error) = auth.drain_errors().pop() {
+                    return Err(anyhow!(error)).context("could not save login credentials");
+                }
+                Ok(credential)
+            } => result,
         }
-        auth.set(&provider_id, credential.clone());
-        if let Some(error) = auth.drain_errors().pop() {
-            return Err(anyhow!(error)).context("could not save login credentials");
-        }
-        Ok(credential)
     }
 }
 
@@ -677,6 +692,173 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(after, vec!["-notion/SKILL.md".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_login_waiting_for_storage_is_not_saved() {
+        struct StorageUi {
+            paste: PasteUi,
+            cancel: tokio_util::sync::CancellationToken,
+            exchanging: tokio::sync::Notify,
+        }
+        impl McpLoginUi for StorageUi {
+            fn cancelled(&self) -> bool {
+                self.cancel.is_cancelled()
+            }
+            fn wait_cancelled(
+                &self,
+            ) -> std::pin::Pin<Box<dyn futures::Future<Output = ()> + Send + '_>> {
+                Box::pin(self.cancel.cancelled())
+            }
+            fn on_progress(&self, message: &str) {
+                if message.starts_with("Exchanging") {
+                    self.exchanging.notify_one();
+                }
+            }
+            fn on_auth(&self, url: &str, instructions: &str) {
+                self.paste.on_auth(url, instructions);
+            }
+            fn on_prompt(
+                &self,
+                message: &str,
+                placeholder: &str,
+            ) -> std::pin::Pin<Box<dyn futures::Future<Output = Result<String>> + Send>>
+            {
+                self.paste.on_prompt(message, placeholder)
+            }
+            fn on_manual_code_input(
+                &self,
+            ) -> Option<std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>>
+            {
+                self.paste.on_manual_code_input()
+            }
+        }
+        for deadline in [false, true] {
+            let agent = tempfile::tempdir().unwrap();
+            let http = Arc::new(fixture_http());
+            let user_servers = HashMap::from([(
+                "fixture".to_string(),
+                oauth_http_server("https://fixture.example/mcp"),
+            )]);
+            let manager = manager(agent.path(), Some(user_servers), http.clone());
+            let mut context = manager.lock().unwrap().login_context("fixture").unwrap();
+            let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = reservation.local_addr().unwrap().port();
+            drop(reservation);
+            context.config.callback_port = Some(port);
+            let storage = Arc::clone(&context.auth_storage).lock_owned().await;
+            let ui = StorageUi {
+                paste: PasteUi {
+                    auth_url: Arc::default(),
+                },
+                cancel: tokio_util::sync::CancellationToken::new(),
+                exchanging: tokio::sync::Notify::new(),
+            };
+            let mut login = Box::pin(context.run(&ui, http.as_ref()));
+            tokio::select! {
+                result = &mut login => panic!("storage lock should block save: {result:?}"),
+                () = ui.exchanging.notified() => {},
+            }
+            if deadline {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(120)).await;
+            } else {
+                ui.cancel.cancel();
+            }
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), login)
+                .await
+                .expect("cancel/deadline must interrupt the storage lock")
+                .unwrap_err();
+            if deadline {
+                tokio::time::resume();
+            }
+            assert_eq!(
+                error.to_string(),
+                if deadline {
+                    "Login timed out"
+                } else {
+                    "Login cancelled"
+                }
+            );
+            drop(storage);
+            let stored = AuthStorage::create(agent.path()).get_all();
+            assert!(stored.get("mcp:fixture").is_none());
+            let _rebound = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_token_response_prevents_persistence() {
+        struct CancelOnToken {
+            scripted: ScriptedHttp,
+            cancel: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl OAuthHttp for CancelOnToken {
+            fn request(
+                &self,
+                request: super::super::OAuthHttpRequest,
+            ) -> futures::future::BoxFuture<'_, Result<OAuthHttpResponse>> {
+                Box::pin(async move {
+                    let token = request.url.ends_with("/token");
+                    let response = self.scripted.request(request).await?;
+                    if token {
+                        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(response)
+                })
+            }
+        }
+        struct CancelUi {
+            paste: PasteUi,
+            cancel: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl McpLoginUi for CancelUi {
+            fn cancelled(&self) -> bool {
+                self.cancel.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            fn on_progress(&self, message: &str) {
+                self.paste.on_progress(message);
+            }
+            fn on_auth(&self, url: &str, instructions: &str) {
+                self.paste.on_auth(url, instructions);
+            }
+            fn on_prompt(
+                &self,
+                message: &str,
+                placeholder: &str,
+            ) -> std::pin::Pin<Box<dyn futures::Future<Output = Result<String>> + Send>>
+            {
+                self.paste.on_prompt(message, placeholder)
+            }
+            fn on_manual_code_input(
+                &self,
+            ) -> Option<std::pin::Pin<Box<dyn futures::Future<Output = Option<String>> + Send>>>
+            {
+                self.paste.on_manual_code_input()
+            }
+        }
+        let agent = tempfile::tempdir().unwrap();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let http = Arc::new(CancelOnToken {
+            scripted: fixture_http(),
+            cancel: Arc::clone(&cancel),
+        });
+        let user_servers = HashMap::from([(
+            "fixture".to_string(),
+            oauth_http_server("https://fixture.example/mcp"),
+        )]);
+        let manager = manager(agent.path(), Some(user_servers), http.clone());
+        let ui = CancelUi {
+            paste: PasteUi {
+                auth_url: Arc::default(),
+            },
+            cancel,
+        };
+        let context = manager.lock().unwrap().login_context("fixture").unwrap();
+        let error = context.run(&ui, http.as_ref()).await.unwrap_err();
+        assert_eq!(error.to_string(), "Login cancelled");
+        let stored = AuthStorage::create(agent.path()).get_all();
+        assert!(stored.get("mcp:fixture").is_none());
     }
 
     /// Unknown servers and non-OAuth servers error with the TS wording;

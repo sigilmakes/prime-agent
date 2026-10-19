@@ -67,7 +67,13 @@ impl SessionManager {
     /// Append `git` as a `git_state` row when it differs from the nearest
     /// git context on the active branch (or the header); returns the new id.
     pub fn record_git_state_if_changed(&mut self, git: GitContext) -> Option<String> {
-        if self.active_git_context().as_ref() == Some(&git) {
+        // Match TS gitContextsEqual: preserved future metadata is not part of
+        // repository identity and must not create a new git_state row.
+        if self.active_git_context().as_ref().is_some_and(|active| {
+            active.repo_url == git.repo_url
+                && active.commit == git.commit
+                && active.branch == git.branch
+        }) {
             return None;
         }
         self.append_git_state(git).ok()

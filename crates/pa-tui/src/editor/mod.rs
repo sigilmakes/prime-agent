@@ -253,6 +253,26 @@ impl Editor {
         }
     }
 
+    /// Replace commands owned by active plugin generations.
+    pub(crate) fn set_autocomplete_plugin_commands(&mut self, commands: Vec<SlashCommandEntry>) {
+        let was_showing = self.autocomplete.is_some();
+        self.autocomplete = None;
+        if was_showing {
+            self.emit(EditorEvent::AutocompleteToggled(false));
+        }
+        if let Some(provider) = self.autocomplete_provider.as_mut() {
+            provider.set_plugin_commands(commands);
+        }
+        // Discovery may finish after the input-idle lookup found no commands. Refresh the
+        // current slash draft as well, so a late catalog cannot leave completion empty.
+        if self
+            .current_slash_command_context()
+            .is_some_and(|context| context.kind == crate::autocomplete::SlashKind::Name)
+        {
+            self.request_autocomplete(/*force*/ false, /*explicit_tab*/ false);
+        }
+    }
+
     #[must_use]
     pub fn is_showing_autocomplete(&self) -> bool {
         self.autocomplete.is_some()

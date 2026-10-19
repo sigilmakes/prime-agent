@@ -38,6 +38,11 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
+#[path = "support/personalization_env.rs"]
+mod personalization_env;
+
+static RUN_LOCK: Mutex<()> = Mutex::new(());
+
 /// The rule row's glyph: the settings page's bars (the search field's borders, the detail block's
 /// separator).
 const RULE: &str = "\u{2500}";
@@ -377,12 +382,6 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
     fn set_update_channel(&self, _channel: &str) -> Result<()> {
         Ok(())
     }
-    fn telemetry_status(&self) -> String {
-        String::new()
-    }
-    fn set_telemetry_enabled(&self, _enabled: bool) -> Result<String> {
-        Ok(String::new())
-    }
     fn effective_update_channel(&self, version: &str) -> String {
         if version.contains("-beta") {
             "nightly".to_string()
@@ -415,12 +414,9 @@ fn options(socket: PathBuf, settings: Arc<RecordingSettings>) -> InteractiveOpti
         branch_summary_skip_prompt: false,
         version: "0.0.0".to_string(),
         onboarding: None,
-        telemetry_disabled: None,
         client_auth: None,
-        traces: None,
         provider_auth: None,
         update_commands: None,
-        telemetry: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         session_rlm_depth: None,
         prompt_stash: Arc::default(),
@@ -432,8 +428,38 @@ fn options(socket: PathBuf, settings: Arc<RecordingSettings>) -> InteractiveOpti
 
 /// Run a plan against the mock daemon, with the recording settings seam.
 fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Arc<RecordingSettings>) {
-    std::env::remove_var("TMUX");
+    run_plan_with_themes(steps, &[], "prime")
+}
+
+fn run_plan_with_themes(
+    steps: Vec<HeadlessStep>,
+    themes: &[(&str, Value)],
+    initial_theme: &str,
+) -> (Vec<String>, Arc<RecordingSettings>) {
+    run_plan_with_theme_setup(steps, themes, initial_theme, |_| {})
+}
+
+fn run_plan_with_theme_setup(
+    steps: Vec<HeadlessStep>,
+    themes: &[(&str, Value)],
+    initial_theme: &str,
+    setup: impl FnOnce(&std::path::Path),
+) -> (Vec<String>, Arc<RecordingSettings>) {
+    let _lock = RUN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().expect("temp dir");
+    let _environment = personalization_env::IsolatedEnv::new(dir.path());
+    let themes_dir = dir.path().join("agent/themes");
+    std::fs::create_dir_all(&themes_dir).expect("themes directory");
+    for (name, value) in themes {
+        std::fs::write(
+            themes_dir.join(format!("{name}.json")),
+            serde_json::to_vec(value).unwrap(),
+        )
+        .expect("write isolated theme");
+    }
+    setup(&themes_dir);
     let socket = dir.path().join("tui.sock");
     let supervisor = MockSupervisor::bind(&socket);
     let handle = std::thread::spawn(move || supervisor.serve());
@@ -448,11 +474,10 @@ fn run_plan(steps: Vec<HeadlessStep>) -> (Vec<String>, Arc<RecordingSettings>) {
         width: 100,
         height: 30,
     };
+    let mut options = options(socket, settings.clone());
+    options.theme = initial_theme.to_string();
     let outcome = runtime
-        .block_on(run_interactive(
-            options(socket, settings.clone()),
-            UiMode::Headless(plan),
-        ))
+        .block_on(run_interactive(options, UiMode::Headless(plan)))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     (outcome.frames, settings)
@@ -756,4 +781,360 @@ fn threshold_percentage_cycles_through_the_persistence_seam() {
     assert!(rows
         .iter()
         .any(|row| row.contains("Auto-compact threshold (%)") && row.contains("100")));
+}
+
+/// The real `SessionUi` must supply discovered themes to the menu, then
+/// validate and persist the chosen filename through its settings seam.
+#[test]
+fn a_discovered_custom_theme_is_rendered_previewed_and_persisted() {
+    let mut theme: Value = serde_json::from_str(pa_tui::theme::PRIME_JSON).unwrap();
+    theme["name"] = json!("terminal-native");
+    theme["vars"] = json!({"native": "", "blue": 4, "alias": "blue"});
+    for color in theme["colors"].as_object_mut().unwrap().values_mut() {
+        *color = json!("native");
+    }
+    theme["colors"]["accent"] = json!("alias");
+    theme["colors"]["selectedBg"] = json!(4);
+    let mut steps = open_settings();
+    steps.extend([
+        HeadlessStep::Key(key(KeyCode::Char('3'))),
+        HeadlessStep::WaitRender {
+            needle: "Mermaid diagrams".into(),
+            timeout_ms: 5000,
+        },
+        HeadlessStep::Key(key(KeyCode::Enter)),
+        HeadlessStep::WaitRender {
+            needle: "terminal-native".into(),
+            timeout_ms: 5000,
+        },
+        HeadlessStep::Key(key(KeyCode::Down)),
+        HeadlessStep::Key(key(KeyCode::Down)),
+        HeadlessStep::Key(key(KeyCode::Down)),
+        HeadlessStep::WaitRender {
+            needle: "› terminal-native".into(),
+            timeout_ms: 5000,
+        },
+        HeadlessStep::Key(key(KeyCode::Enter)),
+        HeadlessStep::WaitRender {
+            needle: "› Theme".into(),
+            timeout_ms: 5000,
+        },
+    ]);
+    let (frames, settings) = run_plan_with_themes(steps, &[("terminal-native", theme)], "prime");
+    assert!(frames
+        .iter()
+        .any(|frame| frame.contains("› terminal-native")));
+    let rows = frame_with(&frames, "› Theme");
+    assert!(rows
+        .iter()
+        .any(|row| row.contains("› Theme") && row.contains("terminal-native")));
+    assert_eq!(settings.log(), vec!["theme=terminal-native"]);
+}
+
+#[test]
+fn an_invalid_discovered_theme_shows_a_diagnostic_and_is_not_persisted() {
+    let mut steps = open_settings();
+    steps.extend([
+        HeadlessStep::Key(key(KeyCode::Char('3'))),
+        HeadlessStep::WaitRender {
+            needle: "Mermaid diagrams".into(),
+            timeout_ms: 5000,
+        },
+        HeadlessStep::Key(key(KeyCode::Enter)),
+        HeadlessStep::WaitRender {
+            needle: "› broken".into(),
+            timeout_ms: 5000,
+        },
+        HeadlessStep::Key(key(KeyCode::Enter)),
+        HeadlessStep::WaitRender {
+            needle: "› Theme".into(),
+            timeout_ms: 5000,
+        },
+        HeadlessStep::Key(key(KeyCode::Esc)),
+        HeadlessStep::WaitRender {
+            needle: "using prime".into(),
+            timeout_ms: 5000,
+        },
+    ]);
+    let (frames, settings) = run_plan_with_themes(
+        steps,
+        &[("broken", json!({"name":"broken", "colors":{"text":999}}))],
+        "prime",
+    );
+    let all = frames.join("\n");
+    assert!(all.contains("invalid colors token"), "{all}");
+    assert!(all.contains("using prime"), "{all}");
+    assert!(settings.log().is_empty(), "a rejected theme is never saved");
+}
+
+#[test]
+fn bad_startup_themes_keep_a_visible_diagnostic_after_the_initial_paint() {
+    for initial_theme in ["missing-theme", "broken"] {
+        let (frames, settings) = run_plan_with_themes(
+            vec![
+                HeadlessStep::WaitRender {
+                    needle: "using prime".into(),
+                    timeout_ms: 3000,
+                },
+                HeadlessStep::Type("native draft".into()),
+                HeadlessStep::WaitRender {
+                    needle: "native draft".into(),
+                    timeout_ms: 3000,
+                },
+            ],
+            &[("broken", json!({"name":"broken", "colors":{"text":999}}))],
+            initial_theme,
+        );
+        let final_frame = frames.last().expect("a rendered draft frame");
+        assert!(final_frame.contains("native draft"));
+        assert!(
+            final_frame.contains(initial_theme),
+            "theme name remains visible: {final_frame}"
+        );
+        assert!(
+            final_frame.contains("using prime"),
+            "fallback remains visible: {final_frame}"
+        );
+        assert!(!frames.join("\n").contains("timed out waiting"));
+        assert!(
+            settings.log().is_empty(),
+            "startup fallback never changes saved preference"
+        );
+    }
+}
+
+#[test]
+fn valid_startup_themes_are_silent_and_do_not_rewrite_preferences() {
+    let custom: Value = serde_json::from_str(pa_tui::theme::PRIME_JSON).unwrap();
+    for initial_theme in ["", "prime", "dark", "light", "terminal-native"] {
+        let (frames, settings) = run_plan_with_themes(
+            vec![HeadlessStep::Type("native draft".into())],
+            &[("terminal-native", custom.clone())],
+            initial_theme,
+        );
+        let all = frames.join("\n");
+        assert!(all.contains("native draft"), "{all}");
+        assert!(!all.contains("using prime"), "valid theme warned: {all}");
+        assert!(!all.contains("⚠"), "valid theme warned: {all}");
+        assert!(settings.log().is_empty(), "startup never saves a theme");
+    }
+}
+
+/// A FIFO holds the actual production file read until a rendered-input
+/// timestamp arrives. Its timeout releases a synchronous-loader mutant too,
+/// so a failure never leaves the runtime waiting on a blocked file reader.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stalled_startup_theme_does_not_hold_first_paint_or_typing() {
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel();
+    let mut writer = None;
+    let (frames, settings) = run_plan_with_theme_setup(
+        vec![
+            HeadlessStep::Type("native draft".into()),
+            HeadlessStep::WaitRender {
+                needle: "native draft".into(),
+                timeout_ms: 3000,
+            },
+            HeadlessStep::Timestamp(paint_tx),
+            HeadlessStep::WaitRender {
+                needle: "using prime".into(),
+                timeout_ms: 3000,
+            },
+        ],
+        &[],
+        "stalled",
+        |themes_dir| {
+            let path = themes_dir.join("stalled.json");
+            assert!(std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            writer = Some(std::thread::spawn(move || {
+                let painted = paint_rx.recv_timeout(std::time::Duration::from_secs(3));
+                let mut fifo = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+                fifo.write_all(b"{malformed").unwrap();
+                drop(fifo);
+                if painted.is_err() {
+                    let _ = paint_rx.recv_timeout(std::time::Duration::from_secs(10));
+                }
+                painted
+            }));
+        },
+    );
+    let (_, renders) = writer
+        .unwrap()
+        .join()
+        .unwrap()
+        .expect("input painted before theme read completed");
+    assert!(renders > 0, "timestamp follows a real rendered frame");
+    let final_frame = frames.last().unwrap();
+    assert!(final_frame.contains("native draft"), "{final_frame}");
+    assert!(final_frame.contains("using prime"), "{final_frame}");
+    assert!(!frames.join("\n").contains("timed out waiting"));
+    assert!(settings.log().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_late_startup_theme_failure_cannot_replace_an_intentional_theme_setting() {
+    let (chosen_tx, chosen_rx) = std::sync::mpsc::channel();
+    let mut writer = None;
+    let mut steps = vec![HeadlessStep::Submit("/settings".into())];
+    steps.extend([
+        HeadlessStep::WaitRender {
+            needle: "General".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Key(key(KeyCode::Char('3'))),
+        HeadlessStep::Key(key(KeyCode::Enter)),
+        HeadlessStep::WaitRender {
+            needle: "› dark".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Key(key(KeyCode::Down)),
+        HeadlessStep::WaitRender {
+            needle: "› light".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Key(key(KeyCode::Enter)),
+        HeadlessStep::WaitRender {
+            needle: "› Theme".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Timestamp(chosen_tx),
+        HeadlessStep::Key(key(KeyCode::Esc)),
+        HeadlessStep::WaitRender {
+            needle: "keeping light theme".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Submit("/settings".into()),
+        HeadlessStep::WaitRender {
+            needle: "General".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Key(key(KeyCode::Char('3'))),
+        HeadlessStep::WaitRender {
+            needle: "› Theme".into(),
+            timeout_ms: 3000,
+        },
+    ]);
+    let (frames, settings) = run_plan_with_theme_setup(steps, &[], "stalled", |themes_dir| {
+        let path = themes_dir.join("stalled.json");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        writer = Some(std::thread::spawn(move || {
+            let chosen = chosen_rx.recv_timeout(std::time::Duration::from_secs(3));
+            let mut fifo = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            fifo.write_all(b"{malformed").unwrap();
+            drop(fifo);
+            if chosen.is_err() {
+                let _ = chosen_rx.recv_timeout(std::time::Duration::from_secs(10));
+            }
+            chosen
+        }));
+    });
+    let ready = writer.unwrap().join().unwrap();
+    assert!(
+        ready.is_ok(),
+        "theme setting blocked: {ready:?}\n{}",
+        frames.join("\n---\n")
+    );
+    assert_eq!(settings.log(), vec!["theme=light"]);
+    let final_frame = frames.last().unwrap();
+    assert!(
+        final_frame
+            .lines()
+            .any(|row| row.contains("› Theme") && row.contains("light")),
+        "{final_frame}"
+    );
+    assert!(!frames.join("\n").contains("timed out waiting"));
+}
+
+/// Run the real public headless entry in its own process. A held theme
+/// read must not keep Tokio runtime teardown (and therefore the CLI) alive.
+#[cfg(target_os = "linux")]
+#[test]
+fn quitting_while_a_startup_theme_read_is_held_does_not_hold_process_exit() {
+    let _lock = RUN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use tokio::io::AsyncReadExt;
+        for mode in ["exit", "finish"] {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "held_startup_theme_quit_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("PA_TUI_HELD_THEME_CHILD", mode)
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start isolated verifier process");
+            let mut stdout = child.stdout.take().unwrap();
+            let captured = tokio::spawn(async move {
+                let mut output = String::new();
+                stdout.read_to_string(&mut output).await.unwrap();
+                output
+            });
+            let exit = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+            if exit.is_err() {
+                child.kill().await.expect("stop held verifier process");
+            }
+            let output = captured.await.unwrap();
+            assert!(
+                output.contains("PA_HELD_THEME_PAINTED"),
+                "the child painted before quitting: {output}"
+            );
+            assert!(
+                exit.is_ok(),
+                "quitting held on the startup theme read: {output}"
+            );
+            assert!(exit.unwrap().unwrap().success(), "{mode}: {output}");
+        }
+    });
+}
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "subprocess helper for the bounded whole-process quit verifier"]
+fn held_startup_theme_quit_child() {
+    let mode = std::env::var("PA_TUI_HELD_THEME_CHILD").expect("subprocess mode");
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        let (_, renders) = paint_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        assert!(renders > 0);
+        println!("PA_HELD_THEME_PAINTED");
+    });
+    let mut steps = vec![
+        HeadlessStep::Type("quit draft".into()),
+        HeadlessStep::WaitRender {
+            needle: "quit draft".into(),
+            timeout_ms: 3000,
+        },
+        HeadlessStep::Timestamp(paint_tx),
+    ];
+    if mode == "exit" {
+        steps.push(HeadlessStep::Submit("/exit".into()));
+    }
+    let (frames, _) = run_plan_with_theme_setup(steps, &[], "stalled", |themes_dir| {
+        assert!(std::process::Command::new("mkfifo")
+            .arg(themes_dir.join("stalled.json"))
+            .status()
+            .unwrap()
+            .success());
+    });
+    observer.join().unwrap();
+    assert!(frames.iter().any(|frame| frame.contains("quit draft")));
 }

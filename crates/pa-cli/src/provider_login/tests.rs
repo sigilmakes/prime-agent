@@ -100,6 +100,7 @@ fn the_display_names_match_the_ts_map() {
     assert_eq!(display_name("openai"), "OpenAI");
     assert_eq!(display_name("google"), "Google Gemini");
     assert_eq!(display_name("prime-inference"), "Prime Inference");
+    assert_eq!(display_name("ollama-cloud"), "Ollama Cloud");
     assert_eq!(display_name("a-custom-provider"), "a-custom-provider");
 }
 
@@ -109,6 +110,8 @@ fn the_api_key_login_rule_matches_ts() {
     built_in.insert("anthropic".to_string());
     // The display-name map marks api-key logins.
     assert!(is_api_key_login_provider("openai", &built_in));
+    built_in.insert("ollama-cloud".to_string());
+    assert!(is_api_key_login_provider("ollama-cloud", &built_in));
     // A provider the built-in set does not know is a custom api-key
     // provider.
     assert!(is_api_key_login_provider("my-endpoint", &built_in));
@@ -126,7 +129,6 @@ async fn login_options_list_providers_only() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent = dir.path().join("agent");
     std::fs::create_dir_all(&agent).expect("agent dir");
-    std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
     std::env::remove_var("PRIME_API_KEY");
     let auth = ProviderAuth::new(dir.path(), agent.clone());
     let rows = auth.login_options().await;
@@ -312,4 +314,43 @@ async fn a_stored_web_search_key_pairs_with_the_logout_row() {
             )
         );
     assert!(auth.logout_options().await.is_empty());
+}
+
+#[tokio::test]
+async fn ollama_cloud_api_key_login_and_logout_use_the_standard_store() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent = dir.path().join("agent");
+    std::fs::create_dir_all(&agent).expect("agent dir");
+    let auth = ProviderAuth::new(dir.path(), agent.clone());
+    let row = ProviderRow {
+        id: "ollama-cloud".into(),
+        name: display_name("ollama-cloud"),
+        auth_type: AuthType::ApiKey,
+        status: None,
+        flow: AuthFlow::ApiKeyPrompt,
+        configured: false,
+        available: true,
+    };
+    assert!(matches!(
+        auth.login(&row, Some("fixture-key")).await,
+        ProviderAuthOutcome::Status(_)
+    ));
+    let storage = pa_core::auth::AuthStorage::create(&agent);
+    assert!(
+        matches!(storage.get_all().credential("ollama-cloud"), Some(AuthCredential::ApiKey { key, .. }) if key == "fixture-key")
+    );
+    let stored = auth.logout_options().await;
+    let row = stored
+        .iter()
+        .find(|row| row.id == "ollama-cloud")
+        .expect("Ollama logout row");
+    assert_eq!(row.name, "Ollama Cloud");
+    assert!(matches!(
+        auth.logout(row).await,
+        ProviderAuthOutcome::Status(_)
+    ));
+    assert!(pa_core::auth::AuthStorage::create(&agent)
+        .get_all()
+        .get("ollama-cloud")
+        .is_none());
 }

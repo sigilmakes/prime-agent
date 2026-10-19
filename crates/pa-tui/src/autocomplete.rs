@@ -85,6 +85,8 @@ pub trait AutocompleteProvider: Send {
     /// Replace the session's `skill:` commands. A default no-op for
     /// providers without command listings.
     fn set_skill_commands(&mut self, _skills: Vec<SlashCommandEntry>) {}
+    /// Replace active plugin commands independently of the skill setting.
+    fn set_plugin_commands(&mut self, _commands: Vec<SlashCommandEntry>) {}
     /// Replace one command's argument completions; a default no-op for
     /// providers without argument completions.
     fn set_argument_completions(&mut self, _command: &'static str, _items: Vec<CompletionItem>) {}
@@ -725,6 +727,39 @@ pub fn skill_command_entries(commands: &serde_json::Value) -> Vec<SlashCommandEn
         .collect()
 }
 
+/// Active plugin contributions from the worker catalog. The worker owns activation;
+/// the client replaces the whole list on refresh and never infers plugins from MCP rows.
+pub(crate) fn plugin_command_entries(commands: &serde_json::Value) -> Vec<SlashCommandEntry> {
+    commands
+        .get("commands")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("source").and_then(serde_json::Value::as_str) == Some("plugin"))
+        .filter_map(|entry| {
+            let name = entry.get("name")?.as_str()?;
+            let argument_hint = entry
+                .get("argumentHint")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some(SlashCommandEntry {
+                name: name.to_string(),
+                aliases: Vec::new(),
+                description: entry
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                takes_argument: entry
+                    .get("takesArgument")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(argument_hint.is_some()),
+                argument_hint,
+                source_tag: Some("#plugin".to_string()),
+            })
+        })
+        .collect()
+}
+
 /// The installed provider: fuzzy-filtered slash-command completion from
 /// the builtin registry plus file/path completion.
 pub struct CombinedAutocompleteProvider {
@@ -732,6 +767,7 @@ pub struct CombinedAutocompleteProvider {
     /// The session's `skill:<name>` commands: appended after the
     /// builtins, replaced whole on every catalog refresh.
     skill_commands: Vec<SlashCommandEntry>,
+    plugin_commands: Vec<SlashCommandEntry>,
     /// Commands the current model filters out of the listing (TS drops
     /// `/fast` when the model is not fast-mode-eligible).
     hidden: std::collections::HashSet<String>,
@@ -772,6 +808,7 @@ impl CombinedAutocompleteProvider {
         Self {
             commands,
             skill_commands: Vec::new(),
+            plugin_commands: Vec::new(),
             hidden: HashSet::default(),
             arguments: HashMap::default(),
             paths: PathCompletionProvider { base },
@@ -805,6 +842,7 @@ impl CombinedAutocompleteProvider {
             .commands
             .iter()
             .chain(self.skill_commands.iter())
+            .chain(self.plugin_commands.iter())
             .filter(|command| !self.hidden.contains(&command.name))
             .collect();
         let scored = fuzzy_filter(&commands, query, |command| command.search_text());
@@ -850,6 +888,7 @@ impl CombinedAutocompleteProvider {
             .commands
             .iter()
             .chain(self.skill_commands.iter())
+            .chain(self.plugin_commands.iter())
             .find(|command| command.name == item.value)
             .is_some_and(|command| command.takes_argument);
         let has_separator_after_cursor =
@@ -882,6 +921,10 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
 
     fn set_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
         CombinedAutocompleteProvider::set_skill_commands(self, skills);
+    }
+
+    fn set_plugin_commands(&mut self, commands: Vec<SlashCommandEntry>) {
+        self.plugin_commands = commands;
     }
 
     fn set_argument_completions(&mut self, command: &'static str, items: Vec<CompletionItem>) {
@@ -972,6 +1015,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                 .commands
                 .iter()
                 .chain(self.skill_commands.iter())
+                .chain(self.plugin_commands.iter())
                 .any(|command| command.name == item.value)
         {
             return self.apply_slash_completion(lines, cursor_line, cursor_col, item, prefix);

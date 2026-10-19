@@ -1,17 +1,8 @@
-//! The live master switch and model-boundary filtering. Durable history is untouched.
+//! Read-only suppression of legacy host-owned harness context.
+//! Active plugins supply new context explicitly; saved legacy rows never replay.
+//! Durable history and user-authored text are untouched.
 
 use pa_types::session::AgentMessage;
-
-/// The single live policy read for scheduling, planning, apply, and context delivery.
-pub(crate) fn enabled(settings: Option<&crate::settings::SettingsManager>) -> bool {
-    settings.is_none_or(|settings| settings.reopen().get_harness_refinements())
-}
-
-impl super::AgentSession {
-    pub(crate) fn harness_refinements_enabled(&self) -> bool {
-        enabled(self.refinement_settings.as_ref())
-    }
-}
 
 /// Remove only typed harness rows; never interpret a user's quoted text as metadata.
 pub(crate) fn without_refinements(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
@@ -41,34 +32,25 @@ pub(crate) fn without_refinements(messages: Vec<AgentMessage>) -> Vec<AgentMessa
         .collect()
 }
 
-/// Resolve at every provider request, including tool continuations and retries.
-/// I/O runs off the async worker. Filtering precedes conversion while provenance is typed.
-pub(crate) fn convert_to_llm(
-    settings: crate::settings::SettingsManager,
-) -> pa_agent::agent_loop::ConvertToLlmFn {
-    let settings = std::sync::Arc::new(settings);
+/// Filter at every provider request, including tool continuations and retries.
+/// Provenance stays typed until after the legacy context has been removed.
+pub(crate) fn convert_to_llm() -> pa_agent::agent_loop::ConvertToLlmFn {
     std::sync::Arc::new(move |messages| {
-        let settings = std::sync::Arc::clone(&settings);
         Box::pin(async move {
-            let enabled = tokio::task::spawn_blocking(move || enabled(Some(&settings))).await?;
-            let messages = if enabled {
-                messages
-            } else {
-                messages
-                    .into_iter()
-                    .filter_map(|message| match message {
-                        pa_agent::types::AgentMessage::Custom(custom) => {
-                            let typed =
-                                serde_json::from_value(serde_json::to_value(custom).ok()?).ok()?;
-                            without_refinements(vec![typed])
-                                .into_iter()
-                                .next()
-                                .and_then(|row| super::session_message_to_loop(&row))
-                        }
-                        message @ pa_agent::types::AgentMessage::Standard(_) => Some(message),
-                    })
-                    .collect()
-            };
+            let messages = messages
+                .into_iter()
+                .filter_map(|message| match message {
+                    pa_agent::types::AgentMessage::Custom(custom) => {
+                        let typed =
+                            serde_json::from_value(serde_json::to_value(custom).ok()?).ok()?;
+                        without_refinements(vec![typed])
+                            .into_iter()
+                            .next()
+                            .and_then(|row| super::session_message_to_loop(&row))
+                    }
+                    message @ pa_agent::types::AgentMessage::Standard(_) => Some(message),
+                })
+                .collect();
             Ok(super::messages::loop_convert_to_llm(messages))
         })
     })
@@ -77,7 +59,6 @@ pub(crate) fn convert_to_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::SettingsManager;
     use pa_types::ai::{UserContent, UserMessage};
 
     fn user(text: &str) -> AgentMessage {
@@ -88,120 +69,20 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn live_request_gate_filters_saved_rows_and_preserves_quoted_user_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut settings = SettingsManager::create(tmp.path(), tmp.path().join("agent"));
-        let convert = convert_to_llm(settings.reopen());
-        let digest =
-            super::super::harness_digest::harness_digest_prompt_row("saved memory", 1, "fp");
-        let quote =
-            super::super::session_message_to_loop(&user("[harness-digest] quoted user content"))
-                .unwrap();
-        let messages = vec![digest.clone(), quote.clone()];
-        assert_eq!(convert(messages.clone()).await.unwrap().len(), 2);
-        settings.set_harness_refinements(false).unwrap();
-        let expected = super::super::messages::loop_convert_to_llm(vec![quote]);
-        assert_eq!(convert(messages.clone()).await.unwrap(), expected);
-        settings.set_harness_refinements(true).unwrap();
-        assert_eq!(convert(messages).await.unwrap().len(), 2);
+    fn custom(kind: &str, text: &str) -> AgentMessage {
+        AgentMessage::Custom(pa_types::session::CustomMessage {
+            custom_type: kind.to_string(),
+            content: UserContent::Text(text.to_string()),
+            display: false,
+            details: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        })
     }
 
-    #[tokio::test]
-    async fn cold_and_resumed_disabled_sessions_omit_saved_harness_context() {
-        let tmp = tempfile::tempdir().unwrap();
-        let agent_dir = tmp.path().join("agent");
-        let mut settings = SettingsManager::create(tmp.path(), &agent_dir);
-        settings.set_harness_refinements(false).unwrap();
-        let model: pa_agent::types::Model = serde_json::from_value(serde_json::json!({
-            "id":"m", "name":"m", "api":"test", "provider":"test", "baseUrl":"http://localhost",
-            "reasoning":false, "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-            "contextWindow":10000, "maxTokens":100
-        }))
-        .unwrap();
-        for resumed in [false, true] {
-            let mut manager = crate::session::manager::SessionManager::in_memory(tmp.path());
-            manager.materialize_session_file(Some(tmp.path().join(if resumed {
-                "resumed"
-            } else {
-                "cold"
-            })));
-            if resumed {
-                manager
-                    .append_custom_message(
-                        "harness_digest",
-                        UserContent::Text("saved memory".to_string()),
-                        false,
-                        None,
-                    )
-                    .unwrap();
-                manager.append_message(user("Continue my work")).unwrap();
-            }
-            let provider =
-                std::sync::Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
-            let engine =
-                super::super::engine::create_session(super::super::engine::SessionEngineConfig {
-                    cwd: tmp.path().to_path_buf(),
-                    agent_dir: agent_dir.clone(),
-                    model: Some(model.clone()),
-                    stream_fn: Some(provider.stream_fn()),
-                    session_manager: Some(manager),
-                    daemonless: true,
-                    ..Default::default()
-                })
-                .await
-                .unwrap();
-            assert!(!engine.session.auto_refine_allowed());
-            assert!(engine.session.harness_digest_inputs().await.is_none());
-            assert!(engine
-                .session
-                .pending_digest_prompt_row()
-                .await
-                .unwrap()
-                .is_none());
-            let live = engine.session.agent().state().await.messages;
-            assert_eq!(
-                super::super::messages::loop_convert_to_llm(live).len(),
-                usize::from(resumed)
-            );
-            // Re-enable without a reload (the busy-session case): the next admission loads state.
-            settings.set_harness_refinements(true).unwrap();
-            assert!(engine.session.auto_refine_allowed());
-            assert!(engine
-                .session
-                .pending_digest_prompt_row()
-                .await
-                .unwrap()
-                .is_some());
-            settings.set_harness_refinements(false).unwrap();
-            assert!(engine
-                .session
-                .pending_digest_prompt_row()
-                .await
-                .unwrap()
-                .is_none());
-            settings.set_harness_refinements(true).unwrap();
-            assert!(
-                engine
-                    .session
-                    .pending_digest_prompt_row()
-                    .await
-                    .unwrap()
-                    .is_none(),
-                "a consumed digest must not be re-armed by disabling and enabling"
-            );
-            settings.set_harness_refinements(false).unwrap();
-            // The history remains inspectable even though it is absent from model context.
-            if resumed {
-                assert!(engine.session.entries().await.iter().any(|entry| matches!(entry,
-                    pa_types::session::FileEntry::CustomMessage { payload, .. } if payload.custom_type == "harness_digest")));
-            }
-        }
-    }
-
-    #[test]
-    fn disabled_context_removes_compaction_digest_but_keeps_the_summary() {
-        let summary = pa_types::session::CompactionSummaryMessage {
+    fn compaction() -> AgentMessage {
+        AgentMessage::CompactionSummary(pa_types::session::CompactionSummaryMessage {
+            rest: pa_types::JsonMap::new(),
             summary: "Earlier decisions still apply".to_string(),
             tokens_before: 10,
             retained_message_count: None,
@@ -209,13 +90,69 @@ mod tests {
             harness_digest: Some("saved memory".to_string()),
             harness_state_fingerprint: Some("fp".to_string()),
             timestamp: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn legacy_rows_never_replay_beside_new_plugin_context_or_quoted_user_text() {
+        let quote = user(&format!(
+            "{}saved memory{}\n[refinement-notice] quoted, not metadata",
+            super::super::messages::HARNESS_DIGEST_PREFIX,
+            super::super::messages::HARNESS_DIGEST_SUFFIX,
+        ));
+        // Plugin activation does not authorize replay of old host-owned rows.
+        let plugin = custom("plugin.harness.context", "new explicit contribution");
+        let canonical = vec![
+            custom("harness_digest", "saved memory"),
+            custom("refinement_notice", "old notice"),
+            custom("refinement_outcome", "old outcome"),
+            compaction(),
+            quote.clone(),
+            plugin.clone(),
+        ];
+        let saved = canonical.clone();
+        let mut summary = compaction();
+        let AgentMessage::CompactionSummary(clean) = &mut summary else {
+            unreachable!();
         };
-        let mut expected = summary.clone();
-        expected.harness_digest = None;
-        expected.harness_state_fingerprint = None;
+        clean.harness_digest = None;
+        clean.harness_state_fingerprint = None;
+        let expected = vec![summary, quote, plugin];
+        assert_eq!(without_refinements(canonical.clone()), expected);
         assert_eq!(
-            without_refinements(vec![AgentMessage::CompactionSummary(summary)]),
-            vec![AgentMessage::CompactionSummary(expected)]
+            canonical, saved,
+            "filtering must not mutate canonical history"
         );
+
+        // Bypass the admission helper to test raw restored loop rows at the provider boundary.
+        let raw = canonical
+            .iter()
+            .map(|message| serde_json::from_value(serde_json::to_value(message).unwrap()).unwrap())
+            .collect();
+        let expected_loop = expected
+            .iter()
+            .filter_map(super::super::session_message_to_loop)
+            .collect();
+        let convert = convert_to_llm();
+        assert_eq!(
+            convert(raw).await.unwrap(),
+            super::super::messages::loop_convert_to_llm(expected_loop),
+        );
+        assert_eq!(canonical, saved);
+    }
+
+    #[test]
+    fn session_rebuild_filters_legacy_metadata_without_touching_user_quotes() {
+        let quoted = user("[harness-digest]\n<harness_state>quoted memory</harness_state>");
+        let canonical = vec![custom("harness_digest", "old memory"), quoted, compaction()];
+        let saved = canonical.clone();
+        let rebuilt = super::super::rebuilt_loop_messages(canonical.clone());
+        let expected = without_refinements(canonical.clone())
+            .iter()
+            .filter_map(super::super::session_message_to_loop)
+            .collect::<Vec<_>>();
+        assert_eq!(rebuilt, expected);
+        assert_eq!(rebuilt.len(), 2);
+        assert_eq!(canonical, saved);
     }
 }

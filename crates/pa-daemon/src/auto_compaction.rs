@@ -150,20 +150,6 @@ impl AgentSessionEngine {
                         &serde_json::Value::Null,
                     );
                 }
-                // Adoption telemetry (TS `compaction_end` handling counts
-                // every completed compaction into the active run).
-                {
-                    let guard = self.session.blocking_lock();
-                    if let Some(telemetry) = guard
-                        .as_deref()
-                        .and_then(|engine| engine.telemetry.as_ref())
-                    {
-                        telemetry.note_compaction(Some(run.duration_ms));
-                    }
-                }
-                // TS `_scheduleAutoRefineAfterCompaction`: the compaction
-                // arms the compact-trigger review.
-                self.mark_compact_auto_refine_pending();
                 // The wire result is the TS `CompactionResult` shape (details included).
                 let result = crate::compaction::compaction_result_value(&run.result, &run.entry);
                 let entry = serde_json::to_value(&run.entry).unwrap_or(Value::Null);

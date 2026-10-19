@@ -23,9 +23,8 @@ pub struct WorkerConfig {
     pub agent_dir: PathBuf,
     pub recovery_journal_path: PathBuf,
     pub script: Option<Value>,
-    /// Telemetry opt-out inherited from the create command ("1" = disabled;
-    /// absent/other = enabled). Sessions created on this worker install no
-    /// telemetry subscriber.
+    /// Inert legacy opt-out inherited from the create command.
+    /// This build has no telemetry reporters.
     pub telemetry_disabled: Option<bool>,
 }
 

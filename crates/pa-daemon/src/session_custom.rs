@@ -239,112 +239,43 @@ impl Worker {
         )
     }
 
-    /// `refine { instructions?, rollbackId?, global? }` (TS `session.refine`): run the
-    /// refinement, emit the durable outcome and notice rows, and answer the `RefinementResult`.
+    /// Preserve legacy worker decoding, but route execution through the active
+    /// plugin command handler. Disabled or unsupported hosts reject explicitly.
     pub(crate) async fn handle_refine(&self, payload: &Value) -> DaemonResponse {
-        if let Err(response) = self.require_created("refine") {
-            return response;
+        let mut text = String::from("/refine");
+        if payload.get("global").and_then(Value::as_bool) == Some(true) {
+            text.push_str(" --global");
         }
-        let options = pa_core::session_engine::refine::RefineOptions {
-            instructions: payload
-                .get("instructions")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            rollback_id: payload
-                .get("rollbackId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            global: payload
-                .get("global")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        };
-        let engine = std::sync::Arc::clone(&self.engine);
-        let result = tokio::task::spawn_blocking(move || engine.run_refinement(options))
+        if let Some(rollback_id) = payload.get("rollbackId").and_then(Value::as_str) {
+            if rollback_id.is_empty() || rollback_id.chars().any(char::is_whitespace) {
+                return response_failure(None, "refine", "Invalid rollback id", None);
+            }
+            text.push_str(" rollback ");
+            text.push_str(rollback_id);
+        } else if let Some(instructions) = payload.get("instructions").and_then(Value::as_str) {
+            text.push(' ');
+            text.push_str(instructions);
+        }
+        self.run_native_plugin_command("refine", &json!({ "text": text }))
             .await
-            .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                self.emit_worker_event(json!({
-                    "type": "refine_failed",
-                    "error": format!("{error:#}"),
-                }));
-                return response_failure(None, "refine", &format!("{error:#}"), None);
-            }
-        };
-        // The refinement's durable rows: the TUI outcome, plus the model-facing
-        // notice when edits applied.
-        if let Ok(typed) =
-            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone())
-        {
-            let outcome =
-                pa_core::session_engine::refine::create_refinement_outcome_message(&typed);
-            if let Ok(value) =
-                serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome))
-            {
-                self.emit_custom_row(&value);
-            }
-            if typed.applied_edits.iter().any(|edit| edit.applied) {
-                let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                    &typed,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                );
-                if let Ok(value) =
-                    serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
-                {
-                    self.emit_custom_row(&value);
-                }
-            }
-            crate::user_bash::emit_session_event_frame(
-                &self.core,
-                &self.events,
-                crate::worker::refine_complete_event(&typed),
-            );
-        }
-        response_success(None, "refine", Some(result))
     }
 
-    /// `reload`: re-read the session's live inputs — the request auth
-    /// rebinds from the credential store (a `/login` from another process
-    /// never reaches the running session's request path otherwise), and
-    /// the MCP manager re-reads its settings and auth state. Settings and
-    /// the model catalog resolve per use and need no re-read. The reload
-    /// touches the MCP auth store, whose snapshot takes a blocking lock —
-    /// it parks on a blocking thread, the same posture as
-    /// `get_mcp_connections`.
+    /// Legacy reload also reconciles the active core plugin host. The optional
+    /// native plugin command uses this same path, not an auth-only reload.
     pub(crate) async fn handle_reload(&self) -> DaemonResponse {
-        if let Err(response) = self.require_created("reload") {
-            return response;
-        }
-        if let Some(engine) = &self.agent_engine {
-            let engine = std::sync::Arc::clone(engine);
-            // The blocking thread's reload can fail two ways: the auth
-            // store's reload (a malformed document, an unacquirable lock)
-            // or the join itself (a panic). Both answer the client's
-            // reload with the failure, never a success the session did
-            // not apply.
-            match tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    return response_failure(
-                        None,
-                        "reload",
-                        &format!("session reload failed: {error}"),
-                        None,
-                    );
-                }
-                Err(error) => {
-                    return response_failure(
-                        None,
-                        "reload",
-                        &format!("session reload failed: {error}"),
-                        None,
-                    );
-                }
+        if self.agent_engine.is_none() {
+            if let Err(response) = self.require_created("reload") {
+                return response;
             }
+            return response_success(None, "reload", None);
         }
-        response_success(None, "reload", None)
+        let mut response = self
+            .run_native_plugin_command("reload", &json!({ "text": "/reload" }))
+            .await;
+        if response.success {
+            response.data = None;
+        }
+        response
     }
 }
 
@@ -958,12 +889,11 @@ mod tests {
         }
     }
 
-    /// The scripted harness has no refiner: `refine` answers the failure the engine seam
-    /// carries.
+    /// Legacy clients get an explicit unsupported response from engines with no
+    /// plugin host, never a model prompt or a success with no handler.
     #[tokio::test]
-    async fn refine_surfaces_the_engine_failure() {
+    async fn legacy_refine_rejects_an_engine_without_plugin_commands() {
         let worker = created_worker().await;
-        let mut subscription = worker.events.subscribe();
         let response = worker
             .dispatch(
                 "refine",
@@ -971,25 +901,10 @@ mod tests {
             )
             .await;
         assert!(!response.success);
+        assert_eq!(response.command, "refine");
         assert_eq!(
             response.error.as_deref(),
-            Some("This session does not support refinement")
-        );
-        let mut failures = Vec::new();
-        while let Ok(frame) = subscription.try_recv() {
-            if frame.outbound_type == "session_event" {
-                let event: Value = serde_json::from_slice(&frame.payload).unwrap();
-                if event["event"]["type"] == "refine_failed" {
-                    failures.push(event["event"].clone());
-                }
-            }
-        }
-        assert_eq!(
-            failures,
-            vec![json!({
-                "type": "refine_failed",
-                "error": "This session does not support refinement",
-            })]
+            Some("This session does not support plugin commands")
         );
     }
 

@@ -161,8 +161,7 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
         matches!(&mode.composer, Composer::Reply(reply) if reply.editor.get_text() == "foo\nbar"),
         "the failure restores the draft"
     );
-    // The success disarms (the empty-editor guard); the adoption action rides the
-    // outcome.
+    // Success disarms the empty editor.
     mode.handle_key("enter");
     assert!(
         mode.pending_reply.take().is_some(),
@@ -180,7 +179,6 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
         matches!(mode.composer, Composer::Search),
         "the success disarms"
     );
-    assert_eq!(mode.actions.last(), Some(&"reply_sent"));
 }
 
 #[test]
@@ -319,7 +317,6 @@ fn view_commands_route_and_reject() {
         "the stopped target disarms"
     );
     assert_eq!(live.status_text(), Some("Agent stopped"));
-    assert_eq!(live.actions.last(), Some(&"killed"));
 }
 
 #[test]

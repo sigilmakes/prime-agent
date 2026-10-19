@@ -42,11 +42,31 @@ pub(crate) struct DirectLink {
     pub(crate) socket_path: String,
     /// Private per-connection identity; a reconnect to the same session is distinct.
     pub(crate) owner: Arc<()>,
+    hello: Value,
     writer: mpsc::UnboundedSender<Vec<u8>>,
     alive: Arc<AtomicBool>,
 }
 
 impl DirectLink {
+    /// Optional commands are negotiated against this worker, not its supervisor.
+    pub(crate) fn supports_optional_command(&self, command: &str) -> bool {
+        let capabilities: Vec<String> = self.hello["serverCapabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        self.hello["protocol"]["name"] == pa_types::daemon::DAEMON_PROTOCOL_NAME
+            && self.hello["protocol"]["version"].as_u64()
+                == Some(pa_types::daemon::DAEMON_PROTOCOL_VERSION)
+            && pa_types::daemon::compatibility::supports_optional_command(
+                command,
+                self.hello["schemaRevision"].as_u64(),
+                &capabilities,
+            )
+    }
+
     pub(crate) fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst) && !self.writer.is_closed()
     }
@@ -203,6 +223,7 @@ pub(crate) async fn connect_direct(
         bail!("unexpected first frame from the session worker");
     }
 
+    let hello = serde_json::from_slice::<Value>(&hello.payload).unwrap_or(Value::Null);
     let request_id = format!("direct_peer_{}", ticket.grant_id);
     let presentation = DaemonPeerCommand::PeerAuth {
         id: Some(request_id.clone()),
@@ -301,6 +322,7 @@ pub(crate) async fn connect_direct(
         active_session_id: ticket.active_session_id.clone(),
         socket_path: ticket.socket_path.clone(),
         owner,
+        hello,
         writer: frame_tx,
         alive,
     })

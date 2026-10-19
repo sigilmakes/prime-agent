@@ -229,19 +229,56 @@ mod tests {
         std::env::remove_var("PI_SHARE_VIEWER_URL");
     }
 
-    /// The full gh spawn path against a stub `gh` (the e2e harness uses the
-    /// same stub): the upload file must exist and the printed URL becomes the
-    /// gist + viewer pair. Unix-only (the stub is a shell script).
+    /// Exercise the real probe and upload against a local executable, never an installed gh.
+    /// The exact-test child owns its entire environment, so parallel tests cannot alter PATH
+    /// or the viewer URL during a probe or upload.
     #[cfg(unix)]
     #[tokio::test]
     async fn gist_spawn_against_stub_gh() {
         use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "PA_TUI_GH_FIXTURE";
+        const MARKER: &str = "PA_TUI_GH_FIXTURE_OK";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            let dir = std::path::PathBuf::from(dir);
+            assert_eq!(probe_gh_auth(), GhAuthStatus::Ok);
+            let child = spawn_gist_create(&dir.join("session.html")).expect("spawn stub gh");
+            assert_eq!(
+                gist_outcome(child).await.expect("gist outcome"),
+                GistOutcome {
+                    gist_url: "https://gist.github.com/testuser/abc123".to_string(),
+                    preview_url: "https://pi.dev/session/#abc123".to_string(),
+                }
+            );
+            let child = spawn_gist_create(&dir.join("nope.html")).expect("spawn stub gh");
+            assert_eq!(
+                gist_outcome(child)
+                    .await
+                    .expect_err("missing upload must fail"),
+                "gist: upload file missing"
+            );
+            println!("{MARKER}");
+            return;
+        }
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let stub = r#"#!/bin/bash
+        // Nix supplies CONFIG_SHELL as an absolute store path. Else resolve sh once
+        // from the test toolchain; the child's PATH will contain only our mock.
+        let shell = std::env::var_os("CONFIG_SHELL")
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .map(|path| path.join("sh")),
+            )
+            .find(|path| path.is_absolute() && path.is_file())
+            .expect("an absolute test shell")
+            .canonicalize()
+            .expect("resolve pinned test shell");
+        let stub = format!(
+            r#"#!{}
 case "$1" in
   auth) exit 0 ;;
   gist)
-    if [ $# -lt 4 ] || [ ! -f "$4" ]; then
+    if [ $# -ne 4 ] || [ "$2" != create ] || [ "$3" != --public=false ] || [ ! -f "$4" ]; then
       echo "gist: upload file missing" >&2
       exit 1
     fi
@@ -249,31 +286,47 @@ case "$1" in
     ;;
   *) echo "unsupported: $1" >&2; exit 1 ;;
 esac
-"#;
-        std::fs::write(dir.path().join("gh"), stub).expect("write stub");
-        let mut permissions = std::fs::metadata(dir.path().join("gh"))
-            .expect("stat")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(dir.path().join("gh"), permissions).expect("chmod");
-        let upload = dir.path().join("session.html");
-        std::fs::write(&upload, "<html></html>").expect("write upload");
-
-        let previous = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), previous));
-        assert_eq!(probe_gh_auth(), GhAuthStatus::Ok);
-        let child = spawn_gist_create(&upload).expect("spawn gh");
-        let outcome = gist_outcome(child).await.expect("gist outcome");
-        std::env::set_var("PATH", previous.clone());
-        assert_eq!(outcome.gist_url, "https://gist.github.com/testuser/abc123");
-        assert_eq!(outcome.preview_url, "https://pi.dev/session/#abc123");
-
-        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), previous));
-        let child = spawn_gist_create(&dir.path().join("nope.html")).expect("spawn gh");
-        let error = gist_outcome(child)
+"#,
+            shell.display()
+        );
+        let executable = dir.path().join("gh");
+        std::fs::write(&executable, stub).expect("write stub");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+        std::fs::write(dir.path().join("session.html"), "<html></html>").expect("write upload");
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .env_clear()
+            .args([
+                "--exact",
+                "export_share::tests::gist_spawn_against_stub_gh",
+                "--nocapture",
+            ])
+            .env(CHILD, dir.path())
+            .env("PATH", dir.path())
+            .env("HOME", dir.path())
+            .env("TMPDIR", dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("XDG_STATE_HOME", dir.path().join("state"))
+            .env("XDG_RUNTIME_DIR", dir.path())
+            .env(
+                "LD_LIBRARY_PATH",
+                std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+            )
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
             .await
-            .expect_err("missing upload must fail");
-        std::env::set_var("PATH", previous.clone());
-        assert_eq!(error, "gist: upload file missing");
+            .expect("bounded fixture child")
+            .expect("run fixture child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}{stderr}");
+        assert!(
+            stdout.lines().any(|line| line == MARKER),
+            "fixture did not execute: {stdout}{stderr}"
+        );
     }
 }

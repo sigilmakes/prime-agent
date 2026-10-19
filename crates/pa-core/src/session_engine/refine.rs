@@ -488,6 +488,37 @@ pub(crate) enum AutoRefineRound {
 }
 
 impl AgentSession {
+    pub(crate) fn refiner_call(
+        &self,
+        api_key: Option<String>,
+    ) -> crate::refinement::executor::RefinerFn {
+        let Some(inference) = self.auxiliary_inference() else {
+            return default_refiner_call(api_key);
+        };
+        Box::new(move |model, system_prompt, prompt| {
+            Box::pin(async move {
+                let context = pa_types::ai::Context {
+                    system_prompt: Some(system_prompt.to_string()),
+                    messages: vec![pa_types::ai::Message::User(UserMessage {
+                        content: UserContent::Text(prompt),
+                        timestamp: 0,
+                        rest: serde_json::Map::default(),
+                    })],
+                    tools: None,
+                };
+                let options = pa_agent::stream::StreamRequestOptions {
+                    api_key,
+                    reasoning: pa_types::ai::minimum_reasoning(&model).map_or(
+                        pa_agent::types::ThinkingLevel::Off,
+                        super::provider_adapter::map_thinking_level,
+                    ),
+                    ..Default::default()
+                };
+                inference.complete(&model, context, options, None).await
+            })
+        })
+    }
+
     /// The compact-trigger review: an LLM call over the conversation, the
     /// merged harness state, and the refinement history. `Ok(None)` is the
     /// decline; `Ok(Some(review))` a fresh approval.
@@ -536,7 +567,7 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key.clone()),
+            self.refiner_call(api_key.clone()),
         )
         .await?;
         if !review.should_refine {

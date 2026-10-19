@@ -1,12 +1,14 @@
-//! The daemon-ensure concern: the socket probe, the stale-daemon shutdown, the
-//! detached supervisor spawn, and the startup poll window.
+//! The daemon-ensure concern: a read-only socket probe, detached supervisor
+//! spawn, and bounded startup polling. A foreign peer never grants takeover.
 
 use anyhow::Context as _;
+use tokio::io::AsyncBufReadExt as _;
 
 use super::{anyhow, Command, Duration, Instant, Path, Result, Stdio};
 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
-const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
+const DAEMON_CONNECT_TIMEOUT_MS: u64 = 3_000;
+const DAEMON_HELLO_TIMEOUT_MS: u64 = 15_000;
 /// Pause between daemon-startup probes (TS `ensureDaemonRunning` polls at
 /// 25ms). A cold supervisor binds its socket ~39ms after the spawn, so the
 /// poll interval quantizes every cold launch: the bind lands 0-interval
@@ -19,47 +21,94 @@ const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
 /// the timeout error are unchanged.
 const DAEMON_PROBE_INTERVAL_MS: u64 = 1;
 
+#[cfg(all(test, unix))]
+#[path = "daemon_tests.rs"]
+mod tests;
+
 enum DaemonProbe {
     Absent,
     Current,
-    /// A supervisor answered with a different protocol/schema. The client rides
-    /// boxed: its size is platform-dependent, so the box keeps the other arms small.
-    Stale(Box<pa_tui::daemon_client::DaemonClient>),
 }
 
-/// Probe the socket once: connect, read the hello, and classify it.
-async fn probe_daemon(socket_path: &Path) -> DaemonProbe {
-    let Ok((client, _events)) = pa_tui::daemon_client::DaemonClient::connect(socket_path).await
-    else {
-        return DaemonProbe::Absent;
+/// Probe without sending commands. The TUI client rejects unknown protocol
+/// names during connect, so its connect error cannot distinguish a foreign
+/// listener from an absent one. Only a definitive transport refusal permits
+/// spawning; any connected peer must supply the current native hello.
+async fn probe_daemon(socket_path: &Path) -> Result<DaemonProbe> {
+    let stream = match tokio::time::timeout(
+        Duration::from_millis(DAEMON_CONNECT_TIMEOUT_MS),
+        pa_types::platform::transport::connect_transport(socket_path),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error))
+            if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                )
+            }) =>
+        {
+            return Ok(DaemonProbe::Absent);
+        }
+        Ok(Err(error)) => return Err(refuse_peer(socket_path, &error.to_string())),
+        Err(_) => return Err(refuse_peer(socket_path, "connection timed out")),
     };
-    let hello = client.hello();
-    let current = hello.get("protocol").and_then(|p| p.get("version"))
-        == Some(&serde_json::json!(
-            pa_types::daemon::DAEMON_PROTOCOL_VERSION
-        ))
+    let (reader, _writer) = stream.split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut line = String::new();
+    match tokio::time::timeout(
+        Duration::from_millis(DAEMON_HELLO_TIMEOUT_MS),
+        reader.read_line(&mut line),
+    )
+    .await
+    {
+        Ok(Ok(0)) => {
+            return Err(refuse_peer(
+                socket_path,
+                "connection closed before the hello",
+            ))
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(refuse_peer(socket_path, &error.to_string())),
+        Err(_) => return Err(refuse_peer(socket_path, "hello timed out")),
+    }
+    let hello: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|_| refuse_peer(socket_path, "invalid daemon hello"))?;
+    let current = hello.get("type") == Some(&serde_json::json!("daemon_hello"))
+        && hello.get("protocol").and_then(|p| p.get("name"))
+            == Some(&serde_json::json!(pa_types::daemon::DAEMON_PROTOCOL_NAME))
+        && hello.get("protocol").and_then(|p| p.get("version"))
+            == Some(&serde_json::json!(
+                pa_types::daemon::DAEMON_PROTOCOL_VERSION
+            ))
         && hello.get("schemaId") == Some(&serde_json::json!(pa_types::daemon::DAEMON_SCHEMA_ID));
     if current {
-        client.close();
-        DaemonProbe::Current
+        Ok(DaemonProbe::Current)
     } else {
-        DaemonProbe::Stale(Box::new(client))
+        Err(refuse_peer(socket_path, "incompatible protocol or schema"))
     }
 }
 
-/// Ensure a current daemon is listening on `socket_path`, spawning this
-/// executable in `--mode daemon` when it is not (a stale idle daemon is
-/// shut down, a busy one refuses replacement).
+fn refuse_peer(socket_path: &Path, reason: &str) -> anyhow::Error {
+    anyhow!(
+        "The Prime Agent Rust client cannot use the peer on selected socket {}: {reason}. No shutdown or replacement was attempted. Select a separate private socket with --daemon-socket, or use the matching client for that runtime.",
+        socket_path.display()
+    )
+}
+
+/// Ensure a current native daemon is listening on `socket_path`, spawning this
+/// executable in `--mode daemon` only when the selected socket is absent.
+/// Foreign peers are left running, including peers with no active sessions.
 ///
 /// # Errors
-/// Returns an error when the executable path cannot be resolved, a stale
-/// daemon refuses replacement, the supervisor cannot be spawned, or no
-/// current daemon starts before the startup timeout.
+/// Returns an error when the executable path cannot be resolved, the selected
+/// socket has an incompatible or unverified peer, the supervisor cannot be
+/// spawned, or no current daemon starts before the startup timeout.
 pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Result<()> {
-    match probe_daemon(socket_path).await {
-        DaemonProbe::Current => return Ok(()),
-        DaemonProbe::Stale(client) => shutdown_stale_daemon(*client, socket_path).await?,
-        DaemonProbe::Absent => {}
+    if matches!(probe_daemon(socket_path).await?, DaemonProbe::Current) {
+        return Ok(());
     }
     let exe = std::env::current_exe().context("resolve the prime-agent executable")?;
     ensure_daemon_running_with(&exe, socket_path, spawn_cwd).await
@@ -69,99 +118,30 @@ pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Resu
 /// product path uses this process's own binary).
 ///
 /// # Errors
-/// Returns an error when the supervisor cannot be spawned or no current
-/// daemon starts before the startup timeout.
+/// Returns an error for an incompatible or unverified peer, when the supervisor
+/// cannot be spawned, or when no current daemon starts before the timeout.
 pub async fn ensure_daemon_running_with(
     exe: &Path,
     socket_path: &Path,
     spawn_cwd: &Path,
 ) -> Result<()> {
-    match probe_daemon(socket_path).await {
-        DaemonProbe::Current => return Ok(()),
-        DaemonProbe::Stale(client) => {
-            // A stale daemon appeared between the caller's check and here:
-            // fall through to the spawn path after refusing busy ones.
-            client.close();
-        }
-        DaemonProbe::Absent => {}
+    if matches!(probe_daemon(socket_path).await?, DaemonProbe::Current) {
+        return Ok(());
     }
     spawn_supervisor_detached(socket_path, spawn_cwd, exe)?;
     let deadline = Instant::now() + Duration::from_millis(DAEMON_STARTUP_TIMEOUT_MS);
     loop {
-        match probe_daemon(socket_path).await {
-            DaemonProbe::Current => return Ok(()),
-            DaemonProbe::Stale(client) => {
-                // A concurrent launcher won the socket with a build whose protocol matches at
-                // connect time but failed the schema check: re-probe before deciding.
-                client.close();
-            }
-            DaemonProbe::Absent => {}
+        if matches!(probe_daemon(socket_path).await?, DaemonProbe::Current) {
+            return Ok(());
         }
         if Instant::now() > deadline {
             return Err(anyhow!(
-                "Timed out waiting for the Prime Agent daemon to start on {}. Run: prime-agent shutdown --force, then retry the original command.",
+                "Timed out waiting for the Prime Agent Rust daemon to start on selected socket {}. Check the selected socket and daemon diagnostics, then retry.",
                 socket_path.display()
             ));
         }
         tokio::time::sleep(Duration::from_millis(DAEMON_PROBE_INTERVAL_MS)).await;
     }
-}
-
-/// Shut a stale daemon down when no session is busy; a busy one refuses
-/// replacement.
-async fn shutdown_stale_daemon(
-    client: pa_tui::daemon_client::DaemonClient,
-    socket_path: &Path,
-) -> Result<()> {
-    let sessions = client
-        .request_ok(pa_types::daemon::DaemonCommand::List {
-            id: None,
-            all: None,
-            cwd: None,
-            session_dir: None,
-            include_client_owned: None,
-            rest: serde_json::Map::default(),
-        })
-        .await;
-    let busy = sessions.map_or(true, |data| {
-        data.get("sessions")
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(|rows| {
-                rows.iter()
-                    .any(|row| row.get("isSessionActive") == Some(&serde_json::json!(true)))
-            })
-    });
-    client.close();
-    if busy {
-        return Err(anyhow!(
-            "An incompatible Prime Agent daemon is running on {}.\n\nRun:\n  prime-agent shutdown --force\n\nThen retry the original command (the running daemon has active work).",
-            socket_path.display()
-        ));
-    }
-    if let Ok((client, _)) = pa_tui::daemon_client::DaemonClient::connect(socket_path).await {
-        let _ = client
-            .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
-                id: None,
-                force: None,
-                rest: serde_json::Map::default(),
-            })
-            .await;
-        client.close();
-    }
-    wait_for_socket_gone(socket_path).await;
-    Ok(())
-}
-
-/// Wait until nothing accepts connections on the socket (bounded).
-async fn wait_for_socket_gone(socket_path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_millis(DAEMON_SHUTDOWN_WAIT_MS);
-    while Instant::now() < deadline {
-        if !pa_daemon::socket::can_connect(socket_path, Duration::from_millis(250)).await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    false
 }
 
 /// Spawn a detached supervisor on `socket_path` (the child outlives this

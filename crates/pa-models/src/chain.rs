@@ -75,6 +75,7 @@ pub struct ModelCatalog {
     /// nesting is the contract, not an accidental Option<Option>.
     #[allow(clippy::option_option)]
     pi_scope_seen: Mutex<Option<Option<String>>>,
+    provider_owned: Option<crate::provider_catalogs::ProviderCatalogs>,
 }
 
 impl ModelCatalog {
@@ -82,33 +83,53 @@ impl ModelCatalog {
     /// registry use), bundled assets at the package root.
     #[must_use]
     pub fn new(models_dir: Option<PathBuf>) -> Self {
-        Self::with_urls(
-            models_dir,
-            None,
-            MODEL_CATALOG_URL,
-            PRIME_INFERENCE_BASE_URL,
-        )
+        Self::with_bundled_dir(models_dir, None)
     }
 
     /// [`ModelCatalog::new`] with an explicit bundled-asset directory
     /// (tests, staged installs).
     #[must_use]
     pub fn with_bundled_dir(models_dir: Option<PathBuf>, bundled_dir: Option<PathBuf>) -> Self {
-        Self::with_urls(
+        Self::with_discovery_urls(
             models_dir,
             bundled_dir,
             MODEL_CATALOG_URL,
             PRIME_INFERENCE_BASE_URL,
+            &std::collections::HashMap::new(),
+            &std::env::var("OLLAMA_API_BASE")
+                .unwrap_or_else(|_| crate::ollama_cloud::BASE_URL.to_string()),
         )
     }
 
     /// [`ModelCatalog::new`] with both remote URLs overridden (hermetic
     /// tests run the two fetch layers against a local server).
+    #[must_use]
     pub fn with_urls(
         models_dir: Option<PathBuf>,
         bundled_dir: Option<PathBuf>,
         model_catalog_url: &str,
         pi_base_url: &str,
+    ) -> Self {
+        let mut catalog = Self::with_discovery_urls(
+            models_dir,
+            bundled_dir,
+            model_catalog_url,
+            pi_base_url,
+            &std::collections::HashMap::new(),
+            crate::ollama_cloud::BASE_URL,
+        );
+        catalog.provider_owned = None;
+        catalog
+    }
+
+    /// Hermetic provider-owned catalog endpoints; never taken from remote metadata.
+    pub fn with_discovery_urls(
+        models_dir: Option<PathBuf>,
+        bundled_dir: Option<PathBuf>,
+        model_catalog_url: &str,
+        pi_base_url: &str,
+        discovery_urls: &std::collections::HashMap<String, String>,
+        ollama_base_url: &str,
     ) -> Self {
         let templates = PinnedTemplates::from_compiled();
         let compiled = Arc::new(transports::compiled_models().to_vec());
@@ -125,6 +146,11 @@ impl ModelCatalog {
                 Arc::new(CatalogFetcher::new()),
                 parse,
             ),
+            provider_owned: Some(crate::provider_catalogs::ProviderCatalogs::new(
+                models_dir.as_deref(),
+                discovery_urls,
+                ollama_base_url,
+            )),
             prime_inference: PrimeInferenceCatalog::with_base_url(models_dir, pi_base_url),
             bundled: bundled_dir
                 .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
@@ -185,12 +211,156 @@ impl ModelCatalog {
                 None => self.compiled.as_ref().clone(),
             },
         };
-        let live = credentials
-            .and_then(|credentials| self.prime_inference.get(&credentials.as_inference()));
+        let live = match credentials {
+            Some(credentials) => self.prime_inference.get(&credentials.as_inference()),
+            None => self.prime_inference.get_public(),
+        };
         match live {
             Some(live) => merge_prime_inference_models(&base, Some(&live)),
             None => base,
         }
+    }
+
+    /// Resolve provider-owned views for exactly the caller's current credentials.
+    pub fn resolve_with_discovery(
+        &self,
+        prime: Option<&PrimeCredentials>,
+        credentials: &crate::DiscoveryCredentials,
+    ) -> Vec<Model> {
+        let models = self.resolve(prime);
+        match &self.provider_owned {
+            Some(owned) => owned.resolve(models, credentials),
+            None => models,
+        }
+    }
+
+    pub fn ollama_base_url(&self) -> &str {
+        self.provider_owned.as_ref().map_or(
+            crate::ollama_cloud::BASE_URL,
+            crate::provider_catalogs::ProviderCatalogs::ollama_base_url,
+        )
+    }
+
+    pub fn preferred_default(&self) -> Option<String> {
+        self.provider_owned
+            .as_ref()
+            .and_then(crate::provider_catalogs::ProviderCatalogs::preferred_default)
+    }
+
+    /// Explicit source refresh; every result is credential-free and publication has settled.
+    pub async fn refresh_catalog_sources(
+        &self,
+        force: bool,
+        prime: Option<&PrimeCredentials>,
+        credentials: &crate::DiscoveryCredentials,
+        sources: Option<&[String]>,
+    ) -> Vec<pa_types::model_refresh::ModelRefreshSourceResult> {
+        let (owned, curated, inference) = tokio::join!(
+            async {
+                match &self.provider_owned {
+                    Some(owned) => owned.refresh(credentials, force, sources).await,
+                    None => Vec::new(),
+                }
+            },
+            async {
+                if crate::provider_catalogs::selected(sources, "curated") {
+                    let templates = self.templates.clone();
+                    let report = self
+                        .provider_cache
+                        .refresh_report(
+                            PUBLIC_SCOPE,
+                            RefreshOptions {
+                                force,
+                                merge_payload: Some(Arc::new(move |payload, _previous| {
+                                    crate::pinning::parse_trusted_provider_model_catalog(
+                                        payload, &templates,
+                                    )?;
+                                    Ok(payload.clone())
+                                })),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    Some(crate::provider_catalogs::source_result(
+                        "curated",
+                        &report,
+                        report.models.as_ref().map(Vec::len),
+                    ))
+                } else {
+                    None
+                }
+            },
+            async {
+                if crate::provider_catalogs::selected(sources, "prime-inference-public") {
+                    if let Some(prime) = prime {
+                        let report = self
+                            .prime_inference
+                            .refresh_report(&prime.as_inference(), force)
+                            .await;
+                        Some(crate::provider_catalogs::source_result(
+                            "prime-inference-public",
+                            &report,
+                            report.models.as_ref().map(Vec::len),
+                        ))
+                    } else {
+                        let report = self.prime_inference.refresh_public_report(force).await;
+                        Some(crate::provider_catalogs::source_result(
+                            "prime-inference-public",
+                            &report,
+                            report.models.as_ref().map(Vec::len),
+                        ))
+                    }
+                } else {
+                    None
+                }
+            }
+        );
+        let mut results = owned;
+        results.extend(curated);
+        results.extend(inference);
+        results
+    }
+
+    /// Adopt local validated snapshots only, cancelling older publications.
+    pub fn apply_catalog_snapshots(
+        &self,
+        prime: Option<&PrimeCredentials>,
+        credentials: &crate::DiscoveryCredentials,
+        since: Option<u64>,
+    ) -> pa_types::model_refresh::ModelRefreshApplyReport {
+        let mut report = self.provider_owned.as_ref().map_or_else(
+            pa_types::model_refresh::ModelRefreshApplyReport::default,
+            |owned| owned.apply(credentials, since),
+        );
+        let present = self.provider_cache.reload_from_disk(PUBLIC_SCOPE).is_some();
+        let current = since.is_none_or(|since| {
+            self.provider_cache
+                .status(PUBLIC_SCOPE)
+                .checked_at
+                .is_some_and(|at| at >= since)
+        });
+        if present && current {
+            report.applied.push("curated".into());
+        } else {
+            report.missing.push("curated".into());
+        }
+        if let Some(prime) = prime {
+            let (present, checked_at) =
+                self.prime_inference.reload_from_disk(&prime.as_inference());
+            if present && since.is_none_or(|since| checked_at.is_some_and(|at| at >= since)) {
+                report.applied.push("prime-inference-public".into());
+            } else {
+                report.missing.push("prime-inference-public".into());
+            }
+        } else {
+            let (present, checked_at) = self.prime_inference.reload_public_from_disk();
+            if present && since.is_none_or(|since| checked_at.is_some_and(|at| at >= since)) {
+                report.applied.push("prime-inference-public".into());
+            } else {
+                report.missing.push("prime-inference-public".into());
+            }
+        }
+        report
     }
 
     /// Fire-and-forget refresh for `trigger`; errors are caught and last-good
@@ -219,6 +389,7 @@ impl ModelCatalog {
                         force,
                         headers: Vec::new(),
                         is_current: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -257,6 +428,32 @@ impl ModelCatalog {
         });
     }
 
+    /// Hourly provider-owned discovery, sharing the same one-loop guard as the legacy chain.
+    pub fn spawn_hourly_refresh_with_discovery(
+        self: &Arc<Self>,
+        credentials: impl Fn() -> (Option<PrimeCredentials>, crate::DiscoveryCredentials)
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        if self.hourly_loop.set(()).is_err() {
+            return;
+        }
+        let catalog = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                crate::CATALOG_REFRESH_INTERVAL_MS,
+            ));
+            loop {
+                interval.tick().await;
+                let (prime, discovery) = credentials();
+                catalog
+                    .refresh_catalog_sources(false, prime.as_ref(), &discovery, None)
+                    .await;
+            }
+        });
+    }
+
     /// Await a direct (non-spawned) refresh — `refreshModelCatalog` in the
     /// TS reference; used by tests and callers that need the result.
     pub async fn refresh(&self, force: bool) -> Option<Vec<Model>> {
@@ -267,6 +464,7 @@ impl ModelCatalog {
                     force,
                     headers: Vec::new(),
                     is_current: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -288,6 +486,7 @@ impl ModelCatalog {
                     force,
                     headers: Vec::new(),
                     is_current: None,
+                    ..Default::default()
                 },
             )
             .await;
@@ -327,6 +526,26 @@ mod tests {
             })
             .collect();
         serde_json::to_string(&json!({"schemaVersion": 1, "models": models})).unwrap()
+    }
+
+    #[test]
+    fn two_url_constructor_has_exactly_two_remote_domains() {
+        let catalog = ModelCatalog::with_urls(
+            None,
+            None,
+            "http://127.0.0.1:1/catalog",
+            "http://127.0.0.1:1/api/v1",
+        );
+        assert!(
+            catalog.provider_owned.is_none(),
+            "no implicit provider/default endpoints"
+        );
+        assert!(catalog.preferred_default().is_none());
+        let production = ModelCatalog::new(None);
+        assert!(
+            production.provider_owned.is_some(),
+            "production explicitly enables discovery"
+        );
     }
 
     #[test]

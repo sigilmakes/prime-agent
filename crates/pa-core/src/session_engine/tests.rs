@@ -133,288 +133,28 @@ async fn an_unknown_skill_command_passes_through() {
     assert_eq!(user_text, "/skill:missing do a thing");
 }
 
-/// A scripted session wired like production: the engine-level
-/// `convert_to_llm` plus a harness-digest context, so the deferred
-/// first-turn digest rides the first prompt.
-async fn digest_session(provider: Arc<ScriptedProvider>) -> (AgentSession, tempfile::TempDir) {
+/// A scripted session wired with the production model-boundary conversion.
+async fn provider_session(provider: Arc<ScriptedProvider>) -> (AgentSession, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let harness = crate::session_engine::harness_digest::HarnessDigestContext {
-        global_dir: tmp.path().join("harness"),
-        local_dir: None,
-        include_ipython: false,
-        include_shell_examples: false,
-        include_refine: false,
-    };
-    let session = digest_session_with_harness(provider, harness).await;
-    (session, tmp)
-}
-
-async fn digest_session_with_harness(
-    provider: Arc<ScriptedProvider>,
-    harness: crate::session_engine::harness_digest::HarnessDigestContext,
-) -> AgentSession {
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             model: Some(test_model()),
             ..Default::default()
         },
-        convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
+        convert_to_llm: Some(crate::session_engine::refinement_gate::convert_to_llm()),
         stream_fn: Some(provider.stream_fn()),
         ..Default::default()
     });
-    let tmp = tempfile::tempdir().unwrap();
-    AgentSession::from_session_arc(
+    let session = AgentSession::from_session_arc(
         Arc::new(agent),
         Arc::new(tokio::sync::Mutex::new(SessionManager::in_memory(
             tmp.path(),
         ))),
         vec![],
-        Some(harness),
     )
     .await
-    .unwrap()
-}
-
-/// A resumed session over the entries of a prior session (converted
-/// loop context, adopted manager).
-async fn resumed_digest_session(
-    entries: Vec<FileEntry>,
-    harness: crate::session_engine::harness_digest::HarnessDigestContext,
-) -> AgentSession {
-    let provider = Arc::new(ScriptedProvider::new(test_model()));
-    let context = crate::session::build_session_context(&entries, None);
-    let loop_messages: Vec<pa_agent::types::AgentMessage> =
-        crate::session_engine::messages::convert_to_llm(&context.messages)
-            .into_iter()
-            .filter_map(|message| {
-                serde_json::to_value(&message)
-                    .ok()
-                    .and_then(|value| serde_json::from_value(value).ok())
-            })
-            .collect();
-    let agent = Agent::new(AgentOptions {
-        initial_state: AgentInitialState {
-            model: Some(test_model()),
-            messages: Some(loop_messages),
-            ..Default::default()
-        },
-        convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
-        stream_fn: Some(provider.stream_fn()),
-        ..Default::default()
-    });
-    let mut manager = SessionManager::in_memory(&std::env::temp_dir());
-    manager.adopt_entries(entries);
-    AgentSession::from_session_arc(
-        Arc::new(agent),
-        Arc::new(tokio::sync::Mutex::new(manager)),
-        vec![],
-        Some(harness),
-    )
-    .await
-    .unwrap()
-}
-
-/// The digest rows in the live loop context (custom wire rows and the
-/// user turns a rebuild converted) with their fingerprint, when known.
-async fn loop_digest_rows(session: &AgentSession) -> Vec<(String, Option<String>)> {
-    let state = session.agent().state().await;
-    state
-        .messages
-        .iter()
-        .filter_map(|message| {
-            crate::session_engine::harness_digest::latest_context_digest_details(
-                std::slice::from_ref(message),
-            )
-            .map(|details| (details.digest, details.state_fingerprint))
-        })
-        .collect()
-}
-
-/// TS #2400 + #2394 at the resume boundary: unchanged state does not
-/// re-deliver a drifted-looking digest; a state change re-delivers
-/// exactly one, replacing the superseded copy.
-#[tokio::test]
-async fn resume_dedupes_by_state_fingerprint_and_replaces_stale_digests() {
-    let tmp = tempfile::tempdir().unwrap();
-    let harness_dir = tmp.path().join("harness");
-    // Seeded global state: entries whose ranked order differs once the
-    // resume-time query terms mention one of them.
-    let mut state = crate::refinement::empty_harness_state();
-    for (id, title) in [
-        ("alpha_relevant", "Alpha note"),
-        ("middle_plain", "Middle plain note"),
-        ("zeta_relevant", "Zeta note"),
-    ] {
-        state
-            .entries
-            .get_mut(&crate::refinement::RefinementKind::Memory)
-            .unwrap()
-            .insert(
-                id.to_string(),
-                crate::refinement::HarnessEntry {
-                    id: id.to_string(),
-                    kind: crate::refinement::RefinementKind::Memory,
-                    title: title.to_string(),
-                    content: format!("{title} about the worktree parity lane."),
-                    path: "general".to_string(),
-                    scope: Some(crate::refinement::HarnessScope::Global),
-                    reference: serde_json::Map::default(),
-                    arguments: serde_json::Map::default(),
-                    metadata: serde_json::Map::default(),
-                    source: "test".to_string(),
-                    created_at: String::new(),
-                    updated_at: String::new(),
-                    version: 1,
-                },
-            );
-    }
-    crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
-    let harness = crate::session_engine::harness_digest::HarnessDigestContext {
-        global_dir: harness_dir.clone(),
-        local_dir: None,
-        include_ipython: false,
-        include_shell_examples: false,
-        include_refine: false,
-    };
-
-    // First session: the deferred first-turn digest rides the turn and
-    // persists (unranked: the pre-turn context has no task signal yet).
-    let provider = Arc::new(ScriptedProvider::new(test_model()));
-    provider.push_text_turn("noted");
-    let session = digest_session_with_harness(Arc::clone(&provider), harness.clone()).await;
-    session
-        .prompt("hello alpha", PromptOptions::default())
-        .await
-        .unwrap();
-    session.agent().wait_for_idle().await;
-    let entries = session.entries().await;
-    let digest_rows: Vec<&FileEntry> = entries
-        .iter()
-        .filter(|entry| {
-            matches!(entry, FileEntry::CustomMessage { payload, .. }
-                if payload.custom_type == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE)
-        })
-        .collect();
-    assert_eq!(
-        digest_rows.len(),
-        1,
-        "the first turn persisted one digest row"
-    );
-    let FileEntry::CustomMessage {
-        payload: first_row, ..
-    } = digest_rows[0]
-    else {
-        panic!("expected a digest custom entry");
-    };
-    let Some(first_fingerprint) = first_row
-        .details
-        .as_ref()
-        .and_then(|details| details.get("stateFingerprint"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-    else {
-        panic!("the persisted digest row carries its state fingerprint");
-    };
-
-    // Resume over the same entries: the fresh render ranks
-    // `alpha_relevant` first (the context's task signal mentions it),
-    // so only the state fingerprint can dedupe. The unchanged state must
-    // NOT re-deliver.
-    let resumed = resumed_digest_session(entries.clone(), harness.clone()).await;
-    let rows = loop_digest_rows(&resumed).await;
-    assert_eq!(
-        rows,
-        vec![(
-            // The converted user frame carries no fingerprint of its
-            // own; the recovery view is exercised by the no-append.
-            digest_of_entries(&entries),
-            None
-        )],
-        "an unchanged state must not re-deliver at the resume boundary"
-    );
-
-    // Changed disk state: the fingerprint moves, so the boundary
-    // re-delivers — and the fresh row replaces the superseded copy
-    // instead of stacking (TS #2394).
-    state
-        .entries
-        .get_mut(&crate::refinement::RefinementKind::Memory)
-        .unwrap()
-        .insert(
-            "resume_test_memory".to_string(),
-            crate::refinement::HarnessEntry {
-                id: "resume_test_memory".to_string(),
-                kind: crate::refinement::RefinementKind::Memory,
-                title: "Resume test memory".to_string(),
-                content: "Written between resumes.".to_string(),
-                path: "general".to_string(),
-                scope: Some(crate::refinement::HarnessScope::Global),
-                reference: serde_json::Map::default(),
-                arguments: serde_json::Map::default(),
-                metadata: serde_json::Map::default(),
-                source: "test".to_string(),
-                created_at: String::new(),
-                updated_at: String::new(),
-                version: 1,
-            },
-        );
-    crate::refinement::save_harness_state(&harness_dir, &state).unwrap();
-    let refreshed = resumed_digest_session(entries.clone(), harness).await;
-    let rows = loop_digest_rows(&refreshed).await;
-    assert_eq!(rows.len(), 1, "the fresh digest replaces the old copy");
-    assert!(
-        rows[0].1.is_some(),
-        "the delivered custom row carries its state fingerprint"
-    );
-    assert!(rows[0].0.contains("Resume test memory"));
-    // The persisted transcript keeps every copy (TS #2394: the newest
-    // digest remains authoritative), so the file holds both while the
-    // live context carries exactly one.
-    let persisted: Vec<String> = refreshed
-        .entries()
-        .await
-        .iter()
-        .filter_map(|entry| match entry {
-            FileEntry::CustomMessage { payload, .. }
-                if payload.custom_type
-                    == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
-            {
-                payload
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.get("stateFingerprint"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(persisted.len(), 2);
-    assert_eq!(persisted[0], first_fingerprint);
-    assert_ne!(persisted[1], first_fingerprint);
-    assert_eq!(Some(persisted[1].as_str()), rows[0].1.as_deref());
-}
-
-/// The digest body of the newest digest custom entry (fixture lookup).
-fn digest_of_entries(entries: &[FileEntry]) -> String {
-    entries
-        .iter()
-        .rev()
-        .find_map(|entry| match entry {
-            FileEntry::CustomMessage { payload, .. }
-                if payload.custom_type
-                    == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
-            {
-                payload
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.get("digest"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            }
-            _ => None,
-        })
-        .expect("a digest custom entry")
+    .unwrap();
+    (session, tmp)
 }
 
 fn user_text(message: &pa_agent::types::Message) -> String {
@@ -434,142 +174,6 @@ fn user_text(message: &pa_agent::types::Message) -> String {
     }
 }
 
-#[tokio::test]
-async fn prompt_rides_digest_row_into_the_run() {
-    let provider = Arc::new(ScriptedProvider::new(test_model()));
-    provider.push_text_turn("hello from the model");
-    provider.push_text_turn("second answer");
-    let (session, _tmp) = digest_session(Arc::clone(&provider)).await;
-    let events: Arc<std::sync::Mutex<Vec<AgentEvent>>> = Arc::default();
-    let sink = Arc::clone(&events);
-    session
-        .agent()
-        .subscribe(move |event, _signal| {
-            let sink = Arc::clone(&sink);
-            Box::pin(async move {
-                sink.lock().unwrap().push(event);
-                Ok(())
-            })
-        })
-        .await;
-    session
-        .prompt("hi there", PromptOptions::default())
-        .await
-        .unwrap();
-    session.agent().wait_for_idle().await;
-
-    // The run's agent_end carries the digest custom row with the turn's
-    // prompt messages (TS parity). The lock snapshots the captured
-    // events and never crosses an await.
-    let (end_messages, kinds) = {
-        let captured = events.lock().unwrap();
-        let Some(AgentEvent::AgentEnd { messages }) = captured
-            .iter()
-            .rev()
-            .find(|event| matches!(event, AgentEvent::AgentEnd { .. }))
-        else {
-            panic!("no agent_end event");
-        };
-        let kinds: Vec<String> = captured
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::TurnStart => Some("turn_start".to_string()),
-                AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
-                    Some(message.role().to_string())
-                }
-                _ => None,
-            })
-            .collect();
-        (messages.clone(), kinds)
-    };
-    let roles: Vec<&str> = end_messages
-        .iter()
-        .map(pa_agent::types::AgentMessage::role)
-        .collect();
-    assert_eq!(roles, vec!["custom", "user", "assistant"]);
-    let AgentMessage::Custom(custom) = &end_messages[0] else {
-        panic!("expected digest custom row");
-    };
-    assert_eq!(
-        custom
-            .payload
-            .get("customType")
-            .and_then(serde_json::Value::as_str),
-        Some(crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE)
-    );
-    // The message pair streamed ahead of the user prompt's pair.
-    assert_eq!(
-        kinds,
-        vec![
-            "turn_start",
-            "custom",
-            "custom",
-            "user",
-            "user",
-            "assistant",
-            "assistant"
-        ]
-    );
-
-    // The provider request carries the digest as a user turn ahead of
-    // the prompt (the engine-level conversion at the LLM boundary).
-    let calls = provider.calls();
-    assert_eq!(calls.len(), 1);
-    assert!(user_text(&calls[0].messages[0]).contains("[harness-digest]"));
-    assert_eq!(user_text(&calls[0].messages[1]), "hi there");
-
-    // The digest persisted exactly once (the loop's message_end), ahead
-    // of the user row.
-    let entries = session.entries().await;
-    let digest_rows = entries
-        .iter()
-        .filter(|entry| {
-            matches!(entry, FileEntry::CustomMessage { payload, .. }
-                if payload.custom_type
-                    == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE)
-        })
-        .count();
-    assert_eq!(digest_rows, 1);
-
-    // The second prompt does not re-deliver: the flag is consumed and the
-    // delivered row is the newest in-context digest.
-    session
-        .prompt("again", PromptOptions::default())
-        .await
-        .unwrap();
-    session.agent().wait_for_idle().await;
-    let calls = provider.calls();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(user_text(calls[1].messages.last().unwrap()), "again");
-    let second_end_roles: Vec<String> = {
-        let captured = events.lock().unwrap();
-        captured
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                AgentEvent::AgentEnd { messages } => Some(
-                    messages
-                        .iter()
-                        .map(|message| message.role().to_string())
-                        .collect::<Vec<String>>(),
-                ),
-                _ => None,
-            })
-            .expect("no second agent_end event")
-    };
-    assert_eq!(second_end_roles, vec!["user", "assistant"]);
-    let entries = session.entries().await;
-    let digest_rows = entries
-        .iter()
-        .filter(|entry| {
-            matches!(entry, FileEntry::CustomMessage { payload, .. }
-                if payload.custom_type
-                    == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE)
-        })
-        .count();
-    assert_eq!(digest_rows, 1);
-}
-
 /// The transcript and the loop context hold ONE representation of the
 /// turn (the custom row, appended once), never a duplicate user
 /// message.
@@ -577,7 +181,7 @@ async fn prompt_rides_digest_row_into_the_run() {
 async fn prompt_injected_message_persists_one_custom_row() {
     let provider = Arc::new(ScriptedProvider::new(test_model()));
     provider.push_text_turn("notice acknowledged");
-    let (session, _tmp) = digest_session(Arc::clone(&provider)).await;
+    let (session, _tmp) = provider_session(Arc::clone(&provider)).await;
     let notice_text = "[child-exited: no-reply child:lane]";
     let notice = pa_types::session::CustomMessage {
         custom_type: "rlm_child_terminal_notice".to_string(),
@@ -595,9 +199,7 @@ async fn prompt_injected_message_persists_one_custom_row() {
     session.agent().wait_for_idle().await;
 
     // The provider request carries the notice text as its user-role
-    // view — once, with no duplicate user message. The first-turn
-    // harness digest rides ahead of it, exactly like a plain prompt's
-    // request.
+    // view — once, with no duplicate user message.
     let calls = provider.calls();
     assert_eq!(calls.len(), 1);
     let user_texts: Vec<String> = calls[0]
@@ -606,8 +208,7 @@ async fn prompt_injected_message_persists_one_custom_row() {
         .filter(|message| matches!(message, pa_agent::types::Message::User(_)))
         .map(user_text)
         .collect();
-    assert_eq!(user_texts.len(), 2, "digest plus notice: {calls:?}");
-    assert_eq!(user_texts[1], notice_text);
+    assert_eq!(user_texts, vec![notice_text.to_string()]);
     assert_eq!(
         user_texts
             .iter()
@@ -654,7 +255,7 @@ async fn an_agent_message_custom_row_matches_the_plain_prompt_context() {
 
     let plain_provider = Arc::new(ScriptedProvider::new(test_model()));
     plain_provider.push_text_turn("ack");
-    let (plain_session, _plain_tmp) = digest_session(Arc::clone(&plain_provider)).await;
+    let (plain_session, _plain_tmp) = provider_session(Arc::clone(&plain_provider)).await;
     plain_session
         .prompt(prompt, PromptOptions::default())
         .await
@@ -665,7 +266,7 @@ async fn an_agent_message_custom_row_matches_the_plain_prompt_context() {
     // is the same prompt (TS `createAgentSessionMessage`).
     let row_provider = Arc::new(ScriptedProvider::new(test_model()));
     row_provider.push_text_turn("ack");
-    let (row_session, _row_tmp) = digest_session(Arc::clone(&row_provider)).await;
+    let (row_session, _row_tmp) = provider_session(Arc::clone(&row_provider)).await;
     let row = pa_types::session::CustomMessage {
         custom_type: crate::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE.to_string(),
         content: pa_types::ai::UserContent::Text(prompt.to_string()),
@@ -1074,11 +675,13 @@ async fn run_boundaries_record_git_state() {
                 repo_url: None,
                 commit: Some(second_sha.clone()),
                 branch: Some("main".to_string()),
+                rest: pa_types::JsonMap::new(),
             },
             pa_types::session::GitContext {
                 repo_url: None,
                 commit: Some(second_sha),
                 branch: Some("feature".to_string()),
+                rest: pa_types::JsonMap::new(),
             },
         ]
     );

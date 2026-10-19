@@ -7,7 +7,7 @@ import textwrap
 import unittest
 
 
-WORKFLOW = Path(__file__).resolve().parents[2] / '.github/workflows/release.yml'
+WORKFLOW = Path(__file__).resolve().parents[2] / '.github/upstream-workflows/release.yml'
 FUNCTION = textwrap.dedent(
     WORKFLOW.read_text().split('          version_gt() {', 1)[1]
     .split('          publish_pointer_pair()', 1)[0]

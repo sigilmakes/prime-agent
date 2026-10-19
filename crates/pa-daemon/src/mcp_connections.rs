@@ -126,10 +126,6 @@ impl Worker {
             Ok(inputs) => pa_core::mcp::install_static_token(inputs, token).await,
             Err(message) => Err(message),
         };
-        if install.is_ok() {
-            let manager = manager.lock().unwrap();
-            manager.note_usage("paste-install", server);
-        }
         match install {
             Ok(outcome) => response_success(
                 None,

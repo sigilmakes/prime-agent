@@ -915,8 +915,8 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         "cwd": home.display().to_string(), "rlmDepth": 0,
     }));
     let mut counter: u64 = 0;
-    let mut parent = String::new();
-    let entry = |counter: &mut u64, parent: &mut String, fields: Value| {
+    let mut parent: Option<String> = None;
+    let entry = |counter: &mut u64, parent: &mut Option<String>, fields: Value| {
         *counter += 1;
         let id = format!("{:08x}", *counter);
         let mut row = fields;
@@ -928,7 +928,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
             *counter % 60,
             *counter % 1000
         ));
-        *parent = id;
+        *parent = Some(id);
         row
     };
     for base in 0..11 {
@@ -951,7 +951,14 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         .repeat(10);
     let turn_text = paragraph.repeat(90);
     let per_turn = turn_text.len() + 1024;
-    let turns = (size_mib * (1 << 20)) / per_turn;
+    let requested_bytes = size_mib * (1 << 20);
+    // Preserve the original ten-MiB workload. Stronger variants have at least
+    // their requested bytes in assistant text alone, before JSON overhead.
+    let turns = if size_mib >= 32 {
+        requested_bytes.div_ceil(turn_text.len())
+    } else {
+        requested_bytes / per_turn
+    };
     for turn in 0..turns {
         let row = entry(
             &mut counter,
@@ -1074,6 +1081,32 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
     std::fs::write(path, text).unwrap();
 }
 
+#[test]
+fn corpus_fixture_has_a_null_root_and_preserves_every_nonroot_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions/corpus.jsonl");
+    write_corpus_fixture(&path, 0);
+    let rows: Vec<Value> = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[0]["type"], "session");
+    assert!(
+        rows[1].get("parentId").unwrap().is_null(),
+        "first canonical entry has no parent; an empty string names a missing entry"
+    );
+    for row in &rows[1..] {
+        assert!(row["id"].as_str().is_some_and(|id| !id.is_empty()));
+    }
+    for pair in rows[1..].windows(2) {
+        assert_eq!(
+            pair[1]["parentId"], pair[0]["id"],
+            "only the first parent is null; all later links retain the preceding real ID"
+        );
+    }
+}
+
 /// One timestamped RPC child: each frame records the `Instant` its chunk arrived.
 struct TimedRpcChild {
     child: std::process::Child,
@@ -1100,6 +1133,8 @@ impl TimedRpcChild {
         let mut child = Command::new(bin)
             .args(["--mode", "rpc", "--resume", fixture.to_str().unwrap()])
             .env("HOME", home.path())
+            // Faux-only timed corpus cases must not refresh public model metadata.
+            .env("PI_OFFLINE", "1")
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
             .env("RUST_LOG", "error")
             .current_dir(home.path())
@@ -1218,9 +1253,26 @@ impl Drop for TimedRpcChild {
 /// frame strands (TS writes stdout synchronously at the emit: the flush is parity).
 #[test]
 fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
+    case_rpc_compact_flushes_the_start_frame_before_the_pipeline(10);
+}
+
+#[test]
+fn rpc_compact_flushes_the_start_frame_before_the_pipeline_32m() {
+    case_rpc_compact_flushes_the_start_frame_before_the_pipeline(32);
+}
+
+fn case_rpc_compact_flushes_the_start_frame_before_the_pipeline(size_mib: usize) {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
-    write_corpus_fixture(&fixture, 10);
+    write_corpus_fixture(&fixture, size_mib);
+    if size_mib >= 32 {
+        let bytes = std::fs::metadata(&fixture).unwrap().len();
+        assert!(
+            bytes >= 32 * 1024 * 1024,
+            "32 MiB corpus is too small: {bytes} bytes"
+        );
+        eprintln!("rpc corpus target_mib={size_mib} actual_bytes={bytes}");
+    }
     let script = json!({
         // The split-turn cut makes two concurrent summarizer calls; the
         // script queues one response each.
@@ -1282,9 +1334,26 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
 /// blocks mid-write and the compaction must still complete.
 #[test]
 fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
+    case_rpc_compact_flush_is_bounded_against_a_stalled_reader(10);
+}
+
+#[test]
+fn rpc_compact_flush_is_bounded_against_a_stalled_reader_32m() {
+    case_rpc_compact_flush_is_bounded_against_a_stalled_reader(32);
+}
+
+fn case_rpc_compact_flush_is_bounded_against_a_stalled_reader(size_mib: usize) {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
-    write_corpus_fixture(&fixture, 10);
+    write_corpus_fixture(&fixture, size_mib);
+    if size_mib >= 32 {
+        let bytes = std::fs::metadata(&fixture).unwrap().len();
+        assert!(
+            bytes >= 32 * 1024 * 1024,
+            "32 MiB corpus is too small: {bytes} bytes"
+        );
+        eprintln!("rpc corpus target_mib={size_mib} actual_bytes={bytes}");
+    }
     let script = json!({
         // The split-turn cut makes two concurrent summarizer calls; the
         // script queues one response each.
@@ -1328,9 +1397,26 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
 /// `promptResponsePending`) and publish AFTER the response.
 #[test]
 fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
+    case_rpc_prompt_admitted_compact_frames_flush_after_the_response(10);
+}
+
+#[test]
+fn rpc_prompt_admitted_compact_frames_flush_after_the_response_32m() {
+    case_rpc_prompt_admitted_compact_frames_flush_after_the_response(32);
+}
+
+fn case_rpc_prompt_admitted_compact_frames_flush_after_the_response(size_mib: usize) {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
-    write_corpus_fixture(&fixture, 10);
+    write_corpus_fixture(&fixture, size_mib);
+    if size_mib >= 32 {
+        let bytes = std::fs::metadata(&fixture).unwrap().len();
+        assert!(
+            bytes >= 32 * 1024 * 1024,
+            "32 MiB corpus is too small: {bytes} bytes"
+        );
+        eprintln!("rpc corpus target_mib={size_mib} actual_bytes={bytes}");
+    }
     let script = json!({
         // The split-turn cut makes two concurrent summarizer calls; the
         // script queues one response each.

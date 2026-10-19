@@ -3,55 +3,6 @@ use super::*;
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
-/// The cargo test config sets `DO_NOT_TRACK=1`; the daemon's live
-/// recording gate reads it (env before settings). Tests that exercise
-/// gated daemon-event paths hold this guard while the three override
-/// vars are scrubbed, and restore them after. The env is process-wide,
-/// so these tests serialize through the crate-wide
-/// `test_support::TELEMETRY_ENV_MUTEX` (shared with `agent_engine`'s
-/// `telemetry_opt_in`) while they hold it.
-const TELEMETRY_ENV_VARS: [&str; 3] = ["DO_NOT_TRACK", "PI_OFFLINE", "PRIME_AGENT_TELEMETRY"];
-
-struct CleanTelemetryEnv {
-    saved: Vec<(&'static str, Option<String>)>,
-    _env_lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Default for CleanTelemetryEnv {
-    fn default() -> Self {
-        // Held first: the vars may not be touched while another env test
-        // runs.
-        let env_lock = crate::test_support::TELEMETRY_ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let saved = TELEMETRY_ENV_VARS
-            .iter()
-            .map(|var| {
-                let value = std::env::var(var).ok();
-                std::env::remove_var(var);
-                (*var, value)
-            })
-            .collect();
-        Self {
-            saved,
-            _env_lock: env_lock,
-        }
-    }
-}
-
-impl Drop for CleanTelemetryEnv {
-    fn drop(&mut self) {
-        // The manual drop runs before the field drops: the restore lands
-        // while the env lock is still held.
-        for (var, value) in self.saved.drain(..) {
-            match value {
-                Some(value) => std::env::set_var(var, value),
-                None => std::env::remove_var(var),
-            }
-        }
-    }
-}
-
 /// The crash-path failure count: spawn-dies-fast churn accumulates to
 /// the give-up cap (the storm's counter could never grow while
 /// relaunch-spawns kept resetting it); a child that lived past the
@@ -2316,74 +2267,119 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
     );
 }
 
-/// The daemon's exit sends the partial `daemon event` summary of the
-/// current window (the window is under an hour, so no count sent it yet).
+/// Boot-loaded legacy descriptors keep their original reporting posture. An
+/// opted-out attach must stop before either forwarding or subscribing, even
+/// when the adopted worker is connected and ready to answer.
 #[tokio::test]
-async fn the_exit_flush_sends_the_partial_daemon_event_summary() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::TempDir::new().unwrap();
-    let supervisor = Supervisor::new(SupervisorOptions {
-        socket_path: dir.path().join("daemon.sock"),
-        agent_dir: dir.path().join("agent"),
-    })
-    .expect("supervisor");
-    let mock = Arc::new(pa_telemetry::MockSink::new());
-    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
-    config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
-    *supervisor.telemetry.lock().unwrap() =
-        Some(pa_telemetry::TelemetryClient::spawn(config).unwrap());
-    supervisor.note_daemon_event("attach", None);
-    supervisor.note_daemon_event("attach", None);
-    assert!(mock.events().is_empty(), "the window is still open");
-    supervisor.flush_telemetry_on_exit().await;
-    let events = mock.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].name, "daemon event");
-    assert_eq!(
-        events[0].properties.get("kind"),
-        Some(&Value::from("summary"))
-    );
-    assert_eq!(
-        events[0].properties.get("attach_count"),
-        Some(&Value::from(2))
-    );
-}
-
-/// The daemon's live gate counts only while telemetry is on: events
-/// that fire during a settings opt-out window never ride the summary
-/// after a re-enable. The counters skip while off (they are not
-/// severed), so the on-period count before the window still reports.
-#[tokio::test]
-async fn off_window_daemon_events_never_count_into_the_summary() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    settings.set_telemetry_enabled(false).unwrap();
-    let supervisor = Supervisor::new(SupervisorOptions {
-        socket_path: dir.path().join("daemon.sock"),
-        agent_dir: agent_dir.clone(),
-    })
-    .expect("supervisor");
-    let mock = Arc::new(pa_telemetry::MockSink::new());
-    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
-    config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
-    *supervisor.telemetry.lock().unwrap() =
-        Some(pa_telemetry::TelemetryClient::spawn(config).unwrap());
-    // Off: the event skips, so nothing counts.
-    supervisor.note_daemon_event("attach", None);
-    settings.set_telemetry_enabled(true).unwrap();
-    // Back on: the event counts again.
-    supervisor.note_daemon_event("attach", None);
-    supervisor.flush_telemetry_on_exit().await;
-    let events = mock.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].name, "daemon event");
-    assert_eq!(
-        events[0].properties.get("attach_count"),
-        Some(&Value::from(1)),
-        "the off-window attach never counts"
-    );
+async fn legacy_resident_opt_out_attach_guard_preserves_adopted_posture() {
+    for worker_disabled in [None, Some(false), Some(true)] {
+        for kind in ["attach", "reattach"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let supervisor = Arc::new(
+                Supervisor::new(SupervisorOptions {
+                    socket_path: dir.path().join("daemon.sock"),
+                    agent_dir: dir.path().join("agent"),
+                })
+                .expect("supervisor"),
+            );
+            let descriptor_path = supervisor.descriptor_dir.join("legacy-worker.json");
+            let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+                "version": 2,
+                "workerId": "legacy-worker",
+                "pid": 4242,
+                "socketPath": dir.path().join("legacy-worker.sock"),
+                "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+                "supervisorSocketPath": supervisor.options.socket_path,
+                "authenticationToken": "test-token",
+                "rootActiveSessionId": "legacy-worker",
+                "telemetryDisabled": worker_disabled,
+                "createdAt": "2026-10-01T00:00:00Z",
+                "updatedAt": "2026-10-01T00:00:00Z",
+                "lifecycle": "ready",
+                "createCommand": {},
+                "consecutiveFailures": 0,
+            }))
+            .expect("descriptor");
+            persist_worker(&descriptor_path, &descriptor).expect("persist legacy descriptor");
+            let before = std::fs::read(&descriptor_path).expect("descriptor bytes");
+            let (loaded_path, loaded) =
+                load_descriptors(&supervisor.descriptor_dir, &supervisor.options.socket_path)
+                    .into_iter()
+                    .next()
+                    .expect("boot loads the legacy descriptor");
+            assert_eq!(loaded.telemetry_disabled, worker_disabled);
+            let resident = ResidentWorker::new("legacy-worker".into(), loaded, loaded_path);
+            let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+            *resident.cmd_tx.lock().await = Some(cmd_tx);
+            resident.note_connection_live();
+            resident.note_session_ready();
+            supervisor.registry.insert(Arc::clone(&resident)).await;
+            let forwarded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let pump_forwarded = Arc::clone(&forwarded);
+            let pump_resident = Arc::clone(&resident);
+            let pump = tokio::spawn(async move {
+                while let Some(request) = cmd_rx.recv().await {
+                    pump_forwarded.fetch_add(1, Ordering::SeqCst);
+                    let reply = pump_resident
+                        .pending
+                        .lock()
+                        .await
+                        .remove(&request.request_id)
+                        .expect("pending attach reply");
+                    let _ = reply.send(WorkerReply::Typed(response_success(
+                        None,
+                        kind,
+                        Some(json!({ "activeSessionId": "legacy-worker" })),
+                    )));
+                }
+            });
+            let (targeted_tx, mut targeted_rx) = mpsc::channel(4);
+            let attached = subscribers::ClientSubscriptions::new("client".into(), targeted_tx);
+            let command: DaemonCommand = serde_json::from_value(json!({
+                "type": kind,
+                "activeSessionId": "legacy-worker",
+                "targetActiveSessionId": "legacy-worker",
+                "telemetryDisabled": true,
+            }))
+            .expect("attach command");
+            let (lines, stop) = supervisor
+                .route_client_command(
+                    &command,
+                    "client",
+                    &attached,
+                    "a1".into(),
+                    kind.into(),
+                    None,
+                )
+                .await;
+            assert!(!stop);
+            let allowed = worker_disabled == Some(true);
+            assert_eq!(lines[0]["success"], json!(allowed));
+            assert_eq!(forwarded.load(Ordering::SeqCst), usize::from(allowed));
+            assert_eq!(attached.contains("legacy-worker"), allowed);
+            if !allowed {
+                assert_eq!(lines[0]["error"], json!(
+                    "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry."
+                ));
+                supervisor
+                    .publish_session_event("legacy-worker", &Arc::new(json!({ "type": "test" })));
+                assert!(
+                    targeted_rx.try_recv().is_err(),
+                    "a refused legacy attach never subscribes"
+                );
+            }
+            assert_eq!(
+                resident.descriptor.lock().await.telemetry_disabled,
+                worker_disabled
+            );
+            assert_eq!(
+                std::fs::read(&descriptor_path).unwrap(),
+                before,
+                "loading and routing must not relabel a live legacy descriptor"
+            );
+            pump.abort();
+        }
+    }
 }
 
 proptest! {

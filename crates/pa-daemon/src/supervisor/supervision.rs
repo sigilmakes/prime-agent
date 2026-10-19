@@ -191,7 +191,6 @@ impl Supervisor {
                         "session worker {} stopped intentionally (status {status:?})",
                         resident.worker_id
                     ));
-                    self.note_daemon_event("worker_exited", Some("normal"));
                     return;
                 }
             } else if adopted_pid != 0 {
@@ -236,7 +235,6 @@ impl Supervisor {
             if self.superseded(&resident, monitor_epoch) {
                 return;
             }
-            self.note_daemon_event("worker_exited", Some("crash"));
             // A hard-killed parent bypasses every worker-side close (#246): close the
             // resident RLM children here, before the restart, so a relaunched parent
             // never resumes beside an orphaned child worker.
@@ -325,7 +323,6 @@ impl Supervisor {
                     // No counter reset on a successful relaunch: a spawn that dies fast must
                     // accumulate toward the give-up cap (the reset comes only from a stable
                     // lifetime on the crash path).
-                    self.note_daemon_event("worker_restarted", None);
                     child = Some(new_child);
                 }
                 Err(error) => {
@@ -542,6 +539,9 @@ impl Supervisor {
         // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env, orphan_path) = {
             let mut descriptor = resident.descriptor.lock().await.clone();
+            // Stamp only the launch clone here. A live adopted predecessor
+            // must retain its original posture until a replacement is spawned.
+            descriptor.telemetry_disabled = Some(true);
             // Each process lifetime owns a different file. An old owner's
             // in-flight reap must never clear a replacement's journal.
             let orphan_path = crate::journal::orphan_journal_path(
@@ -619,6 +619,9 @@ impl Supervisor {
             let child_pid = child.id().unwrap_or(0);
             descriptor.pid = u64::from(child_pid);
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
+            // This flag belongs to the successfully spawned generation, not
+            // to a still-live worker loaded from a legacy descriptor.
+            descriptor.telemetry_disabled = Some(true);
             // Publish the path with its owner identity, never against the
             // previous generation's pid before the spawn succeeds.
             descriptor.orphan_process_journal_path = Some(orphan_path);
@@ -992,11 +995,6 @@ impl Supervisor {
                 response.error.unwrap_or_default()
             ));
         }
-        // The handshake answered: install the channel for routing (TS
-        // `worker.client = client`). A superseded connect never installs over it.
-        resident
-            .install_command_channel(connection_epoch, cmd_tx)
-            .await;
         // Peer-transport capability rides on the worker instance id (the TS
         // worker only advertises `direct_peer_transport` with one).
         let peer_transport_capable = response
@@ -1012,6 +1010,42 @@ impl Supervisor {
         resident
             .peer_transport_capable
             .store(peer_transport_capable, Ordering::SeqCst);
+        let refresh_capable = response.data.as_ref().is_some_and(|data| {
+            let capabilities: Vec<String> = data
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            pa_types::daemon::compatibility::supports_optional_command(
+                "refresh_models",
+                data.get("schemaRevision").and_then(Value::as_u64),
+                &capabilities,
+            )
+        });
+        resident.set_model_refresh_capability(connection_epoch, refresh_capable);
+        let plugin_capable = response.data.as_ref().is_some_and(|data| {
+            let capabilities: Vec<String> = data["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            pa_types::daemon::compatibility::supports_optional_command(
+                "plugin_command",
+                data["schemaRevision"].as_u64(),
+                &capabilities,
+            )
+        });
+        resident.set_plugin_command_capability(connection_epoch, plugin_capable);
+        // The handshake answered: install the channel for routing (TS
+        // `worker.client = client`). A superseded connect never installs over it.
+        resident
+            .install_command_channel(connection_epoch, cmd_tx)
+            .await;
         pumps.installed = true;
         Ok(())
     }

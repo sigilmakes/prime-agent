@@ -82,7 +82,7 @@ impl Serialize for AssistantUsageById {
         serializer.collect_seq(
             self.entries
                 .iter()
-                .map(|(id, usage)| (id.as_str(), PersistedUsage::from(*usage))),
+                .map(|(id, usage)| (id.as_str(), PersistedUsage::from(usage.clone()))),
         )
     }
 }
@@ -139,12 +139,14 @@ struct ScanUsageCost {
 impl From<ScanUsage> for Usage {
     fn from(scan: ScanUsage) -> Usage {
         Usage {
+            rest: pa_types::JsonMap::new(),
             input: scan.input,
             output: scan.output,
             cache_read: scan.cache_read,
             cache_write: scan.cache_write,
             total_tokens: scan.total_tokens,
             cost: UsageCost {
+                rest: pa_types::JsonMap::new(),
                 input: scan.cost.input,
                 output: scan.cost.output,
                 cache_read: scan.cost.cache_read,
@@ -157,7 +159,7 @@ impl From<ScanUsage> for Usage {
 
 /// The fold's two billable totals: `own` subtracts every attributed child
 /// block, `total` keeps the child spend (the session-tree spend including settled children).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionUsageTotals {
     pub own: Usage,
     pub total: Usage,
@@ -205,12 +207,14 @@ impl From<Usage> for PersistedUsage {
 impl From<PersistedUsage> for Usage {
     fn from(persisted: PersistedUsage) -> Self {
         Usage {
+            rest: pa_types::JsonMap::new(),
             input: persisted.input,
             output: persisted.output,
             cache_read: persisted.cache_read,
             cache_write: persisted.cache_write,
             total_tokens: persisted.total_tokens,
             cost: UsageCost {
+                rest: pa_types::JsonMap::new(),
                 input: JsNumber(f64::from_bits(persisted.cost_input)),
                 output: JsNumber(f64::from_bits(persisted.cost_output)),
                 cache_read: JsNumber(f64::from_bits(persisted.cost_cache_read)),
@@ -234,7 +238,7 @@ mod usage_bits {
         value: &Usage,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        PersistedUsage::from(*value).serialize(serializer)
+        PersistedUsage::from(value.clone()).serialize(serializer)
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
@@ -321,7 +325,7 @@ impl UsageScan {
             add_assistant_usage(&mut total, usage);
         }
         add_assistant_usage(&mut total, &self.summarization_usage);
-        let mut own = total;
+        let mut own = total.clone();
         subtract_assistant_usage(&mut own, &self.attributed_child_usage);
         SessionUsageTotals { own, total }
     }
@@ -475,7 +479,7 @@ mod tests {
         json!({ "type": "message", "id": id, "message": { "role": role, "usage": usage } })
     }
 
-    fn attribution(target: &str, child: Usage, aggregate: Usage) -> Value {
+    fn attribution(target: &str, child: &Usage, aggregate: &Usage) -> Value {
         json!({
             "type": "child_usage_attributed", "targetId": target,
             "childUsage": child, "aggregateUsage": aggregate
@@ -489,9 +493,9 @@ mod tests {
             "assistant",
             &serde_json::to_value(usage(100, 10, 8.0)).unwrap(),
         );
-        let mut first = attribution("a", usage(20, 2, 2.0), usage(120, 12, 10.0));
+        let mut first = attribution("a", &usage(20, 2, 2.0), &usage(120, 12, 10.0));
         first["id"] = json!("report-1");
-        let mut second = attribution("a", usage(30, 3, 4.0), usage(150, 15, 14.0));
+        let mut second = attribution("a", &usage(30, 3, 4.0), &usage(150, 15, 14.0));
         second["id"] = json!("report-2");
         let mut repeated = first.clone();
         // Aggregate replacement still follows file order, even for a repeated ID.
@@ -522,15 +526,15 @@ mod tests {
 
     #[test]
     fn orphan_ids_are_not_consumed_and_legacy_attributions_remain_distinct() {
-        let mut orphan = attribution("a", usage(20, 2, 2.0), usage(120, 12, 10.0));
+        let mut orphan = attribution("a", &usage(20, 2, 2.0), &usage(120, 12, 10.0));
         orphan["id"] = json!("report-1");
         let assistant = message(
             "a",
             "assistant",
             &serde_json::to_value(usage(100, 10, 8.0)).unwrap(),
         );
-        let missing_id = attribution("a", usage(30, 3, 4.0), usage(150, 15, 14.0));
-        let mut empty_id = attribution("a", usage(40, 4, 8.0), usage(190, 19, 22.0));
+        let missing_id = attribution("a", &usage(30, 3, 4.0), &usage(150, 15, 14.0));
+        let mut empty_id = attribution("a", &usage(40, 4, 8.0), &usage(190, 19, 22.0));
         empty_id["id"] = json!("");
         let mut scan = UsageScan::default();
         for row in [
@@ -567,8 +571,8 @@ mod tests {
                     "cost": { "input": 0.0, "output": 1.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 1.0 }
                 }),
             ),
-            attribution("a", usage(20, 2, 0.2), usage(120, 12, 1.2)),
-            attribution("a", usage(30, 3, 0.3), usage(150, 15, 1.5)),
+            attribution("a", &usage(20, 2, 0.2), &usage(120, 12, 1.2)),
+            attribution("a", &usage(30, 3, 0.3), &usage(150, 15, 1.5)),
             message(
                 "b",
                 "assistant",
@@ -598,8 +602,8 @@ mod tests {
                 "cost": { "input": 0.0, "output": 0.4, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.4 }
             }),
         );
-        let orphan = attribution("a", usage(30, 3, 0.3), usage(70, 7, 0.7));
-        let ahead_of_target = attribution("z", usage(1, 1, 0.1), usage(41, 5, 0.5));
+        let orphan = attribution("a", &usage(30, 3, 0.3), &usage(70, 7, 0.7));
+        let ahead_of_target = attribution("z", &usage(1, 1, 0.1), &usage(41, 5, 0.5));
 
         let before = scan_summary(&[orphan.clone(), ahead_of_target.clone(), assistant.clone()]);
         let after = scan_summary(&[assistant, orphan, ahead_of_target]);
@@ -691,7 +695,7 @@ mod tests {
                 }),
             ),
             // Drifted child spend larger than the aggregate folds in.
-            attribution("a", usage(900, 90, 0.9), usage(10, 1, 0.1)),
+            attribution("a", &usage(900, 90, 0.9), &usage(10, 1, 0.1)),
         ]);
         // The clamp drains the session to no billable work at all, so the summary is absent.
         assert_eq!(summary, None);

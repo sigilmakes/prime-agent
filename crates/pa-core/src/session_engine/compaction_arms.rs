@@ -1,6 +1,6 @@
 use super::compact_session::CompactOutcome;
 use super::{
-    compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages, refine,
+    compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages,
     session_message_to_loop, standard_message, AgentMessage, AgentSession, FileEntry,
     SessionAgentMessage, TrailingAssistantFilter,
 };
@@ -24,6 +24,7 @@ impl AgentSession {
     /// the live loop context over the model's context window against the
     /// effective threshold; usage before the latest compaction never re-triggers.
     pub async fn auto_compaction_due(&self, model: &pa_types::ai::Model) -> bool {
+        let model = self.configure_ollama_model(model);
         let state = self.agent.state().await;
         // The live loop context is the agent's message list (the same
         // JSON round-trip `compact` uses).
@@ -39,7 +40,7 @@ impl AgentSession {
             // The live thinking level decides whether the request folds a
             // thinking budget on top of the base output budget.
             compaction::request_output_budget(
-                model,
+                &model,
                 provider_adapter::model_thinking_level(state.thinking_level),
             ),
             &self.compaction_settings(),
@@ -176,8 +177,10 @@ impl AgentSession {
             .lock()
             .expect("compaction summary sink lock")
             .clone();
+        let model = self.configure_ollama_model(model);
         let options = crate::session_engine::compact_session::CompactOptions {
-            model: model.clone(),
+            inference: self.auxiliary_inference(),
+            model,
             api_key,
             custom_instructions,
             settings: self.compaction_settings(),
@@ -185,15 +188,13 @@ impl AgentSession {
             // Captured per attempt inside `compaction_attempts`: a
             // conflict retry summarizes a new branch, and inputs captured
             // here would rank the abandoned branch's terms.
-            harness_digest: None,
             auxiliary: self.auxiliary_model.as_ref(),
             summary_delta,
             semantic_edges: self.semantic_edges(),
         };
         // The flight spans the attempts, the rebuilt-context replace, and
         // the kernel-state notice: every path here REPLACES the live loop
-        // context, and the other replacers — `refine_with_refiner`'s
-        // outcome push and `record_compaction_outcome`'s failure row —
+        // context, and `record_compaction_outcome`'s failure row
         // take the same flight. A row pushed onto the context must not
         // interleave with the replace: it would duplicate in the rebuilt
         // view or vanish under it while staying durable either way.
@@ -203,9 +204,14 @@ impl AgentSession {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
             return Ok(outcome);
         }
-        let rebuilt = {
-            let session = self.session.lock().await;
-            crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
+        let accepted = self
+            .accepted_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let rebuilt = match accepted {
+            Some(messages) => messages,
+            None => self.context_messages().await?,
         };
         let loop_messages: Vec<AgentMessage> = rebuilt_loop_messages(rebuilt);
         let rebuilt_message_count = loop_messages.len();
@@ -234,6 +240,7 @@ impl AgentSession {
                 "notice": notice_landed,
             }),
         );
+        self.notify_compaction_settled(&outcome).await;
         Ok(outcome)
     }
 
@@ -249,6 +256,9 @@ impl AgentSession {
         /// The conflict-retry bound: a branch that keeps changing under
         /// the compaction fails instead of re-summarizing forever.
         const MAX_COMPACTION_ATTEMPTS: usize = 3;
+        if self.plugins.is_some() {
+            return self.strategy_compaction_attempts(options, started_at).await;
+        }
         for _ in 0..MAX_COMPACTION_ATTEMPTS {
             let mut attempt = {
                 let session = self.session.lock().await;
@@ -262,20 +272,17 @@ impl AgentSession {
             // once before the loop would rank the abandoned branch's
             // terms. The capture takes the session lock itself, so it
             // runs off the prepare hold.
-            if !self.harness_refinements_enabled() {
-                attempt.history = super::refinement_gate::without_refinements(attempt.history);
-                attempt.turn_prefix_messages =
-                    super::refinement_gate::without_refinements(attempt.turn_prefix_messages);
-            }
-            let digest_inputs = self.harness_digest_inputs().await;
+            attempt.history = super::refinement_gate::without_refinements(attempt.history);
+            attempt.turn_prefix_messages =
+                super::refinement_gate::without_refinements(attempt.turn_prefix_messages);
             compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
             let attempt_options = crate::session_engine::compact_session::CompactOptions {
+                inference: options.inference.clone(),
                 model: options.model.clone(),
                 api_key: options.api_key.clone(),
                 custom_instructions: options.custom_instructions,
                 settings: options.settings,
                 abort: options.abort,
-                harness_digest: digest_inputs,
                 auxiliary: options.auxiliary,
                 summary_delta: options.summary_delta.clone(),
                 semantic_edges: options.semantic_edges.clone(),
@@ -286,10 +293,8 @@ impl AgentSession {
             )
             .await?;
             // A toggle during the summarizer request must not re-inject the captured digest.
-            if !self.harness_refinements_enabled() {
-                prepared.entry.harness_digest = None;
-                prepared.entry.harness_state_fingerprint = None;
-            }
+            prepared.entry.harness_digest = None;
+            prepared.entry.harness_state_fingerprint = None;
             let committed = {
                 let mut session = self.session.lock().await;
                 crate::session_engine::compact_session::commit_attempt(
@@ -371,105 +376,114 @@ impl AgentSession {
         &self,
         branch_entries: Vec<FileEntry>,
     ) -> anyhow::Result<()> {
-        let rebuilt = {
-            let mut session = self.session.lock().await;
-            session.adopt_entries(branch_entries);
-            crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
+        self.rebuild_branch_context_at(branch_entries, &super::ContextStartupBoundary::Current, &[])
+            .await
+    }
+
+    /// Adopt complete canonical branch entries and publish only the selected
+    /// strategy's verified pre-admission projection, without raw-view repair.
+    ///
+    /// # Errors
+    /// Invalid ancestry or admission IDs, branch races, retired strategies and
+    /// invalid archive/views fail before canonical adoption or live publication.
+    pub async fn rebuild_branch_context_at(
+        &self,
+        branch_entries: Vec<FileEntry>,
+        boundary: &super::ContextStartupBoundary,
+        admitted_user_ids: &[String],
+    ) -> anyhow::Result<()> {
+        let _flight = self.compaction_flight.lock().await;
+        let (expected_leaf, session_id) = {
+            let session = self.session.lock().await;
+            (
+                session.get_leaf_id().map(str::to_owned),
+                session.get_session_id().to_owned(),
+            )
         };
+        if !matches!(boundary, super::ContextStartupBoundary::Current)
+            && branch_entries.iter().any(|entry| {
+                matches!(entry,
+                FileEntry::Header { header } if header.id != session_id)
+            })
+        {
+            anyhow::bail!("context branch belongs to another session");
+        }
+        let leaf = branch_entries
+            .iter()
+            .rev()
+            .find_map(|entry| entry.id().map(str::to_owned));
+        let target = self
+            .plugins
+            .as_ref()
+            .map(|plugins| plugins.context_selection())
+            .transpose()?;
+        let (context, projection_leaf) =
+            if matches!(boundary, super::ContextStartupBoundary::Current) {
+                if !admitted_user_ids.is_empty() {
+                    anyhow::bail!("Current startup context cannot carry admitted-user proof");
+                }
+                let context = match &target {
+                    Some(target) => super::context_strategy::project(
+                        &branch_entries,
+                        leaf.as_deref(),
+                        &format!("{}/{}", target.plugin, target.name),
+                    ),
+                    None => crate::session::build_session_context(&branch_entries, leaf.as_deref()),
+                };
+                (context, leaf.clone())
+            } else {
+                let route = target.as_ref().map_or_else(
+                    || crate::plugins::context::DEFAULT_STRATEGY.to_owned(),
+                    |target| format!("{}/{}", target.plugin, target.name),
+                );
+                super::context_strategy::startup::project_at(
+                    &branch_entries,
+                    leaf.as_deref(),
+                    &route,
+                    boundary,
+                    admitted_user_ids,
+                )?
+            };
+        let model = self
+            .context_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let rebuilt = match (&self.plugins, &target) {
+            (Some(plugins), Some(target)) => {
+                super::context_strategy::assemble_for_strategy(
+                    plugins,
+                    target,
+                    context.messages,
+                    context.archive.as_ref(),
+                    model.as_ref(),
+                    projection_leaf.as_deref(),
+                )
+                .await?
+            }
+            _ => context.messages,
+        };
+        {
+            let mut session = self.session.lock().await;
+            if session.get_leaf_id() != expected_leaf.as_deref() {
+                anyhow::bail!("session branch changed while preparing a context view; try again");
+            }
+            let commit = || {
+                session.adopt_entries(branch_entries);
+                Ok(())
+            };
+            match (&self.plugins, &target) {
+                (Some(plugins), Some(target)) => plugins.with_strategy_authority(target, commit)?,
+                _ => commit()?,
+            }
+        }
+        *self
+            .context_archive
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context.archive;
         self.agent
             .set_messages(rebuilt_loop_messages(rebuilt))
             .await;
         Ok(())
-    }
-
-    /// Execute `/refine`: plan, re-read, apply, and persist the continual
-    /// harness state for this session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the conversation history cannot be read, or
-    /// when the refinement plan, apply, or persist fails.
-    pub async fn refine(
-        &self,
-        options: &refine::RefineOptions,
-        source: refine::RefinementSource,
-        model: &pa_types::ai::Model,
-        api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
-    ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        self.refine_with_refiner(
-            options,
-            source,
-            model,
-            refine::default_refiner_call(api_key),
-            global_harness_dir,
-        )
-        .await
-    }
-
-    /// [`Self::refine`] with an injected refiner call: the seam the parity
-    /// tests use to drive the refinement without a provider.
-    pub(crate) async fn refine_with_refiner(
-        &self,
-        options: &refine::RefineOptions,
-        source: refine::RefinementSource,
-        model: &pa_types::ai::Model,
-        refine_call: crate::refinement::executor::RefinerFn,
-        global_harness_dir: std::path::PathBuf,
-    ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        // The flight serializes every live-context replacer against a
-        // compaction's rebuild: this round's outcome rows persist and then
-        // push onto the context the compaction replaces, so the push must
-        // not interleave with a replace (duplicating in the rebuilt view
-        // or vanishing under it).
-        let _flight = self.compaction_flight.lock().await;
-        // The transcript's consumed artifacts are extracted under this first
-        // lock straight from the retained rows: no second clone of the rows.
-        let parts = self.session.lock().await.refine_transcript_parts();
-        let crate::session::manager::RefineTranscriptParts {
-            messages,
-            refinement_history,
-        } = parts.await?;
-        let (result, context_row_ids) = {
-            let mut session = self.session.lock().await;
-            // The factory opt-in resolves at apply time, not here: the
-            // agent dir (the same settings.json the kernel-side factory
-            // gate reads) rides down to the refinement, which re-reads
-            // `factory.enabled` immediately before applying the plan, off
-            // the async worker (`spawn_blocking`). The arm performs no
-            // synchronous settings read while holding this session lock,
-            // and the long planning request can no longer leave the gate
-            // deciding on a snapshot the request made stale. A session
-            // without a wired agent dir keeps the fail-closed disabled
-            // default.
-            refine::execute_refinement_with_rows(
-                &mut session,
-                refine::RefinementTranscript {
-                    messages: &messages,
-                    refinement_history: &refinement_history,
-                },
-                &global_harness_dir,
-                model,
-                options,
-                source,
-                refine_call,
-                self.agent_dir.as_deref(),
-            )
-            .await?
-        };
-        // The outcome rows (and the notice row when any edit applied) push
-        // onto the live context after the durable append, never a full rebuild
-        // — a rebuild would resurrect a retried turn's dropped trailing
-        // assistant. The pushed rows are THIS run's, under ONE agent-state lock.
-        let rows = {
-            let session = self.session.lock().await;
-            refine::context_rows_by_ids(session.retained_entries(), &context_row_ids)
-        };
-        let loop_rows: Vec<AgentMessage> =
-            rows.iter().filter_map(session_message_to_loop).collect();
-        if !loop_rows.is_empty() {
-            self.agent.append_messages(loop_rows).await;
-        }
-        Ok(result)
     }
 }

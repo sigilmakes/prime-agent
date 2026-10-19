@@ -1,10 +1,7 @@
 //! The print runtime's turn-boundary compaction checks: the overflow
 //! compact-and-retry plus the requested/threshold arms, at the settled-turn
 //! boundary and before every admitted prompt (a pre-turn compaction never
-//! re-issues). A success schedules the auto-refine review; json mode streams
-//! the wire events, text mode stays quiet.
-
-use std::path::PathBuf;
+//! re-issues). Json mode streams compaction events; text mode stays quiet.
 
 use pa_core::session_engine::compact_session::{CompactOutcome, CompactRun};
 use pa_core::session_engine::engine::SessionEngine;
@@ -27,30 +24,13 @@ use compaction_arms::{OverflowBoundary, OverflowOutcome, OverflowRecovery};
 #[cfg(test)]
 use compaction_arms::OVERFLOW_RECOVERY_FAILED_MESSAGE;
 
-mod autorefine;
-
-use autorefine::RefineSurface;
-
 /// Where the boundary's json events go: stdout in the product, a captured
 /// buffer in tests.
 type EventSink = std::sync::Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
 
-/// The print loop's turn-boundary state: the one-attempt overflow machine, the
-/// compact-trigger auto-refine bookkeeping, and the json/text output mode.
+/// The print loop's turn-boundary state: the one-attempt overflow machine and output mode.
 pub(crate) struct TurnBoundary {
     recovery: OverflowRecovery,
-    /// A successful compaction schedules the compact-trigger auto-refine
-    /// review for the next serialized checkpoint (or the disposal drain).
-    compact_auto_refine_pending: bool,
-    /// (millis) Every review attempt — decline, success, or failure —
-    /// stamps the cooldown window.
-    last_auto_refine_review_at: Option<u64>,
-    /// The settled non-error, non-aborted assistant turns since the run's
-    /// start or the last review.
-    assistant_turns_since_review: u32,
-    /// The entry-count baseline the turn counter diffs against; set at
-    /// the first pre-turn check, so resumed history never counts.
-    entry_baseline: Option<usize>,
     /// json mode streams the session events on stdout; text mode reads
     /// the durable rows through the headless terminal result.
     json_mode: bool,
@@ -61,10 +41,6 @@ impl TurnBoundary {
     pub(crate) fn new(json_mode: bool) -> Self {
         Self {
             recovery: OverflowRecovery::Idle,
-            compact_auto_refine_pending: false,
-            last_auto_refine_review_at: None,
-            assistant_turns_since_review: 0,
-            entry_baseline: None,
             json_mode,
             sink: std::sync::Arc::new(|event| println!("{event}")),
         }
@@ -76,10 +52,6 @@ impl TurnBoundary {
     pub(crate) fn with_sink(json_mode: bool, sink: EventSink) -> Self {
         Self {
             recovery: OverflowRecovery::Idle,
-            compact_auto_refine_pending: false,
-            last_auto_refine_review_at: None,
-            assistant_turns_since_review: 0,
-            entry_baseline: None,
             json_mode,
             sink,
         }
@@ -110,9 +82,6 @@ impl TurnBoundary {
         let outcome = self
             .overflow_recovery_attempt(engine, model, api_key.clone(), OverflowBoundary::PreTurn)
             .await?;
-        if self.entry_baseline.is_none() {
-            self.entry_baseline = Some(engine.session.entries().await.len());
-        }
         if matches!(outcome, OverflowOutcome::NotApplicable) {
             self.requested_and_threshold_arms(engine, model, api_key)
                 .await?;
@@ -121,24 +90,13 @@ impl TurnBoundary {
         Ok(())
     }
 
-    /// The settled-turn boundary: the checkpoint's auto-refine consumption, then the
-    /// overflow arm with its retry loop, then the requested and threshold arms.
+    /// The settled-turn boundary: overflow recovery followed by requested/threshold compaction.
     pub(crate) async fn run_at_settled_turn(
         &mut self,
         engine: &SessionEngine,
         model: &Model,
         api_key: Option<String>,
-        global_harness_dir: PathBuf,
     ) -> Result<(), String> {
-        self.count_settled_turns(engine).await;
-        self.consume_compact_auto_refine(
-            engine,
-            model,
-            api_key.clone(),
-            global_harness_dir.clone(),
-            RefineSurface::Checkpoint,
-        )
-        .await?;
         let arm_finished = loop {
             let outcome = self
                 .overflow_recovery_attempt(
@@ -148,32 +106,13 @@ impl TurnBoundary {
                     OverflowBoundary::SettledTurn,
                 )
                 .await?;
-            if let OverflowOutcome::RetryTurn = outcome {
-                self.consume_compact_auto_refine(
-                    engine,
-                    model,
-                    api_key.clone(),
-                    global_harness_dir.clone(),
-                    RefineSurface::Checkpoint,
-                )
-                .await?;
-            } else {
+            if !matches!(outcome, OverflowOutcome::RetryTurn) {
                 break matches!(outcome, OverflowOutcome::Finished);
             }
         };
         if !arm_finished {
-            self.requested_and_threshold_arms(engine, model, api_key.clone())
+            self.requested_and_threshold_arms(engine, model, api_key)
                 .await?;
-        }
-        // The requested refinement runs whenever the turn did not
-        // re-issue (a retried turn consumes it at its own boundary).
-        let entries_before = engine.session.entries().await.len();
-        if let Some(outcome) = engine
-            .consume_pending_refinement(model, api_key, global_harness_dir)
-            .await
-        {
-            self.stream_refinement_outcome(engine, &outcome, entries_before, true, "requested")
-                .await;
         }
         Ok(())
     }
@@ -186,7 +125,6 @@ impl TurnBoundary {
         model: &Model,
         api_key: Option<String>,
         prompt: &str,
-        global_harness_dir: PathBuf,
     ) -> Result<(), String> {
         self.run_pre_turn(engine, model, api_key.clone()).await?;
         engine
@@ -202,8 +140,7 @@ impl TurnBoundary {
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;
-        self.run_at_settled_turn(engine, model, api_key, global_harness_dir)
-            .await
+        self.run_at_settled_turn(engine, model, api_key).await
     }
 }
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Map;
 
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEventStream, AssistantMessageEventWriter,
+    create_provider_event_stream, AssistantMessageEventStream, AssistantMessageEventWriter,
 };
 use crate::registry::{register_api_provider, unregister_api_providers, Provider};
 use crate::types::{
@@ -18,6 +18,7 @@ use crate::types::{
     ThinkingContent, ToolCall, ToolResultMessage, Usage, UsageCost, UserMessageContent,
 };
 use crate::utils_inner::diagnostics::now_ms;
+use crate::utils_inner::stream_failure::ProviderError;
 use rand::Rng;
 
 const DEFAULT_API: &str = "faux";
@@ -411,6 +412,7 @@ fn with_usage_estimate(
     }
 
     message.usage = Usage {
+        rest: pa_types::JsonMap::new(),
         input,
         output: output_tokens,
         cache_read,
@@ -509,36 +511,25 @@ async fn schedule_chunk(chunk: &str, tokens_per_second: Option<f64>) {
 async fn stream_with_deltas(
     writer: &AssistantMessageEventWriter,
     message: &AssistantMessage,
+    partial: &mut AssistantMessage,
     min_token_size: usize,
     max_token_size: usize,
     tokens_per_second: Option<f64>,
     signal: Option<&tokio_util::sync::CancellationToken>,
-) {
-    let mut partial = message.clone();
-    partial.content = Vec::new();
+) -> Result<(), ProviderError> {
     if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-        let aborted = create_aborted_message(&partial);
-        writer.push(AssistantMessageEvent::Error {
-            reason: ErrorStopReason::Aborted,
-            error: aborted.clone(),
-        });
-        writer.end(Some(aborted));
-        return;
+        return Err(ProviderError::Aborted);
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: partial.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: partial.clone(),
+        })
+        .await?;
 
     for index in 0..message.content.len() {
         if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            let aborted = create_aborted_message(&partial);
-            writer.push(AssistantMessageEvent::Error {
-                reason: ErrorStopReason::Aborted,
-                error: aborted.clone(),
-            });
-            writer.end(Some(aborted));
-            return;
+            return Err(ProviderError::Aborted);
         }
 
         let block = message.content[index].clone();
@@ -553,10 +544,12 @@ async fn stream_with_deltas(
                         redacted: None,
                         rest: Map::default(),
                     }));
-                writer.push(AssistantMessageEvent::ThinkingStart {
-                    content_index: index as u64,
-                    partial: partial.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ThinkingStart {
+                        content_index: index as u64,
+                        partial: partial.clone(),
+                    })
+                    .await?;
                 for chunk in split_string_by_token_size(
                     &thinking_block.thinking,
                     min_token_size,
@@ -564,30 +557,28 @@ async fn stream_with_deltas(
                 ) {
                     schedule_chunk(&chunk, tokens_per_second).await;
                     if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                        let aborted = create_aborted_message(&partial);
-                        writer.push(AssistantMessageEvent::Error {
-                            reason: ErrorStopReason::Aborted,
-                            error: aborted.clone(),
-                        });
-                        writer.end(Some(aborted));
-                        return;
+                        return Err(ProviderError::Aborted);
                     }
                     if let Some(AssistantContent::Thinking(content)) =
                         partial.content.get_mut(index)
                     {
                         content.thinking += &chunk;
                     }
-                    writer.push(AssistantMessageEvent::ThinkingDelta {
-                        content_index: index as u64,
-                        delta: chunk,
-                        partial: partial.clone(),
-                    });
+                    writer
+                        .send(AssistantMessageEvent::ThinkingDelta {
+                            content_index: index as u64,
+                            delta: chunk,
+                            partial: partial.clone(),
+                        })
+                        .await?;
                 }
-                writer.push(AssistantMessageEvent::ThinkingEnd {
-                    content_index: index as u64,
-                    content: thinking_block.thinking,
-                    partial: partial.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ThinkingEnd {
+                        content_index: index as u64,
+                        content: thinking_block.thinking,
+                        partial: partial.clone(),
+                    })
+                    .await?;
             }
             AssistantContent::Text(text_block) => {
                 partial.content.push(AssistantContent::Text(TextContent {
@@ -595,37 +586,37 @@ async fn stream_with_deltas(
                     text_signature: None,
                     rest: Map::default(),
                 }));
-                writer.push(AssistantMessageEvent::TextStart {
-                    content_index: index as u64,
-                    partial: partial.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::TextStart {
+                        content_index: index as u64,
+                        partial: partial.clone(),
+                    })
+                    .await?;
                 for chunk in
                     split_string_by_token_size(&text_block.text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
                     if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                        let aborted = create_aborted_message(&partial);
-                        writer.push(AssistantMessageEvent::Error {
-                            reason: ErrorStopReason::Aborted,
-                            error: aborted.clone(),
-                        });
-                        writer.end(Some(aborted));
-                        return;
+                        return Err(ProviderError::Aborted);
                     }
                     if let Some(AssistantContent::Text(content)) = partial.content.get_mut(index) {
                         content.text += &chunk;
                     }
-                    writer.push(AssistantMessageEvent::TextDelta {
-                        content_index: index as u64,
-                        delta: chunk,
-                        partial: partial.clone(),
-                    });
+                    writer
+                        .send(AssistantMessageEvent::TextDelta {
+                            content_index: index as u64,
+                            delta: chunk,
+                            partial: partial.clone(),
+                        })
+                        .await?;
                 }
-                writer.push(AssistantMessageEvent::TextEnd {
-                    content_index: index as u64,
-                    content: text_block.text,
-                    partial: partial.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::TextEnd {
+                        content_index: index as u64,
+                        content: text_block.text,
+                        partial: partial.clone(),
+                    })
+                    .await?;
             }
             AssistantContent::ToolCall(tool_call_block) => {
                 partial.content.push(AssistantContent::ToolCall(ToolCall {
@@ -635,10 +626,12 @@ async fn stream_with_deltas(
                     thought_signature: None,
                     rest: Map::default(),
                 }));
-                writer.push(AssistantMessageEvent::ToolcallStart {
-                    content_index: index as u64,
-                    partial: partial.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ToolcallStart {
+                        content_index: index as u64,
+                        partial: partial.clone(),
+                    })
+                    .await?;
                 let arguments_text =
                     serde_json::Value::Object(tool_call_block.arguments.clone()).to_string();
                 for chunk in
@@ -646,46 +639,31 @@ async fn stream_with_deltas(
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
                     if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                        let aborted = create_aborted_message(&partial);
-                        writer.push(AssistantMessageEvent::Error {
-                            reason: ErrorStopReason::Aborted,
-                            error: aborted.clone(),
-                        });
-                        writer.end(Some(aborted));
-                        return;
+                        return Err(ProviderError::Aborted);
                     }
-                    writer.push(AssistantMessageEvent::ToolcallDelta {
-                        content_index: index as u64,
-                        delta: chunk,
-                        partial: partial.clone(),
-                    });
+                    writer
+                        .send(AssistantMessageEvent::ToolcallDelta {
+                            content_index: index as u64,
+                            delta: chunk,
+                            partial: partial.clone(),
+                        })
+                        .await?;
                 }
                 if let Some(AssistantContent::ToolCall(content)) = partial.content.get_mut(index) {
                     content.arguments.clone_from(&tool_call_block.arguments);
                 }
-                writer.push(AssistantMessageEvent::ToolcallEnd {
-                    content_index: index as u64,
-                    tool_call: tool_call_block.clone(),
-                    partial: partial.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ToolcallEnd {
+                        content_index: index as u64,
+                        tool_call: tool_call_block.clone(),
+                        partial: partial.clone(),
+                    })
+                    .await?;
             }
         }
     }
 
-    if message.stop_reason == StopReason::Error || message.stop_reason == StopReason::Aborted {
-        writer.push(AssistantMessageEvent::Error {
-            reason: error_reason(message.stop_reason),
-            error: message.clone(),
-        });
-        writer.end(Some(message.clone()));
-        return;
-    }
-
-    writer.push(AssistantMessageEvent::Done {
-        reason: done_reason(message.stop_reason),
-        message: message.clone(),
-    });
-    writer.end(Some(message.clone()));
+    Ok(())
 }
 
 #[derive(Default)]
@@ -717,6 +695,10 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             &self.api
         }
 
+        fn supports_bounded_event_delivery(&self) -> bool {
+            true
+        }
+
         // Long by design: mirrors the provider's stream shape.
         #[allow(clippy::too_many_lines)]
         fn stream(
@@ -725,7 +707,11 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             context: &Context,
             options: Option<&StreamOptions>,
         ) -> AssistantMessageEventStream {
-            let (writer, reader) = create_assistant_message_event_stream();
+            let (writer, mut reader) = match create_provider_event_stream(model, options) {
+                Ok(pair) => pair,
+                Err(stream) => return stream,
+            };
+            let bounded = options.is_some_and(|options| options.event_buffer_capacity.is_some());
             let step = self.state.next_step();
             *self.state.call_count.lock().unwrap() += 1;
             self.state
@@ -744,7 +730,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             let max_token_size = self.max_token_size;
             let tokens_per_second = self.tokens_per_second;
 
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 if let Some(options) = options.as_ref() {
                     if let Some(on_response) = &options.on_response {
                         on_response(
@@ -769,10 +755,12 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                         options.as_ref(),
                         &state.prompt_cache,
                     );
-                    writer.push(AssistantMessageEvent::Error {
-                        reason: ErrorStopReason::Error,
-                        error: message.clone(),
-                    });
+                    let _ = writer
+                        .send(AssistantMessageEvent::Error {
+                            reason: ErrorStopReason::Error,
+                            error: message.clone(),
+                        })
+                        .await;
                     writer.end(Some(message));
                     return;
                 };
@@ -803,10 +791,12 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                                 let mut partial = message.clone();
                                 partial.content = Vec::new();
                                 let aborted = create_aborted_message(&partial);
-                                writer.push(AssistantMessageEvent::Error {
-                                    reason: ErrorStopReason::Aborted,
-                                    error: aborted.clone(),
-                                });
+                                let _ = writer
+                                    .send(AssistantMessageEvent::Error {
+                                        reason: ErrorStopReason::Aborted,
+                                        error: aborted.clone(),
+                                    })
+                                    .await;
                                 writer.end(Some(aborted));
                                 return;
                             }
@@ -827,26 +817,59 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                             options.as_ref(),
                             &state.prompt_cache,
                         );
-                        stream_with_deltas(
+                        let mut partial = message.clone();
+                        partial.content = Vec::new();
+                        let result = stream_with_deltas(
                             &writer,
                             &message,
+                            &mut partial,
                             min_token_size,
                             max_token_size,
                             tokens_per_second,
                             options.as_ref().and_then(|options| options.signal.as_ref()),
                         )
                         .await;
+                        let message = match result {
+                            Ok(()) => message,
+                            Err(ProviderError::Aborted) => create_aborted_message(&partial),
+                            Err(error) => {
+                                partial.stop_reason = StopReason::Error;
+                                partial.error_message = Some(error.to_string());
+                                partial
+                            }
+                        };
+                        let event = if matches!(
+                            message.stop_reason,
+                            StopReason::Error | StopReason::Aborted
+                        ) {
+                            AssistantMessageEvent::Error {
+                                reason: error_reason(message.stop_reason),
+                                error: message.clone(),
+                            }
+                        } else {
+                            AssistantMessageEvent::Done {
+                                reason: done_reason(message.stop_reason),
+                                message: message.clone(),
+                            }
+                        };
+                        let _ = writer.send(event).await;
+                        writer.end(Some(message));
                     }
                     Err(error) => {
                         let message = create_error_message(&error, &api, &provider, &model.id);
-                        writer.push(AssistantMessageEvent::Error {
-                            reason: ErrorStopReason::Error,
-                            error: message.clone(),
-                        });
+                        let _ = writer
+                            .send(AssistantMessageEvent::Error {
+                                reason: ErrorStopReason::Error,
+                                error: message.clone(),
+                            })
+                            .await;
                         writer.end(Some(message));
                     }
                 }
             });
+            if bounded {
+                reader.abort_on_drop = Some(task.abort_handle());
+            }
 
             reader
         }

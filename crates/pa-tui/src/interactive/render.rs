@@ -98,6 +98,9 @@ pub(super) enum Renderer {
         /// so restyle-only renders add no frame; this count is the style-blind render witness
         /// timing markers report.
         renders: usize,
+        /// Native-scrollback bytes from explicit restored-transcript replays. These are separate
+        /// from viewport frames so normal renders and render barriers never replay history.
+        replay_bytes: Vec<u8>,
     },
 }
 
@@ -270,6 +273,14 @@ impl Renderer {
                                     return;
                                 }
                             }
+                            HeadlessStep::WaitNativeReplay { needle, timeout_ms } => {
+                                if ui_tx
+                                    .send(UiInput::WaitNativeReplay { needle, timeout_ms })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
                             HeadlessStep::WaitMs(ms) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                             }
@@ -310,6 +321,7 @@ impl Renderer {
                     height: plan.height,
                     frames: Vec::new(),
                     renders: 0,
+                    replay_bytes: Vec::new(),
                 })
             }
         }
@@ -388,6 +400,47 @@ impl Renderer {
         Ok(())
     }
 
+    /// Replay an authoritative restored transcript on the primary screen, then return to the
+    /// fullscreen viewport. Mouse tracking and enhanced keyboard modes remain enabled throughout.
+    /// Callers consume the replay request before this fallible operation: a partial write must
+    /// never trigger an automatic replay retry.
+    pub(super) fn replay_loaded_transcript(&mut self, view: &mut AgentView) -> Result<()> {
+        use std::io::Write;
+        match self {
+            Renderer::Terminal { term, .. } => {
+                let (width, height) = terminal::size()?;
+                crate::altscreen::leave()?;
+                let mut out = std::io::stdout();
+                let replay = view
+                    .stream_replay_to(&mut out, width as usize, height as usize)
+                    .and_then(|()| out.flush());
+                // Restore fullscreen ownership even if the replay writer failed. Clear only the
+                // alternate screen; ratatui also invalidates its cached draw buffer here.
+                crate::altscreen::enter()?;
+                term.clear()?;
+                replay?;
+                Ok(())
+            }
+            Renderer::Headless {
+                width,
+                height,
+                replay_bytes,
+                ..
+            } => {
+                view.stream_replay_to(replay_bytes, *width as usize, *height as usize)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The explicit native-scrollback replay capture, separate from ordinary viewport frames.
+    pub(super) fn headless_replay_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Renderer::Headless { replay_bytes, .. } => Some(replay_bytes),
+            Renderer::Terminal { .. } => None,
+        }
+    }
+
     /// Whether this run owns a real terminal (the force-quit guard arms on terminal runs; headless
     /// verification keeps deterministic teardown).
     pub(super) fn is_terminal(&self) -> bool {
@@ -411,6 +464,7 @@ impl Renderer {
             height,
             frames,
             renders,
+            ..
         } = self
         else {
             return;
@@ -446,6 +500,7 @@ impl Renderer {
             height,
             frames,
             renders,
+            ..
         } = self
         else {
             return;
@@ -543,4 +598,51 @@ pub(crate) fn write_flush_rows(buffer: &mut String, rows: &[crate::Line]) {
 /// The main-screen exit flush is on unless `PRIME_AGENT_TUI_EXIT_FLUSH=0` opts out.
 fn exit_flush_enabled() -> bool {
     std::env::var_os("PRIME_AGENT_TUI_EXIT_FLUSH").is_none_or(|value| value != "0")
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[test]
+    fn restored_replay_is_separate_from_viewport_draws_and_resizes() {
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        for index in 0..1200 {
+            view.push(crate::session::TranscriptItem::UserMessage {
+                text: format!("native-replay-{index:04}"),
+            });
+        }
+        let mut renderer = Renderer::Headless {
+            width: 80,
+            height: 24,
+            frames: Vec::new(),
+            renders: 0,
+            replay_bytes: Vec::new(),
+        };
+        // A prior exit/suspend diff base must not suppress authoritative replay.
+        view.stream_flush_to(&mut Vec::new(), 80, 24).unwrap();
+        renderer.replay_loaded_transcript(&mut view).unwrap();
+        let bytes = renderer.headless_replay_bytes().unwrap().to_vec();
+        let replay = String::from_utf8(bytes.clone()).unwrap();
+        let first = replay.find("native-replay-0000").unwrap();
+        let middle = replay.find("native-replay-0600").unwrap();
+        let tail = replay.find("native-replay-1199").unwrap();
+        assert!(first < middle && middle < tail);
+        assert!(!replay.contains("\x1b[3J"));
+        renderer.render_headless_pane(&mut view);
+        renderer.render_headless_pane(&mut view);
+        if let Renderer::Headless { width, height, .. } = &mut renderer {
+            *width = 40;
+            *height = 10;
+        }
+        renderer.render_headless_pane(&mut view);
+        assert_eq!(renderer.headless_replay_bytes(), Some(bytes.as_slice()));
+        assert_eq!(renderer.headless_renders(), 3);
+        let mut ordinary = Vec::new();
+        view.stream_flush_to(&mut ordinary, 80, 24).unwrap();
+        assert!(ordinary.is_empty());
+    }
 }

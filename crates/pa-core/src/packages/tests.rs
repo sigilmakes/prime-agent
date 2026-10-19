@@ -249,7 +249,7 @@ fn git_clone_update_remove_flow() {
         SourceScope::User,
         &sandbox.cwd,
         &sandbox.agent_dir,
-        None,
+        Some(&vec![sandbox.npm_shim.display().to_string()]),
     )
     .unwrap();
 
@@ -272,7 +272,7 @@ fn git_clone_update_remove_flow() {
         SourceScope::User,
         &sandbox.cwd,
         &sandbox.agent_dir,
-        None,
+        Some(&vec![sandbox.npm_shim.display().to_string()]),
     )
     .unwrap();
     assert!(installed.join("skills.md").exists());
@@ -282,7 +282,7 @@ fn git_clone_update_remove_flow() {
         SourceScope::User,
         &sandbox.cwd,
         &sandbox.agent_dir,
-        None,
+        Some(&vec![sandbox.npm_shim.display().to_string()]),
     )
     .unwrap();
 
@@ -317,7 +317,7 @@ fn git_ref_checkout_installs_the_pinned_revision() {
         SourceScope::User,
         &sandbox.cwd,
         &sandbox.agent_dir,
-        None,
+        Some(&vec![sandbox.npm_shim.display().to_string()]),
     )
     .unwrap();
     let installed = sandbox

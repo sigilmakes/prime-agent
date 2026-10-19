@@ -3,9 +3,8 @@
 //! gate.
 
 use super::{
-    now_epoch_ms, parse_storage_data, refresh_flight, resolve_config_value,
-    resolve_config_value_uncached, AuthApiKeyResult, AuthCredential, AuthStorage,
-    PRIME_INFERENCE_PROVIDER_ID,
+    now_epoch_ms, parse_storage_data, resolve_config_value, resolve_config_value_uncached,
+    AuthApiKeyResult, AuthCredential, AuthStorage, PRIME_INFERENCE_PROVIDER_ID,
 };
 
 impl AuthStorage {
@@ -138,105 +137,56 @@ impl AuthStorage {
             .api_key
     }
 
-    /// Refresh an expired OAuth credential, returning the new credential on success.
-    ///
-    /// Load-then-lock shape: the token fetch never runs under the document lock
-    /// (TS refreshes inside `withLockAsync`; its single-threaded runtime pays nothing,
-    /// but a fetch under this port's lock would stall every same-process auth read
-    /// and write). The phases:
-    ///
-    /// 1. LOAD: the document through the read arm (no document lock).
-    /// 2. FETCH: the token call outside every lock, behind [`refresh_flight`]'s
-    ///    single-flight gate; the expiry is re-checked under the gate so a second
-    ///    fetch never wastes a single-use refresh token.
-    /// 3. WRITE: the locked read-modify-write, holding the lock only for the re-read,
-    ///    insert, and atomic write. A peer that refreshed meanwhile keeps its fresher
-    ///    credential.
+    /// Refresh under the same cross-process document lock the TypeScript backend
+    /// holds. A process-local flight gate cannot protect a single-use grant.
     fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
-        // LOAD: no document lock.
-        let Ok(content) = self.storage.read() else {
-            // A failed read: reload, then serve the stored credential.
+        if super::super::refresh_policy::disabled() {
+            // A peer may already have committed a fresh token. Re-read the
+            // authoritative file before refusing, but never invoke the refresh
+            // integration or fall back to a repeatedly rejected old grant.
             self.reload();
-            return self
-                .data
-                .credential(provider_id)
-                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
-        };
-        let Ok(data) = parse_storage_data(content.as_deref()) else {
-            self.reload();
-            return self
-                .data
-                .credential(provider_id)
-                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
-        };
-        let Some(credential) = data.credential(provider_id) else {
-            self.reload();
-            return None;
-        };
-        let AuthCredential::Oauth { expires, .. } = &credential else {
-            self.reload();
-            return None;
-        };
-        if now_epoch_ms() < *expires {
-            self.reload();
-            return Some(credential);
-        }
-        // FETCH: outside every lock, one flight per provider.
-        let fetched = {
-            let _flight = refresh_flight(provider_id);
-            // The gate may have just released a flight that wrote a fresh
-            // credential; re-check before spending a refresh token.
-            let content = self.storage.read().unwrap_or_default();
-            if let Some(credential) = parse_storage_data(content.as_deref())
-                .ok()
-                .and_then(|data| data.credential(provider_id))
-                .filter(|credential| {
-                    matches!(
-                        credential,
-                        AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-                    )
-                })
-            {
-                self.reload();
-                return Some(credential);
+            let current = self.data.credential(provider_id).filter(|credential| {
+                matches!(credential, AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires)
+            });
+            if current.is_none() {
+                let message = "OAuth refresh disabled by PRIME_AGENT_DISABLE_OAUTH_REFRESH";
+                if !self.errors.iter().any(|error| error == message) {
+                    self.errors.push(message.into());
+                }
             }
-            self.oauth.refresh(provider_id, &data)
-        };
-        let Some(new_credential) = fetched else {
-            // Refresh failed: keep credentials for a later retry; a peer
-            // may have refreshed meanwhile, so reload before failing.
-            self.reload();
-            return None;
-        };
-        // WRITE: the locked read-modify-write.
-        let mut refreshed: Option<AuthCredential> = Some(new_credential.clone());
-        let result = self.storage.with_lock(&mut |current| {
+            return current;
+        }
+        let mut refreshed = None;
+        let result = self.storage.with_refresh_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
-            if let Some(credential) = data.credential(provider_id).filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-                )
-            }) {
-                // A peer refreshed while this fetch ran: its fresher
-                // credential stands and this attempt writes nothing.
+            let Some(credential) = data.credential(provider_id) else {
+                return Ok(((), None));
+            };
+            let AuthCredential::Oauth { expires, .. } = &credential else {
+                return Ok(((), None));
+            };
+            if now_epoch_ms() < *expires {
                 refreshed = Some(credential);
                 return Ok(((), None));
             }
-            data.insert(provider_id, &new_credential);
-            let content = serde_json::to_string_pretty(&data.0)?;
-            Ok(((), Some(content)))
+            let Some(next) = self.oauth.refresh(provider_id, &data) else {
+                return Ok(((), None));
+            };
+            // Only this locked snapshot may authorize spending the refresh token.
+            // The file backend rechecks the entire raw document before publication,
+            // refusing an out-of-protocol deletion/replacement during the fetch.
+            data.insert_preserving_metadata(provider_id, &next);
+            refreshed = Some(next);
+            Ok(((), Some(serde_json::to_string_pretty(&data.0)?)))
         });
         if result.is_err() {
-            // A peer may have refreshed successfully; reload before failing.
             self.reload();
-            return self
-                .data
-                .credential(provider_id)
-                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+            // A peer may have finished while lock acquisition waited. Never serve
+            // an expired credential or the rejected fetch's credential on failure.
+            return self.data.credential(provider_id).filter(|credential| {
+                matches!(credential, AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires)
+            });
         }
-        // Reload from what we wrote: the in-memory snapshot must not serve the
-        // pre-refresh credential (a rotated refresh token is single-use).
         self.reload();
         refreshed
     }

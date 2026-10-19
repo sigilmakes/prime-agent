@@ -200,18 +200,7 @@ impl Worker {
         // The fresh arms defer their creation prefix to after the startup scope
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
-        let (settings, trace_consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(
-            std::path::Path::new(&cwd),
-            &self.config.agent_dir,
-        );
-        let traces = |path: &std::path::Path| {
-            pa_core::agent_traces::ContinuousTraceUpload::install(
-                std::path::Path::new(&cwd),
-                &self.config.agent_dir,
-                Some(path),
-                trace_consent.clone(),
-            )
-        };
+        let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
                 let loaded = {
@@ -230,7 +219,6 @@ impl Worker {
                 };
                 match loaded {
                     Ok(mut opened) => {
-                        opened.trace_upload = traces(&opened.path);
                         opened_existing_session = true;
                         if opened.skipped_lines > 0 {
                             // The rows stay on disk (the append-only
@@ -315,7 +303,6 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
-                created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -354,7 +341,6 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
-                created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -401,9 +387,10 @@ impl Worker {
         let scoped_models = if model_patterns.is_empty() {
             Vec::new()
         } else {
-            let registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
-            let available: Vec<pa_types::ai::Model> =
-                registry.get_available().into_iter().cloned().collect();
+            let mut registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
+            // Authoritative scope resolution follows successful cache publication, not a
+            // caller deadline that can expire while a sibling still owns the cache lock.
+            let available = registry.refresh_available_models().await;
             pa_core::models::resolve_model_scope_from_models(&model_patterns, &available)
         };
         let is_continuing = opened_existing_session;
@@ -613,9 +600,12 @@ impl Worker {
         // Deliberate divergence from TS's eager create build: the response stays
         // model-independent; a build failure surfaces on the first demand seam.
         if let Some(agent_engine) = &self.agent_engine {
+            // Pin the selected identity before another worker publishes a refresh.
+            // This does not build the lazy core or resolve request credentials.
+            agent_engine.capture_model_metadata_refresh_anchor();
             let engine = std::sync::Arc::clone(agent_engine);
             tokio::spawn(async move {
-                let Ok(model) = engine.resolve_model() else {
+                let Ok(model) = engine.session_model() else {
                     return;
                 };
                 let _ = engine.ensure_core_session_async(&model).await;

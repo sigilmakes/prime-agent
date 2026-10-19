@@ -41,6 +41,16 @@ pub struct McpOAuthConfig {
 
 /// The interactive surface a login drives (the TS `OAuthLoginCallbacks`).
 pub trait McpLoginUi: Send + Sync {
+    /// Whether the user cancelled this login. Hosts check again immediately before saving.
+    fn cancelled(&self) -> bool {
+        false
+    }
+    /// Wait for explicit cancellation, including during discovery and token exchange.
+    /// Implementations must also report an already-cancelled login without waiting.
+    /// Surfaces without cancellation remain pending; dropping the login still tears it down.
+    fn wait_cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
     /// Narration for slow steps (discovery, registration, exchange).
     fn on_progress(&self, message: &str);
     /// The authorization URL to open in a browser, plus instructions.
@@ -130,11 +140,74 @@ enum ManualOutcome {
 /// # Errors
 ///
 /// Returns an error when discovery, registration, the callback server, the
-/// paste validation, or the token exchange fails.
+/// paste validation, or the token exchange fails, when the user cancels,
+/// or when the entire flow exceeds 120 seconds. Dropping the future also closes its sockets.
 pub async fn mcp_login(
     http: &dyn OAuthHttp,
     config: &McpOAuthConfig,
     ui: &dyn McpLoginUi,
+) -> Result<AuthCredential> {
+    mcp_login_until(
+        http,
+        config,
+        ui,
+        tokio::time::Instant::now() + LOGIN_TIMEOUT,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn mcp_login_with_listener(
+    http: &dyn OAuthHttp,
+    config: &McpOAuthConfig,
+    ui: &dyn McpLoginUi,
+    listener: super::oauth_callback::test_listener::ReservedListener,
+) -> Result<AuthCredential> {
+    mcp_login_until(
+        http,
+        config,
+        ui,
+        tokio::time::Instant::now() + LOGIN_TIMEOUT,
+        Some(listener),
+    )
+    .await
+}
+
+pub(super) const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
+
+pub(super) async fn mcp_login_until(
+    http: &dyn OAuthHttp,
+    config: &McpOAuthConfig,
+    ui: &dyn McpLoginUi,
+    deadline: tokio::time::Instant,
+    #[cfg(test)] reserved_listener: Option<super::oauth_callback::test_listener::ReservedListener>,
+) -> Result<AuthCredential> {
+    if ui.cancelled() {
+        bail!("Login cancelled");
+    }
+    tokio::select! {
+        biased;
+        () = ui.wait_cancelled() => Err(anyhow!("Login cancelled")),
+        () = tokio::time::sleep_until(deadline) => Err(anyhow!("Login timed out")),
+        result = login_flow(http, config, ui, #[cfg(test)] reserved_listener) => {
+            if ui.cancelled() {
+                bail!("Login cancelled");
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("Login timed out");
+            }
+            result
+        }
+    }
+}
+
+async fn login_flow(
+    http: &dyn OAuthHttp,
+    config: &McpOAuthConfig,
+    ui: &dyn McpLoginUi,
+    #[cfg(test)] reserved_listener: Option<super::oauth_callback::test_listener::ReservedListener>,
 ) -> Result<AuthCredential> {
     super::oauth_callback::validate_callback_port(config.callback_port)?;
     let discovery = discover(http, &config.url).await?;
@@ -185,7 +258,16 @@ pub async fn mcp_login(
     // `state` is independent of the PKCE verifier: the verifier is the
     // token-exchange secret, `state` is echoed on the redirect URL.
     let state = random_state();
+    #[cfg(not(test))]
     let callback = CallbackServer::start(&config.label, config.callback_port).await?;
+    #[cfg(test)]
+    let callback = match reserved_listener {
+        Some(listener) => {
+            assert_eq!(config.callback_port, Some(listener.port()));
+            listener.into_callback()?
+        }
+        None => CallbackServer::start(&config.label, config.callback_port).await?,
+    };
     let redirect_uri = callback.redirect_uri();
     let mut auth_params: Vec<(String, String)> = vec![
         ("client_id".to_string(), client_id.clone()),
@@ -507,6 +589,10 @@ pub async fn mcp_refresh_token(
 
 #[cfg(test)]
 mod tests {
+    mod lifecycle_tests {
+        include!("oauth/lifecycle_tests.rs");
+    }
+
     use super::*;
     use crate::mcp::oauth_http::{OAuthHttpRequest, OAuthHttpResponse};
     use std::collections::HashMap;
@@ -712,23 +798,28 @@ mod tests {
             ),
             (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
         ]);
-        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
+        let (reservation, ownership) =
+            super::super::oauth_callback::test_listener::reserve_listener();
+        let port = reservation.port();
         let mut config = config("Slack", ORIGIN_URL);
         config.client_id = Some("registered-client".to_string());
         config.callback_port = Some(port);
         let ui = PendingUi(Mutex::default());
-        let mut login = Box::pin(mcp_login(&http, &config, &ui));
+        let mut login = Box::pin(mcp_login_with_listener(&http, &config, &ui, reservation));
         assert!(futures::poll!(login.as_mut()).is_pending());
         assert!(
             !ui.0.lock().unwrap().is_empty(),
             "login reached browser authorization"
         );
+        assert!(
+            ownership.is_listening(),
+            "login owns the reserved callback listener"
+        );
         drop(login);
-        let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
-            .expect("cancelling login must release its callback port before the next attempt");
-        drop(rebound);
+        assert!(
+            ownership.is_closed(),
+            "dropping login closes actual owned callback sockets"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -780,9 +871,9 @@ mod tests {
             // Every schedule must succeed; repetition exercises select's fair branch ordering,
             // rather than retrying a failed login until it happens to succeed.
             for _ in 0..32 {
-                let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-                let port = reservation.local_addr().unwrap().port();
-                drop(reservation);
+                let (reservation, ownership) =
+                    super::super::oauth_callback::test_listener::reserve_listener();
+                let port = reservation.port();
                 let mut config = config("Slack", ORIGIN_URL);
                 config.client_id = Some("registered-client".to_string());
                 config.callback_port = Some(port);
@@ -790,8 +881,9 @@ mod tests {
                     auth_url: Mutex::default(),
                     input: input.clone(),
                 };
-                let mut login = Box::pin(mcp_login(&http, &config, &ui));
+                let mut login = Box::pin(mcp_login_with_listener(&http, &config, &ui, reservation));
                 assert!(futures::poll!(login.as_mut()).is_pending());
+                assert!(ownership.is_listening());
                 let auth_url = Url::parse(&ui.auth_url.lock().unwrap()).unwrap();
                 let state = auth_url
                     .query_pairs()
@@ -812,6 +904,7 @@ mod tests {
                 login
                     .await
                     .expect("the settled browser code must survive the paste outcome");
+                assert!(ownership.is_closed());
                 let requests = http.seen.lock().unwrap();
                 let (url, body) = requests.last().unwrap();
                 assert_eq!(url, ORIGIN_TOKEN);
@@ -1433,9 +1526,9 @@ mod tests {
 
     #[tokio::test]
     async fn pre_registered_client_skips_registration_and_pins_the_redirect() {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        let (reservation, ownership) =
+            super::super::oauth_callback::test_listener::reserve_listener();
+        let port = reservation.port();
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 404, None, ""),
             (
@@ -1456,7 +1549,10 @@ mod tests {
         let mut login_config = config("root", ORIGIN_URL);
         login_config.client_id = Some("root-client".to_string());
         login_config.callback_port = Some(port);
-        let credentials = mcp_login(&http, &login_config, &ui).await.unwrap();
+        let credentials = mcp_login_with_listener(&http, &login_config, &ui, reservation)
+            .await
+            .unwrap();
+        assert!(ownership.is_closed());
         match &credentials {
             AuthCredential::Oauth {
                 access, client_id, ..
@@ -1499,9 +1595,9 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_registration_advertises_the_pinned_redirect() {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        let (reservation, ownership) =
+            super::super::oauth_callback::test_listener::reserve_listener();
+        let port = reservation.port();
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 404, None, ""),
             (
@@ -1527,7 +1623,10 @@ mod tests {
         let ui = test_ui();
         let mut login_config = config("origin", ORIGIN_URL);
         login_config.callback_port = Some(port);
-        let credentials = mcp_login(&http, &login_config, &ui).await.unwrap();
+        let credentials = mcp_login_with_listener(&http, &login_config, &ui, reservation)
+            .await
+            .unwrap();
+        assert!(ownership.is_closed());
         match &credentials {
             AuthCredential::Oauth { access, .. } => assert_eq!(access, "range-access"),
             other => panic!("oauth credential expected, got {other:?}"),

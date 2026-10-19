@@ -500,6 +500,13 @@ pub fn message_value_to_entries(message: &Value) -> Vec<ChatEntry> {
         "assistant" => assistant_value_to_entries(message),
         "custom" => custom_message_entries(message),
         "compactionSummary" => compaction_summary_entries(message),
+        "branchSummary" => vec![ChatEntry::BranchSummary {
+            summary: message
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }],
         // Other roles (tool results, bookkeeping) have no rendering here:
         // live tool results arrive as tool_execution events instead.
         _ => Vec::new(),

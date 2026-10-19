@@ -239,7 +239,11 @@ async fn connection_worker(
                 return;
             }
             WorkerCommand::Send { body, events } => {
-                if sink.send(Message::Text(body.into())).await.is_err() {
+                let sent = tokio::select! {
+                    () = events.closed() => return,
+                    sent = sink.send(Message::Text(body.into())) => sent,
+                };
+                if sent.is_err() {
                     // A dead socket surfaces through its close event (the TS runtime's send on a
                     // closed socket is a silent no-op; the close event carries the failure).
                     let _ = events
@@ -276,15 +280,15 @@ async fn read_request_events(
         if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Err(CodexStreamError::Aborted);
         }
-        let next = stream.next();
-        let message = match signal {
-            Some(signal) => {
-                tokio::select! {
-                    () = signal.cancelled() => return Err(CodexStreamError::Aborted),
-                    message = next => message,
+        let message = tokio::select! {
+            () = events.closed() => return Err(CodexStreamError::Aborted),
+            () = async {
+                match signal {
+                    Some(signal) => signal.cancelled().await,
+                    None => std::future::pending().await,
                 }
-            }
-            None => next.await,
+            } => return Err(CodexStreamError::Aborted),
+            message = stream.next() => message,
         };
         match message {
             // Peer EOF without a close frame: the runtime fires a close event with code 1006
@@ -376,6 +380,30 @@ pub struct AcquiredConnection {
     /// A cache entry backs this connection (continuation is possible).
     pub cached: bool,
     pub connection_id: u64,
+    /// Bounded streams arm this lease so aborting their producer cannot strand a busy cache entry.
+    pub(super) abort_on_drop: bool,
+}
+
+impl Drop for AcquiredConnection {
+    fn drop(&mut self) {
+        if !self.abort_on_drop {
+            return;
+        }
+        if let (Some(session_id), Ok(mut state)) =
+            (self.session_id.as_deref(), session_state().lock())
+        {
+            let matches = state
+                .connections
+                .get(session_id)
+                .is_some_and(|entry| entry.connection_id == self.connection_id);
+            if matches {
+                state.connections.remove(session_id);
+            }
+        }
+        // An active request also observes its event receiver closing. An idle worker consumes
+        // this command, so a dropped lease closes both active and not-yet-started requests.
+        let _ = self.worker.try_send(WorkerCommand::Close);
+    }
 }
 
 impl AcquiredConnection {
@@ -434,6 +462,7 @@ pub async fn acquire_websocket(
             reused: false,
             cached: false,
             connection_id,
+            abort_on_drop: false,
         });
     };
 
@@ -458,6 +487,7 @@ pub async fn acquire_websocket(
             reused: true,
             cached: true,
             connection_id,
+            abort_on_drop: false,
         });
     }
 
@@ -480,6 +510,7 @@ pub async fn acquire_websocket(
                 reused: false,
                 cached: false,
                 connection_id,
+                abort_on_drop: false,
             });
         };
         state.connections.insert(
@@ -501,14 +532,16 @@ pub async fn acquire_websocket(
         reused: false,
         cached,
         connection_id,
+        abort_on_drop: false,
     })
 }
 
 pub async fn release_connection(
-    connection: AcquiredConnection,
+    mut connection: AcquiredConnection,
     keep: bool,
     continuation: Option<ContinuationState>,
 ) {
+    connection.abort_on_drop = false;
     let session_id = connection.session_id.clone();
     let Some(session_id) = session_id else {
         // Uncached connections always close after the request.
@@ -999,7 +1032,9 @@ mod ws_wire_tests {
         };
         assert_eq!(
             error.to_string(),
-            format!("WebSocket connection to 'wss://127.0.0.1:{port}/codex/responses' failed: TLS handshake failed")
+            format!(
+                "WebSocket connection to 'wss://127.0.0.1:{port}/codex/responses' failed: TLS handshake failed"
+            )
         );
         assert_eq!(error.error_name(), "Error");
     }
@@ -1015,5 +1050,66 @@ mod ws_wire_tests {
                 .starts_with("Invalid Codex WebSocket JSON: "),
             "unexpected text {error}"
         );
+    }
+    #[tokio::test]
+    async fn bounded_connection_drop_clears_busy_cache_and_closes_idle_or_active_socket() {
+        for phase in ["idle", "active"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("address");
+            let session_id = format!("bounded-drop-{phase}-{address}");
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.expect("accept");
+                let mut socket = tokio_tungstenite::accept_async(socket)
+                    .await
+                    .expect("upgrade");
+                if phase == "active" {
+                    let request = socket.next().await.expect("request").expect("frame");
+                    assert!(request.is_text());
+                }
+                ready_tx.send(()).expect("readiness");
+                match socket.next().await {
+                    None | Some(Ok(Message::Close(_)) | Err(_)) => {}
+                    other => panic!("expected socket closure, got {other:?}"),
+                }
+            });
+            let mut connection = acquire_websocket(
+                &format!("ws://{address}/codex/responses"),
+                &[],
+                Some(&session_id),
+                None,
+            )
+            .await
+            .expect("connection");
+            connection.abort_on_drop = true;
+            let events = if phase == "active" {
+                Some(
+                    connection
+                        .send_request(&serde_json::json!({"model": "gpt"}), None)
+                        .await
+                        .expect("request"),
+                )
+            } else {
+                None
+            };
+            ready_rx.await.expect("peer ready");
+            assert!(session_state()
+                .lock()
+                .expect("session state")
+                .connections
+                .get(&session_id)
+                .is_some_and(|entry| entry.busy));
+            drop(events);
+            drop(connection);
+            assert!(!session_state()
+                .lock()
+                .expect("session state")
+                .connections
+                .contains_key(&session_id));
+            tokio::time::timeout(Duration::from_secs(2), peer)
+                .await
+                .expect("socket must close")
+                .expect("peer task");
+        }
     }
 }

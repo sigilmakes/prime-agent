@@ -89,7 +89,7 @@ pub(crate) fn wheel_scroll_delta(event: &MouseEvent) -> Option<isize> {
     }
 }
 
-const WHEEL_SCROLL_LINES: isize = 3;
+const WHEEL_SCROLL_LINES: isize = 1;
 
 /// A report read back from a crossterm mouse event: wheel turns, left-button presses, drags,
 /// releases, and the buttonless motion of `?1003` tracking (crossterm's `Moved` — operator
@@ -212,9 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn wheel_up_scrolls_three_lines_up() {
+    fn wheel_up_scrolls_one_line_up() {
         let event = parse_sgr_mouse_event("\x1b[<64;10;10M").expect("valid SGR report");
-        assert_eq!(wheel_scroll_delta(&event), Some(-3));
+        assert_eq!(wheel_scroll_delta(&event), Some(-1));
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!((event.x, event.y), (20, 5));
         assert!(event.press);
         assert!(event.shift);
-        assert_eq!(wheel_scroll_delta(&event), Some(-3));
+        assert_eq!(wheel_scroll_delta(&event), Some(-1));
 
         let down = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::ScrollDown,
@@ -254,7 +254,7 @@ mod tests {
         };
         let event = from_crossterm(down).expect("wheel-down event");
         assert_eq!(event.button, WHEEL_DOWN);
-        assert_eq!(wheel_scroll_delta(&event), Some(3));
+        assert_eq!(wheel_scroll_delta(&event), Some(1));
     }
 
     #[test]

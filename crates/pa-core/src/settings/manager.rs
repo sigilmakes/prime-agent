@@ -75,8 +75,7 @@ impl SettingsManager {
     }
 
     /// A new manager over the same settings store (a fresh read; the
-    /// runtime overrides carry over), for long-lived readers such as the
-    /// telemetry switch.
+    /// runtime overrides carry over).
     #[must_use]
     pub fn reopen(&self) -> Self {
         let mut fresh = Self::from_storage(Arc::clone(&self.storage));
@@ -233,7 +232,7 @@ impl SettingsManager {
     }
 
     /// `treeFilterMode`: the `/tree` selector's initial filter; an unset
-    /// or invalid value falls back to `user-only` (the TS default).
+    /// or invalid value falls back to `default` (the TS default).
     #[must_use]
     pub fn get_tree_filter_mode(&self) -> String {
         let mode = self.settings().tree_filter_mode.clone().unwrap_or_default();
@@ -241,7 +240,7 @@ impl SettingsManager {
         if valid.contains(&mode.as_str()) && !mode.is_empty() {
             mode
         } else {
-            "user-only".to_string()
+            "default".to_string()
         }
     }
 
@@ -365,24 +364,6 @@ impl SettingsManager {
     /// # Errors
     ///
     /// Returns an error when the global settings file cannot be written.
-    pub fn set_telemetry_enabled(&mut self, enabled: bool) -> Result<()> {
-        let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
-        telemetry.enabled = Some(enabled);
-        self.save_global(&["telemetry.enabled"])
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error when the global settings file cannot be written.
-    pub fn set_telemetry_notice_shown(&mut self, shown: bool) -> Result<()> {
-        let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
-        telemetry.notice_shown = Some(shown);
-        self.save_global(&["telemetry.noticeShown"])
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error when the global settings file cannot be written.
     pub fn set_onboarding_shown(&mut self, shown: bool) -> Result<()> {
         self.global.onboarding_shown = Some(shown);
         self.save_global(&["onboardingShown"])
@@ -415,39 +396,6 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// `agentTraces.enabled`: unset means OFF — trace sharing is opt-in, exactly the TS default.
-    #[must_use]
-    pub fn get_agent_traces_enabled(&self) -> bool {
-        self.merged
-            .agent_traces
-            .as_ref()
-            .and_then(|traces| traces.enabled)
-            .unwrap_or(false)
-    }
-
-    /// Whether a trace-sharing choice was ever written: the `agentTraces.enabled` key
-    /// present in the merged settings. Only a fresh home (no choice written) is asked, once.
-    #[must_use]
-    pub fn agent_traces_choice_written(&self) -> bool {
-        self.merged
-            .agent_traces
-            .as_ref()
-            .and_then(|traces| traces.enabled)
-            .is_some()
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error when the global settings file cannot be written.
-    pub fn set_agent_traces_enabled(&mut self, enabled: bool) -> Result<()> {
-        let traces = self
-            .global
-            .agent_traces
-            .get_or_insert_with(Default::default);
-        traces.enabled = Some(enabled);
-        self.save_global(&["agentTraces.enabled"])
-    }
-
     pub fn set_packages(&mut self, packages: Vec<serde_json::Value>) {
         self.global.packages = Some(packages.clone());
         self.persist_scope_field(
@@ -459,6 +407,10 @@ impl SettingsManager {
     }
 
     pub fn set_project_packages(&mut self, packages: Vec<serde_json::Value>) {
+        if self.storage.project_scope_is_global() {
+            self.set_packages(packages);
+            return;
+        }
         self.project.packages = Some(packages.clone());
         self.persist_scope_field(
             SettingsScope::Project,
@@ -488,6 +440,10 @@ impl SettingsManager {
 
     /// Replace one resource-path array in the project settings file.
     pub fn set_project_resource_array(&mut self, field: &str, values: Vec<String>) {
+        if self.storage.project_scope_is_global() {
+            self.set_global_resource_array(field, values);
+            return;
+        }
         let array: Vec<serde_json::Value> =
             values.into_iter().map(serde_json::Value::String).collect();
         match field {
@@ -840,42 +796,6 @@ impl SettingsManager {
         self.merged.transport.unwrap_or(TransportSetting::Auto)
     }
 
-    /// `telemetry.enabled` when any scope sets it (`None`: nothing set, the
-    /// default-on posture), resolved like [`Self::get_telemetry_enabled`].
-    #[must_use]
-    pub fn telemetry_enabled_setting(&self) -> Option<bool> {
-        let set = [
-            self.global.telemetry.as_ref(),
-            self.project.telemetry.as_ref(),
-            self.runtime_overrides.telemetry.as_ref(),
-        ]
-        .iter()
-        .any(|scope| scope.and_then(|t| t.enabled).is_some());
-        set.then(|| self.get_telemetry_enabled())
-    }
-
-    /// Telemetry is enabled only when every scope says so (default true).
-    #[must_use]
-    pub fn get_telemetry_enabled(&self) -> bool {
-        [
-            self.global.telemetry.as_ref(),
-            self.project.telemetry.as_ref(),
-            self.runtime_overrides.telemetry.as_ref(),
-        ]
-        .iter()
-        .all(|scope| scope.and_then(|t| t.enabled).unwrap_or(true))
-    }
-
-    #[must_use]
-    pub fn get_telemetry_notice_shown(&self) -> bool {
-        self.runtime_overrides
-            .telemetry
-            .as_ref()
-            .and_then(|t| t.notice_shown)
-            .or_else(|| self.global.telemetry.as_ref().and_then(|t| t.notice_shown))
-            .unwrap_or(false)
-    }
-
     /// `requestTiming`: unset means OFF — the per-request timing timeline
     /// is opt-in, exactly the TS default.
     #[must_use]
@@ -1007,6 +927,9 @@ fn load_scope(
     scope: SettingsScope,
     errors: &mut Vec<SettingsError>,
 ) -> (Settings, Option<serde_json::Value>, Option<String>) {
+    if scope == SettingsScope::Project && storage.project_scope_is_global() {
+        return (Settings::default(), None, None);
+    }
     let mut load_error: Option<String> = None;
     // The pure-read arm: a locked protocol read on any cache miss, the
     // process-cached copy on a hit (see `SettingsStorage::read`).
@@ -1032,6 +955,14 @@ fn load_scope(
         }
     };
     if let Some(message) = load_error {
+        errors.push(SettingsError {
+            scope,
+            message: message.clone(),
+        });
+        return (Settings::default(), None, Some(message));
+    }
+    if !value.is_object() {
+        let message = "settings document must be an object".to_string();
         errors.push(SettingsError {
             scope,
             message: message.clone(),
@@ -1194,7 +1125,6 @@ mod tests {
             .unwrap();
         let manager = SettingsManager::from_storage(storage);
         assert_eq!(manager.get_steering_mode(), QueueModeSetting::All);
-        assert!(manager.get_telemetry_enabled());
     }
 
     #[test]
@@ -1227,30 +1157,6 @@ mod tests {
         );
         manager.global.idle_eviction_minutes = Some(serde_json::json!(45));
         assert_eq!(manager.get_idle_eviction(), IdleEviction::Minutes(45));
-    }
-
-    #[test]
-    fn agent_traces_default_off_and_persist_the_opt_in() {
-        let mut manager = SettingsManager::in_memory(&Settings::default());
-        assert!(!manager.get_agent_traces_enabled());
-        manager.set_agent_traces_enabled(true).unwrap();
-        assert!(manager.get_agent_traces_enabled());
-        manager.reload().unwrap();
-        assert!(manager.get_agent_traces_enabled());
-        manager.set_agent_traces_enabled(false).unwrap();
-        assert!(!manager.get_agent_traces_enabled());
-    }
-
-    #[test]
-    fn agent_traces_choice_written_marks_a_provisioned_home() {
-        let mut manager = SettingsManager::in_memory(&Settings::default());
-        assert!(!manager.agent_traces_choice_written());
-        manager.set_agent_traces_enabled(false).unwrap();
-        assert!(manager.agent_traces_choice_written());
-        manager.reload().unwrap();
-        assert!(manager.agent_traces_choice_written());
-        manager.set_agent_traces_enabled(true).unwrap();
-        assert!(manager.agent_traces_choice_written());
     }
 
     #[test]

@@ -81,7 +81,10 @@ impl AgentSessionEngine {
             },
         )
         .map_err(anyhow::Error::msg)?;
-        Ok(route)
+        Ok(route.map(|mut route| {
+            route.model = self.configure_fresh_ollama_model(&route.model);
+            route
+        }))
     }
 
     /// Arm (or clear) the dispatched batch's image-model route: the
@@ -108,7 +111,6 @@ impl AgentSessionEngine {
                 let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
                 if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector)
                 {
-                    self.note_model_refused("image_route", &selector);
                     return Err(format!("{refusal:#}"));
                 }
                 Some(resolved)

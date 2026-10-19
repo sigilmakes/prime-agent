@@ -2335,3 +2335,83 @@ fn windowed_prompt_time_prefers_the_readable_tail_over_an_older_scalar() {
         );
     }
 }
+
+#[test]
+fn issue_19_display_snapshot_preserves_every_chronological_compaction_boundary() {
+    let messages = vec![
+        json!({"role":"user", "content":"before compaction", "timestamp":1}),
+        json!({"role":"compactionSummary", "summary":"first summary", "retainedMessageCount":0, "timestamp":2}),
+        json!({"role":"user", "content":"between compactions", "timestamp":3}),
+        json!({"role":"compactionSummary", "summary":"second summary", "retainedMessageCount":0, "timestamp":4}),
+        json!({"role":"user", "content":"latest turn", "timestamp":5}),
+    ];
+    let attach: AttachData = serde_json::from_value(json!({
+        "activeSessionId":"active", "snapshot": {
+            "state":{"sessionId":"saved"}, "messages":messages,
+            "displayTranscript":true
+        }
+    }))
+    .unwrap();
+    let mut view = test_view();
+    view.detail = crate::chat::Detail::All;
+    for entry in reconstruct(&attach).chat {
+        view.push_entry(entry);
+    }
+    let text = view
+        .render_transcript(100)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let markers = [
+        "before compaction",
+        "first summary",
+        "between compactions",
+        "second summary",
+        "latest turn",
+    ];
+    let positions: Vec<_> = markers
+        .iter()
+        .map(|marker| text.find(marker).expect(marker))
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+}
+
+#[test]
+fn issue_19_display_snapshot_renders_branch_summary_and_agent_receipt() {
+    let messages = vec![
+        json!({"role":"user", "content":"selected root", "timestamp":1}),
+        json!({"role":"branchSummary", "summary":"kept branch summary body", "fromId":"old", "timestamp":2}),
+        json!({"role":"assistant", "content":[{"type":"toolCall", "id":"call", "name":"ipython", "arguments":{"code":"send"}}], "timestamp":3}),
+        json!({"role":"toolResult", "toolCallId":"call", "toolName":"ipython", "content":[{"type":"text", "text":"done"}], "details":{"sentAgentMessages":[{"id":"sent", "message":"branch receipt body", "deliveryStatus":"delivered", "target":{"activeSessionId":"peer", "sessionId":"peer-saved", "sessionName":"receipt-peer"}}]}, "timestamp":4}),
+    ];
+    let entries = display_transcript_to_entries(&messages);
+    assert!(entries.iter().any(|entry| matches!(entry, ChatEntry::BranchSummary { summary } if summary == "kept branch summary body")));
+    let mut view = test_view();
+    view.detail = crate::chat::Detail::All;
+    for entry in entries {
+        view.push_entry(entry);
+    }
+    let text = view
+        .render_transcript(100)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for marker in [
+        "[branch]",
+        "kept branch summary body",
+        "receipt-peer",
+        "branch receipt body",
+    ] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+}

@@ -11,10 +11,10 @@ use crate::JsonMap;
 
 pub const DAEMON_PROTOCOL_NAME: &str = "prime-agent.daemon";
 pub const DAEMON_PROTOCOL_VERSION: u64 = 7;
-/// Revision 30 publishes `deletedDescendantUsage` on saved-session rows (landing ahead of TS main:
-/// the Rust lifecycle captures the tombstoned child's usage before the unlink).
-pub const DAEMON_SCHEMA_REVISION: u64 = 30;
-pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-30-8e4b17c2a9f5";
+/// Revision 31 added chronological display transcripts; revision 32 adds optional model refresh.
+/// Older peers retain the compacted projection and omit unsupported commands.
+pub const DAEMON_SCHEMA_REVISION: u64 = 32;
+pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-32-model-refresh";
 
 pub type DaemonClientId = String;
 pub type DaemonCommandId = String;
@@ -95,6 +95,7 @@ pub struct DaemonEventMeta {
 
 pub mod agent_roster;
 mod command;
+pub mod compatibility;
 pub mod framing;
 pub mod herdr_env;
 pub mod launch_env;
@@ -172,8 +173,8 @@ mod tests {
     fn protocol_constants_match_ts() {
         assert_eq!(DAEMON_PROTOCOL_NAME, "prime-agent.daemon");
         assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
-        assert_eq!(DAEMON_SCHEMA_REVISION, 30);
-        assert_eq!(DAEMON_SCHEMA_ID, "protocol-7-schema-30-8e4b17c2a9f5");
+        assert_eq!(DAEMON_SCHEMA_REVISION, 32);
+        assert_eq!(DAEMON_SCHEMA_ID, "protocol-7-schema-32-model-refresh");
         assert_eq!(DAEMON_UPDATE_RESTART_FORMAT_VERSION, 1);
     }
 }

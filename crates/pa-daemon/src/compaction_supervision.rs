@@ -508,7 +508,6 @@ impl crate::supervisor::Supervisor {
                 return;
             }
         };
-        self.note_compaction_abort_declared();
         // The synthetic `compaction_end`: an abort carries `aborted: true` with no error
         // message; `errorSeverity` mirrors the end the worker would have landed.
         let error_severity = (terminal.reason == "manual").then_some("error");

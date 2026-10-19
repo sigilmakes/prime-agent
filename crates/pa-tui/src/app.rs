@@ -39,11 +39,13 @@ impl Default for AppOptions {
 #[must_use]
 pub fn load_theme(name: &str) -> Theme {
     let mode = crate::theme::detect_color_mode();
-    // The default brand theme when the caller passes none (empty) or an
-    // unknown name; only known builtins resolve.
-    let known = ["prime", "dark", "light"];
-    let name = if known.contains(&name) { name } else { "prime" };
-    Theme::builtin(name, mode)
+    match crate::theme::load_named_theme(name, mode) {
+        Ok(theme) => theme,
+        Err(error) => {
+            eprintln!("Prime Agent: {error:#}; using prime theme.");
+            Theme::builtin("prime", mode)
+        }
+    }
 }
 
 /// Run the view against a session stream until the stream ends and the user exits. `on_submit`

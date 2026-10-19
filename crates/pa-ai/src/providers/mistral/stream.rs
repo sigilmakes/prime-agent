@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
+    create_provider_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
     AssistantMessageEventWriter,
 };
 use crate::models::calculate_cost;
@@ -43,9 +43,16 @@ pub fn stream_mistral(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: API_MISTRAL_CONVERSATIONS.to_string(),
@@ -65,10 +72,12 @@ pub fn stream_mistral(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -85,14 +94,19 @@ pub fn stream_mistral(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -307,9 +321,11 @@ async fn run_stream(
         ));
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
 
     let mut state = MistralStreamState::new();
     // The TS try/catch encloses this whole streaming section, including the abort and stop-reason
@@ -327,7 +343,7 @@ async fn run_stream(
                 let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
                     ProviderError::Message(format!("Could not parse Mistral SSE chunk: {error}"))
                 })?;
-                state.handle_chunk(&parsed, model, output, writer);
+                state.handle_chunk(&parsed, model, output, writer).await?;
             }
         }
         for sse in decoder.finish() {
@@ -337,9 +353,9 @@ async fn run_stream(
             let parsed = parse_json_with_repair(&sse.data).map_err(|error| {
                 ProviderError::Message(format!("Could not parse Mistral SSE chunk: {error}"))
             })?;
-            state.handle_chunk(&parsed, model, output, writer);
+            state.handle_chunk(&parsed, model, output, writer).await?;
         }
-        state.finish(output, writer);
+        state.finish(output, writer).await?;
 
         if options
             .base
@@ -402,47 +418,52 @@ impl MistralStreamState {
         }
     }
 
-    fn finish_current_block(
+    async fn finish_current_block(
         &mut self,
         output: &AssistantMessage,
         writer: &AssistantMessageEventWriter,
-    ) {
+    ) -> Result<(), ProviderError> {
         match self.current_block.take() {
             Some(CurrentBlock::Text { index }) => {
                 let text = match &output.content[index] {
                     AssistantContent::Text(text) => text.text.clone(),
                     _ => String::new(),
                 };
-                writer.push(AssistantMessageEvent::TextEnd {
-                    content_index: index as u64,
-                    content: text,
-                    partial: output.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::TextEnd {
+                        content_index: index as u64,
+                        content: text,
+                        partial: output.clone(),
+                    })
+                    .await?;
             }
             Some(CurrentBlock::Thinking { index }) => {
                 let thinking = match &output.content[index] {
                     AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
                     _ => String::new(),
                 };
-                writer.push(AssistantMessageEvent::ThinkingEnd {
-                    content_index: index as u64,
-                    content: thinking,
-                    partial: output.clone(),
-                });
+                writer
+                    .send(AssistantMessageEvent::ThinkingEnd {
+                        content_index: index as u64,
+                        content: thinking,
+                        partial: output.clone(),
+                    })
+                    .await?;
             }
             None => {}
         }
+        Ok(())
     }
 
-    fn ensure_text_block(
+    async fn ensure_text_block(
         &mut self,
         output: &mut AssistantMessage,
         writer: &AssistantMessageEventWriter,
-    ) -> usize {
+    ) -> Result<usize, ProviderError> {
         if let Some(CurrentBlock::Text { index }) = self.current_block {
-            return index;
+            return Ok(index);
         }
-        self.finish_current_block(output, writer);
+        self.finish_current_block(output, writer).await?;
         output.content.push(AssistantContent::Text(TextContent {
             text: String::new(),
             text_signature: None,
@@ -450,22 +471,24 @@ impl MistralStreamState {
         }));
         let index = output.content.len() - 1;
         self.current_block = Some(CurrentBlock::Text { index });
-        writer.push(AssistantMessageEvent::TextStart {
-            content_index: index as u64,
-            partial: output.clone(),
-        });
-        index
+        writer
+            .send(AssistantMessageEvent::TextStart {
+                content_index: index as u64,
+                partial: output.clone(),
+            })
+            .await?;
+        Ok(index)
     }
 
-    fn ensure_thinking_block(
+    async fn ensure_thinking_block(
         &mut self,
         output: &mut AssistantMessage,
         writer: &AssistantMessageEventWriter,
-    ) -> usize {
+    ) -> Result<usize, ProviderError> {
         if let Some(CurrentBlock::Thinking { index }) = self.current_block {
-            return index;
+            return Ok(index);
         }
-        self.finish_current_block(output, writer);
+        self.finish_current_block(output, writer).await?;
         output
             .content
             .push(AssistantContent::Thinking(ThinkingContent {
@@ -476,23 +499,25 @@ impl MistralStreamState {
             }));
         let index = output.content.len() - 1;
         self.current_block = Some(CurrentBlock::Thinking { index });
-        writer.push(AssistantMessageEvent::ThinkingStart {
-            content_index: index as u64,
-            partial: output.clone(),
-        });
-        index
+        writer
+            .send(AssistantMessageEvent::ThinkingStart {
+                content_index: index as u64,
+                partial: output.clone(),
+            })
+            .await?;
+        Ok(index)
     }
 
     /// Port of the `consumeChatStream` chunk loop body.
     // Long by design: mirrors the provider's stream shape.
     #[allow(clippy::too_many_lines)]
-    fn handle_chunk(
+    async fn handle_chunk(
         &mut self,
         chunk: &Value,
         model: &Model,
         output: &mut AssistantMessage,
         writer: &AssistantMessageEventWriter,
-    ) {
+    ) -> Result<(), ProviderError> {
         // Keep the first non-empty streamed id as the response identifier.
         if output.response_id.is_none() {
             if let Some(id) = chunk.get("id").and_then(Value::as_str) {
@@ -531,7 +556,7 @@ impl MistralStreamState {
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
         else {
-            return;
+            return Ok(());
         };
 
         if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
@@ -552,15 +577,17 @@ impl MistralStreamState {
                 match &item {
                     Value::String(text) => {
                         let text_delta = sanitize_surrogates(text);
-                        let index = self.ensure_text_block(output, writer);
+                        let index = self.ensure_text_block(output, writer).await?;
                         if let AssistantContent::Text(block) = &mut output.content[index] {
                             block.text.push_str(&text_delta);
                         }
-                        writer.push(AssistantMessageEvent::TextDelta {
-                            content_index: index as u64,
-                            delta: text_delta,
-                            partial: output.clone(),
-                        });
+                        writer
+                            .send(AssistantMessageEvent::TextDelta {
+                                content_index: index as u64,
+                                delta: text_delta,
+                                partial: output.clone(),
+                            })
+                            .await?;
                     }
                     Value::Object(_)
                         if item.get("type").and_then(Value::as_str) == Some("thinking") =>
@@ -579,15 +606,17 @@ impl MistralStreamState {
                         if thinking_delta.is_empty() {
                             continue;
                         }
-                        let index = self.ensure_thinking_block(output, writer);
+                        let index = self.ensure_thinking_block(output, writer).await?;
                         if let AssistantContent::Thinking(block) = &mut output.content[index] {
                             block.thinking.push_str(&thinking_delta);
                         }
-                        writer.push(AssistantMessageEvent::ThinkingDelta {
-                            content_index: index as u64,
-                            delta: thinking_delta,
-                            partial: output.clone(),
-                        });
+                        writer
+                            .send(AssistantMessageEvent::ThinkingDelta {
+                                content_index: index as u64,
+                                delta: thinking_delta,
+                                partial: output.clone(),
+                            })
+                            .await?;
                     }
                     Value::Object(_)
                         if item.get("type").and_then(Value::as_str) == Some("text") =>
@@ -595,15 +624,17 @@ impl MistralStreamState {
                         let text_delta = sanitize_surrogates(
                             item.get("text").and_then(Value::as_str).unwrap_or(""),
                         );
-                        let index = self.ensure_text_block(output, writer);
+                        let index = self.ensure_text_block(output, writer).await?;
                         if let AssistantContent::Text(block) = &mut output.content[index] {
                             block.text.push_str(&text_delta);
                         }
-                        writer.push(AssistantMessageEvent::TextDelta {
-                            content_index: index as u64,
-                            delta: text_delta,
-                            partial: output.clone(),
-                        });
+                        writer
+                            .send(AssistantMessageEvent::TextDelta {
+                                content_index: index as u64,
+                                delta: text_delta,
+                                partial: output.clone(),
+                            })
+                            .await?;
                     }
                     _ => {}
                 }
@@ -617,7 +648,7 @@ impl MistralStreamState {
             .unwrap_or_default();
         for tool_call in tool_calls {
             if self.current_block.is_some() {
-                self.finish_current_block(output, writer);
+                self.finish_current_block(output, writer).await?;
             }
             let call_id = match tool_call.get("id").and_then(Value::as_str) {
                 Some(id) if !id.is_empty() && id != "null" => id.to_string(),
@@ -657,10 +688,12 @@ impl MistralStreamState {
                     }));
                     let index = output.content.len() - 1;
                     self.tool_blocks_by_key.insert(key.clone(), index);
-                    writer.push(AssistantMessageEvent::ToolcallStart {
-                        content_index: index as u64,
-                        partial: output.clone(),
-                    });
+                    writer
+                        .send(AssistantMessageEvent::ToolcallStart {
+                            content_index: index as u64,
+                            partial: output.clone(),
+                        })
+                        .await?;
                     index
                 }
             };
@@ -680,17 +713,24 @@ impl MistralStreamState {
                     block.arguments = json_object(parsed);
                 }
             }
-            writer.push(AssistantMessageEvent::ToolcallDelta {
-                content_index: block_index as u64,
-                delta: args_delta,
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ToolcallDelta {
+                    content_index: block_index as u64,
+                    delta: args_delta,
+                    partial: output.clone(),
+                })
+                .await?;
         }
+        Ok(())
     }
 
     /// Port of the trailing block finalization.
-    fn finish(&mut self, output: &mut AssistantMessage, writer: &AssistantMessageEventWriter) {
-        self.finish_current_block(output, writer);
+    async fn finish(
+        &mut self,
+        output: &mut AssistantMessage,
+        writer: &AssistantMessageEventWriter,
+    ) -> Result<(), ProviderError> {
+        self.finish_current_block(output, writer).await?;
         let mut indexes: Vec<usize> = self.tool_blocks_by_key.values().copied().collect();
         indexes.sort_unstable();
         indexes.dedup();
@@ -706,21 +746,25 @@ impl MistralStreamState {
                 block.arguments = json_object(parsed);
             }
             let block = output.content[index].clone();
-            writer.push(AssistantMessageEvent::ToolcallEnd {
-                content_index: index as u64,
-                tool_call: match block {
-                    AssistantContent::ToolCall(call) => call,
-                    _ => continue,
-                },
-                partial: output.clone(),
-            });
+            writer
+                .send(AssistantMessageEvent::ToolcallEnd {
+                    content_index: index as u64,
+                    tool_call: match block {
+                        AssistantContent::ToolCall(call) => call,
+                        _ => continue,
+                    },
+                    partial: output.clone(),
+                })
+                .await?;
         }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_stream::create_assistant_message_event_stream;
 
     /// The TS `formatMistralError` shape: "Mistral API error (N): <body>", truncated at 4000 chars
     /// (UTF-16 units) with the JS remainder count.
@@ -830,8 +874,8 @@ mod tests {
 
     /// TS assigns `usage.totalTokens = chunk.usage.totalTokens || input + output`, so an explicitly
     /// reported zero total is falsy and falls back to the prompt/completion sum.
-    #[test]
-    fn usage_total_tokens_explicit_zero_falls_back_to_sum() {
+    #[tokio::test]
+    async fn usage_total_tokens_explicit_zero_falls_back_to_sum() {
         use serde_json::json;
 
         let model = Model {
@@ -859,15 +903,18 @@ mod tests {
             &model.id,
         );
 
-        state.handle_chunk(
-            &json!({
-                "id": "usage-1",
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 0},
-            }),
-            &model,
-            &mut output,
-            &writer,
-        );
+        state
+            .handle_chunk(
+                &json!({
+                    "id": "usage-1",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 0},
+                }),
+                &model,
+                &mut output,
+                &writer,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             output.usage,
             Usage {
@@ -878,26 +925,32 @@ mod tests {
             }
         );
 
-        state.handle_chunk(
-            &json!({
-                "id": "usage-2",
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 99},
-            }),
-            &model,
-            &mut output,
-            &writer,
-        );
+        state
+            .handle_chunk(
+                &json!({
+                    "id": "usage-2",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 99},
+                }),
+                &model,
+                &mut output,
+                &writer,
+            )
+            .await
+            .unwrap();
         assert_eq!(output.usage.total_tokens, 99);
 
-        state.handle_chunk(
-            &json!({
-                "id": "usage-3",
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-            }),
-            &model,
-            &mut output,
-            &writer,
-        );
+        state
+            .handle_chunk(
+                &json!({
+                    "id": "usage-3",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                }),
+                &model,
+                &mut output,
+                &writer,
+            )
+            .await
+            .unwrap();
         assert_eq!(output.usage.total_tokens, 15);
     }
 }

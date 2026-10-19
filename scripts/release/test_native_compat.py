@@ -85,7 +85,7 @@ class NativeCompatibilityTests(unittest.TestCase):
     def test_promotion_validates_native_archives_beside_source_distribution(self):
         _, archive, _ = self.assemble()
         repo = Path(__file__).resolve().parents[2]
-        workflow = (repo / ".github/workflows/release.yml").read_text()
+        workflow = (repo / ".github/upstream-workflows/release.yml").read_text()
         step = workflow.split(
             "      - name: Verify historical native updater compatibility\n", 1
         )[1].split("      - name:", 1)[0]

@@ -8,8 +8,8 @@ use serde_json::{json, Map, Value};
 
 use crate::env_api_keys::get_env_api_key;
 use crate::event_stream::{
-    create_assistant_message_event_stream, AssistantMessageEvent, AssistantMessageEventStream,
-    AssistantMessageEventWriter,
+    create_assistant_message_event_stream, create_provider_event_stream, AssistantMessageEvent,
+    AssistantMessageEventStream, AssistantMessageEventWriter,
 };
 use crate::models::{clamp_thinking_level, supports_thinking};
 use crate::providers::openai_responses_shared::{
@@ -248,9 +248,16 @@ pub fn stream_azure_openai_responses(
     let options = options.cloned();
     let model = model.clone();
     let context = context.clone();
-    let (writer, reader) = create_assistant_message_event_stream();
+    let bounded = options
+        .as_ref()
+        .is_some_and(|options| options.base.event_buffer_capacity.is_some());
+    let (writer, mut reader) =
+        match create_provider_event_stream(&model, options.as_ref().map(|options| &options.base)) {
+            Ok(pair) => pair,
+            Err(stream) => return stream,
+        };
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut output = AssistantMessage {
             content: Vec::new(),
             api: API_AZURE_OPENAI_RESPONSES.to_string(),
@@ -270,10 +277,12 @@ pub fn stream_azure_openai_responses(
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
         match result {
             Ok(()) => {
-                writer.push(AssistantMessageEvent::Done {
-                    reason: done_reason(output.stop_reason),
-                    message: output,
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Done {
+                        reason: done_reason(output.stop_reason),
+                        message: output,
+                    })
+                    .await;
                 writer.end(None);
             }
             Err(error) => {
@@ -288,14 +297,19 @@ pub fn stream_azure_openai_responses(
                     &mut output,
                     &error,
                 );
-                writer.push(AssistantMessageEvent::Error {
-                    reason: error_reason(output.stop_reason),
-                    error: output.clone(),
-                });
+                let _ = writer
+                    .send(AssistantMessageEvent::Error {
+                        reason: error_reason(output.stop_reason),
+                        error: output.clone(),
+                    })
+                    .await;
                 writer.end(Some(output));
             }
         }
     });
+    if bounded {
+        reader.abort_on_drop = Some(task.abort_handle());
+    }
 
     reader
 }
@@ -376,9 +390,11 @@ async fn run_stream(
         ));
     }
 
-    writer.push(AssistantMessageEvent::Start {
-        partial: output.clone(),
-    });
+    writer
+        .send(AssistantMessageEvent::Start {
+            partial: output.clone(),
+        })
+        .await?;
 
     let stream_result: Result<(), ProviderError>;
     {
@@ -403,7 +419,7 @@ async fn run_stream(
                         Ok(event) => event,
                         Err(_) => parse_streaming_json(Some(&sse.data)),
                     };
-                    processor.handle_event(&event)?;
+                    processor.handle_event(&event).await?;
                 }
             }
             for sse in decoder.finish() {
@@ -414,7 +430,7 @@ async fn run_stream(
                     Ok(event) => event,
                     Err(_) => parse_streaming_json(Some(&sse.data)),
                 };
-                processor.handle_event(&event)?;
+                processor.handle_event(&event).await?;
             }
             processor.finish()?;
             if options
@@ -503,6 +519,10 @@ pub struct AzureOpenAIResponsesProvider;
 impl Provider for AzureOpenAIResponsesProvider {
     fn api(&self) -> &str {
         API_AZURE_OPENAI_RESPONSES
+    }
+
+    fn supports_bounded_event_delivery(&self) -> bool {
+        true
     }
 
     fn stream(

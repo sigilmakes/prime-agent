@@ -7,11 +7,10 @@ import json
 import os
 import sys
 import traceback
-import socket
+import select
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,17 +53,51 @@ raise ImportError("fixture startup crash")
 """
 
 
-_HTTP_FIXTURE = """from mcp.server.mcpserver import MCPServer
+_HTTP_FIXTURE = """import asyncio, socket
+import uvicorn
+from mcp.server.mcpserver import MCPServer
+
 server = MCPServer("fixture")
 @server.tool(name="http/raw.tool")
 def echo(value: str) -> dict[str, str]:
     return {"value": value}
-server.run(transport="streamable-http", host="127.0.0.1", port=int(__import__("sys").argv[1]))
+
+async def main():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        port = sock.getsockname()[1]
+
+        class ReadyServer(uvicorn.Server):
+            async def startup(self, sockets=None):
+                await super().startup(sockets=sockets)
+                if self.started:
+                    print(f"READY {port}", flush=True)
+
+        config = uvicorn.Config(server.streamable_http_app(), log_level="warning")
+        await ReadyServer(config).serve(sockets=[sock])
+
+asyncio.run(main())
 """
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+async def start_reload(registry, server=None):
+    """Wait until reload reaches transport cleanup, without scheduling sleeps."""
+    entered = asyncio.Event()
+    close_name = registry._close_name
+
+    async def observed_close(name):
+        entered.set()
+        await close_name(name)
+
+    with mock.patch.object(registry, "_close_name", observed_close):
+        task = asyncio.create_task(registry.reload(server))
+        await asyncio.wait_for(entered.wait(), 1)
+    return task
 
 
 class FakeStack:
@@ -223,11 +256,11 @@ class McpRegistryTest(unittest.TestCase):
             ):
                 first_open = asyncio.create_task(mcp._registry.get("svc"))
                 await opening.wait()
-                reload_all = asyncio.create_task(mcp._registry.reload())
-                await asyncio.sleep(0)
+                reload_all = await start_reload(mcp._registry)
                 self.assertFalse(reload_all.done())
                 release.set()
-                await first_open
+                with self.assertRaisesRegex(RuntimeError, "reloaded"):
+                    await first_open
                 await reload_all
 
         run(scenario())
@@ -697,21 +730,16 @@ class McpRegistryTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         fixture = Path(tmp.name) / "http_server.py"
         fixture.write_text(_HTTP_FIXTURE)
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
         process = subprocess.Popen(
-            [sys.executable, str(fixture), str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            [sys.executable, str(fixture)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
         )
         try:
-            deadline = time.time() + 10
-            while time.time() < deadline:
-                with socket.socket() as probe:
-                    if probe.connect_ex(("127.0.0.1", port)) == 0:
-                        break
-                time.sleep(0.05)
-            else:
-                self.fail("HTTP MCP fixture did not start")
+            assert process.stdout is not None
+            ready, _, _ = select.select([process.stdout], [], [], 10)
+            self.assertTrue(ready, "HTTP MCP fixture did not signal readiness")
+            message = process.stdout.readline()
+            self.assertTrue(message.startswith("READY "), f"HTTP MCP fixture exited before readiness: {message!r}")
+            port = int(message.removeprefix("READY ").strip())
 
             async def scenario():
                 generation = mcp._Generation("svc", {"type": "http", "url": f"http://127.0.0.1:{port}/mcp"})
@@ -733,6 +761,8 @@ class McpRegistryTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
+            if process.stdout is not None:
+                process.stdout.close()
 
     def test_boolean_timeout_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -1277,6 +1307,387 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertIsNotNone(captured["http_client"])
         self.assertEqual(streams, ("read", "write"))
 
+
+class McpSessionRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        mcp._registry = mcp._Registry()
+
+    def test_tools_list_expiry_reconnects_once_without_replaying_tool_calls(self):
+        from mcp.shared.exceptions import MCPError
+
+        async def scenario():
+            attempts = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                index = len(attempts)
+                attempts.append(generation)
+                class Session:
+                    async def list_tools(self):
+                        if index == 0:
+                            raise MCPError(-32600, "Session terminated")
+                        return SimpleNamespace(tools=[SimpleNamespace(name="fresh", inputSchema={})])
+                generation.session = Session()
+                await generation.discover()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                tools = await mcp.list_tools("svc")
+                self.assertEqual([tool["name"] for tool in tools], ["fresh"])
+                self.assertEqual(len(attempts), 2)
+                self.assertTrue(attempts[0].closed)
+                self.assertIs(mcp._registry._generations["svc"], attempts[1])
+        run(scenario())
+
+
+    def test_tool_origin_expiry_shaped_error_with_read_only_hint_is_not_replayed_or_closed(self):
+        from mcp.shared.exceptions import MCPError
+        from mcp.types import Tool, ToolAnnotations
+
+        async def scenario():
+            calls = []
+            generations = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                index = len(generations)
+                generations.append(generation)
+                class Session:
+                    async def list_tools(self):
+                        return SimpleNamespace(tools=[Tool(name="read", inputSchema={}, annotations=ToolAnnotations(readOnlyHint=True))])
+                    async def call_tool(self, name, arguments):
+                        calls.append((index, name))
+                        if index == 0:
+                            # The tool itself can emit the SDK's transport-looking error.
+                            raise MCPError(-32600, "Session terminated")
+                        return SimpleNamespace(content=[SimpleNamespace(text="fresh")], structuredContent=None, isError=False)
+                generation.session = Session()
+                await generation.discover()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                with self.assertRaises(MCPError):
+                    await mcp.call_tool("svc", "read")
+                self.assertEqual(calls, [(0, "read")])
+                self.assertEqual(len(generations), 1)
+                self.assertFalse(generations[0].closed)
+                self.assertIs(mcp._registry._generations["svc"], generations[0])
+                # Explicit reload, then the next user call opens a fresh session.
+                await mcp.reload("svc")
+                self.assertTrue(generations[0].closed)
+                self.assertEqual(await mcp.call_tool("svc", "read"), "fresh")
+                self.assertEqual(calls, [(0, "read"), (1, "read")])
+        run(scenario())
+
+    def test_mutating_tool_expiry_shaped_error_is_never_replayed(self):
+        from mcp.shared.exceptions import MCPError
+
+        async def scenario():
+            calls = []
+            generations = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                generations.append(generation)
+                generation.tools = {"delete": {"name": "delete", "inputSchema": {}}}
+                class Session:
+                    async def call_tool(self, name, arguments):
+                        calls.append(name)
+                        raise MCPError(-32600, "Session terminated")
+                generation.session = Session()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                with self.assertRaises(MCPError):
+                    await mcp.call_tool("svc", "delete")
+                self.assertEqual(calls, ["delete"])
+                self.assertEqual(len(generations), 1)
+                self.assertFalse(generations[0].closed)
+        run(scenario())
+
+    def test_tools_list_expiry_retry_is_bounded_and_reports_first_error(self):
+        from mcp.shared.exceptions import MCPError
+
+        async def scenario():
+            first = MCPError(-32600, "Session terminated")
+            attempts = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                attempts.append(generation)
+                class Session:
+                    async def list_tools(self):
+                        raise first if len(attempts) == 1 else MCPError(-32600, "Session terminated")
+                generation.session = Session()
+                await generation.discover()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                with self.assertRaises(MCPError) as caught:
+                    await mcp.list_tools("svc")
+                self.assertIs(caught.exception, first)
+                self.assertEqual(len(attempts), 2)
+                self.assertTrue(all(generation.closed for generation in attempts))
+                self.assertNotIn("svc", mcp._registry._generations)
+        run(scenario())
+
+    def test_initialize_expiry_shaped_error_does_not_retry(self):
+        from mcp.shared.exceptions import MCPError
+
+        async def scenario():
+            attempts = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                attempts.append(generation)
+                raise MCPError(-32600, "Session terminated")
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                with self.assertRaises(MCPError):
+                    await mcp.list_tools("svc")
+                self.assertEqual(len(attempts), 1)
+                self.assertTrue(attempts[0].closed)
+        run(scenario())
+
+    def test_reload_during_tools_list_expiry_does_not_open_retry(self):
+        from mcp.shared.exceptions import MCPError
+
+        async def scenario():
+            entered = asyncio.Event()
+            resume = asyncio.Event()
+            attempts = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                attempts.append(generation)
+                class Session:
+                    async def list_tools(self):
+                        entered.set()
+                        await resume.wait()
+                        raise MCPError(-32600, "Session terminated")
+                generation.session = Session()
+                await generation.discover()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                listing = asyncio.create_task(mcp.list_tools("svc"))
+                await entered.wait()
+                reloading = await start_reload(mcp._registry, "svc")
+                resume.set()
+                with self.assertRaisesRegex(RuntimeError, "reloaded"):
+                    await listing
+                await reloading
+                self.assertEqual(len(attempts), 1)
+                self.assertTrue(attempts[0].closed)
+        run(scenario())
+
+    def test_shutdown_cancels_pending_handshake_and_closes_transport(self):
+        async def scenario():
+            entered = asyncio.Event()
+            exited = []
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            class Transport:
+                async def __aenter__(self):
+                    return object(), object()
+                async def __aexit__(self, *_args):
+                    exited.append("transport")
+            class Session:
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    exited.append("session")
+                async def initialize(self):
+                    entered.set()
+                    await asyncio.Event().wait()
+            async def open_transport(generation):
+                return await generation.stack.enter_async_context(Transport())
+            registry = mcp._Registry()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "_open_transport", open_transport
+            ), mock.patch("mcp.ClientSession", return_value=Session()):
+                opening = asyncio.create_task(registry.get("svc"))
+                await entered.wait()
+                await registry.shutdown()
+                with self.assertRaises(asyncio.CancelledError):
+                    await opening
+            self.assertEqual(exited, ["session", "transport"])
+            self.assertEqual(registry._generations, {})
+        run(scenario())
+
+    def test_discovery_retry_requires_the_exact_sdk_session_terminated_error(self):
+        from mcp.shared.exceptions import MCPError
+
+        for failure in (
+            MCPError(-32600, "a different failure"),
+            MCPError(-32000, "Session terminated"),
+            RuntimeError("Session terminated"),
+        ):
+            with self.subTest(failure=failure):
+                async def scenario():
+                    attempts = []
+
+                    async def open_generation(generation):
+                        attempts.append(generation)
+                        generation.session = mock.Mock()
+                        generation.session.list_tools = mock.AsyncMock(side_effect=failure)
+                        await generation.discover()
+
+                    mcp._registry = mcp._Registry()
+                    with mock.patch.object(mcp, "_config", new=mock.AsyncMock(return_value={"type": "http"})), mock.patch.object(
+                        mcp._Generation, "open", open_generation
+                    ):
+                        with self.assertRaises(type(failure)) as caught:
+                            await mcp.list_tools("svc")
+                        self.assertIs(caught.exception, failure)
+                        self.assertEqual(len(attempts), 1)
+                        self.assertTrue(attempts[0].closed)
+                        self.assertEqual(mcp._registry._generations, {})
+
+                run(scenario())
+
+    def test_later_page_expiry_reloads_config_and_discards_partial_inventory(self):
+        from mcp.shared.exceptions import MCPError
+
+        async def scenario():
+            attempts = []
+            configs = [{"type": "http", "url": url} for url in ("old", "fresh")]
+            cursors = []
+
+            async def open_generation(generation):
+                index = len(attempts)
+                attempts.append(generation)
+
+                class Session:
+                    async def list_tools(self, params=None):
+                        cursor = None if params is None else params.cursor
+                        cursors.append((index, cursor))
+                        if index == 0:
+                            if cursor is not None:
+                                raise MCPError(-32600, "Session terminated")
+                            return SimpleNamespace(
+                                tools=[SimpleNamespace(name="stale", inputSchema={})], next_cursor="page-2"
+                            )
+                        return SimpleNamespace(tools=[SimpleNamespace(name="fresh", inputSchema={})])
+
+                    async def call_tool(self, name, arguments):
+                        return SimpleNamespace(content=[SimpleNamespace(text="called once")])
+
+                generation.session = Session()
+                await generation.discover()
+
+            with mock.patch.object(mcp, "_config", new=mock.AsyncMock(side_effect=configs)) as config, mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                self.assertEqual(await mcp.call_tool("svc", "fresh"), "called once")
+                self.assertEqual(config.await_count, 2)
+                self.assertEqual([generation.config for generation in attempts], configs)
+                self.assertEqual(cursors, [(0, None), (0, "page-2"), (1, None)])
+                self.assertEqual(attempts[0].tools, {})
+                self.assertTrue(attempts[0].closed)
+                self.assertEqual(list(attempts[1].tools), ["fresh"])
+                self.assertFalse(attempts[1].closed)
+
+        run(scenario())
+
+    def test_cancelled_startup_does_not_leave_an_unretrieved_ready_exception(self):
+        import gc
+
+        async def scenario():
+            entered = asyncio.Event()
+            diagnostics = []
+            loop = asyncio.get_running_loop()
+            previous_handler = loop.get_exception_handler()
+            loop.set_exception_handler(lambda _loop, context: diagnostics.append(context["message"]))
+            generation = mcp._Generation("svc", {"type": "http"})
+
+            async def lifecycle(ready):
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError as exc:
+                    ready.set_exception(exc)
+                finally:
+                    generation.closed = True
+
+            try:
+                with mock.patch.object(generation, "_run_lifecycle", lifecycle):
+                    opening = asyncio.create_task(generation.open())
+                    await entered.wait()
+                    opening.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await opening
+                self.assertTrue(generation.closed)
+                del opening
+                gc.collect()
+                self.assertEqual(diagnostics, [])
+            finally:
+                loop.set_exception_handler(previous_handler)
+
+        run(scenario())
+
+    def test_reload_during_config_does_not_start_a_stale_transport(self):
+        async def scenario():
+            entered = asyncio.Event()
+            resume = asyncio.Event()
+            opened = []
+
+            async def config(_server):
+                entered.set()
+                await resume.wait()
+                return {"type": "http", "url": "fixture"}
+
+            async def open_generation(generation):
+                opened.append(generation)
+
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                opening = asyncio.create_task(mcp.list_tools("svc"))
+                await entered.wait()
+                reloading = await start_reload(mcp._registry, "svc")
+                resume.set()
+                with self.assertRaisesRegex(RuntimeError, "reloaded"):
+                    await opening
+                await reloading
+                self.assertEqual(opened, [])
+                self.assertEqual(mcp._registry._generations, {})
+
+        run(scenario())
+
+    def test_reload_invalidates_a_pending_open_and_does_not_publish_it(self):
+        async def scenario():
+            entered = asyncio.Event()
+            resume = asyncio.Event()
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                generation.session = FakeSession([])
+                entered.set()
+                await resume.wait()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                opening = asyncio.create_task(mcp._registry.tools("svc"))
+                await entered.wait()
+                reloading = await start_reload(mcp._registry, "svc")
+                resume.set()
+                with self.assertRaises(RuntimeError):
+                    await opening
+                await reloading
+                self.assertNotIn("svc", mcp._registry._generations)
+        run(scenario())
+
+    def test_reload_invalidates_inflight_result(self):
+        async def scenario():
+            entered = asyncio.Event()
+            resume = asyncio.Event()
+            async def config(_server):
+                return {"type": "http", "url": "fixture"}
+            async def open_generation(generation):
+                generation.tools = {"read": {"name": "read", "annotations": {"readOnlyHint": True}}}
+                class Session:
+                    async def call_tool(self, name, arguments):
+                        entered.set()
+                        await resume.wait()
+                        return SimpleNamespace(content=[SimpleNamespace(text="stale")], structuredContent=None, isError=False)
+                generation.session = Session()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                calling = asyncio.create_task(mcp._registry.call("svc", "read", {}))
+                await entered.wait()
+                reloading = await start_reload(mcp._registry, "svc")
+                resume.set()
+                with self.assertRaises(RuntimeError):
+                    await calling
+                await reloading
+        run(scenario())
 
 if __name__ == "__main__":
     unittest.main()

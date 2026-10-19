@@ -1,7 +1,7 @@
 //! Private Prime Inference models: bundled table, team-authorized fetch,
 //! HMAC-fingerprinted disk cache.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,6 @@ use sha2::Sha256;
 use serde_json::Value;
 
 use super::prime_inference::is_private_prime_inference_model_id;
-use super::prime_inference_catalog::fetch_prime_inference_model_catalog;
 use pa_models::prime_inference::{
     build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceEntry,
 };
@@ -58,62 +57,6 @@ pub struct AuthorizedPrivatePrimeInferenceModels {
     pub items: Vec<Value>,
 }
 
-/// Fetch the team's authorized private models; 401/403 settle to empty.
-/// `base_url` is the Prime Inference API base (the shared catalog's, so
-/// hermetic tests aim the whole flow at a local server).
-///
-/// # Errors
-///
-/// Propagates the fetch's error, or the catalog parse's (an invalid payload).
-pub async fn fetch_authorized_private_prime_inference_models(
-    base_url: &str,
-    api_key: &str,
-    team_headers: &HashMap<String, String>,
-    public_model_ids: &HashSet<String>,
-    timeout_ms: u64,
-) -> Result<AuthorizedPrivatePrimeInferenceModels, String> {
-    if team_headers.get("X-Prime-Team-ID").is_none() {
-        return Ok(AuthorizedPrivatePrimeInferenceModels::default());
-    }
-    let mut headers = team_headers.clone();
-    headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
-    let fetch = fetch_prime_inference_model_catalog(base_url, Some(&headers), timeout_ms).await;
-    let payload = match fetch {
-        Ok(payload) => payload,
-        Err(error) => {
-            // 401/403 mean "no entitlements", not a failure.
-            if error.contains("with status 401") || error.contains("with status 403") {
-                return Ok(AuthorizedPrivatePrimeInferenceModels::default());
-            }
-            return Err(error);
-        }
-    };
-    // A malformed catalog is a failure, not an empty authorization: the
-    // registry's error path preserves the previous entitlements, while an
-    // empty success would wipe them and pin the wipe into the cache.
-    let data = payload
-        .get("data")
-        .and_then(|data| data.as_array())
-        .ok_or_else(|| "Invalid Prime Inference model catalog".to_string())?;
-    let public_ids: HashSet<String> = public_model_ids
-        .iter()
-        .map(|id| id.to_lowercase())
-        .collect();
-    let items = data
-        .iter()
-        .filter(|item| {
-            let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
-                return false;
-            };
-            let lower = id.to_lowercase();
-            !public_ids.contains(&lower) && is_private_prime_inference_model_id(&lower)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let models = build_authorized_private_models(&items)?;
-    Ok(AuthorizedPrivatePrimeInferenceModels { models, items })
-}
-
 /// Build the registry's private models from the raw `/models` wire items: the
 /// parse and build are the catalog crate's, shared with the public routes, so
 /// a route's declared reasoning parameters rebuild into the model's compat and
@@ -156,6 +99,52 @@ fn build_authorized_private_models(items: &[Value]) -> Result<Vec<Model>, String
         })
         .collect::<Vec<_>>();
     Ok(build_prime_inference_models(&bundled, &entries, true, Some(0)).unwrap_or_default())
+}
+
+/// Process-shared private catalog with the same revision/tombstone publication rules as public discovery.
+pub(crate) fn private_catalog_cache(
+    models_json_path: Option<&Path>,
+    base_url: &str,
+) -> std::sync::Arc<pa_models::cache::CatalogCache<AuthorizedPrivatePrimeInferenceModels>> {
+    type Cache =
+        std::sync::Arc<pa_models::cache::CatalogCache<AuthorizedPrivatePrimeInferenceModels>>;
+    type CacheRegistry = std::sync::Mutex<HashMap<(Option<PathBuf>, String), Cache>>;
+    static CACHES: std::sync::OnceLock<CacheRegistry> = std::sync::OnceLock::new();
+    let path = models_json_path
+        .and_then(Path::parent)
+        .map(|dir| dir.join("models/prime-inference-private-models.v2.json"));
+    let key = (path.clone(), base_url.to_string());
+    let mut caches = CACHES
+        .get_or_init(Default::default)
+        .lock()
+        .expect("private catalog cache registry");
+    std::sync::Arc::clone(caches.entry(key).or_insert_with(|| {
+        std::sync::Arc::new(pa_models::cache::CatalogCache::new(
+            &format!("{base_url}/models"),
+            path,
+            std::sync::Arc::new(pa_models::fetch::CatalogFetcher::with_limits(
+                std::time::Duration::from_millis(PRIVATE_MODEL_TIMEOUT_MS),
+                2 * 1024 * 1024,
+            )),
+            std::sync::Arc::new(|payload, _scope| {
+                let data = payload
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .ok_or("Invalid Prime Inference model catalog")?;
+                let items: Vec<Value> = data
+                    .iter()
+                    .filter(|item| {
+                        item.get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_private_prime_inference_model_id)
+                    })
+                    .cloned()
+                    .collect();
+                let models = build_authorized_private_models(&items)?;
+                Ok(AuthorizedPrivatePrimeInferenceModels { models, items })
+            }),
+        ))
+    }))
 }
 
 /// A cached authorization: fingerprint-scoped models with a refresh timestamp.
