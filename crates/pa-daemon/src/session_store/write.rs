@@ -2,6 +2,8 @@
 //! append-with-rewrite-bootstrap persist paths, and the store lease discipline that
 //! serializes writers onto the file.
 
+use pa_core::session_engine::canonical_coordinator::CanonicalWriteCertainty;
+
 use super::{
     fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
     SessionFile, SessionHeader, Value, Write,
@@ -227,7 +229,25 @@ impl SessionFile {
             "window-backed session file is missing"
         );
         let id = entry.id.clone();
-        if !self.path.as_os_str().is_empty() && self.path.exists() {
+        // Canonical admission for this row, taken before any byte moves: a user
+        // row takes a prepare-phase flight (no draft exists for it), every other
+        // row takes a requested-mutation grant. With no epoch attached the row is
+        // counted instead - the counter states the fact, never a policy.
+        let epoch = self.epoch.clone();
+        let mut grant = if let Some(handle) = epoch.as_ref() {
+            let admitted = super::canonical_adapter::grant_for_row(&handle.0, &entry)?;
+            if admitted.is_none() {
+                self.rows_written_without_epoch += 1;
+            }
+            admitted
+        } else {
+            self.rows_written_without_epoch += 1;
+            None
+        };
+        // Captured rather than re-tested later: this branch REQUIRES an existing
+        // file, and that is what makes `Known` provable for the append below.
+        let existed_before = !self.path.as_os_str().is_empty() && self.path.exists();
+        if existed_before {
             let mut bytes = Vec::new();
             write_line(&mut bytes, &entry)?;
             #[cfg(test)]
@@ -246,15 +266,34 @@ impl SessionFile {
                 file.flush()?;
                 anyhow::bail!("injected partial attribution append error");
             }
-            match &self.lease {
-                Some(lease) => lease.append(&self.path, &bytes)?,
+            let appended = match &self.lease {
+                Some(lease) => lease.append(&self.path, &bytes),
                 None => pa_core::session::window::append_cached(
                     &self.path,
                     &bytes,
                     pa_core::session::window::AppendOwnership::Unleased,
                 )
-                .with_context(|| format!("append to {}", self.path.display()))?,
+                .with_context(|| format!("append to {}", self.path.display())),
+            };
+            // `Known` is provable HERE only because this branch requires a file that
+            // already existed: the bootstrap rewrite created it durably, so this
+            // append puts no directory entry at stake. `window::append_cached` opens
+            // with create-if-missing and does NOT sync the parent directory on a
+            // create, so if the file could vanish between the guard above and that
+            // open, a successful write would still be an unproven create and this
+            // classification would be a lie. The assertion pins the assumption the
+            // guard rests on, so a later reader cannot turn it into a race.
+            debug_assert!(
+                existed_before,
+                "the durable append branch requires a file that already existed"
+            );
+            // Settle before the row joins the index: a caller must never observe an
+            // indexed row whose flight is still unclassified. An early failure above
+            // drops the grant unclassified, which fails closed and poisons the epoch.
+            if let Some(grant) = grant.take() {
+                grant.settle(certainty_of(&appended))?;
             }
+            appended?;
             #[cfg(test)]
             if entry.type_ == "child_usage_attributed"
                 && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
@@ -288,11 +327,26 @@ impl SessionFile {
                 self.by_id.remove(&id);
                 self.entries.pop();
                 self.leaf_id = previous_leaf;
+                if let Some(grant) = grant.take() {
+                    grant.settle(CanonicalWriteCertainty::Uncertain)?;
+                }
                 return Err(error);
+            }
+            if let Some(grant) = grant.take() {
+                grant.settle(CanonicalWriteCertainty::Known)?;
             }
             self.fold_attribution_id(&id);
         }
         Ok(id)
+    }
+
+    /// Rows this store persisted while no canonical epoch was attached.
+    ///
+    /// The name states the fact rather than the policy, so it stays true if the
+    /// policy changes. A turn that writes content leaves this at zero.
+    #[must_use]
+    pub fn rows_written_without_epoch(&self) -> u64 {
+        self.rows_written_without_epoch
     }
 
     /// Point the session at a concrete file path (after `create`), preserving entries.
@@ -329,4 +383,16 @@ fn write_line<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     Ok(())
+}
+
+/// Classify one append attempt for the canonical epoch.
+///
+/// A failed append is `Uncertain`: bytes may have reached the file before the
+/// error, and the epoch must not drain across a state nobody proved.
+fn certainty_of(result: &Result<()>) -> CanonicalWriteCertainty {
+    if result.is_ok() {
+        CanonicalWriteCertainty::Known
+    } else {
+        CanonicalWriteCertainty::Uncertain
+    }
 }

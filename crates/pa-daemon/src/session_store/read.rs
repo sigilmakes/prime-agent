@@ -159,6 +159,8 @@ impl SessionFile {
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown: false,
             skipped_lines: 0,
+            epoch: None,
+            rows_written_without_epoch: 0,
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -218,6 +220,8 @@ impl SessionFile {
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown,
             skipped_lines: 0,
+            epoch: None,
+            rows_written_without_epoch: 0,
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -316,6 +320,8 @@ impl SessionFile {
             child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown: false,
             skipped_lines: 0,
+            epoch: None,
+            rows_written_without_epoch: 0,
         }
     }
 }
