@@ -303,6 +303,30 @@ pub fn retry_will_follow(
     !non_retryable && retries_performed < policy.max_retries
 }
 
+/// Whether the compaction arm will re-issue this settle.
+///
+/// A context-overflow settle does not belong to the provider retry lane; TS
+/// hands it to the compaction arm, which compacts and re-issues the same turn
+/// (`_handleRetryableError`), so that `agent_end` returns before
+/// `_scheduleAutoRefineAfterAgentEnd` (`agent-session.ts:4736-4740`) exactly
+/// like a provider retry. `compaction_enabled` is the `compaction.enabled`
+/// toggle the arm itself gates on.
+///
+/// The engine cannot see whether the arm's one-attempt guard has already
+/// spent itself (the guard lives with the turn loop and is evaluated after the
+/// run returns), so a spent guard reads as retry-pending here: over-suppression
+/// only, never an extra request.
+#[must_use]
+pub fn compaction_retry_will_follow(
+    message: &AssistantMessage,
+    context_window: u64,
+    compaction_enabled: bool,
+) -> bool {
+    compaction_enabled
+        && message.stop_reason == StopReason::Error
+        && is_context_overflow_failure(message, context_window)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +457,26 @@ mod tests {
         faux.provider = "faux".to_string();
         faux.error_message = Some("No more faux responses queued".to_string());
         assert!(!retry_will_follow(&faux, 0, &policy, 0));
+    }
+
+    /// The compaction-driven retry is the second seam the review must not
+    /// cross.
+    #[test]
+    fn compaction_retry_owns_overflow_settles_only_when_compaction_is_on() {
+        let mut overflow = error_message(None, None, None);
+        overflow.error_message =
+            Some("prompt is too long: 213462 tokens > 200000 maximum".to_string());
+        assert!(compaction_retry_will_follow(&overflow, 200_000, true));
+        // A disabled toggle never re-issues the turn.
+        assert!(!compaction_retry_will_follow(&overflow, 200_000, false));
+        // A clean settle is nobody's retry.
+        assert!(!compaction_retry_will_follow(&ok_message(), 200_000, true));
+        // A non-overflow provider failure belongs to the provider lane.
+        assert!(!compaction_retry_will_follow(
+            &error_message(Some("rate_limit"), Some(429), None),
+            200_000,
+            true
+        ));
     }
 
     #[test]

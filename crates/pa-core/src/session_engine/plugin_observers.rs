@@ -48,13 +48,17 @@ async fn notify(plugins: &SessionPlugins, stage: &str, input: Value) {
     }
 }
 
-/// Whether the retry lane will re-issue this settle.
+/// Whether a retry lane will re-issue this settle.
 ///
 /// TS draws the auto-refine seam at exactly this question: an `agent_end` that
 /// initiated a retry returns before `_scheduleAutoRefineAfterAgentEnd`
 /// (`agent-session.ts:4736-4740`), so no refinement review is scheduled from a
-/// settle the retry lane owns. The run slot is per attempt, so the settle alone
-/// cannot answer it; the message and the live retry policy can.
+/// settle a retry lane owns. Two lanes re-issue a turn here: the provider retry
+/// lane (`provider_retry::retry_will_follow`) and the compaction arm, which
+/// compacts and re-issues the same turn after a context overflow
+/// (`provider_retry::compaction_retry_will_follow`). The run slot is per
+/// attempt, so the settle alone cannot answer either question; the message, the
+/// retry policy and the compaction toggle can.
 async fn settle_retry_pending(
     agent: &Arc<pa_agent::agent::Agent>,
     plugins: &SessionPlugins,
@@ -69,13 +73,21 @@ async fn settle_retry_pending(
         return false;
     };
     let (cwd, agent_dir) = plugins.settings_dirs();
-    let policy =
-        crate::settings::SettingsManager::create(cwd, agent_dir).get_provider_retry_policy();
-    if !policy.enabled {
+    let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
+    let policy = settings.get_provider_retry_policy();
+    let compaction_enabled = settings.get_compaction_enabled();
+    if !policy.enabled && !compaction_enabled {
         return false;
     }
     let context_window = agent.state().await.model.context_window;
-    super::provider_retry::retry_will_follow(assistant, context_window, &policy, 0)
+    let provider_retry = policy.enabled
+        && super::provider_retry::retry_will_follow(assistant, context_window, &policy, 0);
+    provider_retry
+        || super::provider_retry::compaction_retry_will_follow(
+            assistant,
+            context_window,
+            compaction_enabled,
+        )
 }
 
 /// `AgentEnd` is the complete admitted run, unlike `TurnEnd`'s individual tool loop

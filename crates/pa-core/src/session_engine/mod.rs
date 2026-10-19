@@ -53,7 +53,9 @@ pub mod state_restore_notice;
 pub mod tool_bridge;
 pub mod turn_activity;
 pub mod turn_boundary;
-pub use turn_activity::{TurnActivity, TurnActivityProbe, TurnActivitySignal};
+pub use turn_activity::{
+    TurnActivity, TurnActivityGuard, TurnActivityProbe, TurnActivitySignal, TurnActivityState,
+};
 
 mod admission;
 mod canonical_authority;
@@ -233,6 +235,13 @@ impl AgentSession {
     #[must_use]
     pub fn turn_activity_signal(&self) -> Arc<turn_activity::TurnActivitySignal> {
         Arc::clone(&self.turn_activity)
+    }
+
+    /// The engine-owned activity state: a host that owns a wider turn scope
+    /// than this session can see (the daemon's turn loop) marks it here.
+    #[must_use]
+    pub fn turn_activity_state(&self) -> Arc<turn_activity::TurnActivityState> {
+        self.turn_activity.state()
     }
 
     /// Build a session around a running agent loop.

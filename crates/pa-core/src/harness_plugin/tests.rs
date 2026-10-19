@@ -808,3 +808,55 @@ async fn disabled_plugin_settle_enqueues_no_job() {
     assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
     assert!(!f.agent.join("plugins/harness").exists());
 }
+
+/// A context-overflow settle is the compaction arm's, not the review's: the
+/// arm compacts and re-issues the same turn, so this `agent_end` is not a turn
+/// boundary (TS `agent-session.ts:4736-4740` hands the overflow to
+/// `_handleRetryableError` too).
+fn overflow_failure_turn(model: &pa_agent::types::Model) -> pa_agent::scripted::ScriptedTurn {
+    use pa_agent::scripted::{stream_failure_steps, ScriptStep, ScriptedTurn};
+    let mut steps = stream_failure_steps(
+        model,
+        "",
+        "prompt is too long: 213462 tokens > 200000 maximum",
+    );
+    if let Some(ScriptStep::Event(event)) = steps.last_mut() {
+        if let pa_agent::stream::AssistantMessageEvent::Error { error, .. } = event.as_mut() {
+            error.error_message =
+                Some("prompt is too long: 213462 tokens > 200000 maximum".to_string());
+            error.diagnostics = Some(vec![pa_agent::types::AssistantMessageDiagnostic {
+                kind: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(json!({"kind":"context_length","status":400})),
+            }]);
+        }
+    }
+    ScriptedTurn::Events(steps)
+}
+
+fn stream_model() -> pa_agent::types::Model {
+    serde_json::from_value(json!({"id":"test","name":"Test","api":"openai-completions","provider":"test","baseUrl":"http://localhost:9","reasoning":false,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":10000,"maxTokens":100})).unwrap()
+}
+
+#[tokio::test]
+async fn overflow_settle_never_schedules_a_review() {
+    let mut config = interval_settings();
+    config["compaction"] = json!({"enabled": true});
+    let f = Fixture::new(config, LEGACY).await;
+    let model = stream_model();
+    f.provider.push_turn(overflow_failure_turn(&model));
+    let _ = f
+        .engine
+        .prompt(
+            "overflow turn",
+            crate::session_engine::PromptOptions::default(),
+        )
+        .await;
+    assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
+    assert_eq!(
+        f.call_plugin("route", "requests", json!({})).await.unwrap(),
+        json!({}),
+        "the compaction arm owns the settle, so no auxiliary request ran"
+    );
+}

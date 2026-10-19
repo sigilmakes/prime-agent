@@ -31,6 +31,9 @@ impl AgentSession {
         &self,
         message: &pa_types::session::CustomMessage,
     ) -> anyhow::Result<PromptOutcome> {
+        // The engine's own turn scope: a deferred plugin job waits for it, so a
+        // core-only embedder needs no probe.
+        let _turn = self.turn_activity.begin_turn();
         let state = self.agent.state().await;
         let busy = state.is_streaming;
         if busy {
@@ -76,6 +79,9 @@ impl AgentSession {
         images: Vec<pa_agent::types::ImageContent>,
         options: PromptOptions,
     ) -> anyhow::Result<PromptOutcome> {
+        // The engine's own turn scope: a deferred plugin job waits for it, so a
+        // core-only embedder needs no probe.
+        let _turn = self.turn_activity.begin_turn();
         let expand = options.expand_prompt_templates.unwrap_or(true);
         // TS `_finishSubmissionNormalization` order: skill commands expand first, prompt templates
         // second; both are gated by the same policy flag.

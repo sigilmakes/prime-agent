@@ -25,6 +25,16 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
+        // The engine's turn scope spans this loop, not one model attempt: the
+        // overflow arm compacts and re-issues the turn inside it, so the engine
+        // activity state stays busy across retry gaps and compaction (the
+        // deferred plugin jobs gate and the auto-refine seam both read it).
+        let _turn = self
+            .session
+            .blocking_lock()
+            .as_deref()
+            .map(|engine| engine.session.turn_activity_state())
+            .map(|state| state.begin_turn());
         // The first turn admits the prompt; every autonomous follow-up turn
         // runs text-only (attachments are never re-sent).
         let prompt = first;

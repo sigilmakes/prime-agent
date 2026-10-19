@@ -165,6 +165,9 @@ impl AgentSession {
         api_key: Option<String>,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<CompactOutcome> {
+        // The engine's own compaction scope: TS never reviews while
+        // `isCompacting` (`agent-session.ts:9318-9319`).
+        let _compacting = self.turn_activity.begin_compaction();
         compaction_trace::trace(
             "compact.enter",
             &serde_json::json!({
