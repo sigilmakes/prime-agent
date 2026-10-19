@@ -14,6 +14,10 @@
 //! A genuine partial-prefix or fsync failure needs a fault-injection device this
 //! tree does not have; that mapping is covered by `canonical_io::tests`, and the
 //! fail-closed side is covered here by the unrecorded-drop case.
+//!
+//! Against seam bundle v2 the projection accessor no longer exists, so the only
+//! public completion observable is the drain view plus the typed refusal from
+//! `finish_at_external_idle`. Those are asserted instead of a projection bit.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -24,7 +28,7 @@ use pa_core::session::canonical::{
 };
 use pa_core::session_engine::canonical_coordinator::{CanonicalTestDrain, CanonicalTestEpoch};
 
-use super::canonical_io::{append_rows_durable, IoOutcome};
+use super::canonical_io::{append_rows_durable, settle, IoOutcome};
 use super::canonical_write_seam::commit_canonical_rows;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -104,8 +108,10 @@ fn joint_durable_write_records_known_and_drains_only_after_the_real_flight_drops
         std::fs::read(&path).expect("bytes"),
         b"{\"row\":\"joint\"}\n"
     );
-    // Still serving: projection is permitted until the close is requested.
-    assert!(epoch.projection_allowed());
+    // No close requested yet. The drain view reports Blocked, never Drained, so
+    // it is a completion signal and not a readiness predicate: a write that
+    // landed is not by itself permission to project or to finish.
+    assert_eq!(epoch.close_status(), CanonicalTestDrain::Blocked);
     std::fs::remove_file(&path).expect("cleanup");
 
     epoch.request_close().expect("close");
@@ -121,10 +127,12 @@ fn joint_durable_write_records_known_and_drains_only_after_the_real_flight_drops
     );
     epoch.finish_anchor();
     assert_eq!(epoch.close_status(), CanonicalTestDrain::Drained);
-    // A retired epoch no longer projects: `projection_allowed` is a projection
-    // permission, not a readiness or drain predicate.
-    assert!(!epoch.projection_allowed());
-    epoch.finish_at_external_idle().expect("ordered boundary");
+    // A clean drain crosses the ordered boundary. The call consumes the epoch,
+    // so a refused epoch can never be retried into success.
+    assert!(
+        epoch.finish_at_external_idle().is_ok(),
+        "a clean drain must cross the ordered boundary exactly once"
+    );
 }
 
 #[test]
@@ -162,11 +170,14 @@ fn joint_held_flight_keeps_the_scope_pending_until_the_ticket_drops() {
     drop(ticket);
     epoch.finish_anchor();
     assert_eq!(epoch.close_status(), CanonicalTestDrain::Drained);
-    epoch.finish_at_external_idle().expect("ordered boundary");
+    assert!(
+        epoch.finish_at_external_idle().is_ok(),
+        "the drain completed, so the ordered boundary must be consumed"
+    );
 }
 
 #[test]
-fn joint_unrecorded_recorder_drop_blocks_the_epoch_and_denies_projection() {
+fn joint_unrecorded_recorder_drop_blocks_the_epoch() {
     let mut epoch = epoch();
     let cursor = epoch.cursor();
     let (operation, ticket) = epoch.final_ticket(draft()).expect("final ticket");
@@ -188,7 +199,13 @@ fn joint_unrecorded_recorder_drop_blocks_the_epoch_and_denies_projection() {
 
     epoch.request_close().expect("close");
     assert_eq!(epoch.close_status(), CanonicalTestDrain::Blocked);
-    assert!(!epoch.projection_allowed());
+    // The typed refusal is the caller-visible outcome, and consuming the epoch
+    // makes a retry into success impossible.
+    assert_eq!(
+        epoch.finish_at_external_idle().unwrap_err(),
+        CanonicalTestDrain::Blocked,
+        "a poisoned epoch must refuse the ordered boundary, not drain"
+    );
 }
 
 #[test]
@@ -243,7 +260,49 @@ fn joint_refusal_before_the_first_byte_is_known_and_does_not_block_drain() {
     epoch.request_close().expect("close");
     epoch.finish_anchor();
     assert_eq!(epoch.close_status(), CanonicalTestDrain::Drained);
-    epoch.finish_at_external_idle().expect("ordered boundary");
+    assert!(
+        epoch.finish_at_external_idle().is_ok(),
+        "a zero-byte refusal is Known and must still drain cleanly"
+    );
+}
+
+#[test]
+fn joint_unproven_directory_sync_blocks_the_epoch_and_never_drains() {
+    let mut epoch = epoch();
+    let cursor = epoch.cursor();
+    let (operation, ticket) = epoch.final_ticket(draft()).expect("final ticket");
+    let flight = ticket
+        .permit
+        .enter_io(
+            CanonicalIoStage::RequestedMutation,
+            &cursor,
+            &operation,
+            Some(&draft()),
+        )
+        .expect("flight");
+    let recorder = ticket
+        .recorder(CanonicalIoStage::RequestedMutation)
+        .expect("recorder");
+
+    // A created file whose directory sync failed: the bytes are on disk but
+    // durability was never proven, which is the outcome the real watcher reports
+    // for that failure. Settling it must classify Uncertain, not Known.
+    settle(recorder, IoOutcome::FsyncUnproven).expect("classify uncertain");
+    drop(flight);
+    drop(ticket);
+
+    epoch.request_close().expect("close");
+    epoch.finish_anchor();
+    assert_eq!(
+        epoch.close_status(),
+        CanonicalTestDrain::Blocked,
+        "an unproven fsync must block the epoch, never drain it"
+    );
+    assert_eq!(
+        epoch.finish_at_external_idle().unwrap_err(),
+        CanonicalTestDrain::Blocked,
+        "the ordered boundary must refuse an unproven write"
+    );
 }
 
 #[test]

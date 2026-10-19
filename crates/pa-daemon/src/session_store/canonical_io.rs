@@ -10,19 +10,44 @@
 //! "a prefix may have landed". `write_all` cannot tell them apart, so the write
 //! loop below counts bytes itself.
 //!
+//! Durability of a created file needs two proofs, not one. `sync_all` on the file
+//! descriptor proves the bytes of a file that already existed; for a file this
+//! call has just created it does not prove the new directory entry, so a crash
+//! could lose the name while `DurableOk` was already reported. The create path
+//! therefore syncs the containing directory as well and only then reports
+//! [`IoOutcome::DurableOk`]; a directory that cannot be opened or synced is
+//! [`IoOutcome::FsyncUnproven`], which the authority treats as `Uncertain` and
+//! which blocks the epoch instead of draining it.
+//!
 //! Not wired yet: its consumer is the writer seam that takes a Core-issued
 //! `CanonicalWriteTicket`. The file-inner allow is removed at that point and must
 //! not become permanent debt.
 #![allow(dead_code)]
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
+
+/// Consecutive `EINTR` retries allowed inside one write loop.
+///
+/// A signal storm must not be able to spin the loop forever, so the retries are
+/// bounded and exhaustion is reported as a write that stopped where it stopped.
+const MAX_INTERRUPTED_SPINS: u8 = 16;
+
+/// One durability proof, in the order the kernel is asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SyncStage {
+    /// The file's own bytes were synced.
+    File,
+    /// The directory entry was synced, which a created file needs.
+    Directory,
+}
 
 /// What the actual I/O task observed at its decision points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IoOutcome {
-    /// Every byte landed and `sync_all` proved durability.
+    /// Every byte landed and durability was proved: the file was synced, and the
+    /// containing directory was synced too when this call created the file.
     DurableOk,
     /// The write was refused before the kernel accepted a single byte.
     RefusedBeforeFirstByte,
@@ -91,26 +116,96 @@ pub(super) fn settle<S: CertaintySink>(sink: S, outcome: IoOutcome) -> Result<()
 
 /// Append `bytes` and prove durability, reporting what the kernel let through.
 ///
-/// Opens with create+append, counts accepted bytes in a raw write loop so a
-/// zero-byte refusal is distinguishable from a torn prefix, then calls
-/// `sync_all` so a completion is never reported without proof.
+/// Opens with append (creating the file when absent), counts accepted bytes in a
+/// raw write loop so a zero-byte refusal is distinguishable from a torn prefix,
+/// syncs the file, and then syncs the containing directory when this call created
+/// the file. A completion is never reported without both proofs.
 #[must_use]
 pub(super) fn append_rows_durable(path: &Path, bytes: &[u8]) -> IoOutcome {
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+    append_rows_watched(path, bytes, &mut |_stage| {}, &sync_directory)
+}
+
+/// [`append_rows_durable`] with the durability proofs observable and the
+/// directory sync injectable.
+///
+/// The observer sees each proof only after it succeeded, so a test can assert the
+/// order rather than trusting a return value. `sync_dir` exists so the failure
+/// path can be exercised without a broken filesystem.
+#[must_use]
+pub(super) fn append_rows_watched<O, D>(
+    path: &Path,
+    bytes: &[u8],
+    observe: &mut O,
+    sync_dir: &D,
+) -> IoOutcome
+where
+    O: FnMut(SyncStage),
+    D: Fn(&Path) -> std::io::Result<()>,
+{
+    let Ok((mut file, created)) = open_rows(path) else {
         return IoOutcome::RefusedBeforeFirstByte;
     };
     let mut written = 0_usize;
+    let mut spins = 0_u8;
     while written < bytes.len() {
         match file.write(&bytes[written..]) {
             Ok(0) => return after_write_error(written),
-            Ok(count) => written += count,
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Ok(count) => {
+                written += count;
+                spins = 0;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {
+                spins = spins.saturating_add(1);
+                if spins > MAX_INTERRUPTED_SPINS {
+                    return after_write_error(written);
+                }
+            }
             Err(_) => return after_write_error(written),
         }
     }
-    match file.sync_all() {
-        Ok(()) => IoOutcome::DurableOk,
-        Err(_) => IoOutcome::FsyncUnproven,
+    if file.sync_all().is_err() {
+        return IoOutcome::FsyncUnproven;
+    }
+    observe(SyncStage::File);
+    if !created {
+        return IoOutcome::DurableOk;
+    }
+    if sync_dir(parent_directory(path)).is_err() {
+        return IoOutcome::FsyncUnproven;
+    }
+    observe(SyncStage::Directory);
+    IoOutcome::DurableOk
+}
+
+/// Open for append, reporting whether this call created the file.
+///
+/// `create_new` makes the answer atomic instead of a check-then-open race.
+fn open_rows(path: &Path) -> std::io::Result<(File, bool)> {
+    match OpenOptions::new().create_new(true).append(true).open(path) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map(|file| (file, false)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Prove that the directory entry itself is durable.
+fn sync_directory(parent: &Path) -> std::io::Result<()> {
+    File::open(parent)?.sync_all()
+}
+
+/// The directory a created file must sync.
+///
+/// `Path::parent` reports `Some("")` for a bare relative name such as
+/// `rows.jsonl`, and `File::open("")` fails, which would classify a legitimate
+/// relative-path write as unproven and block the epoch for no reason. The current
+/// directory is the right answer there.
+fn parent_directory(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
     }
 }
 
@@ -229,6 +324,69 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), details.len());
+    }
+
+    #[test]
+    fn created_file_syncs_the_file_and_then_the_directory() {
+        let path = scratch_path("create-sync");
+        let mut stages = Vec::new();
+        let outcome = append_rows_watched(
+            &path,
+            b"row\n",
+            &mut |stage| stages.push(stage),
+            &sync_directory,
+        );
+        assert_eq!(outcome, IoOutcome::DurableOk);
+        // A created file needs both proofs, and the order is file then directory.
+        assert_eq!(stages, vec![SyncStage::File, SyncStage::Directory]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn existing_file_syncs_only_the_file() {
+        let path = scratch_path("existing-sync");
+        assert_eq!(append_rows_durable(&path, b"one\n"), IoOutcome::DurableOk);
+        let mut stages = Vec::new();
+        let outcome = append_rows_watched(
+            &path,
+            b"two\n",
+            &mut |stage| stages.push(stage),
+            &sync_directory,
+        );
+        assert_eq!(outcome, IoOutcome::DurableOk);
+        assert_eq!(stages, vec![SyncStage::File]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn directory_sync_failure_is_unproven_and_never_durable() {
+        let path = scratch_path("dir-sync-fails");
+        let mut stages = Vec::new();
+        let outcome = append_rows_watched(
+            &path,
+            b"row\n",
+            &mut |stage| stages.push(stage),
+            &|_parent| Err(std::io::Error::from(ErrorKind::PermissionDenied)),
+        );
+        // The bytes did land, so this is not a refusal: it is unproven durability.
+        assert_eq!(outcome, IoOutcome::FsyncUnproven);
+        assert_eq!(outcome.certainty(), IoCertainty::Uncertain);
+        assert_eq!(stages, vec![SyncStage::File]);
+        assert_eq!(std::fs::read(&path).unwrap(), b"row\n");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn bare_relative_name_syncs_the_current_directory() {
+        // `Path::new("rows.jsonl").parent()` is `Some("")`, and `File::open("")`
+        // fails with ENOENT. A relative write must not turn that into an
+        // unproven durability that blocks the epoch.
+        assert_eq!(parent_directory(Path::new("rows.jsonl")), Path::new("."));
+        assert_eq!(
+            parent_directory(Path::new("/tmp/dir/rows.jsonl")),
+            Path::new("/tmp/dir")
+        );
+        assert_eq!(parent_directory(Path::new("/rows.jsonl")), Path::new("/"));
     }
 
     #[test]

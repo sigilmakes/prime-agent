@@ -122,7 +122,11 @@ pub(super) struct AuthorityOwner {
     shared: Arc<Shared>,
 }
 impl AuthorityOwner {
-    pub(super) fn new(actual_source: CanonicalCursor) -> Self {
+    /// The FIRST epoch of a session. Never use this for a successor epoch: a
+    /// successor must present the previous epoch's retired token through
+    /// [`Self::successor`]. The genesis call is named so a bypassing successor is
+    /// greppable rather than the default constructor.
+    pub(super) fn genesis(actual_source: CanonicalCursor) -> Self {
         Self {
             shared: Arc::new(Shared {
                 entry: Mutex::new(Entry {
@@ -185,6 +189,24 @@ impl AuthorityOwner {
         ))
     }
 
+    /// A SUCCESSOR epoch. It consumes the retired token minted by the previous
+    /// epoch's ordered boundary, so "old ticket Drained plus external ordered
+    /// boundary before any successor" is a type property, not a naming convention.
+    ///
+    /// # Errors
+    /// Refuses a successor whose owner/session/header/path/branch identity differs
+    /// from the retired epoch the token came from.
+    pub(super) fn successor(actual_source: CanonicalCursor, retired: RetiredEpoch) -> Result<Self> {
+        // The token is single-use and proves the previous boundary completed; it
+        // also binds the successor to that exact source identity.
+        let RetiredEpoch {
+            _private: (),
+            source,
+        } = retired;
+        validate_source(&source, &actual_source)?;
+        Ok(Self::genesis(actual_source))
+    }
+
     /// Nonblocking Closing transition. Waiting and activation are separate.
     pub(super) fn request_close(&self, reason: CloseReason) -> CloseTicket {
         stage_close(&self.shared, reason, None)
@@ -217,7 +239,12 @@ impl AuthorityOwner {
     pub(super) fn quarantine(&self) {
         self.shared.quarantine();
     }
-    pub(super) fn projection_allowed(&self) -> bool {
+    /// Whether this epoch has not quarantined projection.
+    ///
+    /// NOT a readiness predicate and it must not gate Ready. It is module-private
+    /// on purpose: a future readiness check has to come through an explicit view
+    /// type we design then, not by widening this.
+    fn projection_not_quarantined(&self) -> bool {
         self.shared
             .lock()
             .is_ok_and(|e| e.gate == Gate::Open && !e.poisoned && !e.projection_quarantined)
@@ -964,6 +991,34 @@ fn stage_close(
         self_hold,
     }
 }
+/// Non-`Clone`, `Send + Sync` proof that one epoch closed at the external
+/// ordered boundary. Only [`CloseTicket::finish_at_external_idle`] mints it, and
+/// [`AuthorityOwner::successor`] requires it, so a successor epoch cannot be
+/// constructed before the old one drained and its boundary completed. Dropping it
+/// abandons the only successor capability for that epoch.
+pub(super) struct RetiredEpoch {
+    _private: (),
+    /// The retired epoch's exact source identity, carried so a successor cannot
+    /// silently attach to a different owner/session/branch epoch.
+    source: CanonicalCursor,
+}
+
+/// Typed refusal of the ordered-boundary consumption. Never a collapsed
+/// `AuthorityError`: the caller branches on the variant and does not retry blindly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DrainRefusal {
+    /// The caller itself still holds the transaction lease or the serving anchor.
+    WouldDrainSelf,
+    /// Actual outstanding work, reported exactly.
+    Pending {
+        io: usize,
+        transactions: usize,
+        anchors: usize,
+    },
+    /// Poisoned or unreadable epoch: never treated as drained.
+    Blocked,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DrainStatus {
     Pending {
@@ -1020,16 +1075,50 @@ impl CloseTicket {
     }
     /// External idle-boundary coordinator consumes the ticket before activating
     /// a NEW owner/serving epoch. This cannot clear old projection quarantine.
-    pub(super) fn finish_at_external_idle(self) -> Result<()> {
-        if self.status() != DrainStatus::Drained {
-            return Err(closed());
+    ///
+    /// Success mints the non-`Clone`, `Send + Sync` [`RetiredEpoch`] token that a
+    /// successor constructor requires. Failure is typed and non-spinning: the
+    /// caller branches on [`DrainRefusal`] and never mistakes a refusal for a
+    /// drain, and never retries blindly.
+    ///
+    /// # Errors
+    /// `DrainRefusal::WouldDrainSelf` when the caller still holds its own lease or
+    /// anchor, `Pending` with the actual outstanding counts, and `Blocked` when the
+    /// epoch is poisoned or unreadable.
+    pub(super) fn finish_at_external_idle(self) -> std::result::Result<RetiredEpoch, DrainRefusal> {
+        match self.status() {
+            DrainStatus::WouldDrainSelf => return Err(DrainRefusal::WouldDrainSelf),
+            DrainStatus::Blocked => return Err(DrainRefusal::Blocked),
+            DrainStatus::Pending {
+                io,
+                transactions,
+                anchors,
+            } => {
+                return Err(DrainRefusal::Pending {
+                    io,
+                    transactions,
+                    anchors,
+                })
+            }
+            DrainStatus::Drained => {}
         }
-        let mut entry = self.shared.lock()?;
-        if entry.poisoned || entry.io != 0 || entry.transactions != 0 || entry.anchors != 0 {
-            return Err(closed());
+        let mut entry = self.shared.lock().map_err(|_| DrainRefusal::Blocked)?;
+        if entry.poisoned {
+            return Err(DrainRefusal::Blocked);
         }
+        if entry.io != 0 || entry.transactions != 0 || entry.anchors != 0 {
+            return Err(DrainRefusal::Pending {
+                io: entry.io,
+                transactions: entry.transactions,
+                anchors: entry.anchors,
+            });
+        }
+        let source = entry.source.clone();
         entry.gate = Gate::Closed;
-        Ok(())
+        Ok(RetiredEpoch {
+            _private: (),
+            source,
+        })
     }
 }
 
@@ -1066,7 +1155,7 @@ mod tests {
     }
     fn fixture(contributions: Vec<ContributionSelection>) -> Fixture {
         let source = cursor();
-        let owner = AuthorityOwner::new(source.clone());
+        let owner = AuthorityOwner::genesis(source.clone());
         let (run, anchor) = owner
             .capture_serving_run(
                 &source,
@@ -1216,7 +1305,7 @@ mod tests {
             close
                 .finish_at_external_idle()
                 .expect("external successor boundary");
-            assert!(!f.owner.projection_allowed());
+            assert!(!f.owner.projection_not_quarantined());
         }
     }
 
@@ -1263,7 +1352,7 @@ mod tests {
         start_tx.send(()).expect("release real writer");
         writer.join().expect("writer finished");
         assert_eq!(close.status(), DrainStatus::Drained);
-        assert!(!f.owner.projection_allowed());
+        assert!(!f.owner.projection_not_quarantined());
     }
     #[test]
     fn transaction_and_registered_late_run_anchor_each_prevent_drain() {
@@ -1351,7 +1440,7 @@ mod tests {
             f.anchor.take().expect("anchor").finish_ordered_boundary();
             assert_eq!(close.status(), DrainStatus::Blocked);
             assert!(close.finish_at_external_idle().is_err());
-            assert!(!f.owner.projection_allowed());
+            assert!(!f.owner.projection_not_quarantined());
         }
         let mut f = fixture(vec![]);
         let close = f.owner.request_close(CloseReason::Retirement);
@@ -1742,7 +1831,7 @@ mod tests {
         close.finish_at_external_idle().expect("closed");
         assert!(scope.begin_prepare().is_err());
         let source = cursor();
-        let next = AuthorityOwner::new(source.clone());
+        let next = AuthorityOwner::genesis(source.clone());
         assert!(next
             .capture_serving_run(
                 &source,
@@ -1757,7 +1846,7 @@ mod tests {
         )]);
         assert!(!f.run.same_serving(&successor.run));
         assert!(successor.run.observe().begin_prepare().is_ok());
-        assert!(!f.owner.projection_allowed());
+        assert!(!f.owner.projection_not_quarantined());
     }
     #[test]
     fn late_real_terminal_after_abort_exact_payload_survives_but_new_work_does_not() {
@@ -1801,7 +1890,7 @@ mod tests {
         persist(&late, &actual);
         f.anchor.take().expect("anchor").finish_ordered_boundary();
         assert_eq!(close.status(), DrainStatus::Drained);
-        assert!(!f.owner.projection_allowed());
+        assert!(!f.owner.projection_not_quarantined());
         assert!(
             late.begin_prepare().is_err(),
             "ordered boundary ends late admission"
@@ -1827,7 +1916,7 @@ mod tests {
         f.owner.request_close(CloseReason::OrdinaryAbort);
         f.owner.quarantine();
         assert!(terminal.begin_prepare().is_err());
-        assert!(!f.owner.projection_allowed());
+        assert!(!f.owner.projection_not_quarantined());
     }
     #[test]
     fn exact_assistant_stop_reason_error_details_and_empty_content_are_immutable() {
@@ -1873,7 +1962,7 @@ mod tests {
         drop(tx);
         f.anchor.take().expect("anchor").finish_ordered_boundary();
         close.finish_at_external_idle().expect("drain complete");
-        assert!(!f.owner.projection_allowed());
+        assert!(!f.owner.projection_not_quarantined());
         assert!(f.run.observe().begin_prepare().is_err());
     }
     #[test]
@@ -1895,6 +1984,150 @@ mod tests {
         anchor.expect("anchor").finish_ordered_boundary();
     }
     #[test]
+    fn every_drain_refusal_variant_comes_from_its_real_condition() {
+        // WouldDrainSelf: the caller still holds its own transaction lease.
+        let f = fixture(vec![]);
+        let (_, tx) = f.run.observe().begin_prepare().expect("transaction");
+        let own = tx
+            .control
+            .request_close(CloseReason::Retirement)
+            .expect("self ticket");
+        assert_eq!(
+            own.finish_at_external_idle().err(),
+            Some(DrainRefusal::WouldDrainSelf)
+        );
+        drop(tx);
+
+        // Pending{transactions}: an outstanding lease, no flight, no anchor.
+        let mut f = fixture(vec![]);
+        let (_, held) = f.run.observe().begin_prepare().expect("held lease");
+        f.anchor.take().expect("anchor").finish_ordered_boundary();
+        let close = f.owner.request_close(CloseReason::Retirement);
+        assert_eq!(
+            close.finish_at_external_idle().err(),
+            Some(DrainRefusal::Pending {
+                io: 0,
+                transactions: 1,
+                anchors: 0
+            })
+        );
+        // A refusal is not success and does not close the epoch: once the lease is
+        // released the same epoch still mints its token.
+        drop(held);
+        let close = f.owner.request_close(CloseReason::Retirement);
+        assert!(close.finish_at_external_idle().is_ok());
+
+        // Pending{io}: one admitted flight with the lease already released.
+        let mut f = fixture(vec![]);
+        let (_, tx) = f.run.observe().begin_prepare().expect("transaction");
+        let flight = enter(
+            &tx,
+            CanonicalIoStage::PreparePreflight,
+            &f.run,
+            &CanonicalOperation::new(),
+            None,
+        );
+        let recorder = tx
+            .control
+            .io_recorder(CanonicalIoStage::PreparePreflight)
+            .expect("recorder");
+        f.anchor.take().expect("anchor").finish_ordered_boundary();
+        drop(tx);
+        let close = f.owner.request_close(CloseReason::Retirement);
+        assert_eq!(
+            close.finish_at_external_idle().err(),
+            Some(DrainRefusal::Pending {
+                io: 1,
+                transactions: 0,
+                anchors: 0
+            })
+        );
+        recorder.record(RecordedIo::Known).expect("classify");
+        drop(flight);
+        let close = f.owner.request_close(CloseReason::Retirement);
+        assert!(close.finish_at_external_idle().is_ok());
+
+        // Pending{anchors}: only the serving anchor is outstanding.
+        let f = fixture(vec![]);
+        let close = f.owner.request_close(CloseReason::Retirement);
+        assert_eq!(
+            close.finish_at_external_idle().err(),
+            Some(DrainRefusal::Pending {
+                io: 0,
+                transactions: 0,
+                anchors: 1
+            })
+        );
+
+        // Blocked: an unrecorded flight drop poisons the epoch.
+        let mut f = fixture(vec![]);
+        let (_, tx) = f.run.observe().begin_prepare().expect("transaction");
+        let flight = enter(
+            &tx,
+            CanonicalIoStage::PreparePreflight,
+            &f.run,
+            &CanonicalOperation::new(),
+            None,
+        );
+        drop(flight);
+        drop(tx);
+        f.anchor.take().expect("anchor").finish_ordered_boundary();
+        assert!(!f.owner.projection_not_quarantined());
+        let close = f.owner.request_close(CloseReason::Retirement);
+        assert_eq!(
+            close.finish_at_external_idle().err(),
+            Some(DrainRefusal::Blocked)
+        );
+    }
+
+    #[test]
+    fn successor_epoch_requires_the_retired_token() {
+        let source = cursor();
+        let owner = AuthorityOwner::genesis(source.clone());
+        let (run, anchor) = owner
+            .capture_serving_run(
+                &source,
+                Arc::new(String::from("run")),
+                Arc::new(String::from("model")),
+                vec![],
+            )
+            .expect("capture");
+        anchor.finish_ordered_boundary();
+        let close = owner.request_close(CloseReason::Retirement);
+        let retired = close.finish_at_external_idle().expect("retired token");
+        // Same owner/session/header/path/branch identity: the token is accepted.
+        let next = AuthorityOwner::successor(source.clone(), retired).expect("successor epoch");
+        assert!(next
+            .capture_serving_run(
+                &source,
+                Arc::new(String::from("next run")),
+                Arc::new(String::from("next model")),
+                vec![]
+            )
+            .is_ok());
+        assert!(run.observe().begin_prepare().is_err());
+        assert!(!owner.projection_not_quarantined());
+
+        // A token cannot carry over to a different owner identity.
+        let other = cursor();
+        let other_owner = AuthorityOwner::genesis(other.clone());
+        let (_, other_anchor) = other_owner
+            .capture_serving_run(
+                &other,
+                Arc::new(String::from("r")),
+                Arc::new(String::from("m")),
+                vec![],
+            )
+            .expect("other capture");
+        other_anchor.finish_ordered_boundary();
+        let other_retired = other_owner
+            .request_close(CloseReason::Retirement)
+            .finish_at_external_idle()
+            .expect("other token");
+        assert!(AuthorityOwner::successor(source, other_retired).is_err());
+    }
+
+    #[test]
     fn provider_final_seals_after_abort_only_for_previously_admitted_step() {
         let mut f = fixture(vec![]);
         let step = f
@@ -1910,6 +2143,6 @@ mod tests {
         assert!(f.run.admit_provider_step(Arc::new(())).is_err());
         f.anchor.take().expect("anchor").finish_ordered_boundary();
         assert_eq!(close.status(), DrainStatus::Drained);
-        assert!(!f.owner.projection_allowed());
+        assert!(!f.owner.projection_not_quarantined());
     }
 }

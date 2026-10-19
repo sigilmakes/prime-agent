@@ -22,7 +22,7 @@ use crate::session::canonical::{
     CanonicalOperation, CanonicalRequestedWrite, CanonicalSourceDisposition, CanonicalStoreError,
 };
 use crate::session_engine::canonical_authority::{
-    AuthorityOwner, CapturedRun, CloseReason, CloseTicket, DrainStatus, LateRunAnchor,
+    AuthorityOwner, CapturedRun, CloseReason, CloseTicket, DrainRefusal, DrainStatus, LateRunAnchor,
 };
 
 fn refused(detail: &str) -> CanonicalStoreError {
@@ -49,6 +49,24 @@ pub enum CanonicalTestDrain {
     Blocked,
     /// The caller itself still holds the transaction lease or the anchor.
     WouldDrainSelf,
+}
+
+impl From<DrainRefusal> for CanonicalTestDrain {
+    fn from(refusal: DrainRefusal) -> Self {
+        match refusal {
+            DrainRefusal::WouldDrainSelf => Self::WouldDrainSelf,
+            DrainRefusal::Pending {
+                io,
+                transactions,
+                anchors,
+            } => Self::Pending {
+                io,
+                transactions,
+                anchors,
+            },
+            DrainRefusal::Blocked => Self::Blocked,
+        }
+    }
 }
 
 impl From<DrainStatus> for CanonicalTestDrain {
@@ -86,7 +104,7 @@ impl CanonicalTestEpoch {
     /// Refuses only when the source cursor cannot be mirrored; construction itself
     /// admits nothing.
     pub fn new(source: CanonicalCursor) -> Result<Self, CanonicalStoreError> {
-        let owner = AuthorityOwner::new(source.clone());
+        let owner = AuthorityOwner::genesis(source.clone());
         Ok(Self {
             owner,
             cursor: source,
@@ -175,19 +193,17 @@ impl CanonicalTestEpoch {
 
     /// Consume the ordered boundary after the drain is complete.
     ///
+    /// `Err` carries the real typed refusal (never `Drained`), so a caller branches
+    /// on the variant instead of retrying.
+    ///
     /// # Errors
-    /// Refuses anything but a real `Drained` ticket.
-    pub fn finish_at_external_idle(self) -> Result<(), CanonicalStoreError> {
-        let ticket = self
-            .close
-            .ok_or_else(|| refused("no staged close ticket"))?;
-        ticket.finish_at_external_idle()
-    }
-
-    /// Whether this epoch still permits projection. NOT a readiness predicate.
-    #[must_use]
-    pub fn projection_allowed(&self) -> bool {
-        self.owner.projection_allowed()
+    /// `WouldDrainSelf`, `Pending{..}` or `Blocked`.
+    pub fn finish_at_external_idle(self) -> Result<(), CanonicalTestDrain> {
+        let ticket = self.close.ok_or(CanonicalTestDrain::Blocked)?;
+        ticket
+            .finish_at_external_idle()
+            .map(|_retired| ())
+            .map_err(CanonicalTestDrain::from)
     }
 
     /// Finish the registered serving anchor at the ordered boundary.
@@ -296,6 +312,5 @@ mod tests {
         drop(ticket);
         epoch.finish_anchor();
         assert_eq!(epoch.close_status(), CanonicalTestDrain::Blocked);
-        assert!(!epoch.projection_allowed());
     }
 }

@@ -194,7 +194,7 @@ mod tests {
 
     fn fixture() -> Fixture {
         let source = cursor();
-        let owner = AuthorityOwner::new(source.clone());
+        let owner = AuthorityOwner::genesis(source.clone());
         let (run, anchor) = owner
             .capture_serving_run(
                 &source,
@@ -302,7 +302,6 @@ mod tests {
         drop(flight);
         drop(ticket);
         assert_eq!(drain(&mut fixture), DrainStatus::Blocked);
-        assert!(!fixture.owner.projection_allowed());
     }
 
     #[test]
@@ -325,7 +324,6 @@ mod tests {
             .record(CanonicalWriteCertainty::Uncertain)
             .expect("classify uncertain");
         drop(flight);
-        assert!(!fixture.owner.projection_allowed());
         drop(ticket);
         assert_eq!(drain(&mut fixture), DrainStatus::Blocked);
     }
@@ -475,7 +473,6 @@ mod tests {
         drop(flight);
         drop(ticket);
         assert_eq!(drain(&mut fixture), DrainStatus::Blocked);
-        assert!(!fixture.owner.projection_allowed());
     }
 
     /// Real durable append through `append_cached` (open, `write_all`, `flush`,
@@ -579,7 +576,6 @@ mod tests {
         release.send(()).expect("release writer");
         writer.join().expect("writer joined");
         assert_eq!(close.status(), DrainStatus::Blocked);
-        assert!(!fixture.owner.projection_allowed());
         drop(ticket);
     }
 }
