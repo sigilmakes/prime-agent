@@ -1,5 +1,6 @@
 //! Generation-owned deferred invocations. Admission is intentionally detached from
 //! the observer; execution waits for quiescence and never retargets a replacement.
+use super::turn_activity::TurnActivitySignal;
 use crate::plugins::{
     CapabilityFuture, CapabilityRequest, ContributionKind, HostCapabilities, InvocationEvent,
     InvocationOutcome, PluginHost,
@@ -12,6 +13,11 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// How often a deferred job re-reads the host's turn-activity probe while the
+/// turn is still busy. Jobs are rare and one poll per interval per pending job
+/// is cheap; the turn queue has no notification seam this registry can await.
+const TURN_SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub(super) struct PluginJobs {
     host: Weak<PluginHost>,
     agent: Weak<Agent>,
@@ -19,6 +25,7 @@ pub(super) struct PluginJobs {
     jobs: Arc<Mutex<BTreeMap<String, Job>>>,
     command_barrier: Arc<tokio::sync::Mutex<()>>,
     settled: Arc<tokio::sync::Notify>,
+    turn_activity: Arc<TurnActivitySignal>,
 }
 struct Job {
     plugin: String,
@@ -32,6 +39,7 @@ impl PluginJobs {
         agent: &Arc<Agent>,
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         command_barrier: Arc<tokio::sync::Mutex<()>>,
+        turn_activity: Arc<TurnActivitySignal>,
     ) -> Self {
         Self {
             host: Arc::downgrade(host),
@@ -40,6 +48,7 @@ impl PluginJobs {
             jobs: Arc::default(),
             command_barrier,
             settled: Arc::default(),
+            turn_activity,
         }
     }
     pub(super) fn checkpoint(&self) -> Vec<String> {
@@ -97,6 +106,7 @@ impl HostCapabilities for PluginJobs {
         let jobs = Arc::clone(&self.jobs);
         let command_barrier = Arc::clone(&self.command_barrier);
         let settled = Arc::clone(&self.settled);
+        let turn_activity = Arc::clone(&self.turn_activity);
         Box::pin(async move {
             let host = host.upgrade().ok_or("session ended")?;
             if cancellation.is_cancelled() {
@@ -155,10 +165,25 @@ impl HostCapabilities for PluginJobs {
                                 None => session.lock().await.get_leaf_id().map(str::to_owned),
                             };
                             drop(permit);
-                            tokio::select! {biased;
-                                ()=retirement.cancelled()=>return Err("retired".into()),
-                                ()=stop.cancelled()=>return Err("cancelled".into()),
-                                ()=agent.wait_for_idle()=>{}
+                            // The agent's run slot is per attempt, so a provider
+                            // retry gap reads as idle while the turn is still live.
+                            // A deferred job waits for the host's turn boundary
+                            // (retry episode and compaction included), which is the
+                            // seam TS draws at `agent-session.ts:4740`/`:9318-9319`.
+                            loop {
+                                tokio::select! {biased;
+                                    ()=retirement.cancelled()=>return Err("retired".into()),
+                                    ()=stop.cancelled()=>return Err("cancelled".into()),
+                                    ()=agent.wait_for_idle()=>{}
+                                }
+                                if !turn_activity.activity().busy() {
+                                    break;
+                                }
+                                tokio::select! {biased;
+                                    ()=retirement.cancelled()=>return Err("retired".into()),
+                                    ()=stop.cancelled()=>return Err("cancelled".into()),
+                                    ()=tokio::time::sleep(TURN_SETTLE_POLL)=>{}
+                                }
                             }
                             if session.lock().await.get_leaf_id().map(str::to_owned) != branch {
                                 return Err("branch changed before job execution".into());

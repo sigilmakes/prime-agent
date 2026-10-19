@@ -758,11 +758,16 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     plugins.set_capability_delegate("session.snapshot", services.clone());
     plugins.set_capability_delegate("inference.", services);
     let plugin_command_barrier = Arc::new(tokio::sync::Mutex::new(()));
+    // The host installs the turn-activity probe after the build (the daemon
+    // worker owns the turn queue); until then a job's run-idle wait is the
+    // whole turn, which is the pre-existing behavior.
+    let turn_activity = Arc::new(super::turn_activity::TurnActivitySignal::new());
     let jobs = Arc::new(super::plugin_jobs::PluginJobs::new(
         &plugins.host(),
         &agent,
         wiring.session.clone(),
         Arc::clone(&plugin_command_barrier),
+        Arc::clone(&turn_activity),
     ));
     plugins.set_capability_delegate("jobs.", jobs.clone());
     plugins.set_capability_delegate(
@@ -836,6 +841,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     session.plugins = Some(Arc::clone(&plugins));
     session.plugin_command_barrier = plugin_command_barrier;
     session.plugin_jobs = Some(jobs);
+    session.turn_activity = turn_activity;
     session.context_archive = Arc::clone(&context_archive_state);
     session.context_model = std::sync::RwLock::new(full_model);
     super::plugins::observe_turns(&agent, Arc::clone(&plugins)).await;

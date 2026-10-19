@@ -108,6 +108,21 @@ impl HostCapabilities for PluginServices {
                         tools: None,
                     };
                     let inference = inference.upgrade().ok_or("session ended")?;
+                    // The auxiliary request carries its session, exactly like the
+                    // upstream auto-refine review (`agent-session.ts:9570`). Without
+                    // it the wire request is anonymous and a provider queue cannot
+                    // attribute the call to this session.
+                    let session_id = {
+                        let session = session.lock().await;
+                        let id = session.get_session_id().to_owned();
+                        if id.is_empty() {
+                            return Err("auxiliary inference needs a session id".into());
+                        }
+                        if !request.session.is_empty() && request.session != id {
+                            return Err("session mismatch".into());
+                        }
+                        id
+                    };
                     let work = inference.complete(
                         &routed.model,
                         context,
@@ -115,6 +130,7 @@ impl HostCapabilities for PluginServices {
                             signal,
                             api_key: routed.api_key,
                             headers: routed.headers,
+                            session_id: Some(session_id),
                             ..Default::default()
                         },
                         None,

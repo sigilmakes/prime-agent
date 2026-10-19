@@ -51,7 +51,9 @@ pub mod skills_unavailable_notice;
 pub mod slash_commands;
 pub mod state_restore_notice;
 pub mod tool_bridge;
+pub mod turn_activity;
 pub mod turn_boundary;
+pub use turn_activity::{TurnActivity, TurnActivityProbe, TurnActivitySignal};
 
 mod admission;
 mod canonical_authority;
@@ -136,6 +138,9 @@ pub struct AgentSession {
     auxiliary_inference: Option<Arc<inference_router::AuxiliaryInference>>,
     plugin_command_barrier: Arc<tokio::sync::Mutex<()>>,
     plugin_jobs: Option<Arc<plugin_jobs::PluginJobs>>,
+    /// The host's turn-scoped activity probe for deferred plugin jobs: a retry
+    /// gap is agent-idle but turn-busy, so a job waits for the turn boundary.
+    turn_activity: Arc<turn_activity::TurnActivitySignal>,
     context_archive: Arc<std::sync::RwLock<Option<pa_types::session::ContextArchive>>>,
     context_model: std::sync::RwLock<Option<pa_types::ai::Model>>,
     accepted_context: std::sync::Mutex<Option<Vec<SessionAgentMessage>>>,
@@ -218,6 +223,18 @@ impl AgentSession {
         Arc::clone(&self.plugin_command_barrier).lock_owned().await
     }
 
+    /// Install the host's turn-activity probe: deferred plugin jobs then wait
+    /// for the turn (retry episodes included) to settle, not just the run slot.
+    pub fn set_turn_activity_probe(&self, probe: turn_activity::TurnActivityProbe) {
+        self.turn_activity.install(probe);
+    }
+
+    /// The session's turn-activity signal, shared with its deferred-job registry.
+    #[must_use]
+    pub fn turn_activity_signal(&self) -> Arc<turn_activity::TurnActivitySignal> {
+        Arc::clone(&self.turn_activity)
+    }
+
     /// Build a session around a running agent loop.
     ///
     /// # Errors
@@ -268,6 +285,7 @@ impl AgentSession {
             auxiliary_inference: None,
             plugin_command_barrier: Arc::default(),
             plugin_jobs: None,
+            turn_activity: Arc::new(turn_activity::TurnActivitySignal::new()),
             context_archive: Arc::default(),
             context_model: std::sync::RwLock::new(None),
             accepted_context: std::sync::Mutex::new(None),

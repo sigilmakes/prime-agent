@@ -200,7 +200,7 @@ async fn active_migration_refuses_corruption_without_authoritative_empty_target(
 const AUX_PROVIDER: &str = r#"
 local requests={}
 return {providers={{name='aux',mode='streaming',run=function(input,ctx)
-  table.insert(requests,{model=input.model.id,system=input.context.system_prompt})
+  table.insert(requests,{model=input.model.id,system=input.context.system_prompt,session=input.options.sessionId})
   local review=string.find(input.context.system_prompt,'Review evidence',1,true)~=nil
   local text
   if review then text='{"shouldRefine":true,"rationale":"fixture evidence"}'
@@ -662,4 +662,149 @@ async fn aborted_admitted_main_run_reports_cancelled_and_never_starts_automatic_
         Value::Null,
         "cancelled run must not advance the interval or cooldown"
     );
+}
+
+/// A scripted provider failure that the retry lane owns: the terminal message
+/// carries the classified `provider_stream_failure` diagnostic the policy
+/// reads, unlike the plain scripted failure.
+fn retryable_failure_turn(model: &pa_agent::types::Model) -> pa_agent::scripted::ScriptedTurn {
+    use pa_agent::scripted::{stream_failure_steps, ScriptStep, ScriptedTurn};
+    let mut steps = stream_failure_steps(model, "partial", "provider rate limited");
+    if let Some(ScriptStep::Event(event)) = steps.last_mut() {
+        if let pa_agent::stream::AssistantMessageEvent::Error { error, .. } = event.as_mut() {
+            error.diagnostics = Some(vec![pa_agent::types::AssistantMessageDiagnostic {
+                kind: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(json!({"kind":"rate_limit","status":429})),
+            }]);
+        }
+    }
+    ScriptedTurn::Events(steps)
+}
+
+/// The recorded auxiliary requests; an empty Lua table crosses the bridge as
+/// an object, so count both shapes.
+fn aux_request_count(value: &Value) -> usize {
+    value.as_array().map_or(0, Vec::len)
+}
+
+fn interval_settings() -> Value {
+    let mut config = settings(true);
+    config["auxiliaryModel"] = json!("aux/default");
+    config["testProvider"] = json!(AUX_PROVIDER);
+    config["plugins"] = json!({"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":true,"turnInterval":1,"cooldownMs":0}}},"route":{"enabled":true,"path":"provider.lua"}});
+    config
+}
+
+#[tokio::test]
+async fn retryable_provider_failure_settle_does_not_schedule_review() {
+    let f = Fixture::new(interval_settings(), LEGACY).await;
+    let model: pa_agent::types::Model=serde_json::from_value(json!({"id":"test","name":"Test","api":"openai-completions","provider":"test","baseUrl":"http://localhost:9","reasoning":false,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":10000,"maxTokens":100})).unwrap();
+    // A settle the retry lane will re-issue is not a turn boundary: no review.
+    f.provider.push_turn(retryable_failure_turn(&model));
+    let _ = f
+        .engine
+        .prompt(
+            "failing turn",
+            crate::session_engine::PromptOptions::default(),
+        )
+        .await;
+    assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
+    assert_eq!(
+        f.call_plugin("route", "requests", json!({})).await.unwrap(),
+        json!({}),
+        "no auxiliary request reached the provider"
+    );
+    // Control: a settle with no retry behind it schedules exactly one review.
+    f.provider.push_text_turn("done");
+    f.engine
+        .prompt(
+            "settled turn",
+            crate::session_engine::PromptOptions::default(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if aux_request_count(&f.call_plugin("route", "requests", json!({})).await.unwrap()) >= 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the settled turn's review and plan ran");
+    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
+    assert_eq!(aux_request_count(&requests), 2, "one review + one plan");
+}
+
+#[tokio::test]
+async fn deferred_review_waits_for_the_turn_to_settle() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let f = Fixture::new(interval_settings(), LEGACY).await;
+    let busy = Arc::new(AtomicBool::new(true));
+    let probe_busy = Arc::clone(&busy);
+    f.engine.session.set_turn_activity_probe(Arc::new(move || {
+        crate::session_engine::TurnActivity {
+            streaming: probe_busy.load(Ordering::SeqCst),
+            ..crate::session_engine::TurnActivity::default()
+        }
+    }));
+    let job = f
+        .call("refine", json!({"instructions":"held evidence"}))
+        .await
+        .unwrap();
+    // The turn (a provider retry episode included) is still live: the job is
+    // admitted but must not reach the provider.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(
+        f.call("job_status", json!({"id":job["id"]})).await.unwrap()["status"],
+        "queued"
+    );
+    assert_eq!(
+        f.call_plugin("route", "requests", json!({})).await.unwrap(),
+        json!({}),
+        "no auxiliary request reached the provider"
+    );
+    // The turn settles: the same job runs at that boundary.
+    busy.store(false, Ordering::SeqCst);
+    let result = await_job(&f, &job["id"]).await;
+    assert_eq!(result["status"], "completed", "{result}");
+    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
+    assert_eq!(requests.as_array().unwrap().len(), 2, "review + plan");
+}
+
+#[tokio::test]
+async fn review_request_carries_the_session_id() {
+    let f = Fixture::new(interval_settings(), LEGACY).await;
+    let session_id = f.engine.session.session_id().await;
+    let job = f
+        .call("refine", json!({"instructions":"identified evidence"}))
+        .await
+        .unwrap();
+    let result = await_job(&f, &job["id"]).await;
+    assert_eq!(result["status"], "completed", "{result}");
+    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
+    let requests = requests.as_array().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    for request in requests {
+        assert_eq!(request["session"], json!(session_id), "{request}");
+    }
+}
+
+#[tokio::test]
+async fn disabled_plugin_settle_enqueues_no_job() {
+    let f = Fixture::new(settings(false), LEGACY).await;
+    f.provider.push_text_turn("done");
+    f.engine
+        .prompt(
+            "ordinary turn",
+            crate::session_engine::PromptOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
+    assert!(!f.agent.join("plugins/harness").exists());
 }

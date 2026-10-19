@@ -108,6 +108,10 @@ local function refine(input,ctx)
 end
 local function automatic(input,ctx)
     if input.reason=="cancelled" then return {scheduled=false,reason="cancelled"} end
+    -- A settle the provider retry lane owns is not a turn boundary: the
+    -- upstream seam returns before auto-refine scheduling
+    -- (agent-session.ts:4736-4740). The counter and cooldown stay untouched.
+    if input.retry==true then return {scheduled=false,reason="retry"} end
     local policy=config.autoRefine
     if policy==null or policy==nil then policy={} end
     if policy.enabled==false then return {scheduled=false} end

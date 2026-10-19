@@ -245,6 +245,9 @@ pub struct AgentSessionEngine {
     /// session. `None` without a worker pump.
     compaction_summary_sink:
         std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
+    /// The worker's turn-activity probe, adopted onto every built session so
+    /// deferred plugin jobs wait for the turn boundary (retries included).
+    turn_activity_probe: std::sync::Mutex<Option<pa_core::session_engine::TurnActivityProbe>>,
     /// The built session's progress-note store, mirrored at every build
     /// adoption; `None` until the first build.
     pub(crate) progress_notes: std::sync::Mutex<

@@ -105,6 +105,12 @@ fn empty_config() -> Value {
 }
 
 impl SessionPlugins {
+    /// The settings scopes the plugin host resolves against; the lifecycle
+    /// observers read the retry policy from the same pair.
+    pub(crate) fn settings_dirs(&self) -> (&std::path::Path, &std::path::Path) {
+        (&self.cwd, &self.agent_dir)
+    }
+
     pub(crate) fn new(session: String, cwd: PathBuf, agent_dir: PathBuf, depth: u32) -> Self {
         // Command reservations belong to session composition, not the Lua runtime.
         let registry = super::slash_commands::SlashCommandRegistry::builtin();

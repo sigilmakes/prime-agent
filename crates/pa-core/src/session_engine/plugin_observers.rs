@@ -48,6 +48,36 @@ async fn notify(plugins: &SessionPlugins, stage: &str, input: Value) {
     }
 }
 
+/// Whether the retry lane will re-issue this settle.
+///
+/// TS draws the auto-refine seam at exactly this question: an `agent_end` that
+/// initiated a retry returns before `_scheduleAutoRefineAfterAgentEnd`
+/// (`agent-session.ts:4736-4740`), so no refinement review is scheduled from a
+/// settle the retry lane owns. The run slot is per attempt, so the settle alone
+/// cannot answer it; the message and the live retry policy can.
+async fn settle_retry_pending(
+    agent: &Arc<pa_agent::agent::Agent>,
+    plugins: &SessionPlugins,
+    messages: &[pa_agent::types::AgentMessage],
+) -> bool {
+    let Some(assistant) = messages.iter().rev().find_map(|message| match message {
+        pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(assistant)) => {
+            Some(assistant)
+        }
+        _ => None,
+    }) else {
+        return false;
+    };
+    let (cwd, agent_dir) = plugins.settings_dirs();
+    let policy =
+        crate::settings::SettingsManager::create(cwd, agent_dir).get_provider_retry_policy();
+    if !policy.enabled {
+        return false;
+    }
+    let context_window = agent.state().await.model.context_window;
+    super::provider_retry::retry_will_follow(assistant, context_window, &policy, 0)
+}
+
 /// `AgentEnd` is the complete admitted run, unlike `TurnEnd`'s individual tool loop
 /// iteration. Plugin-owned counters can use this stage without changing old hooks.
 pub(crate) async fn observe_runs(
@@ -55,13 +85,27 @@ pub(crate) async fn observe_runs(
     plugins: Arc<SessionPlugins>,
     session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>,
 ) {
+    // The subscriber lives on the agent: hold it weakly (a strong edge
+    // would cycle agent -> listener -> agent).
+    let agent_weak = Arc::downgrade(agent);
     agent.subscribe(move|event,signal| {
-        let plugins=Arc::clone(&plugins);let session=Arc::clone(&session);
+        let plugins=Arc::clone(&plugins);let session=Arc::clone(&session);let agent=agent_weak.clone();
         Box::pin(async move {
-            if matches!(event,pa_agent::types::AgentEvent::AgentEnd{..}) {
+            if let pa_agent::types::AgentEvent::AgentEnd{messages}=event {
                 let branch=session.lock().await.get_leaf_id().map(str::to_owned);
                 let reason=if signal.is_aborted() {"cancelled"} else {"completed"};
-                notify(&plugins,"run_settled",json!({"stage":"run_settled","branch":branch,"now_ms":now_ms(),"reason":reason})).await;
+                // Only a stage that has a subscriber pays the classification;
+                // an ordinary settle never re-runs a retry.
+                let subscribed=plugins.host().snapshot().contributions.iter().any(|target| target.kind==ContributionKind::Hook&&target.name=="run_settled");
+                let retry=if subscribed && reason=="completed" {
+                    match agent.upgrade() {
+                        Some(agent) => settle_retry_pending(&agent,&plugins,&messages).await,
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                notify(&plugins,"run_settled",json!({"stage":"run_settled","branch":branch,"now_ms":now_ms(),"reason":reason,"retry":retry})).await;
             }
             Ok(())
         })

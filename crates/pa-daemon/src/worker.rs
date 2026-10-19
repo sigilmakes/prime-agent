@@ -457,6 +457,21 @@ impl Worker {
                 concrete.set_initial_context_selection_store(std::sync::Arc::new(
                     context_selection::CoreInitialContextSelectionStore(Arc::clone(&core)),
                 ));
+                // Deferred plugin jobs (the harness refinement review) wait for
+                // the turn boundary: `busy` spans the whole turn, provider
+                // retries included, so a retry gap never reads as idle. This is
+                // the same snapshot `scheduled_jobs` reads for cron deferral.
+                let turn_core = Arc::clone(&core);
+                concrete.set_turn_activity_probe(std::sync::Arc::new(move || {
+                    let core = turn_core
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    pa_core::session_engine::TurnActivity {
+                        streaming: core.busy,
+                        compacting: core.compacting,
+                        retrying: core.retry_abort_requested,
+                    }
+                }));
                 let sink_core = Arc::clone(&core);
                 let sink_notify = Arc::clone(&work_notify);
                 let autonomous_sink: crate::agent_engine::AutonomousAdmission = {

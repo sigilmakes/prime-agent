@@ -193,6 +193,7 @@ impl AgentSessionEngine {
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
+            turn_activity_probe: std::sync::Mutex::new(None),
             progress_notes: std::sync::Mutex::new(None),
             progress_note_emit: std::sync::Mutex::new(None),
             semantic_identity: std::sync::Mutex::new(None),
@@ -280,6 +281,31 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
+    /// Install the worker's turn-activity probe: deferred plugin jobs (the
+    /// continual-harness refinement review) then wait for the turn boundary
+    /// instead of treating a provider retry gap as idle.
+    ///
+    /// The probe reads the worker's turn-scoped flags, the same snapshot
+    /// `scheduled_jobs` uses for cron deferral: `busy` spans the whole turn
+    /// including retries. Every later build adopts the probe.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the probe slot's mutex is poisoned.
+    pub fn set_turn_activity_probe(&self, probe: pa_core::session_engine::TurnActivityProbe) {
+        *self
+            .turn_activity_probe
+            .lock()
+            .expect("turn activity probe lock") = Some(probe.clone());
+        // A session built before the install adopts it now; a running turn may
+        // hold the session mutex, so this forward never waits for it.
+        if let Ok(guard) = self.session.try_lock() {
+            if let Some(engine) = guard.as_deref() {
+                engine.session.set_turn_activity_probe(probe);
+            }
+        }
+    }
+
     pub(crate) fn set_rlm_usage_store(
         &self,
         store: std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>,
@@ -350,6 +376,14 @@ impl AgentSessionEngine {
             .clone()
         {
             built.session.set_compaction_summary_sink(sink);
+        }
+        if let Some(probe) = self
+            .turn_activity_probe
+            .lock()
+            .expect("turn activity probe lock")
+            .clone()
+        {
+            built.session.set_turn_activity_probe(probe);
         }
         // The in-run consult's mirror: the session mutex is held across
         // compaction turns, and the consult runs inside one.

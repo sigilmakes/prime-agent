@@ -274,6 +274,35 @@ fn with_stop_reason_aborted(mut message: AssistantMessage) -> AssistantMessage {
     message
 }
 
+/// Whether the retry lane will re-issue this settled failure.
+///
+/// TS draws the auto-refine seam at exactly this question: an `agent_end` that
+/// initiated a retry returns before `_scheduleAutoRefineAfterAgentEnd`
+/// (`agent-session.ts:4736-4740`), so no refinement review is scheduled from a
+/// settle the retry lane owns. `retries_performed` is the count already made by
+/// this episode (the loop's own counter), so the same exhaustion rule applies.
+#[must_use]
+pub fn retry_will_follow(
+    message: &AssistantMessage,
+    context_window: u64,
+    policy: &ProviderRetryPolicy,
+    retries_performed: u32,
+) -> bool {
+    if !policy.enabled || message.stop_reason != StopReason::Error {
+        return false;
+    }
+    let non_retryable = is_agent_lifecycle_failure(message)
+        || is_faux_provider_queue_exhausted(message)
+        || is_context_overflow_failure(message, context_window)
+        || is_unsupported_tool_failure(message)
+        || is_permanent_provider_failure_kind(
+            provider_stream_failure_kind(message).as_deref(),
+            retries_performed,
+            provider_stream_failure_status(message),
+        );
+    !non_retryable && retries_performed < policy.max_retries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +379,60 @@ mod tests {
             let sample = retry_jitter_rand01();
             assert!((0.0..=1.0).contains(&sample), "sample {sample}");
         }
+    }
+
+    /// The auto-refine seam's question: which settles the retry lane owns.
+    #[test]
+    fn retry_will_follow_owns_only_the_retryable_failures() {
+        let policy = DEFAULT_PROVIDER_RETRY_POLICY;
+        // A retryable provider failure with budget left: the retry lane owns it.
+        assert!(retry_will_follow(
+            &error_message(Some("rate_limit"), Some(429), None),
+            0,
+            &policy,
+            0
+        ));
+        // A clean settle never retries.
+        assert!(!retry_will_follow(&ok_message(), 0, &policy, 0));
+        // A permanent kind settles on the spot (the disclosure still fires).
+        assert!(!retry_will_follow(
+            &error_message(Some("payment_required"), Some(402), None),
+            0,
+            &policy,
+            0
+        ));
+        // An exhausted episode has no retry left to own.
+        assert!(!retry_will_follow(
+            &error_message(Some("rate_limit"), Some(429), None),
+            0,
+            &policy,
+            policy.max_retries
+        ));
+        // A disabled policy never retries, so the settle is a turn boundary.
+        let disabled = ProviderRetryPolicy {
+            enabled: false,
+            ..policy
+        };
+        assert!(!retry_will_follow(
+            &error_message(Some("rate_limit"), Some(429), None),
+            0,
+            &disabled,
+            0
+        ));
+        // A local lifecycle crash is not a provider failure to retry.
+        let mut lifecycle = error_message(None, None, None);
+        lifecycle.diagnostics = Some(vec![AssistantMessageDiagnostic {
+            kind: "agent_lifecycle_failure".to_string(),
+            timestamp: 0,
+            error: None,
+            details: None,
+        }]);
+        assert!(!retry_will_follow(&lifecycle, 0, &policy, 0));
+        // The faux queue running dry is deterministic.
+        let mut faux = error_message(None, None, None);
+        faux.provider = "faux".to_string();
+        faux.error_message = Some("No more faux responses queued".to_string());
+        assert!(!retry_will_follow(&faux, 0, &policy, 0));
     }
 
     #[test]
