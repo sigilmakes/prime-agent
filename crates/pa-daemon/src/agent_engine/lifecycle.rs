@@ -123,6 +123,8 @@ impl AgentSessionEngine {
         Ok(Self {
             runtime,
             config,
+            #[cfg(test)]
+            test_stream_decorator: std::sync::Mutex::new(None),
             mcp,
             published_goal: std::sync::Mutex::new(None),
             late_agent_message_sink: std::sync::Mutex::new(None),
@@ -1036,6 +1038,19 @@ impl AgentSessionEngine {
         // `set_model` swaps it so the built session follows without a
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
+        #[cfg(test)]
+        let stream_fn = {
+            let decorator = self
+                .test_stream_decorator
+                .lock()
+                .expect("test stream decorator lock")
+                .clone();
+            // Never call fixture code while holding the slot lock.
+            match decorator {
+                Some(decorate) => decorate(stream_fn),
+                None => stream_fn,
+            }
+        };
         {
             // The build's resolve-and-install serializes with `/reload`'s
             // live-input refresh (the other slot writers' fence): a reload

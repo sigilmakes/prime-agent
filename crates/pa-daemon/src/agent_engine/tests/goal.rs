@@ -983,6 +983,17 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
+    let session_path = dir.path().join("abort-contract.jsonl");
+    let mut store = crate::session_store::SessionFile::create(
+        dir.path().to_str().expect("fixture cwd"),
+        None,
+        0,
+    );
+    store.set_path(session_path.clone());
+    store.append_message(&wire_user_message(
+        "history before abort fixture".to_owned(),
+    ));
+    store.rewrite().expect("seed canonical history");
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
         agent_dir: dir.path().join("agent"),
@@ -991,13 +1002,12 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         api_key: None,
         thinking: None,
         session_dir: None,
-        session_file: None,
+        session_file: Some(session_path),
         faux_script: Some(
             json!({
                 "engine": "faux",
                 "responses": [
                     { "text": "goal start reply" },
-                    { "text": "held reply", "delayMs": 60000 },
                 ],
             })
             .to_string(),
@@ -1009,9 +1019,12 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
+    let _canonical_owner = own_canonical_store(&engine, store);
+    let fixture =
+        abort_fixture::AbortFixture::install(&engine, abort_fixture::AbortCase::BeforeStream);
     // No worker owns the queue here: minted continuation work collects
     // instead of running, so the held turn below is the only live one.
-    let _goal_work = goal_admission_collector(&engine);
+    let goal_work = goal_admission_collector(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,
@@ -1025,12 +1038,15 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         before["tokensUsed"].as_u64().unwrap_or(0) > 0,
         "the goal-start turn's usage accounted: {before:?}"
     );
+    let history_before = engine_session_entries(&engine);
+    let queued_before = goal_work.lock().unwrap().len();
+    assert_eq!(fixture.calls(), 1);
     // The second turn holds mid-provider-wait; the abort cancels the fetch
     // (the eager funnel) and the turn settles on the aborted row.
     let turn_engine = std::sync::Arc::clone(&engine);
     let turn_events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> = Arc::default();
     let row_events = std::sync::Arc::clone(&turn_events);
-    let turn = std::thread::spawn(move || {
+    let turn = fixture.spawn(move || {
         turn_engine.run_prompt(
             0,
             PromptRequest {
@@ -1048,23 +1064,14 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
             },
         );
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let agent = engine.turn_agent.lock().expect("turn agent lock").clone();
-        if let Some(agent) = agent {
-            let state = engine.runtime.block_on(agent.state());
-            if state.is_streaming {
-                break;
-            }
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the held turn never started streaming"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+    // The notification comes from the polled provider future, not a runner
+    // flag. It has returned no ModelStream and emitted no partial event.
+    let admitted = engine.runtime.block_on(fixture.admitted());
     engine.abort_in_flight_turn();
-    turn.join().expect("the aborted turn settles");
+    let settled = turn.finish();
+    // Explicitly cancel and join on admission failure too, before panicking.
+    settled.expect("the aborted turn settles within the existing 10s bound");
+    admitted.expect("the held turn reached actual provider admission");
     let events = turn_events.lock().unwrap();
     let aborted_start = events
         .iter()
@@ -1116,6 +1123,13 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     assert_eq!(after["objective"], before["objective"]);
     assert_eq!(after["tokensUsed"], before["tokensUsed"]);
     assert_eq!(after["continuationsUsed"], before["continuationsUsed"]);
+    assert_eq!(fixture.calls(), 2, "no further paid provider work");
+    assert_eq!(goal_work.lock().unwrap().len(), queued_before);
+    let history_after = engine_session_entries(&engine);
+    assert_eq!(
+        &history_after[..history_before.len()],
+        history_before.as_slice()
+    );
 }
 
 #[test]

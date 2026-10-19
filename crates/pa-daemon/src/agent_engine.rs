@@ -113,10 +113,17 @@ enum PromptContextBoundary {
     Leaf(String),
 }
 
+/// Per-instance unit-test decoration of the normal provider stream; absent from production.
+#[cfg(test)]
+pub(crate) type TestStreamDecorator =
+    std::sync::Arc<dyn Fn(pa_agent::stream::StreamFn) -> pa_agent::stream::StreamFn + Send + Sync>;
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
+    #[cfg(test)]
+    pub(crate) test_stream_decorator: std::sync::Mutex<Option<TestStreamDecorator>>,
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.
     pub(crate) mcp: std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>,
     /// The last emitted `goal_update`; unchanged states stay silent.
