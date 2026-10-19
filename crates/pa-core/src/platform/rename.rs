@@ -189,3 +189,111 @@ mod tests {
         assert_eq!(retry_delay_ms(false, classify(&denied), 1), None);
     }
 }
+
+/// Rename `from` onto `to` and prove the DIRECTORY ENTRY is durable.
+///
+/// [`rename_onto`] alone only makes the rename visible: POSIX persists a new or
+/// replaced name only after the containing directory is fsynced. A caller that
+/// reports "durable" from a bare rename therefore claims a Known the crash can
+/// undo - the exact false-`Known` class the canonical writer classifies as
+/// `Uncertain`. This wrapper fsyncs `to`'s parent after a successful rename.
+///
+/// On Windows a directory cannot be opened as a file for fsync; the flush
+/// semantics there already journal the rename, so the parent sync is a no-op
+/// there and the rename result is returned unchanged.
+///
+/// # Errors
+///
+/// Returns the rename error, or the parent-directory open/sync error. A caller
+/// must treat both as "the outcome is not proven", never as success.
+pub fn rename_onto_durable(from: &Path, to: &Path) -> io::Result<()> {
+    rename_onto(from, to)?;
+    sync_parent_directory(to)
+}
+
+/// Fsync the directory that holds `path`, making its entry durable.
+///
+/// A bare relative name resolves to the current directory, which is exactly the
+/// directory holding it, so it is synced rather than refused.
+///
+/// # Errors
+///
+/// Returns the open or sync error. A missing or unreadable directory surfaces the
+/// error instead of being treated as durable.
+pub fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // A bare relative name has `Some("")` as its parent, and for such a name
+        // the containing directory IS the current directory: syncing "." is the
+        // honest proof, not a fallback. Refusing here would turn a call that
+        // succeeded before into an error without making anything more durable.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod durable_tests {
+    //! The directory-entry proof: a rename alone is not durability.
+    use super::*;
+    use std::io::Write;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pa-rename-durable-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn durable_rename_replaces_the_destination_and_keeps_its_bytes() {
+        let dir = scratch("replace");
+        let from = dir.join("tmp");
+        let to = dir.join("final.jsonl");
+        fs::write(&to, b"old").expect("seed destination");
+        let mut file = fs::File::create(&from).expect("temp file");
+        file.write_all(b"new").expect("write temp");
+        file.sync_all().expect("sync temp");
+        drop(file);
+        rename_onto_durable(&from, &to).expect("durable rename");
+        assert_eq!(fs::read(&to).expect("bytes"), b"new");
+        assert!(!from.exists(), "the temp name is gone");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn durable_rename_creates_a_new_name_without_a_prior_destination() {
+        let dir = scratch("create");
+        let from = dir.join("tmp");
+        let to = dir.join("fresh.jsonl");
+        fs::write(&from, b"fresh").expect("temp file");
+        rename_onto_durable(&from, &to).expect("durable create");
+        assert_eq!(fs::read(&to).expect("bytes"), b"fresh");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A bare relative name syncs the current directory: that IS its containing
+    /// directory, so the proof is real rather than silently skipped. This matches
+    /// the append path's normalisation, so the two durability helpers agree.
+    #[test]
+    fn bare_relative_name_syncs_the_current_directory() {
+        sync_parent_directory(Path::new("bare-name.jsonl")).expect("current directory sync");
+    }
+
+    #[test]
+    fn a_missing_parent_directory_surfaces_the_open_error() {
+        let dir = scratch("missing-parent");
+        let error =
+            sync_parent_directory(&dir.join("nested").join("x.jsonl")).expect_err("no such parent");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        fs::remove_dir_all(&dir).ok();
+    }
+}

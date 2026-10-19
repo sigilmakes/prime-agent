@@ -19,5 +19,5 @@ pub use process::{
     kill_pid, kill_process_group_or_pid, pid_exists, set_new_process_group, set_no_window,
     termination_signal, Signal,
 };
-pub use rename::rename_onto;
+pub use rename::{rename_onto, rename_onto_durable, sync_parent_directory};
 pub use shell::{get_shell_config, resolve_kernel_bash_shell, ShellConfig};

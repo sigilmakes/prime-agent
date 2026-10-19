@@ -165,5 +165,5 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
     }
-    crate::platform::rename_onto(&temp, path)
+    crate::platform::rename_onto_durable(&temp, path)
 }
