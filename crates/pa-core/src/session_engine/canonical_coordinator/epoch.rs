@@ -184,6 +184,18 @@ impl CanonicalCommitRecorder {
     }
 }
 
+/// A public, opaque handle to ONE admitted provider main step.
+///
+/// The authority's own step type is module-private. This handle exists because the
+/// step is admitted where the provider main step actually starts - inside the run
+/// that owns it - while the assistant row is written later by the session store.
+/// Handing the handle out is the ONLY channel: the store never mints a step, and a
+/// step admitted without being written is harmless (an unconsumed seal is not a
+/// classification).
+pub struct CanonicalProviderStep {
+    inner: crate::session_engine::canonical_authority::ProviderStep,
+}
+
 /// A live canonical epoch for one serving run.
 ///
 /// Created at ACTUAL serving-model capture, never at desired-next selection. The
@@ -286,6 +298,61 @@ impl CanonicalEpoch {
         drop(prepare_flight);
         drop(prepare_ticket);
         let admitted = capture.admit_final(&operation, draft.clone())?;
+        self.grant(admitted, stage, &operation, Some(draft))
+    }
+
+    /// Admit ONE actual provider main step.
+    ///
+    /// Call this where the provider step actually starts, not when its output is
+    /// about to be written: [`Self::begin_terminal_append`] refuses a step that was
+    /// never admitted, and the seal is bound to the actual step allocation.
+    ///
+    /// # Errors
+    /// Refuses a closed capture and a doubly admitted step allocation.
+    pub fn admit_provider_step<R: Any + Send + Sync>(
+        &self,
+        actual_step: Arc<R>,
+    ) -> Result<CanonicalProviderStep, CanonicalStoreError> {
+        Ok(CanonicalProviderStep {
+            inner: self.run.admit_provider_step(actual_step)?,
+        })
+    }
+
+    /// Admit the assistant row of an ADMITTED provider step and return its grant.
+    ///
+    /// This is the native final-output path. It is not a requested mutation and it
+    /// never travels through a coordinator `commit`: the seal is the admission, the
+    /// grant carries the recorder, and the store performs the write.
+    ///
+    /// # Errors
+    /// Refuses a draft that is not an actual assistant row, a step already sealed,
+    /// a late capture that is no longer eligible, and any admission failure.
+    pub fn begin_terminal_append(
+        &self,
+        step: &CanonicalProviderStep,
+        draft: &CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        let sealed = step.inner.seal_assistant(draft.clone())?;
+        let (capture, prepare) = sealed.begin_prepare()?;
+        let operation = CanonicalOperation::new();
+        // Bind the minted operation through a prepare flight that writes nothing;
+        // `admit_final` refuses an operation this scope never bound.
+        let prepare_ticket = CanonicalWriteTicket::from_admitted(prepare);
+        let prepare_flight = prepare_ticket.permit.enter_io(
+            CanonicalIoStage::PreparePreflight,
+            self.run.source(),
+            &operation,
+            None,
+        )?;
+        prepare_ticket
+            .recorder(CanonicalIoStage::PreparePreflight)?
+            .record(CanonicalWriteCertainty::Known)?;
+        drop(prepare_flight);
+        drop(prepare_ticket);
+        let admitted = capture.admit_final(&operation, draft.clone())?;
+        // A requested-mutation flight must name the exact authorized draft, or the
+        // flight would not be bound to the row this grant was minted for.
         self.grant(admitted, stage, &operation, Some(draft))
     }
 
@@ -794,5 +861,127 @@ mod tests {
         );
         drop(flight);
         drop(permit);
+    }
+
+    fn assistant_draft() -> CanonicalEntryDraft {
+        CanonicalEntryDraft::new(
+            CanonicalMutationKind::AdmittedTerminal,
+            serde_json::from_value(serde_json::json!({"type":"message","message":{
+                "role":"assistant","content":[],"api":"fake","provider":"fake",
+                "model":"actual model",
+                "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,
+                    "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+                "stopReason":"stop","timestamp":1
+            }}))
+            .expect("native entry"),
+        )
+        .expect("draft")
+    }
+
+    /// The native final-output path: one admitted step, one sealed assistant row,
+    /// one classification, and the epoch stays clean.
+    #[test]
+    fn begin_terminal_append_classifies_the_sealed_assistant_row() {
+        let epoch = epoch();
+        let step = epoch
+            .admit_provider_step(Arc::new(String::from("actual step")))
+            .expect("admitted step");
+        let grant = epoch
+            .begin_terminal_append(
+                &step,
+                &assistant_draft(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("terminal grant");
+        grant
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified");
+        assert!(
+            !epoch.poisoned(),
+            "a settled terminal row leaves a clean epoch"
+        );
+    }
+
+    /// The seal is bound to an actual assistant row: a draft of another kind is
+    /// refused before any flight exists.
+    #[test]
+    fn begin_terminal_append_refuses_a_non_assistant_draft() {
+        let epoch = epoch();
+        let step = epoch
+            .admit_provider_step(Arc::new(String::from("actual step")))
+            .expect("admitted step");
+        // A lawful draft of another kind is the honest refusal case: the seal is
+        // bound to an actual assistant row, not merely to a well-formed draft.
+        let wrong = compaction();
+        assert!(
+            epoch
+                .begin_terminal_append(&step, &wrong, CanonicalIoStage::RequestedMutation)
+                .is_err(),
+            "a compaction is not a provider final outcome"
+        );
+        assert!(!epoch.poisoned(), "a refusal admits no flight to poison");
+    }
+
+    /// One step seals exactly one assistant row.
+    #[test]
+    fn a_provider_step_seals_one_assistant_row() {
+        let epoch = epoch();
+        let step = epoch
+            .admit_provider_step(Arc::new(String::from("actual step")))
+            .expect("admitted step");
+        epoch
+            .begin_terminal_append(
+                &step,
+                &assistant_draft(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("first seal")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified");
+        assert!(
+            epoch
+                .begin_terminal_append(
+                    &step,
+                    &assistant_draft(),
+                    CanonicalIoStage::RequestedMutation
+                )
+                .is_err(),
+            "a second assistant row for one step is refused"
+        );
+    }
+
+    /// A held terminal grant is visible to a close: the drain reports the open
+    /// flight, and only the settle lets it drain. This is B's claim, asserted.
+    #[test]
+    fn a_terminal_grant_is_not_drained_across() {
+        let epoch = epoch();
+        let step = epoch
+            .admit_provider_step(Arc::new(String::from("actual step")))
+            .expect("admitted step");
+        let grant = epoch
+            .begin_terminal_append(
+                &step,
+                &assistant_draft(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("terminal grant");
+        let closing = epoch.request_close();
+        assert!(
+            matches!(closing.view(), CanonicalDrainView::Pending { io: 1, .. }),
+            "the open terminal flight must block the drain, got {:?}",
+            std::mem::discriminant(&closing.view())
+        );
+        grant
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified");
+        assert_eq!(
+            closing.view(),
+            CanonicalDrainView::Pending {
+                io: 0,
+                transactions: 0,
+                anchors: 1
+            },
+            "the settle releases the flight; only the epoch's own serving anchor remains"
+        );
     }
 }
