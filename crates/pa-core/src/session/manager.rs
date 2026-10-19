@@ -26,6 +26,9 @@ use super::{build_session_context, SessionContext};
 mod lifecycle;
 use super::window;
 
+mod canonical;
+pub use canonical::{CanonicalLocalAdoption, CanonicalRawCoverage};
+
 // `get_session_file_path` has zero external callers; the re-export keeps
 // the pub path stable and avoids dead-code churn.
 mod ids;
@@ -70,6 +73,8 @@ pub struct SessionManager {
     has_assistant_entry: bool,
     append_ownership: super::window::AppendOwnership,
     file_entries: Vec<FileEntry>,
+    canonical_raw: Option<canonical::RawCanonicalState>,
+    canonical_local_revision: u64,
     window: Option<super::window::WindowedSessionStore>,
     by_id: HashMap<String, usize>,
     labels_by_id: HashMap<String, String>,

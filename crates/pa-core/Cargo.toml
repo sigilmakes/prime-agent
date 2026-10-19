@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 description = "Session engine: tools, skills, prompts, kernel, subagents, settings."
 
+[features]
+# Integration-test support only: exposes the minimum constructors that let a
+# pa-daemon test build a real canonical write ticket against a real owner capture
+# and observe the real close ticket. Never enabled by default, never used by a
+# non-test module. Reviewed publish-surface decision: see
+# crates/pa-core/src/session_engine/canonical_coordinator/integration_test_support.rs
+canonical-integration-test-support = []
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true

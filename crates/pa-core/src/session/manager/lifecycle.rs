@@ -113,6 +113,8 @@ impl SessionManager {
             has_assistant_entry: false,
             append_ownership: super::window::AppendOwnership::Unleased,
             file_entries: Vec::new(),
+            canonical_raw: None,
+            canonical_local_revision: 0,
             window: None,
             by_id: HashMap::new(),
             labels_by_id: HashMap::new(),

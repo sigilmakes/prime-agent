@@ -6,6 +6,7 @@ pub mod agent_messaging;
 pub mod auto_retry;
 pub mod auxiliary_model;
 pub mod branch_summarization;
+pub mod canonical_coordinator;
 pub mod compact_session;
 pub mod compaction;
 pub mod compaction_exec;
@@ -53,6 +54,7 @@ pub mod tool_bridge;
 pub mod turn_boundary;
 
 mod admission;
+mod canonical_authority;
 mod compaction_arms;
 mod context_strategy;
 mod wiring;
