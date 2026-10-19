@@ -30,8 +30,8 @@ use super::{CanonicalWriteCertainty, CanonicalWriteRecorder, CanonicalWriteTicke
 
 /// The drain state of one epoch, as a production caller may observe it.
 ///
-/// `Blocked` means the epoch cannot complete a drain right now: it is poisoned by
-/// an uncertain write, or no close has been requested yet.
+/// A view only exists after [`CanonicalEpoch::request_close`]; there is no
+/// pre-close accessor, so `Blocked` never means "not closing yet".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalDrainView {
     /// Requested close, and nothing is outstanding.
@@ -45,7 +45,10 @@ pub enum CanonicalDrainView {
         /// Registered run anchors.
         anchors: usize,
     },
-    /// Poisoned, unreadable, or not closing.
+    /// The epoch cannot complete a drain: it is poisoned by an uncertain write,
+    /// or its state is unreadable. This view only exists on a [`CanonicalClosing`],
+    /// which `request_close` created, so it is never the "no close requested"
+    /// state - that case has no accessor at all.
     Blocked,
     /// The caller still holds its own lease or anchor.
     WouldDrainSelf,
