@@ -81,6 +81,21 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
+        // Admit ONE provider step for this attempt, BEFORE the prompt is issued:
+        // one attempt is one provider step, and the assistant row's grant is sealed
+        // to it. The subscriber closure below captures no slot - a clone there would
+        // be a second owner. No epoch attached is not an error (the turn runs
+        // uncovered and the counter moves); a refusal under a live epoch is.
+        if let Some(admission) = self
+            .canonical_step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            admission.admit(std::sync::Arc::new(
+                crate::session_store::canonical_adapter::ProviderStepIdentity,
+            ))?;
+        }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.

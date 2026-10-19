@@ -328,6 +328,12 @@ impl TurnRunner {
                 .map_or(0, crate::session_store::SessionFile::message_count)
                 / 2
         };
+        // Wire the canonical step channel for this turn: the store's attached epoch
+        // (if any) plus the core's slot. The engine is the only writer, the row arm
+        // below is the only reader.
+        self.engine.set_canonical_step_admission(Some(
+            self.core.lock().unwrap().canonical_step_admission(),
+        ));
         let request = PromptRequest {
             batch: batched
                 .iter()
@@ -589,8 +595,20 @@ impl TurnRunner {
                     EngineEvent::UserMessage(message)
                     | EngineEvent::AssistantMessage(message)
                     | EngineEvent::ToolResultMessage(message) => {
+                        // The assistant row is the native final output: hand the store
+                        // the step the engine admitted for this attempt, so the row is
+                        // written under a sealed epoch grant. Taking it here keeps the
+                        // step valid for exactly one row.
+                        let step = core.canonical_step.lock().unwrap().take();
                         if let Some(store) = core.store.as_mut() {
-                            let _ = store.persist_entry("message", json!({ "message": message }));
+                            let persisted = match step.as_ref() {
+                                Some(step) => store
+                                    .persist_message_with_step(json!({ "message": message }), step),
+                                None => {
+                                    store.persist_entry("message", json!({ "message": message }))
+                                }
+                            };
+                            let _ = persisted;
                         }
                     }
                     // The in-flight tool-call set, updated under the same core lock

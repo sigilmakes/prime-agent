@@ -11,6 +11,16 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
+    /// The worker owns the slot; the engine only writes into it.
+    fn set_canonical_step_admission(
+        &self,
+        admission: Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>,
+    ) {
+        *self
+            .canonical_step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = admission;
+    }
     /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
         let purge = self

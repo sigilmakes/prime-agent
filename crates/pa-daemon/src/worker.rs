@@ -289,6 +289,7 @@ impl Worker {
             generation: crate::util::new_display_id(),
             last_event_sequence: 0,
             store: None,
+            canonical_step: std::sync::Arc::new(std::sync::Mutex::new(None)),
             context_selection_uncertain: None,
             cwd: String::new(),
             steering: VecDeque::new(),

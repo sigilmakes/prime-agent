@@ -163,6 +163,10 @@ pub struct AgentSessionEngine {
     /// daemon worker.
     pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
+    /// The worker's shared canonical step channel: `None` until the worker wires
+    /// it, which is the honest "no epoch attached" state rather than a guess.
+    pub(crate) canonical_step:
+        std::sync::Mutex<Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>>,
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,

@@ -131,6 +131,7 @@ impl AgentSessionEngine {
             goal_runtime: std::sync::Mutex::new(None),
             pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            canonical_step: std::sync::Mutex::new(None),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             bash_completion_sink: std::sync::Mutex::new(None),

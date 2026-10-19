@@ -15,6 +15,16 @@ pub(crate) struct SessionCore {
     pub(crate) generation: String,
     pub(crate) last_event_sequence: u64,
     pub(crate) store: Option<SessionFile>,
+    /// The live provider step, shared with the per-turn engine.
+    ///
+    /// One owner (this core), one writer (the engine's `run_turn_once` before the
+    /// prompt), one reader (the assistant row's persist arm). The slot is stable
+    /// across store replacement, which is why it lives here and not on the store.
+    pub(crate) canonical_step: std::sync::Arc<
+        std::sync::Mutex<
+            Option<pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
+        >,
+    >,
     /// A canonical selection append may have reached disk before reporting an
     /// error. Refuse inference on this lease epoch until its store is replaced.
     pub(crate) context_selection_uncertain: Option<std::sync::Weak<crate::lease::SessionLease>>,
@@ -96,6 +106,18 @@ pub(crate) struct SessionCore {
 }
 
 impl SessionCore {
+    /// The step channel for the next turn: the store's attached epoch (if any) plus
+    /// this core's slot. `None` epoch is the covered-by-counter path, not an error.
+    pub(crate) fn canonical_step_admission(
+        &self,
+    ) -> crate::session_store::canonical_adapter::CanonicalStepAdmission {
+        let epoch = self.store.as_ref().and_then(|store| store.epoch.as_ref());
+        crate::session_store::canonical_adapter::CanonicalStepAdmission::new(
+            epoch.map(|handle| std::sync::Arc::clone(&handle.0)),
+            std::sync::Arc::clone(&self.canonical_step),
+        )
+    }
+
     /// Whether a turn, compaction, or queued action is in flight (TS
     /// `hasOngoingSessionWork`); the supervisor-lost exit waits for it to settle.
     pub(crate) fn has_ongoing_work(&self) -> bool {
@@ -114,6 +136,7 @@ impl SessionCore {
             generation: String::new(),
             last_event_sequence: 0,
             store,
+            canonical_step: std::sync::Arc::new(std::sync::Mutex::new(None)),
             context_selection_uncertain: None,
             cwd,
             steering: VecDeque::new(),

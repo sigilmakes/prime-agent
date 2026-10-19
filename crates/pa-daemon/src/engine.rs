@@ -51,6 +51,17 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(async { anyhow::bail!("This session does not support plugin commands") })
     }
 
+    /// Wire the worker's canonical provider-step channel.
+    ///
+    /// Engines that admit provider steps override this; the default is a no-op so
+    /// an engine with no canonical path (the scripted engine) is unchanged rather
+    /// than forced to carry a slot it would never read.
+    fn set_canonical_step_admission(
+        &self,
+        _admission: Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>,
+    ) {
+    }
+
     /// The session's shared MCP manager, when the engine owns one: the
     /// `replace_acp_mcp_servers` command writes through it.
     fn acp_mcp_manager(

@@ -34,7 +34,9 @@ use pa_core::session::canonical::{
     CanonicalPrepared, CanonicalRequestedWrite, CanonicalSessionStore, CanonicalSourceDisposition,
     CanonicalStoreError,
 };
-use pa_core::session_engine::canonical_coordinator::{CanonicalAppendGrant, CanonicalEpoch};
+use pa_core::session_engine::canonical_coordinator::{
+    CanonicalAppendGrant, CanonicalEpoch, CanonicalProviderStep,
+};
 
 use pa_types::session::FileEntry;
 
@@ -64,6 +66,62 @@ fn refused(detail: &str) -> CanonicalStoreError {
         requested: CanonicalRequestedWrite::NotWritten,
         source: CanonicalSourceDisposition::Unchanged,
         detail: detail.to_owned(),
+    }
+}
+
+/// One provider request attempt's identity, created where the attempt starts.
+///
+/// The authority treats a step as opaque pointer identity and refuses the same
+/// allocation twice, so this object IS the daemon's actual step record for the
+/// attempt: one per attempt, never reused across a retry or a failover.
+pub struct ProviderStepIdentity;
+
+/// The worker's shared channel for the live provider step.
+///
+/// Division of ownership, which is the whole reason this type exists:
+///
+/// * the WORKER owns it and creates the slot with its session core;
+/// * the per-turn engine method (`run_turn_once`) is the only writer, and it
+///   admits one step per provider attempt, before the prompt is issued;
+/// * `worker/turn.rs` is the only reader, at the assistant row it persists.
+///
+/// The subscriber closure inside `run_turn_once` captures NO slot: a clone there
+/// would be a second owner, and a slot that is cloned per task and never read is a
+/// silent uncovered path. A step admitted and never written leaves an unconsumed
+/// seal and no flight, so it is harmless rather than a leak.
+#[derive(Clone)]
+pub struct CanonicalStepAdmission {
+    epoch: Option<Arc<CanonicalEpoch>>,
+    slot: Arc<std::sync::Mutex<Option<CanonicalProviderStep>>>,
+}
+
+impl CanonicalStepAdmission {
+    pub(crate) fn new(
+        epoch: Option<Arc<CanonicalEpoch>>,
+        slot: Arc<std::sync::Mutex<Option<CanonicalProviderStep>>>,
+    ) -> Self {
+        Self { epoch, slot }
+    }
+
+    /// Admit ONE actual provider step for this attempt.
+    ///
+    /// The engine must call this before the prompt is issued; a missing epoch is
+    /// not an error (the turn runs uncovered and the counter moves), but an
+    /// admission refusal under a live epoch IS one.
+    pub(crate) fn admit(&self, step: Arc<ProviderStepIdentity>) -> anyhow::Result<()> {
+        let Some(epoch) = self.epoch.as_ref() else {
+            return Ok(());
+        };
+        let admitted = epoch.admit_provider_step(step)?;
+        let mut slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // One attempt, one step: a leftover handle would let a later row borrow an
+        // earlier step, so the newer admission replaces it and the old seal stays
+        // unconsumed.
+        *slot = Some(admitted);
+        Ok(())
     }
 }
 
@@ -193,10 +251,27 @@ impl SessionStoreBackend {
 pub(super) fn grant_for_row(
     epoch: &CanonicalEpoch,
     entry: &super::SessionEntry,
+    step: Option<&CanonicalProviderStep>,
 ) -> anyhow::Result<Option<CanonicalAppendGrant>> {
     if is_user_row(entry) {
         return epoch
             .begin_prepare_append(CanonicalIoStage::PreparePreflight)
+            .map(Some)
+            .map_err(anyhow::Error::from);
+    }
+    // The native final output: an assistant row is admitted by the provider step
+    // that produced it, never by a draft-only generic grant. A missing step under a
+    // live epoch means the engine did not admit where we thought it did, so the row
+    // is REFUSED - writing it uncovered would make the drain claim a lie.
+    if is_assistant_row(entry) {
+        let Some(step) = step else {
+            anyhow::bail!(
+                "engine admitted no provider step for this assistant row: refusing to write it without an epoch grant"
+            );
+        };
+        let draft = draft_for_row(entry)?;
+        return epoch
+            .begin_terminal_append(step, &draft, CanonicalIoStage::RequestedMutation)
             .map(Some)
             .map_err(anyhow::Error::from);
     }
@@ -207,10 +282,18 @@ pub(super) fn grant_for_row(
             .map(Some)
             .map_err(anyhow::Error::from);
     }
-    // LAST arm on purpose, and it must stay last: a row type nobody thought about
-    // is COUNTED here rather than silently admitted. A match that admits anything
-    // it does not recognise is how an undeclared path becomes a covered claim.
+    // LAST arm on purpose: a row type nobody has thought about is COUNTED rather
+    // than silently admitted, which is what makes the counter a boundary instead of
+    // a list of known rows.
     Ok(None)
+}
+
+/// Whether this row is an assistant message: the native final output, covered only
+/// by an admitted provider step's seal.
+pub(super) fn is_assistant_row(entry: &super::SessionEntry) -> bool {
+    entry.type_ == "message"
+        && entry.fields.get("message").and_then(|m| m.get("role"))
+            == Some(&serde_json::Value::String("assistant".to_owned()))
 }
 
 /// Whether this row is the turn's user prompt, which no draft may carry.
@@ -224,7 +307,7 @@ pub(super) fn is_user_row(entry: &super::SessionEntry) -> bool {
 ///
 /// The envelope identity is stripped before the draft is built: the draft rejects
 /// a supplied id, parent or timestamp, and the store mints those at write time.
-fn draft_for_row(entry: &super::SessionEntry) -> anyhow::Result<CanonicalEntryDraft> {
+pub(super) fn draft_for_row(entry: &super::SessionEntry) -> anyhow::Result<CanonicalEntryDraft> {
     let mut value = serde_json::to_value(entry)?;
     if let Some(object) = value.as_object_mut() {
         for key in ["id", "parentId", "timestamp"] {
@@ -236,6 +319,11 @@ fn draft_for_row(entry: &super::SessionEntry) -> anyhow::Result<CanonicalEntryDr
     // accepts `Compaction | BranchSummary`, and `MetadataAction::matches` has no
     // branch-summary arm, so a branch summary is context policy and nothing else.
     let kind = match entry.type_.as_str() {
+        // LIVE as of the terminal wiring: an assistant row reaches this arm through
+        // `begin_terminal_append`, which seals it to the admitted provider step. A
+        // user row never gets here (it takes a prepare flight, because no draft may
+        // carry a user row), and a tool result stays counted until a tool seal path
+        // exists. Test: `an_assistant_row_takes_the_provider_step_grant`.
         "message" => CanonicalMutationKind::AdmittedTerminal,
         "compaction" | "branch_summary" => CanonicalMutationKind::ContextPolicy,
         _ => CanonicalMutationKind::OwnerMetadata,

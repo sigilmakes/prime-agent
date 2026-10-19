@@ -209,6 +209,29 @@ impl SessionFile {
         self.persist_built_entry(entry)
     }
 
+    /// [`Self::persist_entry`] for the native final output: the admitted provider
+    /// step travels with the row.
+    ///
+    /// # Errors
+    /// As [`Self::persist_entry`], plus the step refusal.
+    pub fn persist_message_with_step(
+        &mut self,
+        fields: Value,
+        step: &pa_core::session_engine::canonical_coordinator::CanonicalProviderStep,
+    ) -> Result<String> {
+        let mut entry = SessionEntry::new(
+            "message",
+            self.leaf_id.clone(),
+            &self.by_id,
+            fields,
+            &crate::util::now_iso(),
+        );
+        if self.window.is_some() {
+            entry.id = uuid::Uuid::new_v4().to_string();
+        }
+        self.persist_built_entry_with_step(entry, Some(step))
+    }
+
     /// The durable-append core [`Self::persist_entry_at`] and the attribution
     /// append-once share: the entry arrives fully built (its id included),
     /// its line reaches the file first, and the entry joins the index only
@@ -219,7 +242,22 @@ impl SessionFile {
     ///
     /// Returns an error when the store only holds a window without a file,
     /// or the append, flush, sync, or the bootstrap rewrite fails.
-    pub(super) fn persist_built_entry(&mut self, mut entry: SessionEntry) -> Result<String> {
+    pub(super) fn persist_built_entry(&mut self, entry: SessionEntry) -> Result<String> {
+        self.persist_built_entry_with_step(entry, None)
+    }
+
+    /// [`Self::persist_built_entry`] for a row that carries an admitted provider
+    /// step: the native final output. The step is valid for ONE row, so it is a
+    /// parameter rather than a field on the store - nothing can survive a write.
+    ///
+    /// # Errors
+    /// As [`Self::persist_built_entry`], plus a refusal when an assistant row is
+    /// persisted under a live epoch without a step.
+    pub(super) fn persist_built_entry_with_step(
+        &mut self,
+        mut entry: SessionEntry,
+        step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
+    ) -> Result<String> {
         self.confirm_child_usage_write()?;
         // A preflight recovery can advance the leaf after the caller built its
         // generic row. Preserve that recovered parent instead of branching it away.
@@ -234,8 +272,10 @@ impl SessionFile {
         // row takes a requested-mutation grant. With no epoch attached the row is
         // counted instead - the counter states the fact, never a policy.
         let epoch = self.epoch.clone();
+        // One row, one step: the worker sets this immediately before an assistant
+        // row and it is consumed here, so a later row can never borrow it.
         let mut grant = if let Some(handle) = epoch.as_ref() {
-            let admitted = super::canonical_adapter::grant_for_row(&handle.0, &entry)?;
+            let admitted = super::canonical_adapter::grant_for_row(&handle.0, &entry, step)?;
             if admitted.is_none() {
                 self.rows_written_without_epoch += 1;
             }
