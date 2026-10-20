@@ -510,10 +510,16 @@ impl Drop for KernelEnvOverride {
 /// The kernel python for the live-kernel abort test (skipped without one).
 #[cfg(test)]
 fn live_kernel_python() -> Option<std::path::PathBuf> {
-    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
-        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
-    ));
+    // The product's own default, not a remembered path: the Rust port keeps its
+    // venv at `kernel-venv-rust` beside the TypeScript one, and a test that looks
+    // at the TypeScript venv tests an interpreter the port never starts.
+    let candidate = std::env::var("PRIME_AGENT_KERNEL_PYTHON")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || pa_core::kernel::kernel_venv_python(&pa_core::kernel::kernel_venv_dir()),
+            std::path::PathBuf::from,
+        );
     if !candidate.exists() {
         eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
         return None;
