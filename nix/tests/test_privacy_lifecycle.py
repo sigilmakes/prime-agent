@@ -205,5 +205,39 @@ class PrivacyLifecycleTests(unittest.TestCase):
                 privacy.run_lifecycle(binary, timeout)
 
 
+class RequestAllowlist(unittest.TestCase):
+    """A reporter that phones home is caught; a boot-time catalog fetch is named.
+
+    The allowlist exists because the product fetches three public catalogs while
+    its caches are cold. It must never grow into "any request is fine": a direct
+    request, a non-CONNECT method, or an unknown host still fails.
+    """
+
+    class Fake:
+        def __init__(self, requests):
+            self.collector_requests = requests
+
+    def test_allowlisted_catalog_connects_are_tolerated(self):
+        server = self.Fake([
+            ("CONNECT", "raw.githubusercontent.com:443"),
+            ("CONNECT", "openrouter.ai:443"),
+            ("CONNECT", "api.pinference.ai:443"),
+        ])
+        self.assertEqual(privacy.unexpected_requests(server), [])
+
+    def test_any_other_host_method_or_path_fails(self):
+        server = self.Fake([
+            ("CONNECT", "raw.githubusercontent.com:443"),
+            ("CONNECT", "collector.invalid:443"),
+            ("POST", "/api/v1/traces"),
+            ("GET", "https://raw.githubusercontent.com/catalog.json"),
+        ])
+        self.assertEqual(privacy.unexpected_requests(server), [
+            ("CONNECT", "collector.invalid:443"),
+            ("POST", "/api/v1/traces"),
+            ("GET", "https://raw.githubusercontent.com/catalog.json"),
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

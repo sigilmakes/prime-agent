@@ -278,9 +278,33 @@ def rpc_process(binary, home, env, deadline, session=None):
         rpc.dispose()
 
 
+# The public catalog and provider-discovery hosts a session boot reads while its
+# caches are cold. The port (and the TypeScript line before it) fetches them at
+# boot by design; six daemon tests pin that behaviour. They are allowlisted ONLY
+# as HTTPS CONNECT through the poison proxy - a direct request, any other host, or
+# any non-CONNECT method still fails, so a reporter that phones home is caught
+# whether or not it honours the proxy variables.
+CATALOG_CONNECT_ALLOWLIST = frozenset({
+    "raw.githubusercontent.com:443",
+    "openrouter.ai:443",
+    "api.pinference.ai:443",
+})
+
+
+def unexpected_requests(server):
+    unexpected = []
+    for method, target in server.collector_requests:
+        if method == "CONNECT" and target in CATALOG_CONNECT_ALLOWLIST:
+            continue
+        unexpected.append((method, target))
+    return unexpected
+
+
 def observe_no_reporting(server, deadline):
     if server.collector_event.wait(min(REPORTER_OBSERVATION_SECONDS, remaining(deadline))):
-        raise AssertionError(f"outbound collector requests: {server.collector_requests}")
+        unexpected = unexpected_requests(server)
+        if unexpected:
+            raise AssertionError(f"outbound collector requests: {unexpected}")
     remaining(deadline)
 
 
@@ -303,8 +327,9 @@ def privacy_errors(home, before, server):
             errors.append(f"reporter state created: {path.relative_to(home)}")
     if outbox_snapshot(home) != before:
         errors.append("trace outbox changed (sentinel mutation or new outbox state)")
-    if server.collector_requests:
-        errors.append(f"outbound collector requests: {server.collector_requests}")
+    unexpected = unexpected_requests(server)
+    if unexpected:
+        errors.append(f"outbound collector requests: {unexpected}")
     if server.errors:
         errors.append(f"loopback fixture errors: {server.errors}")
     if (home / "kernel-never-created").exists():
