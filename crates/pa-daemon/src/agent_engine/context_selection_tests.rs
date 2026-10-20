@@ -426,3 +426,135 @@ fn admitted_same_body_distinct_ids_are_preserved() {
         vec!["first", "second"]
     );
 }
+
+/// The read refusal must actually REFUSE. A `Some` from the owner that never became an
+/// `Err` would leave a poisoned epoch serving a mirror built from a tail nobody
+/// classified, so this test drives `build_session_mirror` itself, not the predicate.
+struct PoisonedSelectionStore {
+    source: ContextSelectionSource,
+    captures: AtomicUsize,
+}
+
+impl InitialContextSelectionStore for PoisonedSelectionStore {
+    fn capture(&self, _expected_file: &Path) -> anyhow::Result<ContextSelectionSource> {
+        // Reaching here would mean the refusal did not run before the build.
+        self.captures.fetch_add(1, Ordering::SeqCst);
+        Ok(self.source.clone())
+    }
+
+    fn commit(
+        &self,
+        _source: ContextSelectionSource,
+        _selection: ContextSelection,
+    ) -> ContextSelectionCommitFuture {
+        unreachable!("a refused mirror never commits a selection");
+    }
+
+    fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
+        Some(crate::session_store::canonical_adapter::refused_poisoned_read())
+    }
+}
+
+#[tokio::test]
+async fn a_poisoned_epoch_refuses_the_session_mirror_before_building_it() {
+    use pa_core::session::canonical::{CanonicalSourceDisposition, CanonicalStoreError};
+
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let cwd = dir.path().join("project");
+    let session_dir = dir.path().join("sessions");
+    for path in [&agent_dir, &cwd, &session_dir] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({ "providers": { (PROVIDER): {
+            "api": "openai-completions", "baseUrl": "http://127.0.0.1:9/v1",
+            "apiKey": "none",
+            "models": [{ "id": MODEL, "name": "Owned gate test model",
+                "api": "openai-completions", "reasoning": false,
+                "contextWindow": 128_000, "maxTokens": 4096 }]
+        } } })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({
+            "harnessRefinements": false, "enableBuiltinSkills": false,
+            "prewarmIpythonKernel": false, "contextStrategy": "default_context/rolling"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let header = SessionHeader {
+        version: Some(3),
+        id: "poisoned-read-fixture".to_owned(),
+        timestamp: "2026-01-01T00:00:00.000Z".to_owned(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        parent_session: None,
+        rlm_depth: Some(0),
+        git: None,
+        rest: pa_types::JsonMap::new(),
+    };
+    let session_file = session_dir.join("poisoned-read-fixture.jsonl");
+    let mut fixture = serde_json::to_string(&FileEntry::Header {
+        header: header.clone(),
+    })
+    .unwrap();
+    fixture.push('\n');
+    fixture.push_str(&serde_json::to_string(&user_entry("u1", None, "hi")).unwrap());
+    fixture.push('\n');
+    std::fs::write(&session_file, fixture.as_bytes()).unwrap();
+
+    let store = Arc::new(PoisonedSelectionStore {
+        source: ContextSelectionSource {
+            header,
+            path: session_file.clone(),
+            lease: Weak::new(),
+        },
+        captures: AtomicUsize::new(0),
+    });
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: cwd.clone(),
+        agent_dir,
+        provider: Some(PROVIDER.to_owned()),
+        model: Some(MODEL.to_owned()),
+        api_key: None,
+        thinking: None,
+        session_dir: Some(session_dir.clone()),
+        session_file: Some(session_file.clone()),
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    engine.set_initial_context_selection_store(store.clone());
+
+    let Err(error) = engine
+        .build_session_mirror(cwd, Some(session_dir), Some(session_file.clone()))
+        .await
+    else {
+        panic!("a poisoned epoch must not build a mirror")
+    };
+    let refusal = error
+        .downcast_ref::<CanonicalStoreError>()
+        .expect("the refusal stays typed, not a string");
+    assert_eq!(refusal.source, CanonicalSourceDisposition::NeedsReconcile);
+    assert_eq!(
+        refusal.detail,
+        "canonical epoch is poisoned by an uncertain write"
+    );
+    assert_eq!(
+        store.captures.load(Ordering::SeqCst),
+        0,
+        "the refusal runs BEFORE the capture, so nothing is read at all"
+    );
+    assert_eq!(
+        std::fs::read(&session_file).unwrap(),
+        fixture.as_bytes(),
+        "a refused read never rewrites the source"
+    );
+}

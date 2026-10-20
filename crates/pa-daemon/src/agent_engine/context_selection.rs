@@ -41,6 +41,15 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         source: ContextSelectionSource,
         selection: ContextSelection,
     ) -> ContextSelectionCommitFuture;
+
+    /// The typed refusal for a read under a poisoned epoch, if this owner has one.
+    ///
+    /// A live epoch that an uncertain write poisoned may not serve its raw tail:
+    /// the bytes are unclassified, so a reader would be reading a row that may be
+    /// partially present. Owners with no epoch (or no canonical path) return `None`.
+    fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
+        None
+    }
 }
 
 impl super::AgentSessionEngine {
@@ -82,6 +91,12 @@ impl super::AgentSessionEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("persistent session has no canonical context selection owner")
             })?;
+        // Refuse the read BEFORE building anything: a poisoned epoch means an uncertain
+        // write, and serving its tail as if classified is exactly the lie the drain
+        // claim exists to prevent.
+        if let Some(refusal) = store.canonical_read_refusal() {
+            return Err(anyhow::Error::new(refusal));
+        }
         let capture_store = std::sync::Arc::clone(&store);
         let (manager, source) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let source = capture_store.capture(&path)?;

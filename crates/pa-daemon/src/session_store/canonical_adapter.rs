@@ -69,6 +69,26 @@ fn refused(detail: &str) -> CanonicalStoreError {
     }
 }
 
+/// The typed refusal for a read served under a poisoned epoch.
+///
+/// A poisoned epoch means an uncertain write: the raw tail may be partially
+/// present, so nothing may be read as if its bytes were classified. `NeedsReconcile`
+/// is the honest disposition - the source is neither `Unchanged` nor
+/// `PendingAdoption`, and the caller must reconcile before serving again.
+pub(crate) fn refused_poisoned_read() -> CanonicalStoreError {
+    CanonicalStoreError {
+        kind: CanonicalFailureKind::InvalidRequest,
+        requested: CanonicalRequestedWrite::NotWritten,
+        source: CanonicalSourceDisposition::NeedsReconcile,
+        detail: "canonical epoch is poisoned by an uncertain write".to_owned(),
+    }
+}
+
+/// Whether a live epoch is poisoned, as a read path may observe it.
+pub(crate) fn epoch_is_poisoned(epoch: Option<&EpochHandle>) -> bool {
+    epoch.is_some_and(|handle| handle.0.poisoned())
+}
+
 /// One provider request attempt's identity, created where the attempt starts.
 ///
 /// The authority treats a step as opaque pointer identity and refuses the same

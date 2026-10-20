@@ -123,6 +123,14 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         Ok(source)
     }
 
+    /// The typed read refusal: a poisoned epoch may not serve its raw tail.
+    fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
+        let core = self.0.lock().expect("session core lock");
+        let epoch = core.store.as_ref().and_then(|store| store.epoch.as_ref());
+        crate::session_store::canonical_adapter::epoch_is_poisoned(epoch)
+            .then(crate::session_store::canonical_adapter::refused_poisoned_read)
+    }
+
     fn commit(
         &self,
         source: ContextSelectionSource,
@@ -169,6 +177,34 @@ mod tests {
         (dir, core, source)
     }
 
+    fn read_epoch() -> Arc<pa_core::session_engine::canonical_coordinator::CanonicalEpoch> {
+        use pa_core::session::canonical::{
+            CanonicalCursor, CanonicalFrontier, CanonicalOwnerScope,
+        };
+        Arc::new(
+            pa_core::session_engine::canonical_coordinator::CanonicalEpoch::genesis(
+                &CanonicalCursor {
+                    owner: CanonicalOwnerScope::new(),
+                    session_id: "read-refusal-session".to_owned(),
+                    source_path: std::path::PathBuf::from("/private/read-refusal.jsonl"),
+                    raw_source_generation: [3; 32],
+                    header_certificate: [4; 32],
+                    canonical_revision: 0,
+                    branch_revision: 1,
+                    selected_leaf: None,
+                    frontier: CanonicalFrontier {
+                        bytes: 5,
+                        rows: 1,
+                        prefix_certificate: [6; 32],
+                    },
+                },
+                Arc::new(String::from("run")),
+                Arc::new(String::from("model")),
+            )
+            .expect("epoch"),
+        )
+    }
+
     fn choice(route: &str) -> ContextSelection {
         ContextSelection {
             version: 1,
@@ -185,6 +221,51 @@ mod tests {
                 row["type"] == "custom" && row["customType"] == CONTEXT_SELECTION_CUSTOM_TYPE
             })
             .collect()
+    }
+
+    /// The read path's one question: a poisoned live epoch refuses, a clean one and
+    /// an absent one do not. `build_session_mirror` asks exactly this before it builds
+    /// anything, so the refusal cannot be skipped by a later branch.
+    #[test]
+    fn only_a_poisoned_epoch_refuses_the_read() {
+        let (_dir, core, _source) = fixture();
+        let store = CoreInitialContextSelectionStore(Arc::clone(&core));
+        assert!(
+            store.canonical_read_refusal().is_none(),
+            "no epoch attached is not a refusal: the pre-genesis window still reads"
+        );
+
+        let epoch = read_epoch();
+        {
+            let mut core = core.lock().unwrap();
+            core.store.as_mut().unwrap().epoch = Some(
+                crate::session_store::canonical_adapter::EpochHandle(Arc::clone(&epoch)),
+            );
+        }
+        assert!(
+            store.canonical_read_refusal().is_none(),
+            "a clean live epoch reads normally"
+        );
+
+        // An unclassified flight drop is the uncertain write.
+        drop(
+            epoch
+                .begin_prepare_append(
+                    pa_core::session::canonical::CanonicalIoStage::PreparePreflight,
+                )
+                .expect("flight"),
+        );
+        let refusal = store
+            .canonical_read_refusal()
+            .expect("a poisoned epoch refuses the read");
+        assert_eq!(
+            refusal.source,
+            pa_core::session::canonical::CanonicalSourceDisposition::NeedsReconcile
+        );
+        assert_eq!(
+            refusal.detail,
+            "canonical epoch is poisoned by an uncertain write"
+        );
     }
 
     #[tokio::test]

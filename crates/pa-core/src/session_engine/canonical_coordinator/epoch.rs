@@ -204,7 +204,7 @@ pub struct CanonicalProviderStep {
 pub struct CanonicalEpoch {
     owner: Arc<AuthorityOwner>,
     run: CapturedRun,
-    _anchor: LateRunAnchor,
+    anchor: LateRunAnchor,
 }
 
 impl CanonicalEpoch {
@@ -253,7 +253,7 @@ impl CanonicalEpoch {
         Ok(Self {
             owner,
             run: captured,
-            _anchor: anchor,
+            anchor,
         })
     }
 
@@ -457,6 +457,22 @@ impl CanonicalEpoch {
         CanonicalClosing {
             ticket: self.owner.request_close(CloseReason::Retirement),
         }
+    }
+
+    /// Consume the epoch at its ordered external-idle boundary.
+    ///
+    /// Dropping an epoch is NOT this, and the difference is deliberate: an
+    /// abandoned `LateRunAnchor` poisons the shared state and quarantines
+    /// projection, because an epoch that ends without an ordered boundary has a
+    /// tail nobody classified. Only this call releases the anchor's count with the
+    /// boundary claim set, which is why it CONSUMES the epoch: after it the epoch
+    /// admits nothing, and the caller's remaining step is
+    /// [`CanonicalClosing::finish`], which can now find `anchors == 0`.
+    ///
+    /// Infallible by construction: the authority's own boundary call returns no
+    /// refusal, so a `Result` here would advertise a variant nothing can produce.
+    pub fn finish_ordered_boundary(self) {
+        self.anchor.finish_ordered_boundary();
     }
 
     /// Whether an uncertain write poisoned this epoch.

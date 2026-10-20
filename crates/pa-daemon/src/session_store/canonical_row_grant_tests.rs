@@ -312,3 +312,98 @@ fn the_sealed_entry_matches_the_persisted_row_for_the_first_row() {
         "the store assigned an id"
     );
 }
+
+/// The counter must not move across a close: request, boundary, drain, finish, with
+/// no turn in flight. A stale write after the close is the failure the count exists
+/// for.
+#[tokio::test]
+async fn the_without_epoch_count_is_stable_across_the_close() {
+    let (_dir, mut store) = fixture();
+    let epoch = epoch();
+    store.epoch = Some(EpochHandle(Arc::clone(&epoch)));
+    store
+        .persist_entry("message", user_row())
+        .expect("covered user row");
+    let before = store.rows_written_without_epoch();
+    // The store gives the epoch up at shutdown and the ordered boundary consumes it.
+    // Both are required: `wait_drained` WAITS rather than reporting `Pending`, so even
+    // one surviving handle hangs the close instead of describing it.
+    let handle = store.epoch.take();
+    let closing = epoch.request_close();
+    drop(handle);
+    let Ok(epoch) = Arc::try_unwrap(epoch) else {
+        panic!("the store held the only other handle")
+    };
+    epoch.finish_ordered_boundary();
+    assert_eq!(
+        closing.wait_drained().await,
+        pa_core::session_engine::canonical_coordinator::CanonicalDrainView::Drained,
+        "the ordered boundary released the serving anchor, so the drain completes"
+    );
+    assert!(
+        closing.finish().is_ok(),
+        "a drained epoch mints its retired token"
+    );
+    assert_eq!(
+        store.rows_written_without_epoch(),
+        before,
+        "no row may slip in after the close was requested"
+    );
+}
+
+/// Dropping an epoch is NOT closing it, and the difference is a poison.
+///
+/// `LateRunAnchor::drop` poisons the shared state and quarantines projection unless
+/// the anchor took its ordered boundary first. This test pins that, so nobody
+/// "simplifies" the shutdown drain into a drop: abandoned anchors are deliberate
+/// quarantine, not a cleanup path.
+#[test]
+fn an_abandoned_epoch_poisons_and_the_ordered_boundary_does_not() {
+    use pa_core::session_engine::canonical_coordinator::CanonicalDrainView;
+    let abandoned = epoch();
+    let abandoned_closing = abandoned.request_close();
+    drop(abandoned);
+    assert_eq!(
+        abandoned_closing.view(),
+        CanonicalDrainView::Blocked,
+        "an abandoned anchor poisons the epoch: the drain can never succeed after it"
+    );
+
+    let ordered = Arc::try_unwrap(epoch()).ok().expect("unique epoch");
+    let ordered_closing = ordered.request_close();
+    ordered.finish_ordered_boundary();
+    assert_eq!(
+        ordered_closing.view(),
+        CanonicalDrainView::Drained,
+        "the ordered boundary releases the anchor without poisoning it"
+    );
+}
+
+/// The read refusal is typed and names the reason: a poisoned epoch may not serve
+/// its tail as if the bytes were classified.
+#[test]
+fn a_poisoned_epoch_refuses_the_read_with_needs_reconcile() {
+    let (_dir, mut store) = fixture();
+    let epoch = epoch();
+    // An unclassified flight drop poisons: this is the uncertain write.
+    drop(
+        epoch
+            .begin_prepare_append(pa_core::session::canonical::CanonicalIoStage::PreparePreflight)
+            .expect("flight"),
+    );
+    assert!(epoch.poisoned(), "an unrecorded drop poisons the epoch");
+    store.epoch = Some(EpochHandle(Arc::clone(&epoch)));
+    let refusal = super::canonical_adapter::refused_poisoned_read();
+    assert_eq!(
+        refusal.source,
+        pa_core::session::canonical::CanonicalSourceDisposition::NeedsReconcile
+    );
+    assert_eq!(
+        refusal.detail,
+        "canonical epoch is poisoned by an uncertain write"
+    );
+    assert!(
+        super::canonical_adapter::epoch_is_poisoned(store.epoch.as_ref()),
+        "the live store sees the poison, so the read path refuses"
+    );
+}
