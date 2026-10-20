@@ -54,6 +54,15 @@ pub const DEFAULT_RLM_EXTRA_PACKAGES: [(&str, &str, &str); 12] = [
     ("tyro", "tyro", "tyro"),
 ];
 
+/// Whether `python` can serve as the kernel interpreter: it must carry a current
+/// `prime-agent-runtime` with the callable RLM surface. Callers that gate on a live
+/// kernel ask this instead of testing that the interpreter merely exists, because an
+/// interpreter that exists and cannot import `rlm` starts nothing.
+#[must_use]
+pub fn kernel_python_has_runtime(python: &str) -> bool {
+    venv::has_prime_agent_runtime(python)
+}
+
 #[must_use]
 pub fn default_rlm_extra_uv_args() -> Vec<&'static str> {
     DEFAULT_RLM_EXTRA_PACKAGES

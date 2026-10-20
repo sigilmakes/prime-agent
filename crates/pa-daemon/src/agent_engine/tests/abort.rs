@@ -514,11 +514,40 @@ fn live_kernel_python() -> Option<std::path::PathBuf> {
         |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
         |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
     ));
-    if candidate.exists() {
-        return Some(candidate);
+    if !candidate.exists() {
+        eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
+        return None;
     }
-    eprintln!("kernel python {candidate:?} not found; skipping live kernel test");
-    None
+    // Existing is not enough: an interpreter that cannot import a current `rlm`
+    // starts no kernel, and the run thread then reports "kernel startup failed"
+    // while this test waits three minutes for a marker that can never appear.
+    // Ask the same predicate the daemon asks, so a stale venv skips with a reason
+    // instead of turning an environment fault into a stall.
+    if !pa_core::kernel::kernel_python_has_runtime(&candidate.to_string_lossy()) {
+        eprintln!(
+            "kernel python {candidate:?} lacks a current prime-agent-runtime; skipping live kernel test"
+        );
+        return None;
+    }
+    Some(candidate)
+}
+
+/// The first kernel-start failure the engine has already reported, if any.
+///
+/// The event vector grows while the run thread works, so only the events added
+/// since the previous call are formatted.
+fn kernel_start_failure(
+    events: &std::sync::Mutex<Vec<EngineEvent>>,
+    scanned: &mut usize,
+) -> Option<String> {
+    let events = events.lock().unwrap();
+    let failure = events
+        .iter()
+        .skip(*scanned)
+        .map(|event| format!("{event:?}"))
+        .find(|wire| wire.contains("kernel startup failed"));
+    *scanned = events.len();
+    failure
 }
 
 /// The abort wedge repro (dogfood P0): a turn executing a long kernel cell
@@ -607,9 +636,17 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
             );
         })
     };
-    // The cell started (bounded by the kernel boot).
+    // The cell started (bounded by the kernel boot). A kernel that cannot start
+    // reports it at once as an error tool result, so the wait fails fast on the
+    // engine's own report: waiting the full three minutes for a marker that can
+    // never appear turns a one-second environment fault into a three-minute
+    // stall that reads like the wedge this test exists to catch.
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(3);
+    let mut scanned = 0;
     while !marker.exists() && std::time::Instant::now() < deadline {
+        if let Some(failure) = kernel_start_failure(&events, &mut scanned) {
+            panic!("the kernel never started, so the wedge cell never began: {failure}");
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     if !marker.exists() {
