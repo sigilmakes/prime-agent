@@ -68,11 +68,29 @@ fn clone_assistant_content(content: &[AssistantContent]) -> Vec<AssistantContent
         .collect()
 }
 
+/// A settled aborted message always carries at least one content part.
+///
+/// TS starts every assistant message with an empty text block, so no TS row is
+/// aborted with an empty part list. A provider can abort before its first delta,
+/// which leaves a partial that exists with no parts at all; normalising here
+/// covers every provider at once instead of teaching each one the shape.
+pub(crate) fn settle_aborted_content(mut message: AssistantMessage) -> AssistantMessage {
+    if message.stop_reason == StopReason::Aborted && message.content.is_empty() {
+        message
+            .content
+            .push(AssistantContent::Text(crate::types::TextContent {
+                text: String::new(),
+                text_signature: None,
+            }));
+    }
+    message
+}
+
 pub(crate) fn create_aborted_assistant_message(
     config: &AgentLoopConfig,
     partial_message: Option<&AssistantMessage>,
 ) -> AssistantMessage {
-    AssistantMessage {
+    settle_aborted_content(AssistantMessage {
         content: partial_message.map_or_else(
             || {
                 vec![AssistantContent::Text(crate::types::TextContent {
@@ -94,5 +112,66 @@ pub(crate) fn create_aborted_assistant_message(
         stop_reason_raw: None,
         error_message: Some(ABORT_ERROR_MESSAGE.to_string()),
         timestamp: crate::now_ms(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{TextContent, Usage};
+
+    fn partial(content: Vec<AssistantContent>) -> AssistantMessage {
+        AssistantMessage {
+            content,
+            api: "faux".into(),
+            provider: "faux".into(),
+            model: "faux-1".into(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::zero(),
+            stop_reason: StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    /// A partial that exists before its first content part: the aborted row must
+    /// still carry one empty text part, because no TS row is aborted with none.
+    #[test]
+    fn an_aborted_row_with_no_parts_yet_still_carries_one_empty_text_part() {
+        let mut message = partial(Vec::new());
+        message.stop_reason = StopReason::Aborted;
+        let settled = settle_aborted_content(message);
+        assert_eq!(settled.stop_reason, StopReason::Aborted);
+        assert_eq!(
+            settled.content,
+            vec![AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+            })]
+        );
+    }
+
+    /// Text that had already streamed is never replaced by the placeholder.
+    #[test]
+    fn an_aborted_row_keeps_the_parts_it_already_has() {
+        let content = vec![AssistantContent::Text(TextContent {
+            text: "half a sentence".into(),
+            text_signature: None,
+        })];
+        let mut message = partial(content.clone());
+        message.stop_reason = StopReason::Aborted;
+        let settled = settle_aborted_content(message);
+        assert_eq!(settled.content, content);
+    }
+
+    /// A message that did not abort is untouched, even with no parts.
+    #[test]
+    fn a_message_that_did_not_abort_is_left_alone() {
+        let settled = settle_aborted_content(partial(Vec::new()));
+        assert!(settled.content.is_empty());
+        assert_eq!(settled.stop_reason, StopReason::Stop);
     }
 }

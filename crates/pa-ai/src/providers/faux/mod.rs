@@ -487,6 +487,16 @@ fn create_error_message(
 
 fn create_aborted_message(partial: &AssistantMessage) -> AssistantMessage {
     let mut aborted = partial.clone();
+    // TS starts every assistant message with an empty text block, so an aborted
+    // row is never a row with no parts at all. A partial that aborted before its
+    // first delta has none yet; seed the block instead of settling an empty row.
+    if aborted.content.is_empty() {
+        aborted.content.push(AssistantContent::Text(TextContent {
+            text: String::new(),
+            text_signature: None,
+            rest: pa_types::JsonMap::new(),
+        }));
+    }
     aborted.stop_reason = StopReason::Aborted;
     aborted.error_message = Some("Request was aborted".to_string());
     aborted.timestamp = now_ms();
