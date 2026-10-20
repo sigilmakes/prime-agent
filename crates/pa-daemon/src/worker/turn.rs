@@ -592,9 +592,14 @@ impl TurnRunner {
                         }
                     }
                     // A `message` entry per row (TS's appendMessage path).
-                    EngineEvent::UserMessage(message)
-                    | EngineEvent::AssistantMessage(message)
-                    | EngineEvent::ToolResultMessage(message) => {
+                    //
+                    // ONLY the assistant arm may consume the provider step, and this
+                    // split is load-bearing: `UserMessage` is the FIRST event of every
+                    // turn and the step is admitted before the prompt, so a shared arm
+                    // let the user row take the step, drop the seal silently, and make
+                    // every assistant row refuse. The user and tool results are written
+                    // without touching the slot.
+                    EngineEvent::AssistantMessage(message) => {
                         // The assistant row is the native final output: hand the store
                         // the step the engine admitted for this attempt, so the row is
                         // written under a sealed epoch grant. Taking it here keeps the
@@ -608,7 +613,21 @@ impl TurnRunner {
                                     store.persist_entry("message", json!({ "message": message }))
                                 }
                             };
-                            let _ = persisted;
+                            if let Err(error) = persisted {
+                                // A refused assistant row is a bug to SURFACE, never a
+                                // row to drop quietly: the epoch had work admitted and
+                                // the row did not reach the file.
+                                eprintln!("pa-daemon: assistant row refused by its epoch grant: {error:#}");
+                            }
+                        }
+                    }
+                    EngineEvent::UserMessage(message) | EngineEvent::ToolResultMessage(message) => {
+                        // Declared: tool result rows are content-bearing and stay
+                        // COUNTED (`rows_written_without_epoch`), so a zero count is
+                        // impossible for any turn that calls a tool. The counter is
+                        // stated per ROW CLASS, never per turn.
+                        if let Some(store) = core.store.as_mut() {
+                            let _ = store.persist_entry("message", json!({ "message": message }));
                         }
                     }
                     // The in-flight tool-call set, updated under the same core lock

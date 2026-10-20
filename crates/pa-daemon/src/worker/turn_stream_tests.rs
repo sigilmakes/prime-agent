@@ -458,3 +458,193 @@ async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
         );
     }
 }
+
+/// The real producer-consumer order for the canonical step: the engine receives the
+/// worker's admission channel, admits ONE step per attempt BEFORE emitting (exactly
+/// what `run_turn_once` does), then emits the scripted frames - user first, then
+/// assistant, as a real turn does.
+struct CanonicalStepProbeEngine {
+    frames: Vec<EngineEvent>,
+    admission: Mutex<Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>>,
+}
+
+impl SessionEngine for CanonicalStepProbeEngine {
+    fn set_canonical_step_admission(
+        &self,
+        admission: Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>,
+    ) {
+        *self.admission.lock().unwrap() = admission;
+    }
+
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        _request: PromptRequest,
+        _aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        // Admit before the first event, like the real engine: the user row is the
+        // FIRST event of a turn, so a shared persist arm would let it eat the step.
+        if let Some(admission) = self.admission.lock().unwrap().clone() {
+            admission
+                .admit(Arc::new(
+                    crate::session_store::canonical_adapter::ProviderStepIdentity,
+                ))
+                .expect("admit one provider step");
+        }
+        for frame in &self.frames {
+            if !emit(frame.clone()) {
+                return;
+            }
+        }
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn canonical_turn_epoch() -> Arc<pa_core::session_engine::canonical_coordinator::CanonicalEpoch> {
+    use pa_core::session::canonical::{CanonicalCursor, CanonicalFrontier, CanonicalOwnerScope};
+    Arc::new(
+        pa_core::session_engine::canonical_coordinator::CanonicalEpoch::genesis(
+            &CanonicalCursor {
+                owner: CanonicalOwnerScope::new(),
+                session_id: "turn-order-session".to_owned(),
+                source_path: std::path::PathBuf::from("/private/turn-order.jsonl"),
+                raw_source_generation: [7; 32],
+                header_certificate: [8; 32],
+                canonical_revision: 0,
+                branch_revision: 1,
+                selected_leaf: None,
+                frontier: CanonicalFrontier {
+                    bytes: 9,
+                    rows: 1,
+                    prefix_certificate: [9; 32],
+                },
+            },
+            Arc::new(String::from("run")),
+            Arc::new(String::from("model")),
+        )
+        .expect("epoch"),
+    )
+}
+
+/// THE test the previous commit lacked: a whole turn under a LIVE epoch, driven
+/// through the real event order. A `UserMessage` frame arrives BEFORE the
+/// `AssistantMessage` one, so a shared persist arm that takes the step
+/// unconditionally fails here: the user row would eat the step and the assistant
+/// row would be refused.
+#[tokio::test]
+async fn a_whole_turn_seals_the_assistant_row_and_counts_neither_row() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut store = crate::session_store::SessionFile::create("/synthetic", None, 0);
+    store.set_path(dir.path().join("turn-order.jsonl"));
+    store.rewrite().expect("rewrite");
+    let epoch = canonical_turn_epoch();
+    store.epoch = Some(crate::session_store::canonical_adapter::EpochHandle(
+        Arc::clone(&epoch),
+    ));
+
+    let engine: Arc<dyn SessionEngine> = Arc::new(CanonicalStepProbeEngine {
+        frames: vec![
+            EngineEvent::UserMessage(
+                json!({"role": "user", "content": [{"type": "text", "text": "turn"}]}),
+            ),
+            EngineEvent::AssistantMessage(json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "reply"}],
+                "api": "synthetic",
+                "provider": "synthetic",
+                "model": "synthetic",
+                "stopReason": "stop",
+                "timestamp": 2,
+                "usage": serde_json::to_value(pa_types::ai::Usage::default()).expect("usage")
+            })),
+        ],
+        admission: Mutex::new(None),
+    });
+    let runner = burst_runner(Arc::clone(&engine));
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.store = Some(store);
+    }
+    runner
+        .run_turn(
+            engine,
+            vec![QueuedItem {
+                priority: QueuePriority::Human,
+                preview: None,
+                message: "turn".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
+            }],
+        )
+        .await;
+
+    let core = runner.core.lock().unwrap();
+    let store = core.store.as_ref().expect("store");
+    let roles: Vec<&str> = store
+        .entries()
+        .iter()
+        .filter(|entry| entry.type_ == "message")
+        .filter_map(|entry| entry.fields.get("message")?.get("role")?.as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        vec!["user", "assistant"],
+        "both rows persist, in the turn's real order"
+    );
+    assert_eq!(
+        store.rows_written_without_epoch(),
+        0,
+        "per ROW CLASS: a user row is covered by a prepare flight and an assistant row by the provider step's grant, so neither counts"
+    );
+    assert!(
+        !epoch.poisoned(),
+        "both flights classified: nothing may poison the epoch"
+    );
+}
