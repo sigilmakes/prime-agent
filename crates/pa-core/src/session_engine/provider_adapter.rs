@@ -437,7 +437,18 @@ struct PumpedStream {
 impl PumpedStream {
     fn aborted_message(&self) -> pa_agent::types::AssistantMessage {
         pa_agent::types::AssistantMessage {
-            content: vec![],
+            // This adapter invents the settled row (it never comes from the
+            // provider): a cancelled pump drops the provider's own aborted
+            // message, so the shape is minted here. TS starts every assistant
+            // message with an empty text block, so no row is aborted with an
+            // empty part list; minting `vec![]` handed the loop (and every
+            // reader of `result()`) a part-less aborted row.
+            content: vec![pa_agent::types::AssistantContent::Text(
+                pa_agent::types::TextContent {
+                    text: String::new(),
+                    text_signature: None,
+                },
+            )],
             api: self.model.api.clone(),
             provider: self.model.provider.clone(),
             model: self.model.id.clone(),

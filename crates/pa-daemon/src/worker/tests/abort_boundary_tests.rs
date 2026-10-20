@@ -271,6 +271,84 @@ async fn abort_and_send_queued_with_an_empty_queue_is_a_plain_abort() {
     assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
 }
 
+/// The per-engine provider-admission counter: the decorator runs inside the
+/// provider future, so the count moves only when a turn's request is actually
+/// issued. A faux `delayMs` hold sends nothing on the wire before its delay, so
+/// a fixed sleep is the only way to guess — and under load the abort then lands
+/// before the request exists, which hands the held response to the next queued
+/// turn instead of aborting this one mid-wait.
+struct ProviderAdmission {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    engine: std::sync::Arc<crate::agent_engine::AgentSessionEngine>,
+}
+
+impl ProviderAdmission {
+    fn install(engine: &std::sync::Arc<crate::agent_engine::AgentSessionEngine>) -> Self {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let decorator: crate::agent_engine::TestStreamDecorator =
+            std::sync::Arc::new(move |normal: pa_agent::stream::StreamFn| {
+                let normal = std::sync::Arc::clone(&normal);
+                let counted = std::sync::Arc::clone(&counted);
+                std::sync::Arc::new(
+                    move |model: pa_agent::types::Model,
+                          context: pa_agent::stream::LlmContext,
+                          options: pa_agent::stream::StreamRequestOptions| {
+                        let normal = std::sync::Arc::clone(&normal);
+                        let counted = std::sync::Arc::clone(&counted);
+                        Box::pin(async move {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            normal(model, context, options).await
+                        })
+                            as pa_agent::BoxFut<
+                                'static,
+                                anyhow::Result<Box<dyn pa_agent::stream::ModelStream>>,
+                            >
+                    },
+                ) as pa_agent::stream::StreamFn
+            });
+        let mut slot = engine
+            .test_stream_decorator
+            .lock()
+            .expect("test stream decorator lock");
+        assert!(slot.is_none(), "another decorator already owns this engine");
+        *slot = Some(decorator);
+        drop(slot);
+        Self {
+            calls,
+            engine: std::sync::Arc::clone(engine),
+        }
+    }
+
+    fn issued(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Park until `count` provider requests have been issued. Bounded, so a
+    /// request that never happens fails the fixture instead of waiting silently.
+    async fn wait_for(&self, count: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.issued() < count {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn's provider request was never issued ({} of {count} seen)",
+                self.issued()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
+impl Drop for ProviderAdmission {
+    fn drop(&mut self) {
+        self.engine
+            .test_stream_decorator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
 /// The sanctioned divergence: the OLDEST queued follow-up starts the next turn after the settle.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
@@ -299,6 +377,13 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
+    // Install before `create`: the session build clones the decorator.
+    let provider = ProviderAdmission::install(
+        worker
+            .agent_engine
+            .as_ref()
+            .expect("the worker owns the real agent engine"),
+    );
     let created = worker
         .dispatch(
             "create",
@@ -328,7 +413,9 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // The abort must land MID-PROVIDER-WAIT: wait for the held request itself,
+    // never for a wall-clock guess that a loaded machine can miss.
+    provider.wait_for(1).await;
     // Two follow-ups park behind the running turn; the steering
     // lane stays empty — nothing armable.
     for message in ["follow-up one", "follow-up two"] {
