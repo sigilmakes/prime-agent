@@ -254,7 +254,8 @@ pub struct CompactionEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_archive: Option<ContextArchive>,
     pub summary: String,
-    pub first_kept_entry_id: String,
+    /// The first retained prior row; `None` covers the entire prepared prefix.
+    pub first_kept_entry_id: Option<String>,
     pub tokens_before: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
@@ -738,6 +739,24 @@ pub struct EntryBase {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compaction_no_retained_boundary_is_null_without_normalizing_claimed_ids() {
+        for boundary in [None, Some(""), Some("retained")] {
+            let entry = CompactionEntry {
+                summary: "archive".into(),
+                first_kept_entry_id: boundary.map(str::to_owned),
+                tokens_before: 1,
+                ..Default::default()
+            };
+            let wire = serde_json::to_value(&entry).unwrap();
+            assert_eq!(wire["firstKeptEntryId"], serde_json::json!(boundary));
+            assert_eq!(
+                serde_json::from_value::<CompactionEntry>(wire).unwrap(),
+                entry
+            );
+        }
+    }
+
     use super::*;
 
     fn entry(json: &str) -> FileEntry {

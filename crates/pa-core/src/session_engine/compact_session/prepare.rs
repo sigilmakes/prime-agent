@@ -77,9 +77,10 @@ pub fn prepare_compaction(
             let FileEntry::Compaction { payload, .. } = &entries[index] else {
                 unreachable!("rposition matched a compaction entry")
             };
-            let first_kept_index = entries
-                .iter()
-                .position(|entry| entry.id() == Some(payload.first_kept_entry_id.as_str()));
+            let first_kept_index = payload
+                .first_kept_entry_id
+                .as_deref()
+                .and_then(|id| entries.iter().position(|entry| entry.id() == Some(id)));
             let boundary_start = first_kept_index.unwrap_or(index + 1);
             let stripped = super::compaction_utils::strip_file_list_blocks(&payload.summary);
             let previous_summary = (!stripped.is_empty()).then_some(stripped);

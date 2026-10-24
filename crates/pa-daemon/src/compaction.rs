@@ -220,33 +220,35 @@ impl CompactionManager {
             }
             fields
         };
-        // The engine's id references its in-memory entry list: re-pin the boundary to the
-        // durable cut.
-        let first_kept_entry_id = fields
-            .get("firstKeptEntryId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let first_kept_entry_id = if first_kept_entry_id.is_empty() {
-            store
-                .branch()
-                .iter()
-                .find(|entry| entry.type_ == "message")
-                .map(|entry| entry.id.clone())
+        if !fields.get("firstKeptEntryId").is_some_and(Value::is_null) {
+            // The engine's id references its in-memory entry list: re-pin the boundary to the
+            // durable cut.
+            let first_kept_entry_id = fields
+                .get("firstKeptEntryId")
+                .and_then(Value::as_str)
                 .unwrap_or_default()
-        } else {
-            let keep_recent = pa_core::settings::SettingsManager::create(&cwd, &self.agent_dir)
-                .settings()
-                .compaction
-                .clone()
-                .unwrap_or_default()
-                .keep_recent_tokens
-                .unwrap_or(pa_core::session_engine::compaction::DEFAULT_KEEP_RECENT_TOKENS);
-            store
-                .durable_first_kept_entry_id(keep_recent)
-                .unwrap_or(first_kept_entry_id)
-        };
-        fields["firstKeptEntryId"] = json!(first_kept_entry_id);
+                .to_string();
+            let first_kept_entry_id = if first_kept_entry_id.is_empty() {
+                store
+                    .branch()
+                    .iter()
+                    .find(|entry| entry.type_ == "message")
+                    .map(|entry| entry.id.clone())
+                    .unwrap_or_default()
+            } else {
+                let keep_recent = pa_core::settings::SettingsManager::create(&cwd, &self.agent_dir)
+                    .settings()
+                    .compaction
+                    .clone()
+                    .unwrap_or_default()
+                    .keep_recent_tokens
+                    .unwrap_or(pa_core::session_engine::compaction::DEFAULT_KEEP_RECENT_TOKENS);
+                store
+                    .durable_first_kept_entry_id(keep_recent)
+                    .unwrap_or(first_kept_entry_id)
+            };
+            fields["firstKeptEntryId"] = json!(first_kept_entry_id);
+        }
         let _ = store.persist_entry("compaction", fields);
     }
 
@@ -460,7 +462,7 @@ mod tests {
     fn compaction_result_value_mirrors_the_ts_datakeys() {
         let result = pa_core::session_engine::compaction_exec::CompactionResult {
             summary: "the story so far".to_string(),
-            first_kept_entry_id: "abcd1234".to_string(),
+            first_kept_entry_id: Some("abcd1234".to_string()),
             tokens_before: 1234,
             usage: Some(pa_types::ai::Usage::default()),
         };

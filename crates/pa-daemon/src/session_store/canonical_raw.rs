@@ -626,7 +626,7 @@ fn global_kind(kind: &str) -> bool {
 fn anchors(entry: &FileEntry) -> Vec<String> {
     match entry {
         FileEntry::Compaction { payload, .. } => {
-            let mut ids = vec![payload.first_kept_entry_id.clone()];
+            let mut ids: Vec<_> = payload.first_kept_entry_id.iter().cloned().collect();
             if let Some(archive) = &payload.context_archive {
                 ids.push(archive.prepared_leaf.clone());
                 ids.extend(archive.covered_entry_ids.iter().cloned());
@@ -1188,6 +1188,52 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn no_retained_boundary_preserves_raw_prefix_and_refuses_invalid_claimed_ids() {
+        let archive = json!({
+            "type":"compaction", "id":"c", "parentId":"b", "summary":"archive",
+            "firstKeptEntryId":null, "tokensBefore":1,
+            "contextArchive":{
+                "version":1, "strategy":"standard", "compactor":"test",
+                "creatorGeneration":"test", "preparedLeaf":"b",
+                "coveredEntryIds":["a","b"], "representation":{"kind":"standard"}
+            },
+            "opaque":{"boundary":""}
+        });
+        for omitted in [false, true] {
+            let mut value = archive.clone();
+            if omitted {
+                value.as_object_mut().unwrap().remove("firstKeptEntryId");
+            }
+            let row = value.to_string() + "\n";
+            let bytes = format!("{HEADER}{A}{B}{row}").into_bytes();
+            let (_dir, path) = source(&bytes);
+            let actual = capture(&path, Some("c"));
+            assert_eq!(actual.plan.rows[2].anchors, vec!["b", "a", "b"]);
+            let retained = actual
+                .read_span(&actual.cursor, &actual.plan.rows[2].span)
+                .unwrap();
+            assert_eq!(retained.raw(), row.as_bytes());
+            assert!(
+                matches!(retained.entry(), FileEntry::Compaction { payload, .. }
+                if payload.first_kept_entry_id.is_none())
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        for boundary in ["", "missing", "c"] {
+            let mut value = archive.clone();
+            value["firstKeptEntryId"] = json!(boundary);
+            let bytes = format!("{HEADER}{A}{B}{value}\n");
+            assert_eq!(reject(bytes.as_bytes()).kind, RawErrorKind::InvalidGraph);
+        }
+        for boundary in [json!(1), json!(false), json!({})] {
+            let mut value = archive.clone();
+            value["firstKeptEntryId"] = boundary;
+            let bytes = format!("{HEADER}{A}{B}{value}\n");
+            assert_eq!(reject(bytes.as_bytes()).kind, RawErrorKind::Malformed);
+        }
+    }
+
     #[test]
     fn compaction_branch_and_archive_references_are_certified_prior_spans() {
         let compaction=json!({"type":"compaction","id":"c","parentId":"a","summary":"s","firstKeptEntryId":"a","tokensBefore":1,"contextArchive":{"version":1,"strategy":"standard","compactor":"test","creatorGeneration":"test","preparedLeaf":"a","coveredEntryIds":["a"],"representation":{"kind":"standard"}}}).to_string()+"\n";

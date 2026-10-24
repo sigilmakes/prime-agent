@@ -459,7 +459,7 @@ async fn intervening_compaction_reprepares_instead_of_falling_through() {
         session
             .append_compaction(pa_types::session::CompactionEntry {
                 summary: "external accepted summary".into(),
-                first_kept_entry_id: first_kept,
+                first_kept_entry_id: Some(first_kept),
                 ..Default::default()
             })
             .unwrap();

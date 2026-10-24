@@ -178,7 +178,7 @@ fn append_compaction_serializes_the_full_ts_record() {
         .append_compaction(pa_types::session::CompactionEntry {
             context_archive: None,
             summary: "the overflow summary".to_string(),
-            first_kept_entry_id: "e4".to_string(),
+            first_kept_entry_id: Some("e4".to_string()),
             tokens_before: 214,
             details: Some(serde_json::json!({
                 "readFiles": [],

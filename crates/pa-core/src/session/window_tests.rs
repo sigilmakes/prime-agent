@@ -607,6 +607,46 @@ fn reverse_reader_preserves_long_lines_and_unterminated_tail() {
 }
 
 #[test]
+fn no_retained_boundary_matches_cold_context_and_keeps_only_the_physical_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("no-tail.jsonl");
+    let mut rows: Vec<serde_json::Value> = fixture()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.iter_mut().find(|row| row["id"] == "compact").unwrap()["firstKeptEntryId"] = json!(null);
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, &body).unwrap();
+    let reference = build_session_context(&super::super::parse_session_entries(&body), None);
+    assert_eq!(reference.messages.len(), 2);
+    let expected = serde_json::to_vec(&(
+        &reference.messages,
+        &reference.thinking_level,
+        &reference.service_tier,
+        &reference.model,
+    ))
+    .unwrap();
+    for phase in ["cold", "warm"] {
+        let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+        assert_eq!(store.read_stats().cache_hit, phase == "warm");
+        let ids: Vec<_> = store.entries().iter().filter_map(FileEntry::id).collect();
+        assert_eq!(ids, vec!["s", "compact", "sibling", "leaf"]);
+        let actual = store.context();
+        assert_eq!(
+            serde_json::to_vec(&(
+                &actual.messages,
+                &actual.thinking_level,
+                &actual.service_tier,
+                &actual.model,
+            ))
+            .unwrap(),
+            expected
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+}
+
+#[test]
 fn windowed_context_is_byte_identical_to_the_cold_parse() {
     // The resumed worker's first model request is built from this context:
     // the windowed open (cold and sidecar-warm alike) must reproduce the

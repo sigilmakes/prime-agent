@@ -449,7 +449,7 @@ pub(crate) async fn summarize_attempt(
     }
     let result = CompactionResult {
         summary,
-        first_kept_entry_id: attempt.first_kept_entry.clone(),
+        first_kept_entry_id: Some(attempt.first_kept_entry.clone()),
         tokens_before: attempt.tokens_before,
         usage: summed_usage(&slices),
     };

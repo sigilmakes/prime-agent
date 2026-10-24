@@ -811,11 +811,12 @@ impl WindowedSessionStore {
                         }
                     }
                     Some(FileEntry::Compaction { payload, .. }) if first_kept.is_none() => {
+                        found_boundary = payload.first_kept_entry_id.is_none();
                         first_kept = Some(payload.first_kept_entry_id.clone());
                     }
                     _ => {}
                 }
-                if first_kept.as_deref() == Some(id) {
+                if first_kept.as_ref().and_then(Option::as_deref) == Some(id) {
                     found_boundary = true;
                 }
             }

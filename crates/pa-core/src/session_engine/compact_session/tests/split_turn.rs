@@ -146,7 +146,10 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
         run.result.summary,
         "the history summary\n\n---\n\n**Turn Context (split turn):**\n\nthe turn prefix summary"
     );
-    assert_eq!(run.result.first_kept_entry_id, kept_id);
+    assert_eq!(
+        run.result.first_kept_entry_id.as_deref(),
+        Some(kept_id.as_str())
+    );
     // The usage is the sum of the two wire calls (faux estimates each
     // call as ceil(chars/4) over the serialized prompt plus response).
     let est = |text: &str| (text.chars().count() as f64 / 4.0).ceil() as u64;
@@ -294,7 +297,10 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("checkpoint summary"));
     assert!(!requests[0].contains("PREFIX of a turn"));
-    assert_eq!(run.result.first_kept_entry_id, kept_goal_row_id);
+    assert_eq!(
+        run.result.first_kept_entry_id.as_deref(),
+        Some(kept_goal_row_id.as_str())
+    );
     assert!(
         !run.result.summary.contains("Turn Context (split turn)"),
         "a whole-turn cut never merges a turn context: {summary}",
@@ -461,7 +467,10 @@ async fn split_turn_without_history_makes_only_the_prefix_call() {
         run.result.summary,
         "No prior history.\n\n---\n\n**Turn Context (split turn):**\n\nthe turn prefix summary"
     );
-    assert_eq!(run.result.first_kept_entry_id, kept_id);
+    assert_eq!(
+        run.result.first_kept_entry_id.as_deref(),
+        Some(kept_id.as_str())
+    );
     let est = |text: &str| (text.chars().count() as f64 / 4.0).ceil() as u64;
     let prompt = format!(
         "system:{}\n\nuser:{}",

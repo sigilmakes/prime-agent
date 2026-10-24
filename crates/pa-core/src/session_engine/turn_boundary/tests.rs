@@ -100,7 +100,7 @@ fn session_with_history(end_with_compaction: bool) -> SessionManager {
         session
             .append_compaction(pa_types::session::CompactionEntry {
                 summary: "summary".to_string(),
-                first_kept_entry_id: first_kept,
+                first_kept_entry_id: Some(first_kept),
                 tokens_before: 10,
                 ..Default::default()
             })
@@ -472,7 +472,7 @@ fn context_usage_after_a_compaction_without_post_usage_is_null_tokens() {
     session
         .append_compaction(pa_types::session::CompactionEntry {
             summary: "summary".to_string(),
-            first_kept_entry_id: first_kept,
+            first_kept_entry_id: Some(first_kept),
             tokens_before: 10,
             ..Default::default()
         })

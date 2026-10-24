@@ -15,15 +15,13 @@ pub(super) fn coverage(
     preparation: &Preparation,
     candidate: &PreparedCompaction,
 ) -> anyhow::Result<Vec<String>> {
-    let boundary = &candidate.entry.first_kept_entry_id;
-    let end = if boundary.is_empty() {
-        preparation.branch.len()
-    } else {
-        preparation
+    let end = match candidate.entry.first_kept_entry_id.as_deref() {
+        None => preparation.branch.len(),
+        Some(boundary) => preparation
             .branch
             .iter()
             .position(|entry| entry.id() == Some(boundary))
-            .context("compactor retained boundary is outside the prepared branch")?
+            .context("compactor retained boundary is outside the prepared branch")?,
     };
     let ids: Vec<_> = preparation.branch[..end]
         .iter()
@@ -356,7 +354,7 @@ pub(super) async fn run(
             });
             (
                 "Provider-native context archive".to_owned(),
-                String::new(),
+                None,
                 ContextRepresentation::Responses {
                     rest: pa_types::JsonMap::new(),
                     provider: route.provider,
@@ -375,7 +373,7 @@ pub(super) async fn run(
             };
             (
                 "Bitmap context archive".to_owned(),
-                String::new(),
+                None,
                 ContextRepresentation::Snapcompact {
                     rest: pa_types::JsonMap::new(),
                     archive,
@@ -400,7 +398,7 @@ pub(super) async fn run(
                 .to_owned();
             (
                 summary,
-                first_kept_entry_id,
+                Some(first_kept_entry_id),
                 ContextRepresentation::Standard {
                     rest: pa_types::JsonMap::new(),
                 },

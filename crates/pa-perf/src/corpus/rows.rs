@@ -332,7 +332,7 @@ pub(crate) fn write_session_file(
                 "compaction",
                 serde_json::to_value(CompactionEntry {
                     summary: summary.clone(),
-                    first_kept_entry_id: format!("{:08x}", rows.counter),
+                    first_kept_entry_id: Some(format!("{:08x}", rows.counter)),
                     tokens_before: 40_000 + rng.below(60_000),
                     details: None,
                     from_hook: Some(false),

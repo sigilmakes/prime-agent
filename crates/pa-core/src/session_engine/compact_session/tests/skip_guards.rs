@@ -140,7 +140,7 @@ async fn execute_compaction_skips_when_already_compacted() {
     session
         .append_compaction(pa_types::session::CompactionEntry {
             summary: "summary".to_string(),
-            first_kept_entry_id: "e1".to_string(),
+            first_kept_entry_id: Some("e1".to_string()),
             tokens_before: 100,
             ..Default::default()
         })

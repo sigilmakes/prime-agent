@@ -80,7 +80,7 @@ fn raw_compaction_entry(id: &str, first_kept: &str, summary: &str) -> FileEntry 
     FileEntry::Compaction {
         payload: pa_types::session::CompactionEntry {
             summary: summary.to_string(),
-            first_kept_entry_id: first_kept.to_string(),
+            first_kept_entry_id: Some(first_kept.to_string()),
             tokens_before: 100,
             ..Default::default()
         },

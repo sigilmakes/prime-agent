@@ -121,7 +121,10 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
         .and_then(|entry| entry.id())
         .expect("kept entry id")
         .to_string();
-    assert_eq!(second.result.first_kept_entry_id, kept_id);
+    assert_eq!(
+        second.result.first_kept_entry_id.as_deref(),
+        Some(kept_id.as_str())
+    );
     let compactions = session
         .get_entries()
         .iter()

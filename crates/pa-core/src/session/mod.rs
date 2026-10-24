@@ -217,7 +217,7 @@ fn migrate_v1_to_v2(entries: &mut [FileEntry]) {
             continue;
         };
         if let FileEntry::Compaction { payload, .. } = &mut entries[compaction_position] {
-            payload.first_kept_entry_id = target_id;
+            payload.first_kept_entry_id = Some(target_id);
         }
     }
 }
@@ -459,8 +459,9 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
         let mut retained: Vec<AgentMessage> = Vec::new();
         let mut found_first_kept = false;
         for &index in &path[..path.partition_point(|&i| i < compaction_index)] {
-            if Some(entries[index].id().unwrap_or_default().to_string())
-                == Some(first_kept_id.clone())
+            if first_kept_id
+                .as_deref()
+                .is_some_and(|id| entries[index].id() == Some(id))
             {
                 found_first_kept = true;
             }

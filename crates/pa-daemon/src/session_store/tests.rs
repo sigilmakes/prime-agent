@@ -1211,7 +1211,7 @@ fn windowed_settings_projection_preserves_the_accepted_context_archive() {
 fn durable_compaction_row_serializes_in_the_ts_key_order() {
     let entry = pa_types::session::CompactionEntry {
         summary: "pre-compaction reply 6".to_string(),
-        first_kept_entry_id: "ebd5e444".to_string(),
+        first_kept_entry_id: Some("ebd5e444".to_string()),
         tokens_before: 110,
         details: Some(
             serde_json::to_value(

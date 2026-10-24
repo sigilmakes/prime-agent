@@ -7,6 +7,340 @@ use super::*;
 /// alongside the headroom (the combined input+output ceiling).
 const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
+#[test]
+fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_owner() {
+    use pa_types::session::FileEntry;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let base = format!("http://{}/v1", socket.local_addr().unwrap());
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({"providers":{"openai":{
+            "api":"openai-responses", "baseUrl":base, "apiKey":"none",
+            "models":[{"id":"test", "name":"Native owner fixture", "reasoning":false,
+                "contextWindow":128_000, "maxTokens":4096}]
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(agent_dir.join("settings.json"), json!({
+        "harnessRefinements":false, "enableBuiltinSkills":false, "prewarmIpythonKernel":false,
+        "contextStrategy":"default_context/rolling", "plugins":{
+            "default_context":{"config":{"policy":"full", "compactors":["server_compaction/server"]}},
+            "server_compaction":{"config":{"route":{
+                "provider":"openai", "endpoint":format!("{base}/responses/compact"), "model":"test"
+            }}}
+        }
+    }).to_string()).unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.append_message(&json!({"role":"user", "content":[{"type":"text", "text":"source ".repeat(2048)}], "timestamp":1}));
+    store.rewrite().unwrap();
+    let config = || AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: agent_dir.clone(),
+        provider: Some("openai".into()),
+        model: Some("test".into()),
+        api_key: Some("none".into()),
+        thinking: None,
+        session_dir: None,
+        session_file: Some(path.clone()),
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    };
+    let engine = AgentSessionEngine::new(config()).unwrap();
+    let owner = own_canonical_store(&engine, store);
+    let listener = engine
+        .runtime
+        .block_on(async { tokio::net::TcpListener::from_std(socket).unwrap() });
+    let envelope = r#"{"id":"response_1","created_at":1,"object":"response.compaction","output":[{"type":"compaction","id":"cmp","encrypted_content":"opaque-\u0061","future":1.2300}],"usage":{"input_tokens":20,"output_tokens":7,"total_tokens":27}}"#;
+    let server = tokio_util::task::AbortOnDropHandle::new(engine.runtime.spawn(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0;4096];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0, "native request must have a complete HTTP body");
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers.lines().find_map(|line| {
+                        line.to_ascii_lowercase().strip_prefix("content-length:")
+                            .and_then(|length| length.trim().parse::<usize>().ok())
+                    }).unwrap();
+                    if bytes.len() >= end + 4 + length { break; }
+                }
+            }
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{envelope}", envelope.len()).as_bytes()).await.unwrap();
+            String::from_utf8(bytes).unwrap()
+        }).await.unwrap()
+    }));
+    let model = engine.resolve_model().unwrap();
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    let prefix = std::fs::read(&path).unwrap();
+    let source: Vec<serde_json::Value> = std::str::from_utf8(&prefix)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let source_ids: Vec<_> = source
+        .iter()
+        .filter(|row| row["type"] != "session")
+        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+        .collect();
+    let leaf = owner
+        .lock()
+        .unwrap()
+        .store
+        .as_ref()
+        .unwrap()
+        .leaf_id()
+        .unwrap()
+        .to_owned();
+    let abort = pa_agent::abort::AbortController::new();
+    let outcome = engine.run_compaction(
+        crate::engine::CompactionRequest {
+            custom_instructions: None,
+        },
+        &abort.signal(),
+    );
+    let sent = engine.runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(6), server)
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert!(sent.starts_with("POST /v1/responses/compact "));
+    let crate::engine::CompactionOutcome::Compacted { run } = outcome else {
+        panic!("native owner transaction must complete: {outcome:?}");
+    };
+    assert_eq!(run.result["firstKeptEntryId"], serde_json::Value::Null);
+    let durable = std::fs::read(&path).unwrap();
+    assert!(durable.starts_with(&prefix));
+    let suffix: Vec<serde_json::Value> = std::str::from_utf8(&durable[prefix.len()..])
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let [row] = suffix.as_slice() else {
+        panic!("one exact archive suffix")
+    };
+    assert_eq!(row["type"], "compaction");
+    assert!(row
+        .get("firstKeptEntryId")
+        .is_some_and(serde_json::Value::is_null));
+    assert_eq!(row["parentId"], leaf);
+    assert_eq!(row["contextArchive"]["preparedLeaf"], leaf);
+    assert_eq!(row["contextArchive"]["coveredEntryIds"], json!(source_ids));
+    assert_eq!(row["contextArchive"], run.entry["contextArchive"]);
+    let archive = row["contextArchive"]["representation"]["archive"]
+        .as_str()
+        .unwrap();
+    let archive: serde_json::Value = serde_json::from_str(archive).unwrap();
+    assert_eq!(archive["response_json"], envelope);
+    {
+        let session = engine.session.blocking_lock();
+        session
+            .as_ref()
+            .unwrap()
+            .session
+            .canonical_live_session()
+            .unwrap()
+            .ensure_ready()
+            .unwrap();
+    }
+    engine.runtime.block_on(engine.retire_session_runtime());
+    drop(engine);
+    drop(owner);
+    let reopened = crate::session_store::SessionFile::open(&path).unwrap();
+    let cold = AgentSessionEngine::new(config()).unwrap();
+    let cold_owner = own_canonical_store(&cold, reopened);
+    let cold_model = cold.resolve_model().unwrap();
+    cold.runtime
+        .block_on(cold.ensure_core_session_async(&cold_model))
+        .unwrap();
+    let cold_bytes = std::fs::read(&path).unwrap();
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        use sha2::Digest as _;
+
+        assert!(
+            cold_bytes.starts_with(&durable),
+            "cold initialization must preserve the entire ACKed physical prefix"
+        );
+        let bootstrap: Vec<serde_json::Value> = std::str::from_utf8(&cold_bytes[durable.len()..])
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let service_tier = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir)
+            .get_default_service_tier();
+        let expected_bootstrap = [
+            json!({"type":"model_change", "provider":cold_model.provider, "modelId":cold_model.id}),
+            json!({"type":"thinking_level_change", "thinkingLevel":format!("{:?}", map_thinking_level(cold.effective_thinking())).to_lowercase()}),
+            json!({"type":"service_tier_change", "serviceTier":service_tier}),
+        ];
+        assert_eq!(
+            bootstrap.len(),
+            expected_bootstrap.len(),
+            "only the three defined empty-view bootstrap metadata rows may append"
+        );
+        let archive_id = row["id"].as_str().unwrap();
+        let mut seen_ids: std::collections::HashSet<String> = source
+            .iter()
+            .chain(std::iter::once(row))
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(seen_ids.len(), source.len() + 1);
+        let mut expected_parent = archive_id.to_owned();
+        for (entry, mut expected) in bootstrap.iter().zip(expected_bootstrap) {
+            let id = entry["id"].as_str().unwrap();
+            assert!(
+                !id.is_empty(),
+                "bootstrap row needs its actual owner-assigned ID"
+            );
+            assert!(
+                seen_ids.insert(id.to_owned()),
+                "bootstrap IDs must be fresh and unique"
+            );
+            let timestamp = entry["timestamp"].as_str().unwrap();
+            let millis = crate::util::iso_to_unix_ms(timestamp)
+                .expect("bootstrap timestamp must be a valid owner envelope");
+            assert_eq!(crate::util::iso_from_unix_ms(millis), timestamp);
+            expected["id"] = entry["id"].clone();
+            expected["parentId"] = json!(expected_parent);
+            expected["timestamp"] = entry["timestamp"].clone();
+            assert_eq!(
+                entry, &expected,
+                "bootstrap payload and envelope must match exactly"
+            );
+            expected_parent = id.to_owned();
+        }
+        let (owner_rows, owner_leaf) = {
+            let core = cold_owner.lock().unwrap();
+            let store = core.store.as_ref().unwrap();
+            (
+                store
+                    .entries()
+                    .iter()
+                    .map(|entry| serde_json::to_value(entry).unwrap())
+                    .collect::<Vec<_>>(),
+                store.leaf_id().map(str::to_owned),
+            )
+        };
+        assert_eq!(owner_leaf.as_deref(), Some(expected_parent.as_str()));
+        assert_eq!(owner_rows.last(), bootstrap.last());
+        let archive_rows: Vec<_> = owner_rows
+            .iter()
+            .filter(|entry| entry["id"].as_str() == Some(archive_id))
+            .collect();
+        assert_eq!(
+            archive_rows,
+            vec![row],
+            "the exact archive identity and full value must survive"
+        );
+        assert_eq!(
+            owner_rows
+                .iter()
+                .filter(|entry| entry["type"] == "compaction")
+                .count(),
+            1,
+            "cold initialization must not duplicate the archive"
+        );
+        assert!(
+            matches!(serde_json::from_value::<FileEntry>((*archive_rows[0]).clone()).unwrap(),
+            FileEntry::Compaction { payload, .. } if payload.first_kept_entry_id.is_none())
+        );
+        let expected_archive: pa_types::session::ContextArchive =
+            serde_json::from_value(row["contextArchive"].clone()).unwrap();
+        {
+            let session = cold.session.blocking_lock();
+            let session = session.as_ref().unwrap();
+            session
+                .session
+                .canonical_live_session()
+                .unwrap()
+                .ensure_ready()
+                .unwrap();
+            assert!(cold
+                .runtime
+                .block_on(session.session.agent().state())
+                .messages
+                .is_empty());
+            let persistence = session.session.shared_persistence();
+            cold.runtime.block_on(async {
+                let manager = persistence.lock().await;
+                let header = manager.canonical_raw_header().unwrap();
+                let certified = manager
+                    .canonical_raw_full_rows()
+                    .expect("this bounded fixture must retain certified full raw history");
+                let mut certified_bytes = header.raw().to_vec();
+                for entry in certified {
+                    certified_bytes.extend_from_slice(entry.raw());
+                }
+                assert_eq!(
+                    certified_bytes, cold_bytes,
+                    "every certified physical byte must match disk"
+                );
+                assert_eq!(certified.len(), owner_rows.len());
+                for (owner_entry, certified_entry) in owner_rows.iter().zip(certified) {
+                    assert_eq!(owner_entry["id"].as_str(), certified_entry.entry().id());
+                    let physical: serde_json::Value =
+                        serde_json::from_slice(certified_entry.raw()).unwrap();
+                    assert_eq!(
+                        owner_entry, &physical,
+                        "owner rows must match exact certified raw values in order"
+                    );
+                }
+                let binding = manager.canonical_binding().unwrap();
+                assert_eq!(binding.selected_leaf, owner_leaf);
+                assert_eq!(
+                    binding.frontier.bytes,
+                    u64::try_from(cold_bytes.len()).unwrap()
+                );
+                assert_eq!(
+                    binding.frontier.rows,
+                    u64::try_from(certified.len() + 1).unwrap()
+                );
+                let certificate: [u8; 32] = sha2::Sha256::digest(&cold_bytes).into();
+                assert_eq!(binding.frontier.prefix_certificate, certificate);
+                let visible = manager.canonical_visible_context();
+                assert!(
+                    visible.messages.is_empty(),
+                    "no duplicate semantic tail may become visible"
+                );
+                assert_eq!(visible.archive.as_ref(), Some(&expected_archive));
+            });
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            cold_bytes,
+            "verification must not mutate the bootstrap-accounted physical file"
+        );
+    }));
+    if let Err(failure) = checked {
+        let evidence = dir.keep();
+        eprintln!(
+            "cold restore assertion failed; retained private fixture {}",
+            evidence.display()
+        );
+        std::panic::resume_unwind(failure);
+    }
+}
+
 /// The automatic threshold compaction at the turn boundary. The faux
 /// provider estimates usage from the serialized context, so the headroom
 /// sits halfway between a baseline turn and the baseline plus the big prompt.

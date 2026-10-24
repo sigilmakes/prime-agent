@@ -326,7 +326,7 @@ async fn public_engine_resume_window_uses_full_source_and_fresh_session_never_im
         manager
             .append_compaction(pa_types::session::CompactionEntry {
                 summary: "legacy rolling representation only".into(),
-                first_kept_entry_id: first_kept,
+                first_kept_entry_id: Some(first_kept),
                 ..Default::default()
             })
             .unwrap();

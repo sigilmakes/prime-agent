@@ -22,7 +22,7 @@ pub struct CompactionDetails {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionResult {
     pub summary: String,
-    pub first_kept_entry_id: String,
+    pub first_kept_entry_id: Option<String>,
     pub tokens_before: u64,
     pub usage: Option<pa_types::ai::Usage>,
 }
@@ -384,7 +384,7 @@ pub async fn compact_with(
         .join("\n");
     Ok(CompactionResult {
         summary,
-        first_kept_entry_id: first_kept_entry_id.to_string(),
+        first_kept_entry_id: Some(first_kept_entry_id.to_string()),
         tokens_before,
         usage,
     })
@@ -500,7 +500,7 @@ mod tests {
         };
         let result = CompactionResult {
             summary: "the overflow summary".to_string(),
-            first_kept_entry_id: "e4".to_string(),
+            first_kept_entry_id: Some("e4".to_string()),
             tokens_before: 214,
             usage: Some(usage.clone()),
         };
@@ -513,7 +513,7 @@ mod tests {
             CompactionEntry {
                 context_archive: None,
                 summary: "the overflow summary".to_string(),
-                first_kept_entry_id: "e4".to_string(),
+                first_kept_entry_id: Some("e4".to_string()),
                 tokens_before: 214,
                 details: Some(serde_json::json!({
                     "readFiles": ["a.rs"],
@@ -637,7 +637,7 @@ mod tests {
         .await
         .unwrap();
         assert!(result.summary.starts_with("## Goal"));
-        assert_eq!(result.first_kept_entry_id, "e1");
+        assert_eq!(result.first_kept_entry_id.as_deref(), Some("e1"));
         assert_eq!(result.tokens_before, 1_000);
         let details = details_for(&messages, &entries, None);
         let entry = compaction_entry_for(&result, &details, Some("focus"), None, None);

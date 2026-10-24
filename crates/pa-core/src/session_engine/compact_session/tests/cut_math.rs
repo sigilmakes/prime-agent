@@ -19,7 +19,7 @@ fn message_extraction_skips_compaction_and_tool_results() {
         payload: pa_types::session::CompactionEntry {
             context_archive: None,
             summary: "s".to_string(),
-            first_kept_entry_id: "x".to_string(),
+            first_kept_entry_id: Some("x".to_string()),
             tokens_before: 1,
             details: None,
             from_hook: None,

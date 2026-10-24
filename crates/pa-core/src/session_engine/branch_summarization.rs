@@ -620,7 +620,7 @@ mod tests {
             payload: pa_types::session::CompactionEntry {
                 context_archive: None,
                 summary: "prior state".to_string(),
-                first_kept_entry_id: "x".to_string(),
+                first_kept_entry_id: Some("x".to_string()),
                 tokens_before: 10,
                 details: None,
                 from_hook: None,
