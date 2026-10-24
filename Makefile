@@ -1,21 +1,26 @@
 # Downstream local tools. Enter `nix develop --no-update-lock-file` first.
 # Nothing publishes, installs globally, rewrites sources, or stages files.
 .DEFAULT_GOAL := help
+# Bound local and CI compilation without creating incremental/debug caches.
+export CARGO_BUILD_JOBS ?= 2
+export CARGO_INCREMENTAL := 0
+export CARGO_PROFILE_DEV_DEBUG := 0
+export CARGO_PROFILE_TEST_DEBUG := 0
 PACKAGES ?= pa-cli
 PACKAGE_FLAGS = $(foreach package,$(PACKAGES),-p $(package))
 
 help:
 	@printf '%s\n' \
-		'check           selected-package lint, type check, tests, and hook tests' \
+		'check           required full-workspace formatting, clippy, tests, and hooks' \
 		'lint            read-only formatting and clippy checks (PACKAGES=pa-cli)' \
 		'hooks-check     offline Python hook regression tests' \
 		'package         build the downstream Nix source package locally' \
 		'package-check   run the downstream Nix flake checks (may build)' \
-		'workspace-check optional full Rust workspace gate' \
+		'workspace-check alias of the required full Rust workspace gate' \
 		'Optional: deny, windows-cross, windows-msvc-cross, audit-build, perf' \
 		'Install hooks manually: git config core.hooksPath .husky'
 
-check: lint typecheck test hooks-check
+check: workspace-check
 
 # Explicit check mode only; never run a global formatter or restage its output.
 fmt-check:
@@ -32,6 +37,8 @@ test:
 
 hooks-check:
 	python3 scripts/test_downstream_hooks.py
+	python3 -B scripts/test_check_workspace.py
+	python3 -B scripts/release/test_legacy_runtime_restart_options.py
 
 # These are intentional, manual source builds; no upstream release scripts,
 # binary downloads, npm commands, tag creation, or publishing steps.

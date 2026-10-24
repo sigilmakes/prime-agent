@@ -19,9 +19,7 @@ Prime Agent: A Self-Improving RLM Harness
 </p>
 
 <p align="center">
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  </a>
+  <a href="https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/actions">Downstream CI</a>
   <a href="https://arxiv.org/abs/2608.23552">
     <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
   </a>
@@ -56,6 +54,28 @@ Use `nix develop` for the pinned development tools. On Willow's NixOS fleet,
 Update that pin with the guarded fleet updater and deploy through the fleet pipeline;
 do not use upstream installers, global npm packages, or self-update for a Nix-owned
 installation.
+
+Downstream releases are manual, source-only Forgejo Releases tagged
+`fork-YYYY.MM.DD.N` at an exact reviewed commit. The package version remains
+`0.10.0`; the source tag does not restamp the application. CI validates but never
+publishes. No downstream binaries, npm packages, catalogs, or installers are
+published. Portable packaging tools and archived upstream workflows are reference
+material, not the downstream installation path. See the
+[source release procedure](scripts/release/README.md).
+
+Before integration, `make check` runs the full workspace formatting, clippy, test,
+and hook gates. `nix flake check --no-update-lock-file` adds the Nix package,
+privacy, and audited runtime checks; it does not replace the full Rust gate.
+For credential-isolated validation with a prepared real kernel, enter
+`nix develop --no-update-lock-file`, then run:
+
+```bash
+python3 -B scripts/check_workspace.py
+```
+
+This can download locked build/Python dependencies. It never needs live provider
+or MCP credentials. It uses private test state and one reusable Cargo target;
+see the release procedure for limits and explicit cache/kernel reuse options.
 
 ## Why Prime Agent
 
@@ -129,7 +149,10 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 
 ## Contributing
 
-Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
+Read [AGENTS.md](AGENTS.md) before contributing. Use the downstream
+[Forgejo issues](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/issues) and
+[pull requests](https://mnemosyne.sigilzero.dev/sigilzero/prime-agent/pulls).
+GitHub and archived upstream automation are not downstream publication authority.
 
 ## License
 

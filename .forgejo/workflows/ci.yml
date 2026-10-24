@@ -20,6 +20,7 @@ env:
         max-jobs = 2
         cores = 2
     CARGO_BUILD_JOBS: "2"
+    CARGO_INCREMENTAL: "0"
     CARGO_PROFILE_DEV_DEBUG: "0"
     CARGO_PROFILE_TEST_DEBUG: "0"
 
@@ -36,3 +37,17 @@ jobs:
                   persist-credentials: false
             - name: Build and audited offline checks
               run: nix flake check --no-update-lock-file --print-build-logs --keep-going
+
+    workspace:
+        needs: check
+        runs-on: gaia-runner
+        timeout-minutes: 185
+        container:
+            image: fleet-ci:latest
+        steps:
+            - name: Checkout
+              uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+              with:
+                  persist-credentials: false
+            - name: Full workspace gates with private state and a real kernel
+              run: nix develop --no-update-lock-file --command python3 -B scripts/check_workspace.py --timeout 10800

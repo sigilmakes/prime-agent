@@ -29,6 +29,9 @@
                 CARGO_BUILD_JOBS = "2";
                 CARGO_PROFILE_DEV_DEBUG = "0";
                 CARGO_PROFILE_TEST_DEBUG = "0";
+                # uv's managed Python and kernel wheels need the same native
+                # libraries as the installed wrapper, including in CI containers.
+                LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
             };
         };
 }

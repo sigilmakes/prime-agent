@@ -94,16 +94,17 @@ def stop_fixture_processes(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--legacy-archive", type=Path)
-    parser.add_argument("--legacy-npm-prefix", type=Path)
+    legacy_source = parser.add_mutually_exclusive_group(required=True)
+    legacy_source.add_argument("--legacy-archive", type=Path)
+    legacy_source.add_argument("--legacy-npm-prefix", type=Path)
+    legacy_source.add_argument("--legacy-binary", type=Path,
+                               help="invoke an installed legacy executable or wrapper directly")
     parser.add_argument("--node", default="node")
     parser.add_argument("--candidate-archive", type=Path)
     parser.add_argument("--candidate-binary", type=Path)
     parser.add_argument("--with-session", action="store_true")
     parser.add_argument("--report", type=Path, required=True)
     options = parser.parse_args()
-    if bool(options.legacy_archive) == bool(options.legacy_npm_prefix):
-        parser.error("choose one legacy native archive or installed npm prefix")
     if bool(options.candidate_archive) == bool(options.candidate_binary):
         parser.error("choose one candidate archive or candidate binary")
     evidence = {}
@@ -115,9 +116,12 @@ def main():
             with tarfile.open(options.legacy_archive) as archive:
                 archive.extractall(old_dir, filter="data")
             old_command = [str(old_dir / "prime-agent")]
-        else:
+        elif options.legacy_npm_prefix:
             shutil.copytree(options.legacy_npm_prefix, old_dir, symlinks=True)
             old_command = [options.node, str(old_dir / "lib/node_modules/prime-agent/dist/bundle/cli.js")]
+        else:
+            # Preserve installed wrappers, including their runtime environment.
+            old_command = [str(options.legacy_binary.resolve())]
         if options.candidate_archive:
             candidate_dir.mkdir()
             with tarfile.open(options.candidate_archive) as archive:
