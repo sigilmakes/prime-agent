@@ -25,7 +25,7 @@ TOOL_ENV = (
     "PATH", "LANG", "LC_ALL", "TZ", "NIX_CC", "NIX_BINTOOLS",
     "NIX_CFLAGS_COMPILE", "NIX_LDFLAGS", "NIX_SSL_CERT_FILE",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR",
-    "LIBRARY_PATH", "LD_LIBRARY_PATH", "RUST_SRC_PATH",
+    "LIBRARY_PATH", "LD_LIBRARY_PATH", "RUST_SRC_PATH", "PA_WORKSPACE_BOOTSTRAP_PYTHON",
 )
 KERNEL_IMPORTS = (
     "rlm", "dill", "requests", "httpx", "yaml", "tomli", "dotenv", "pandas",
@@ -156,8 +156,15 @@ def prepare_kernel(repo, env, deadline, approved_python=None):
     kernel = Path(env["PRIME_AGENT_KERNEL_VENV"])
     kernel.parent.mkdir(parents=True, exist_ok=True)
     if approved_python is None:
+        declared_python = env.get("PA_WORKSPACE_BOOTSTRAP_PYTHON")
+        if not declared_python:
+            raise ValueError("PA_WORKSPACE_BOOTSTRAP_PYTHON must name the Nix dev shell's Python 3.11 executable")
+        bootstrap_python = Path(declared_python)
+        if not bootstrap_python.is_absolute() or not bootstrap_python.is_file() or not os.access(bootstrap_python, os.X_OK):
+            raise ValueError(f"PA_WORKSPACE_BOOTSTRAP_PYTHON must be an existing absolute executable: {declared_python}")
         run(["uv", "sync", "--locked", "--no-default-groups", "--group", "kernel",
-             "--no-config", "--project", str(repo / "prime-agent-runtime"), "--python", "3.11"],
+             "--no-config", "--project", str(repo / "prime-agent-runtime"),
+             "--python", str(bootstrap_python), "--no-python-downloads"],
             repo=repo, env=env, deadline=deadline)
         python = kernel / "bin/python"
     else:

@@ -24,14 +24,16 @@
             devShells.${system}.default = pkgs.mkShell {
                 packages = with pkgs; [
                     cargo rustc rustfmt clippy pkg-config
-                    git uv fd ripgrep python3 actionlint shellcheck gnumake
+                    git uv fd ripgrep python3 python311 actionlint shellcheck gnumake
                     util-linux iproute2
                 ];
+                # Cold CI bootstrap must use a Nix-native interpreter, not a uv download.
+                PA_WORKSPACE_BOOTSTRAP_PYTHON = "${pkgs.python311}/bin/python3.11";
                 CARGO_BUILD_JOBS = "2";
                 CARGO_PROFILE_DEV_DEBUG = "0";
                 CARGO_PROFILE_TEST_DEBUG = "0";
-                # uv's managed Python and kernel wheels need the same native
-                # libraries as the installed wrapper, including in CI containers.
+                # Python kernel wheels need the same native libraries as the
+                # installed wrapper, including in CI containers.
                 LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
             };
         };

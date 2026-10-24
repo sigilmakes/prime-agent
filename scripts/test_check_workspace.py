@@ -28,6 +28,8 @@ class WorkspaceGateTests(unittest.TestCase):
         env = gate.isolated_environment(root / "repo", root / "state", root / "target",
                                         root / "cargo", {
             "PATH": "/pinned/bin", "NIX_CC": "/nix/store/compiler",
+            "PA_WORKSPACE_BOOTSTRAP_PYTHON": "/nix/store/python311/bin/python3.11",
+            "UV_PYTHON": "/production/python", "UV_PYTHON_DOWNLOADS": "automatic",
             "HOME": "/production", "OPENAI_API_KEY": "secret",
             "PRIME_AGENT_KERNEL_PYTHON": "/production/python",
             "PRIME_AGENT_CODING_AGENT_DIR": "/production/agent",
@@ -37,6 +39,9 @@ class WorkspaceGateTests(unittest.TestCase):
         self.assertFalse(any("secret" in value or "/production" in value for value in env.values()))
         self.assertEqual(env["PATH"], "/pinned/bin")
         self.assertEqual(env["NIX_CC"], "/nix/store/compiler")
+        self.assertEqual(env["PA_WORKSPACE_BOOTSTRAP_PYTHON"], "/nix/store/python311/bin/python3.11")
+        self.assertNotIn("UV_PYTHON", env)
+        self.assertNotIn("UV_PYTHON_DOWNLOADS", env)
         self.assertNotIn("PRIME_AGENT_KERNEL_PYTHON", env)
         self.assertNotIn("PYTHONPATH", env)
         self.assertNotIn("PI_OFFLINE", env)
@@ -134,12 +139,44 @@ class WorkspaceGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.runtime(root / "prime-agent-runtime")
-            env = gate.isolated_environment(root, root / "state", root / "target", root / "cargo", {})
+            bootstrap = root / "nix-python311/bin/python3.11"
+            bootstrap.parent.mkdir(parents=True)
+            bootstrap.write_text("#!/bin/sh\nexit 1\n")  # Never executed by the mocked runner.
+            bootstrap.chmod(0o755)
+            env = gate.isolated_environment(root, root / "state", root / "target", root / "cargo", {
+                "PA_WORKSPACE_BOOTSTRAP_PYTHON": str(bootstrap),
+            })
             with patch.object(gate, "run", side_effect=[None, self.observation(root / "prime-agent-runtime")]) as command:
                 gate.prepare_kernel(root, env, time.monotonic() + 10)
             self.assertEqual(command.call_count, 2)
-            self.assertEqual(command.call_args_list[0].args[0][:7],
-                             ["uv", "sync", "--locked", "--no-default-groups", "--group", "kernel", "--no-config"])
+            sync, probe = command.call_args_list
+            self.assertEqual(sync.args[0], [
+                "uv", "sync", "--locked", "--no-default-groups", "--group", "kernel",
+                "--no-config", "--project", str(root / "prime-agent-runtime"),
+                "--python", str(bootstrap), "--no-python-downloads",
+            ])
+            self.assertIs(sync.kwargs["env"], env)
+            self.assertEqual(env["PA_WORKSPACE_BOOTSTRAP_PYTHON"], str(bootstrap))
+            self.assertEqual(env["UV_PROJECT_ENVIRONMENT"], str(root / "state/home/.prime/agent/kernel-venv"))
+            self.assertEqual(env["UV_CACHE_DIR"], str(root / "cargo/uv-cache"))
+            self.assertEqual(env["UV_PYTHON_INSTALL_DIR"], str(root / "cargo/uv-python"))
+            self.assertEqual(probe.args[0][:2], [str(Path(env["PRIME_AGENT_KERNEL_VENV"]) / "bin/python"), "-I"])
+
+    def test_cold_kernel_rejects_missing_or_nonexecutable_declared_python_before_uv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nonexecutable = root / "python3.11"
+            nonexecutable.write_text("not executable")
+            for declared in (None, "python3.11", str(root / "missing"), str(root), str(nonexecutable)):
+                with self.subTest(declared=declared):
+                    ambient = {} if declared is None else {"PA_WORKSPACE_BOOTSTRAP_PYTHON": declared}
+                    env = gate.isolated_environment(root, root / "state", root / "target", root / "cargo", ambient)
+                    with patch.object(gate, "run") as command:
+                        with self.assertRaisesRegex(ValueError, "PA_WORKSPACE_BOOTSTRAP_PYTHON"):
+                            gate.prepare_kernel(root, env, time.monotonic() + 10)
+                    command.assert_not_called()
+                    self.assertNotIn("PRIME_AGENT_KERNEL_PYTHON", env)
+                    self.assertNotIn("PA_E2E_KERNEL_PYTHON", env)
 
 
 if __name__ == "__main__":
