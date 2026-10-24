@@ -12,6 +12,31 @@ use tokio::sync::Notify;
 const WAIT: Duration = Duration::from_secs(10);
 pub(crate) const NATIVE_RESPONSE_ID: &str = "abort-fixture-native-empty";
 
+/// Count actual provider-future admission without changing its behavior.
+pub(crate) fn count_provider_calls(engine: &Arc<AgentSessionEngine>) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let decorator: TestStreamDecorator = Arc::new(move |normal: StreamFn| {
+        let counted = Arc::clone(&counted);
+        let stream: StreamFn = Arc::new(move |model, context, options| {
+            let counted = Arc::clone(&counted);
+            let normal = Arc::clone(&normal);
+            Box::pin(async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                normal(model, context, options).await
+            })
+        });
+        stream
+    });
+    let mut slot = engine
+        .test_stream_decorator
+        .lock()
+        .expect("test decorator lock");
+    assert!(slot.is_none(), "another decorator already owns this engine");
+    *slot = Some(decorator);
+    calls
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum AbortCase {
     BeforeStream,

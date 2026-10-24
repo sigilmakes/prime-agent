@@ -83,12 +83,26 @@ pub struct AgentInitialState {
     pub messages: Option<Vec<AgentMessage>>,
 }
 
+/// Optional awaited persistence/admission boundary before event reduction.
+///
+/// Called with the actual event and active-run abort signal before either the
+/// event-delivery gate or shared-state guard is acquired. Success permits normal
+/// reduction and listeners exactly once. Failure prevents both for that event.
+/// Implementations must not recursively deliver this event or reduce agent state.
+pub type BeforeEventFn = Arc<
+    dyn Fn(AgentEvent, AbortSignal) -> crate::BoxFut<'static, anyhow::Result<AgentEvent>>
+        + Send
+        + Sync,
+>;
+
 /// Options for constructing an [`Agent`]. The loop's request surface
 /// (temperature, max tokens, reasoning, session id, API key) is carried by
 /// [`crate::agent_loop::AgentLoopConfig`] / [`crate::stream::StreamRequestOptions`].
 #[derive(Default)]
 pub struct AgentOptions {
     pub initial_state: AgentInitialState,
+    /// Optional durable/admission hook. None preserves legacy event delivery.
+    pub before_event: Option<BeforeEventFn>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
     pub stream_fn: Option<StreamFn>,
@@ -316,6 +330,7 @@ struct AgentInner {
     follow_up_queue: Mutex<PendingMessageQueue>,
     /// Active-run bookkeeping. A plain mutex: never held across awaits.
     run: Mutex<Option<ActiveRun>>,
+    before_event: Option<BeforeEventFn>,
     convert_to_llm: ConvertToLlmFn,
     transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
@@ -351,6 +366,14 @@ impl AgentInner {
     }
 
     async fn process_events(self: &Arc<Self>, event: AgentEvent) -> anyhow::Result<()> {
+        let event = if let Some(before_event) = &self.before_event {
+            let signal = self.current_signal().ok_or_else(|| {
+                anyhow::anyhow!("Agent pre-event hook invoked outside active run")
+            })?;
+            before_event(event, signal).await?
+        } else {
+            event
+        };
         let _delivery = self.event_delivery.lock().await;
         let mut shared = self.shared.lock().await;
 
@@ -758,6 +781,7 @@ impl Agent {
                 options.follow_up_mode.unwrap_or(QueueMode::OneAtATime),
             )),
             run: Mutex::new(None),
+            before_event: options.before_event,
             convert_to_llm: options
                 .convert_to_llm
                 .unwrap_or_else(AgentLoopConfig::default_convert_to_llm),
@@ -1569,5 +1593,231 @@ mod tests {
             mixed, 0,
             "every snapshot carries a consistent (model, level) pair"
         );
+    }
+
+    // Pipeline-only fixture: no provider or persistence authority is claimed.
+    fn activate_event_test_run(agent: &Agent) -> AbortController {
+        let controller = AbortController::new();
+        let (idle_tx, _) = watch::channel(false);
+        *agent.inner.run.lock().unwrap() = Some(ActiveRun {
+            controller: controller.clone(),
+            idle_tx,
+            model: Model::unknown(),
+        });
+        controller
+    }
+
+    #[tokio::test]
+    async fn pre_event_hook_awaits_without_agent_gates_then_reduces_and_delivers_once() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let before_event: BeforeEventFn = {
+            let entered = entered.clone();
+            let release = release.clone();
+            let trace = trace.clone();
+            Arc::new(move |event, signal| {
+                let entered = entered.clone();
+                let release = release.clone();
+                let trace = trace.clone();
+                Box::pin(async move {
+                    trace.lock().unwrap().push("durable");
+                    entered.notify_one();
+                    release.notified().await;
+                    assert!(signal.is_aborted(), "hook observes the actual run signal");
+                    trace.lock().unwrap().push("ACK");
+                    Ok(event)
+                })
+            })
+        };
+        let agent = Agent::new(AgentOptions {
+            before_event: Some(before_event),
+            ..Default::default()
+        });
+        let controller = activate_event_test_run(&agent);
+        let message = AgentMessage::user("one exact event");
+        for label in ["first listener", "second listener"] {
+            let agent = agent.clone();
+            let callback = agent.clone();
+            let trace = trace.clone();
+            let message = message.clone();
+            agent
+                .subscribe(move |_event, _signal| {
+                    let agent = callback.clone();
+                    let trace = trace.clone();
+                    let message = message.clone();
+                    Box::pin(async move {
+                        assert_eq!(agent.state().await.messages, vec![message]);
+                        trace.lock().unwrap().push(label);
+                        Ok(())
+                    })
+                })
+                .await;
+        }
+        let process = tokio::spawn({
+            let inner = agent.inner.clone();
+            let message = message.clone();
+            async move {
+                inner
+                    .process_events(AgentEvent::MessageEnd { message })
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .expect("pre-event hook must enter");
+        {
+            let _delivery = agent
+                .inner
+                .event_delivery
+                .try_lock()
+                .expect("delivery gate absent across hook await");
+            let shared = agent
+                .inner
+                .shared
+                .try_lock()
+                .expect("state guard absent across hook await");
+            assert!(shared.state.messages.is_empty());
+            assert_eq!(*trace.lock().unwrap(), vec!["durable"]);
+        }
+        controller.abort();
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), process)
+            .await
+            .expect("event must finish")
+            .expect("event task")
+            .expect("owner ACK");
+        assert_eq!(agent.state().await.messages, vec![message]);
+        assert_eq!(
+            *trace.lock().unwrap(),
+            vec!["durable", "ACK", "first listener", "second listener"]
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_message_end_timestamp_reduces_and_publishes_exact_returned_slot() {
+        let original =
+            AgentMessage::Standard(crate::types::Message::User(crate::types::UserMessage {
+                content: crate::types::UserContent::Text("exact named row".into()),
+                timestamp: 999,
+            }));
+        let canonical =
+            AgentMessage::Standard(crate::types::Message::User(crate::types::UserMessage {
+                content: crate::types::UserContent::Text("exact named row".into()),
+                timestamp: 7,
+            }));
+        let hook_input = original.clone();
+        let hook_output = canonical.clone();
+        let agent = Agent::new(AgentOptions {
+            before_event: Some(Arc::new(move |event, _signal| {
+                let expected = hook_input.clone();
+                let authoritative = hook_output.clone();
+                Box::pin(async move {
+                    let AgentEvent::MessageEnd { message } = event else {
+                        panic!("exact MessageEnd slot expected")
+                    };
+                    assert_eq!(message, expected);
+                    Ok(AgentEvent::MessageEnd {
+                        message: authoritative,
+                    })
+                })
+            })),
+            ..Default::default()
+        });
+        activate_event_test_run(&agent);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let observed = delivered.clone();
+        agent
+            .subscribe(move |event, _signal| {
+                let observed = observed.clone();
+                Box::pin(async move {
+                    observed.lock().unwrap().push(event);
+                    Ok(())
+                })
+            })
+            .await;
+        agent
+            .inner
+            .process_events(AgentEvent::MessageEnd { message: original })
+            .await
+            .unwrap();
+        assert_eq!(agent.state().await.messages, vec![canonical.clone()]);
+        let delivered = delivered.lock().unwrap();
+        let [AgentEvent::MessageEnd { message }] = delivered.as_slice() else {
+            panic!("one authoritative MessageEnd expected")
+        };
+        assert_eq!(message, &canonical);
+    }
+
+    #[tokio::test]
+    async fn pre_event_error_prevents_reduction_and_all_normal_listeners() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let hook_calls = calls.clone();
+        let agent = Agent::new(AgentOptions {
+            before_event: Some(Arc::new(move |_event, _signal| {
+                let calls = hook_calls.clone();
+                Box::pin(async move {
+                    calls.lock().unwrap().push("refused");
+                    Err(anyhow::anyhow!("owner receipt remains unknown"))
+                })
+            })),
+            ..Default::default()
+        });
+        activate_event_test_run(&agent);
+        let listener_calls = calls.clone();
+        agent
+            .subscribe(move |_event, _signal| {
+                let calls = listener_calls.clone();
+                Box::pin(async move {
+                    calls.lock().unwrap().push("listener");
+                    Ok(())
+                })
+            })
+            .await;
+        let error = agent
+            .inner
+            .process_events(AgentEvent::MessageEnd {
+                message: AgentMessage::user("must not reduce"),
+            })
+            .await
+            .expect_err("unknown receipt fails before reduction");
+        assert_eq!(error.to_string(), "owner receipt remains unknown");
+        assert!(agent.state().await.messages.is_empty());
+        assert_eq!(*calls.lock().unwrap(), vec!["refused"]);
+    }
+
+    #[tokio::test]
+    async fn default_event_path_still_reduces_before_ordered_legacy_listeners() {
+        let agent = Agent::new(AgentOptions::default());
+        activate_event_test_run(&agent);
+        let message = AgentMessage::user("legacy event");
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        for label in ["first", "second"] {
+            let agent = agent.clone();
+            let callback = agent.clone();
+            let message = message.clone();
+            let trace = trace.clone();
+            agent
+                .subscribe(move |_event, _signal| {
+                    let agent = callback.clone();
+                    let message = message.clone();
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        assert_eq!(agent.state().await.messages, vec![message]);
+                        trace.lock().unwrap().push(label);
+                        Ok(())
+                    })
+                })
+                .await;
+        }
+        agent
+            .inner
+            .process_events(AgentEvent::MessageEnd {
+                message: message.clone(),
+            })
+            .await
+            .expect("legacy event");
+        assert_eq!(agent.state().await.messages, vec![message]);
+        assert_eq!(*trace.lock().unwrap(), vec!["first", "second"]);
     }
 }

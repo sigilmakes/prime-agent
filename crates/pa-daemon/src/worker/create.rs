@@ -208,6 +208,7 @@ impl Worker {
                     let agent_dir = self.config.agent_dir.clone();
                     tokio::task::spawn_blocking(move || {
                         let lease = crate::lease::acquire_runtime_session_lease(&path, &agent_dir)?;
+                        let path = lease.session_path.clone();
                         pa_core::session::manager::repair_jsonl_damage(&path);
                         let mut store = SessionFile::open_windowed(&path)?;
                         store.lease = Some(Arc::new(lease));
@@ -236,7 +237,7 @@ impl Worker {
                         // The session-model restore records its decision only for a path
                         // this worker opened — a failed open never leaks the binding into a
                         // later create.
-                        self.engine.set_session_file(path.clone());
+                        self.engine.set_session_file(opened.path.clone());
                         // One fold serves all consumers: the model restore takes its saved
                         // context off the store this create just opened.
                         let restored = opened.restored_settings();

@@ -26,6 +26,8 @@ use crate::session_engine::canonical_authority::{
     AuthorityOwner, CapturedRun, CloseReason, CloseTicket, DrainRefusal, DrainStatus, LateRunAnchor,
 };
 
+pub use crate::session_engine::canonical_authority::MetadataAction;
+
 use super::{CanonicalWriteCertainty, CanonicalWriteRecorder, CanonicalWriteTicket};
 
 /// The drain state of one epoch, as a production caller may observe it.
@@ -98,9 +100,11 @@ impl From<DrainRefusal> for CanonicalDrainView {
 /// so a cancelled or panicking writer can never look `Known`.
 #[must_use]
 pub struct CanonicalAppendGrant {
-    permit: CanonicalWritePermit,
-    flight: CanonicalIoFlight,
+    // Rust drops fields in declaration order. A cancelled writer classifies
+    // Uncertain before its flight is released, just like explicit settlement.
     recorder: CanonicalWriteRecorder,
+    flight: CanonicalIoFlight,
+    permit: CanonicalWritePermit,
 }
 
 impl CanonicalAppendGrant {
@@ -184,6 +188,62 @@ impl CanonicalCommitRecorder {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "consumes the actual authority scope and retains its original exit drop order"
+)]
+fn append_scoped(
+    scope: crate::session_engine::canonical_authority::CapturedScope,
+    source: &CanonicalCursor,
+    stage: CanonicalIoStage,
+    draft: &CanonicalEntryDraft,
+) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+    let (capture, prepare) = scope.begin_prepare()?;
+    let operation = CanonicalOperation::new();
+    // This prepare flight binds the operation but performs no I/O. Known means
+    // no bytes were attempted here, never that the requested row was written.
+    let prepare_ticket = CanonicalWriteTicket::from_admitted(prepare);
+    let prepare_flight = prepare_ticket.permit.enter_io(
+        CanonicalIoStage::PreparePreflight,
+        source,
+        &operation,
+        None,
+    )?;
+    prepare_ticket
+        .recorder(CanonicalIoStage::PreparePreflight)?
+        .record(CanonicalWriteCertainty::Known)?;
+    drop(prepare_flight);
+    drop(prepare_ticket);
+    let admitted = capture.admit_final(&operation, draft.clone())?;
+    append_grant(admitted, source, stage, &operation, Some(draft))
+}
+
+fn append_grant(
+    admitted: crate::session_engine::canonical_authority::AdmittedTransaction,
+    source: &CanonicalCursor,
+    stage: CanonicalIoStage,
+    operation: &CanonicalOperation,
+    draft: Option<&CanonicalEntryDraft>,
+) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+    let ticket = CanonicalWriteTicket::from_admitted(admitted);
+    let flight = ticket.permit.enter_io(stage, source, operation, draft)?;
+    let recorder = ticket.recorder(stage)?;
+    Ok(CanonicalAppendGrant {
+        permit: ticket.into_permit(),
+        flight,
+        recorder,
+    })
+}
+
+fn foreign_terminal() -> CanonicalStoreError {
+    CanonicalStoreError {
+        kind: crate::session::canonical::CanonicalFailureKind::OwnerChanged,
+        requested: crate::session::canonical::CanonicalRequestedWrite::NotWritten,
+        source: crate::session::canonical::CanonicalSourceDisposition::Unchanged,
+        detail: "terminal capture belongs to a different serving epoch".to_owned(),
+    }
+}
+
 /// A public, opaque handle to ONE admitted provider main step.
 ///
 /// The authority's own step type is module-private. This handle exists because the
@@ -194,6 +254,227 @@ impl CanonicalCommitRecorder {
 /// classification).
 pub struct CanonicalProviderStep {
     inner: crate::session_engine::canonical_authority::ProviderStep,
+}
+
+impl CanonicalProviderStep {
+    /// Admit the actual tool execution before it starts.
+    ///
+    /// The call ID must occur exactly once in this step's sealed assistant row.
+    /// The native tool allocation remains pinned through its final result.
+    ///
+    /// # Errors
+    /// Refuses an unsealed step, an absent/ambiguous/already admitted call ID,
+    /// and a closed or poisoned serving capture.
+    pub fn admit_tool<T: Any + Send + Sync>(
+        &self,
+        tool_call_id: &str,
+        actual_tool: Arc<T>,
+    ) -> Result<CanonicalAdmittedTool, CanonicalStoreError> {
+        Ok(CanonicalAdmittedTool {
+            inner: self.inner.admit_tool(tool_call_id, actual_tool)?,
+        })
+    }
+}
+
+/// One actual tool admitted from a sealed canonical assistant tool call.
+/// It can seal one native result with that call's exact ID and name.
+pub struct CanonicalAdmittedTool {
+    inner: crate::session_engine::canonical_authority::AdmittedTool,
+}
+
+/// The actual `AgentStart` allocation registered in a source-only owner epoch.
+/// Not Clone. Finish only after this epoch's run tails are adopted and acknowledged.
+pub struct CanonicalOwnerRun {
+    inner: crate::session_engine::canonical_authority::OwnerRun,
+}
+impl CanonicalOwnerRun {
+    /// Consume the actual run's ordered boundary. Drop without it quarantines.
+    pub fn finish_ordered_boundary(self) {
+        self.inner.finish_ordered_boundary();
+    }
+}
+
+/// Source-bound authority of the actual session-file owner.
+///
+/// This admits receipt-time preparation and exact lifecycle rows before a model
+/// serves. It has no run/model allocation. Actual serving capture attaches to the
+/// same gate, counters and source identity, never to a parallel authority.
+pub struct CanonicalOwnerEpoch {
+    owner: Arc<AuthorityOwner>,
+    source: CanonicalCursor,
+}
+
+impl CanonicalOwnerEpoch {
+    /// Attach the FIRST epoch to the actual session-file source.
+    #[must_use]
+    pub fn genesis(source: &CanonicalCursor) -> Self {
+        Self {
+            owner: Arc::new(AuthorityOwner::genesis(source.clone())),
+            source: source.clone(),
+        }
+    }
+
+    /// Attach a successor only after the previous epoch's ordered drain.
+    ///
+    /// # Errors
+    /// Refuses a different owner, session, header, path or branch identity.
+    pub fn successor(
+        source: &CanonicalCursor,
+        retired: CanonicalRetiredEpoch,
+    ) -> Result<Self, CanonicalStoreError> {
+        Ok(Self {
+            owner: Arc::new(AuthorityOwner::successor(
+                source.clone(),
+                retired.into_token(),
+            )?),
+            source: source.clone(),
+        })
+    }
+
+    /// Select a verified member of the same physical history after retirement.
+    /// This consumes the predecessor's single-use token, not a fresh genesis.
+    ///
+    /// The actual session-file owner must verify selected-leaf membership.
+    ///
+    /// # Errors
+    /// Refuses changed owner/header/path or raw generation/frontier. Both branch
+    /// and canonical revisions must advance by exactly one.
+    pub fn successor_after_navigation(
+        source: &CanonicalCursor,
+        retired: CanonicalRetiredEpoch,
+    ) -> Result<Self, CanonicalStoreError> {
+        Ok(Self {
+            owner: Arc::new(AuthorityOwner::successor_after_navigation(
+                source.clone(),
+                retired.into_token(),
+            )?),
+            source: source.clone(),
+        })
+    }
+
+    /// The epoch's source identity, not a current strict store-CAS cursor.
+    #[must_use]
+    pub fn cursor(&self) -> &CanonicalCursor {
+        &self.source
+    }
+
+    /// Admit owner preparation only. No final requested draft can use this scope.
+    /// The actual owner must validate the accepted user content before writing.
+    ///
+    /// # Errors
+    /// Refuses closed/poisoned authority or a stage other than prepare preflight.
+    pub fn begin_prepare_append(
+        &self,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        let scope = self.owner.prepare_owner_append()?;
+        let (_capture, prepare) = scope.begin_prepare()?;
+        let operation = CanonicalOperation::new();
+        append_grant(prepare, &self.source, stage, &operation, None)
+    }
+
+    /// Admit one exact named lifecycle action, without a serving allocation.
+    ///
+    /// # Errors
+    /// Refuses an action/payload mismatch and closed or poisoned authority.
+    pub fn begin_metadata_append(
+        &self,
+        action: MetadataAction,
+        draft: &CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        let scope = self.owner.owner_metadata(action, draft.clone())?;
+        append_scoped(scope, &self.source, stage, draft)
+    }
+
+    /// Admit one exact owner context-policy row without a serving capture.
+    ///
+    /// # Errors
+    /// Refuses anything other than a `ContextPolicy` compaction/branch summary,
+    /// changed payloads, and closed or poisoned source authority.
+    pub fn begin_context_append(
+        &self,
+        draft: &CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        let scope = self.owner.owner_context(draft.clone())?;
+        append_scoped(scope, &self.source, stage, draft)
+    }
+
+    /// Register the actual `AgentStart` run before any serving/provider capture.
+    ///
+    /// # Errors
+    /// Refuses duplicate registration, existing serving work, unsettled owner I/O,
+    /// and closed/poisoned authority. The run pins one ordered-boundary anchor.
+    pub fn register_run<R: Any + Send + Sync>(
+        &self,
+        actual_run: Arc<R>,
+    ) -> Result<CanonicalOwnerRun, CanonicalStoreError> {
+        Ok(CanonicalOwnerRun {
+            inner: self.owner.register_run(actual_run)?,
+        })
+    }
+
+    /// Seal the actual zero-usage aborted assistant before any provider served.
+    /// There is no ordinary assistant/error or native-metadata fallback.
+    ///
+    /// # Errors
+    /// Refuses foreign/retired/replayed runs, any actual serving capture, nonzero
+    /// usage, non-Aborted outcomes, tool calls, and all normal admission failures.
+    pub fn begin_no_provider_abort(
+        &self,
+        run: &CanonicalOwnerRun,
+        draft: &CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        let scope = run.inner.seal_aborted(&self.owner, draft.clone())?;
+        append_scoped(scope, &self.source, stage, draft)
+    }
+
+    /// Capture the actual serving run/model exactly once in this source epoch.
+    /// Call only where inference really starts, not for desired configuration.
+    ///
+    /// # Errors
+    /// Refuses a second serving capture and closed or poisoned authority.
+    pub fn capture_serving_run<R: Any + Send + Sync, M: Any + Send + Sync>(
+        &self,
+        actual_run: Arc<R>,
+        actual_model: Arc<M>,
+    ) -> Result<CanonicalEpoch, CanonicalStoreError> {
+        CanonicalEpoch::capture(self.owner.clone(), &self.source, actual_run, actual_model)
+    }
+
+    /// Close using the actual owner's strictly validated current source.
+    ///
+    /// The owner must first drain pending receipt ACKs and tool outcomes and
+    /// verify the exact raw prefix under its existing lease fence. This refresh
+    /// occurs only at the ordered close, not from arbitrary ACKs or projections.
+    ///
+    /// # Errors
+    /// Refuses unsettled I/O/transactions, rewound or replaced physical history,
+    /// changed source identity/branch, and closed or poisoned authority.
+    pub fn request_close_at_current_source(
+        &self,
+        current: &CanonicalCursor,
+    ) -> Result<CanonicalClosing, CanonicalStoreError> {
+        Ok(CanonicalClosing {
+            ticket: self.owner.request_close_at_current_source(current)?,
+        })
+    }
+
+    /// Stage a synchronous close. No source-bound scope can admit after it.
+    #[must_use]
+    pub fn request_close(&self) -> CanonicalClosing {
+        CanonicalClosing {
+            ticket: self.owner.request_close(CloseReason::Retirement),
+        }
+    }
+
+    /// Read poison only; this is not readiness or publication authority.
+    #[must_use]
+    pub fn poisoned(&self) -> bool {
+        self.owner.is_poisoned()
+    }
 }
 
 /// A live canonical epoch for one serving run.
@@ -273,32 +554,7 @@ impl CanonicalEpoch {
         stage: CanonicalIoStage,
         draft: &CanonicalEntryDraft,
     ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
-        let scope = self.run.context_policy();
-        let (capture, prepare) = scope.begin_prepare()?;
-        let operation = CanonicalOperation::new();
-        // A prepare-phase transaction must bind the owner operation before any final
-        // admission, and the authority binds it through `enter_io`; removing this
-        // preflight breaks final admission rather than simplifying it.
-        //
-        // The classification below is `Known` because the stage's contract is "no
-        // I/O at this phase": `Known` here means no I/O was attempted at this
-        // stage, and no row is counted as written because of it. A mutation that
-        // claims a row write while writing zero bytes is a different case and
-        // records nothing at all.
-        let prepare_ticket = CanonicalWriteTicket::from_admitted(prepare);
-        let prepare_flight = prepare_ticket.permit.enter_io(
-            CanonicalIoStage::PreparePreflight,
-            self.run.source(),
-            &operation,
-            None,
-        )?;
-        prepare_ticket
-            .recorder(CanonicalIoStage::PreparePreflight)?
-            .record(CanonicalWriteCertainty::Known)?;
-        drop(prepare_flight);
-        drop(prepare_ticket);
-        let admitted = capture.admit_final(&operation, draft.clone())?;
-        self.grant(admitted, stage, &operation, Some(draft))
+        append_scoped(self.run.context_policy(), self.run.source(), stage, draft)
     }
 
     /// Admit ONE actual provider main step.
@@ -333,27 +589,43 @@ impl CanonicalEpoch {
         draft: &CanonicalEntryDraft,
         stage: CanonicalIoStage,
     ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        if !step.inner.belongs_to(&self.run) {
+            return Err(foreign_terminal());
+        }
         let sealed = step.inner.seal_assistant(draft.clone())?;
-        let (capture, prepare) = sealed.begin_prepare()?;
-        let operation = CanonicalOperation::new();
-        // Bind the minted operation through a prepare flight that writes nothing;
-        // `admit_final` refuses an operation this scope never bound.
-        let prepare_ticket = CanonicalWriteTicket::from_admitted(prepare);
-        let prepare_flight = prepare_ticket.permit.enter_io(
-            CanonicalIoStage::PreparePreflight,
-            self.run.source(),
-            &operation,
-            None,
-        )?;
-        prepare_ticket
-            .recorder(CanonicalIoStage::PreparePreflight)?
-            .record(CanonicalWriteCertainty::Known)?;
-        drop(prepare_flight);
-        drop(prepare_ticket);
-        let admitted = capture.admit_final(&operation, draft.clone())?;
-        // A requested-mutation flight must name the exact authorized draft, or the
-        // flight would not be bound to the row this grant was minted for.
-        self.grant(admitted, stage, &operation, Some(draft))
+        append_scoped(sealed, self.run.source(), stage, draft)
+    }
+
+    /// Admit the exact final result of a tool admitted before execution.
+    ///
+    /// # Errors
+    /// Refuses a foreign epoch, a result with a different call ID/name, a second
+    /// result for the same execution, or a closed/poisoned capture.
+    pub fn begin_tool_append(
+        &self,
+        tool: &CanonicalAdmittedTool,
+        draft: &CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        if !tool.inner.belongs_to(&self.run) {
+            return Err(foreign_terminal());
+        }
+        let sealed = tool.inner.seal_final_outcome(draft.clone())?;
+        append_scoped(sealed, self.run.source(), stage, draft)
+    }
+
+    /// Admit one exact, named owner lifecycle action. No generic row fallback.
+    ///
+    /// # Errors
+    /// Refuses a draft of another action/kind and closed or poisoned authority.
+    pub fn begin_metadata_append(
+        &self,
+        action: MetadataAction,
+        draft: &CanonicalEntryDraft,
+        stage: CanonicalIoStage,
+    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
+        let scope = self.run.owner_metadata(action, draft.clone())?;
+        append_scoped(scope, self.run.source(), stage, draft)
     }
 
     /// Admit one append that binds no payload: a batch, or a row the owner admitted
@@ -380,26 +652,7 @@ impl CanonicalEpoch {
         let scope = self.run.context_policy();
         let (_capture, prepare) = scope.begin_prepare()?;
         let operation = CanonicalOperation::new();
-        self.grant(prepare, stage, &operation, None)
-    }
-
-    fn grant(
-        &self,
-        admitted: crate::session_engine::canonical_authority::AdmittedTransaction,
-        stage: CanonicalIoStage,
-        operation: &CanonicalOperation,
-        draft: Option<&CanonicalEntryDraft>,
-    ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
-        let ticket = CanonicalWriteTicket::from_admitted(admitted);
-        let flight = ticket
-            .permit
-            .enter_io(stage, self.run.source(), operation, draft)?;
-        let recorder = ticket.recorder(stage)?;
-        Ok(CanonicalAppendGrant {
-            permit: ticket.into_permit(),
-            flight,
-            recorder,
-        })
+        append_grant(prepare, self.run.source(), stage, &operation, None)
     }
 
     /// Admit the COMMIT of a coordinator-prepared operation.
@@ -578,6 +831,55 @@ mod tests {
             .expect("native entry"),
         )
         .expect("draft")
+    }
+
+    fn label_draft(value: &str) -> CanonicalEntryDraft {
+        CanonicalEntryDraft::new(
+            CanonicalMutationKind::OwnerMetadata,
+            serde_json::from_value(serde_json::json!({
+                "type":"label", "targetId":"a", "label":value
+            }))
+            .expect("label entry"),
+        )
+        .expect("label draft")
+    }
+
+    fn assistant_call(id: &str) -> CanonicalEntryDraft {
+        let mut value = serde_json::to_value(assistant_draft().entry()).expect("assistant value");
+        value["message"]["content"] = serde_json::json!([
+            {"type":"toolCall","id":id,"name":"native","arguments":{"x":1}}
+        ]);
+        value["message"]["stopReason"] = serde_json::json!("toolUse");
+        CanonicalEntryDraft::new(
+            CanonicalMutationKind::AdmittedTerminal,
+            serde_json::from_value(value).expect("assistant entry"),
+        )
+        .expect("assistant draft")
+    }
+
+    fn aborted_draft() -> CanonicalEntryDraft {
+        let mut value = serde_json::to_value(assistant_draft().entry()).expect("assistant value");
+        value["message"]["usage"] =
+            serde_json::to_value(pa_types::ai::Usage::default()).expect("zero usage");
+        value["message"]["stopReason"] = serde_json::json!("aborted");
+        CanonicalEntryDraft::new(
+            CanonicalMutationKind::AdmittedTerminal,
+            serde_json::from_value(value).expect("aborted assistant"),
+        )
+        .expect("aborted draft")
+    }
+
+    fn tool_draft(id: &str, name: &str) -> CanonicalEntryDraft {
+        CanonicalEntryDraft::new(
+            CanonicalMutationKind::AdmittedTerminal,
+            serde_json::from_value(serde_json::json!({"type":"message", "message":{
+                "role":"toolResult", "toolCallId":id, "toolName":name,
+                "content":[{"type":"text","text":"native result"}],
+                "details":{"native":[1,null,true]}, "isError":false, "timestamp":2
+            }}))
+            .expect("tool result entry"),
+        )
+        .expect("tool draft")
     }
 
     /// The anti-oracle test: gate state must never leak into `poisoned()`.
@@ -999,5 +1301,345 @@ mod tests {
             },
             "the settle releases the flight; only the epoch's own serving anchor remains"
         );
+    }
+
+    #[test]
+    fn owner_source_prepares_and_writes_exact_metadata_before_actual_capture() {
+        let source = cursor();
+        let owner = CanonicalOwnerEpoch::genesis(&source);
+        owner
+            .begin_prepare_append(CanonicalIoStage::PreparePreflight)
+            .expect("owner preparation without serving model")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("actual owner classified preparation");
+        assert!(owner
+            .begin_prepare_append(CanonicalIoStage::RequestedMutation)
+            .is_err());
+        assert!(owner
+            .begin_metadata_append(
+                MetadataAction::SessionInfo,
+                &label_draft("exact"),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .is_err());
+        owner
+            .begin_metadata_append(
+                MetadataAction::Label,
+                &label_draft("exact"),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("exact owner lifecycle row")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified lifecycle write");
+        let serving = owner
+            .capture_serving_run(Arc::new(String::from("actual run")), Arc::new(7_u64))
+            .expect("first actual serving capture");
+        assert!(owner
+            .capture_serving_run(Arc::new(()), Arc::new(()))
+            .is_err());
+        let closing = owner.request_close();
+        assert_eq!(
+            closing.view(),
+            CanonicalDrainView::Pending {
+                io: 0,
+                transactions: 0,
+                anchors: 1,
+            }
+        );
+        assert!(owner
+            .begin_prepare_append(CanonicalIoStage::PreparePreflight)
+            .is_err());
+        assert!(serving
+            .admit_provider_step(Arc::new("late invocation"))
+            .is_err());
+        serving.finish_ordered_boundary();
+        assert_eq!(closing.view(), CanonicalDrainView::Drained);
+        closing.finish().expect("ordered retired source");
+        assert!(!owner.poisoned());
+    }
+
+    #[test]
+    fn owner_and_serving_share_uncertain_write_quarantine() {
+        let owner = CanonicalOwnerEpoch::genesis(&cursor());
+        let serving = owner
+            .capture_serving_run(Arc::new(()), Arc::new(()))
+            .expect("serving capture");
+        let pending = owner
+            .begin_prepare_append(CanonicalIoStage::PreparePreflight)
+            .expect("owner flight");
+        assert!(!serving.poisoned());
+        drop(pending);
+        assert!(owner.poisoned());
+        assert!(serving.poisoned());
+        assert_eq!(owner.request_close().view(), CanonicalDrainView::Blocked);
+    }
+
+    #[test]
+    fn source_successor_needs_boundary_but_allows_own_frontier_advance() {
+        let mut source = cursor();
+        let owner = CanonicalOwnerEpoch::genesis(&source);
+        let serving = owner
+            .capture_serving_run(Arc::new(()), Arc::new(()))
+            .expect("serving capture");
+        let closing = owner.request_close();
+        serving.finish_ordered_boundary();
+        let retired = closing.finish().expect("retired token");
+        source.canonical_revision += 1;
+        source.raw_source_generation = [9; 32];
+        source.selected_leaf = Some("new".to_owned());
+        source.frontier.bytes += 70;
+        source.frontier.rows += 1;
+        source.frontier.prefix_certificate = [8; 32];
+        let successor = CanonicalOwnerEpoch::successor(&source, retired).expect("own advance");
+        assert_eq!(successor.cursor(), &source);
+        assert!(owner
+            .begin_metadata_append(
+                MetadataAction::Label,
+                &label_draft("retired"),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .is_err());
+        successor
+            .begin_metadata_append(
+                MetadataAction::Label,
+                &label_draft("successor"),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("new source authority")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified");
+    }
+
+    #[test]
+    fn foreign_provider_refusal_does_not_consume_the_actual_assistant_seal() {
+        let mine = epoch();
+        let theirs = epoch();
+        let step = mine.admit_provider_step(Arc::new(())).expect("actual step");
+        let draft = assistant_draft();
+        assert!(theirs
+            .begin_terminal_append(&step, &draft, CanonicalIoStage::RequestedMutation)
+            .is_err());
+        mine.begin_terminal_append(&step, &draft, CanonicalIoStage::RequestedMutation)
+            .expect("foreign refusal must not seal actual output")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified");
+        assert!(!mine.poisoned());
+        assert!(!theirs.poisoned());
+    }
+
+    #[test]
+    fn tool_grant_requires_the_actual_call_and_exact_result_and_is_single_use() {
+        let mine = epoch();
+        let theirs = epoch();
+        let step = mine.admit_provider_step(Arc::new(())).expect("actual step");
+        assert!(step.admit_tool("real", Arc::new(())).is_err());
+        mine.begin_terminal_append(
+            &step,
+            &assistant_call("real"),
+            CanonicalIoStage::RequestedMutation,
+        )
+        .expect("sealed canonical tool call")
+        .settle(CanonicalWriteCertainty::Known)
+        .expect("assistant classification");
+        assert!(step.admit_tool("absent", Arc::new(())).is_err());
+        let tool = step.admit_tool("real", Arc::new(())).expect("actual tool");
+        assert!(step.admit_tool("real", Arc::new(())).is_err());
+        for invalid in [tool_draft("foreign", "native"), tool_draft("real", "wrong")] {
+            assert!(mine
+                .begin_tool_append(&tool, &invalid, CanonicalIoStage::RequestedMutation)
+                .is_err());
+        }
+        let result = tool_draft("real", "native");
+        assert!(theirs
+            .begin_tool_append(&tool, &result, CanonicalIoStage::RequestedMutation)
+            .is_err());
+        let grant = mine
+            .begin_tool_append(&tool, &result, CanonicalIoStage::RequestedMutation)
+            .expect("exact result remains sealable after foreign/malformed refusals");
+        assert!(mine
+            .begin_tool_append(&tool, &result, CanonicalIoStage::RequestedMutation)
+            .is_err());
+        let closing = mine.request_close();
+        assert_eq!(
+            closing.view(),
+            CanonicalDrainView::Pending {
+                io: 1,
+                transactions: 1,
+                anchors: 1,
+            }
+        );
+        grant
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("tool classification");
+        assert_eq!(
+            closing.view(),
+            CanonicalDrainView::Pending {
+                io: 0,
+                transactions: 0,
+                anchors: 1,
+            }
+        );
+        assert!(mine
+            .begin_tool_append(&tool, &result, CanonicalIoStage::RequestedMutation)
+            .is_err());
+        assert!(!mine.poisoned());
+        assert!(!theirs.poisoned());
+    }
+
+    #[test]
+    fn serving_metadata_is_action_specific_and_cannot_write_native_terminals() {
+        let epoch = epoch();
+        assert!(epoch
+            .begin_metadata_append(
+                MetadataAction::SessionInfo,
+                &label_draft("label"),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .is_err());
+        assert!(epoch
+            .begin_metadata_append(
+                MetadataAction::Label,
+                &assistant_draft(),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .is_err());
+        epoch
+            .begin_metadata_append(
+                MetadataAction::Label,
+                &label_draft("label"),
+                CanonicalIoStage::RequestedMutation,
+            )
+            .expect("exact named lifecycle action")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("classified");
+        assert!(!epoch.poisoned());
+    }
+
+    #[test]
+    fn registered_source_run_seals_one_exact_no_provider_abort_and_drains_in_order() {
+        let owner = CanonicalOwnerEpoch::genesis(&cursor());
+        let actual = Arc::new(String::from("actual `AgentStart` allocation"));
+        let run = owner
+            .register_run(actual.clone())
+            .expect("actual run registration");
+        assert!(owner.register_run(actual).is_err());
+        let foreign = CanonicalOwnerEpoch::genesis(&cursor());
+        let draft = aborted_draft();
+        assert!(foreign
+            .begin_no_provider_abort(&run, &draft, CanonicalIoStage::RequestedMutation)
+            .is_err());
+        let grant = owner
+            .begin_no_provider_abort(&run, &draft, CanonicalIoStage::RequestedMutation)
+            .expect("actual zero-usage aborted outcome");
+        assert!(owner
+            .begin_no_provider_abort(&run, &draft, CanonicalIoStage::RequestedMutation)
+            .is_err());
+        let closing = owner.request_close();
+        assert_eq!(
+            closing.view(),
+            CanonicalDrainView::Pending {
+                io: 1,
+                transactions: 1,
+                anchors: 1
+            }
+        );
+        grant
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("writer classified terminal");
+        assert_eq!(
+            closing.view(),
+            CanonicalDrainView::Pending {
+                io: 0,
+                transactions: 0,
+                anchors: 1
+            }
+        );
+        run.finish_ordered_boundary();
+        assert_eq!(closing.view(), CanonicalDrainView::Drained);
+        closing.finish().expect("one source successor token");
+        assert!(!owner.poisoned());
+        assert!(!foreign.poisoned());
+    }
+
+    #[test]
+    fn no_provider_abort_refuses_ordinary_errors_nonzero_usage_and_tool_calls() {
+        let owner = CanonicalOwnerEpoch::genesis(&cursor());
+        let run = owner.register_run(Arc::new(())).expect("actual run");
+        for invalid in [
+            assistant_draft(),
+            compaction(),
+            label_draft("metadata"),
+            tool_draft("id", "native"),
+        ] {
+            assert!(owner
+                .begin_no_provider_abort(&run, &invalid, CanonicalIoStage::RequestedMutation)
+                .is_err());
+        }
+        for change in 0..3 {
+            let mut value =
+                serde_json::to_value(aborted_draft().entry()).expect("actual abort value");
+            match change {
+                0 => value["message"]["stopReason"] = serde_json::json!("error"),
+                1 => value["message"]["usage"]["input"] = serde_json::json!(1),
+                2 => {
+                    value["message"]["content"] = serde_json::json!([
+                        {"type":"toolCall","id":"forged","name":"native","arguments":{}}
+                    ]);
+                }
+                _ => unreachable!(),
+            }
+            let invalid = CanonicalEntryDraft::new(
+                CanonicalMutationKind::AdmittedTerminal,
+                serde_json::from_value(value).expect("native invalid abort"),
+            )
+            .expect("native draft");
+            assert!(owner
+                .begin_no_provider_abort(&run, &invalid, CanonicalIoStage::RequestedMutation)
+                .is_err());
+        }
+        owner
+            .begin_no_provider_abort(&run, &aborted_draft(), CanonicalIoStage::RequestedMutation)
+            .expect("refusals did not consume the actual abort slot")
+            .settle(CanonicalWriteCertainty::Known)
+            .expect("known actual write");
+        run.finish_ordered_boundary();
+        assert!(!owner.poisoned());
+    }
+
+    #[test]
+    fn real_serving_capture_permanently_disables_registered_no_provider_abort() {
+        let owner = CanonicalOwnerEpoch::genesis(&cursor());
+        let actual = Arc::new(String::from("actual outer run"));
+        let run = owner
+            .register_run(actual.clone())
+            .expect("actual source run");
+        assert!(owner
+            .capture_serving_run(
+                Arc::new(String::from("same text foreign run")),
+                Arc::new(())
+            )
+            .is_err());
+        let serving = owner
+            .capture_serving_run(actual, Arc::new(String::from("actual model")))
+            .expect("matched actual serving capture");
+        assert!(owner
+            .begin_no_provider_abort(&run, &aborted_draft(), CanonicalIoStage::RequestedMutation)
+            .is_err());
+        run.finish_ordered_boundary();
+        assert!(owner.register_run(Arc::new(())).is_err());
+        let closing = owner.request_close();
+        serving.finish_ordered_boundary();
+        assert_eq!(closing.view(), CanonicalDrainView::Drained);
+        closing.finish().expect("real serving ordered retirement");
+        assert!(!owner.poisoned());
+    }
+
+    #[test]
+    fn abandoned_registered_run_quarantines_the_source_epoch() {
+        let owner = CanonicalOwnerEpoch::genesis(&cursor());
+        let run = owner.register_run(Arc::new(())).expect("actual run");
+        drop(run);
+        assert!(owner.poisoned());
+        assert_eq!(owner.request_close().view(), CanonicalDrainView::Blocked);
     }
 }

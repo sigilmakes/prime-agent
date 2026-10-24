@@ -732,7 +732,7 @@ fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
     // SAFETY: getuid is a pure identity query.
     let socket_dir = shared_tmp
         .path()
-        .join(format!("prime-agent-{}", unsafe { libc::getuid() }));
+        .join(format!("prime-agent-rust-{}", unsafe { libc::getuid() }));
 
     let socket_a = socket_dir.join("daemon.sock"); // the product default
     let agent_a = fixture_a.path().join("agent");

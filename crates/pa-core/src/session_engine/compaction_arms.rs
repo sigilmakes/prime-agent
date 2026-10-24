@@ -201,7 +201,11 @@ impl AgentSession {
         // take the same flight. A row pushed onto the context must not
         // interleave with the replace: it would duplicate in the rebuilt
         // view or vanish under it while staying durable either way.
-        let _flight = self.compaction_flight.lock().await;
+        let _flight = if self.canonical_live.is_none() {
+            Some(self.compaction_flight.lock().await)
+        } else {
+            None
+        };
         let mut outcome = self.compaction_attempts(&options, started_at).await?;
         if matches!(outcome, CompactOutcome::Skipped(_)) {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
@@ -256,6 +260,27 @@ impl AgentSession {
         options: &crate::session_engine::compact_session::CompactOptions<'_>,
         started_at: std::time::Instant,
     ) -> anyhow::Result<CompactOutcome> {
+        // Only an unconsumed prepared ticket is eligible for abandonment. Once
+        // commit takes the ticket, all I/O/receipt failures keep their quarantine.
+        macro_rules! before_commit {
+            ($ticket:ident, fail: $error:expr) => {{
+                let original: anyhow::Error = $error.into();
+                if let Some(ticket) = $ticket.take() {
+                    if let Err(abandon) = ticket.abandon().await {
+                        return Err(anyhow::Error::from(abandon).context(format!(
+                            "precommit compaction failed ({original}); abandoning its prepared receipt also failed"
+                        )));
+                    }
+                }
+                return Err(original);
+            }};
+            ($ticket:ident, $result:expr) => {{
+                match $result {
+                    Ok(value) => value,
+                    Err(error) => before_commit!($ticket, fail: error),
+                }
+            }};
+        }
         /// The conflict-retry bound: a branch that keeps changing under
         /// the compaction fails instead of re-summarizing forever.
         const MAX_COMPACTION_ATTEMPTS: usize = 3;
@@ -263,11 +288,26 @@ impl AgentSession {
             return self.strategy_compaction_attempts(options, started_at).await;
         }
         for _ in 0..MAX_COMPACTION_ATTEMPTS {
-            let mut attempt = {
+            let mut live_ticket = match &self.canonical_live {
+                Some(live) => Some(
+                    live.prepare_mutation(
+                        crate::session::canonical::CanonicalMutationKind::ContextPolicy,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            let attempt = {
                 let session = self.session.lock().await;
-                match crate::session_engine::compact_session::prepare_attempt(&session, options) {
-                    Ok(attempt) => attempt,
-                    Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
+                crate::session_engine::compact_session::prepare_attempt(&session, options)
+            };
+            let mut attempt = match attempt {
+                Ok(attempt) => attempt,
+                Err(skip) => {
+                    if let Some(ticket) = live_ticket {
+                        ticket.abandon().await?;
+                    }
+                    return Ok(CompactOutcome::Skipped(skip.user_message()));
                 }
             };
             // The digest ranks the branch THIS attempt summarizes: a
@@ -290,15 +330,50 @@ impl AgentSession {
                 summary_delta: options.summary_delta.clone(),
                 semantic_edges: options.semantic_edges.clone(),
             };
-            let mut prepared = crate::session_engine::compact_session::summarize_attempt(
+            let summarize = crate::session_engine::compact_session::summarize_attempt(
                 &attempt,
                 &attempt_options,
-            )
-            .await?;
+            );
+            // Cancel only provider work. The prepared transaction stays here so
+            // the abort result can await its exact known-unwritten abandonment.
+            // Dropping the summary future cancels its detached HTTP provider.
+            let summarized = match options.abort {
+                Some(signal) if live_ticket.is_some() => {
+                    match pa_agent::abort::race_with_abort(summarize, signal).await {
+                        Ok(result) => result,
+                        Err(error) => Err(error),
+                    }
+                }
+                _ => summarize.await,
+            };
+            let mut prepared = before_commit!(live_ticket, summarized);
             // A toggle during the summarizer request must not re-inject the captured digest.
             prepared.entry.harness_digest = None;
             prepared.entry.harness_state_fingerprint = None;
-            let committed = {
+            let committed = if live_ticket.is_some() {
+                before_commit!(
+                    live_ticket,
+                    pa_agent::abort::throw_if_aborted_signal(options.abort)
+                );
+                let draft = before_commit!(
+                    live_ticket,
+                    crate::session::canonical::CanonicalEntryDraft::new(
+                        crate::session::canonical::CanonicalMutationKind::ContextPolicy,
+                        FileEntry::Compaction {
+                            base: super::canonical_live::draft_base(),
+                            payload: prepared.entry.clone(),
+                        },
+                    )
+                );
+                let ticket = live_ticket
+                    .take()
+                    .expect("checked prepared canonical ticket");
+                ticket.commit(draft).await?;
+                if let Some(compaction) = attempt.semantic_compaction.as_mut() {
+                    compaction.commit();
+                }
+                true
+            } else {
                 let mut session = self.session.lock().await;
                 crate::session_engine::compact_session::commit_attempt(
                     &mut session,
@@ -342,11 +417,27 @@ impl AgentSession {
         // below read-modify-writes the live context, and a replace
         // interleaving it would roll the pushed row — or the replace —
         // back.
-        let _flight = self.compaction_flight.lock().await;
+        let _flight = if self.canonical_live.is_none() {
+            Some(self.compaction_flight.lock().await)
+        } else {
+            None
+        };
         let row = crate::session_engine::messages::create_compaction_outcome_message(
             content, reason, outcome,
         );
-        {
+        if self.canonical_live.is_some() {
+            self.persist_metadata_entry(FileEntry::CustomMessage {
+                base: super::canonical_live::draft_base(),
+                payload: pa_types::session::CustomMessageEntry {
+                    custom_type: row.custom_type.clone(),
+                    content: row.content.clone(),
+                    display: row.display,
+                    details: row.details.clone(),
+                    rest: row.rest.clone(),
+                },
+            })
+            .await?;
+        } else {
             let mut session = self.session.lock().await;
             let (_, write_error) = session.append_custom_message_retained(
                 &row.custom_type,

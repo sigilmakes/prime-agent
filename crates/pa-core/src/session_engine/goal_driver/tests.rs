@@ -1079,12 +1079,16 @@ fn same_timeline_reload_never_regresses_the_same_goal() {
         },
     );
 
-    driver.reload_from_branch(&session, GoalBranchReload::SameTimeline);
+    driver
+        .reload_from_branch(&session, GoalBranchReload::SameTimeline)
+        .unwrap();
     assert_eq!(driver.state().status, GoalStatus::Active);
     assert_eq!(driver.state().goal_id, goal_id);
     assert!(driver.state().tokens_used >= 50);
 
-    driver.reload_from_branch(&session, GoalBranchReload::FaithfulBranch);
+    driver
+        .reload_from_branch(&session, GoalBranchReload::FaithfulBranch)
+        .unwrap();
     assert_eq!(driver.state().goal_id, goal_id);
     assert_eq!(driver.state().tokens_used, 1);
 }
@@ -1115,7 +1119,9 @@ fn same_timeline_reload_keeps_a_fired_budget_gate() {
         },
     );
 
-    driver.reload_from_branch(&session, GoalBranchReload::SameTimeline);
+    driver
+        .reload_from_branch(&session, GoalBranchReload::SameTimeline)
+        .unwrap();
     assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
     assert_eq!(driver.state().goal_id, goal_id);
     assert!(driver.state().tokens_used >= 110);
@@ -1148,7 +1154,9 @@ fn same_timeline_reload_adopts_a_different_goal_faithfully() {
             ..empty_goal_state()
         },
     );
-    driver.reload_from_branch(&session, GoalBranchReload::SameTimeline);
+    driver
+        .reload_from_branch(&session, GoalBranchReload::SameTimeline)
+        .unwrap();
     assert_eq!(driver.state().goal_id.as_deref(), Some("other-goal"));
     assert_eq!(driver.state().objective.as_deref(), Some("second goal"));
     assert_eq!(driver.state().tokens_used, 3);
@@ -1168,7 +1176,9 @@ fn same_timeline_reload_adopts_a_different_goal_faithfully() {
             ..empty_goal_state()
         },
     );
-    driver.reload_from_branch(&session, GoalBranchReload::FaithfulBranch);
+    driver
+        .reload_from_branch(&session, GoalBranchReload::FaithfulBranch)
+        .unwrap();
     assert_eq!(driver.state().tokens_used, 500);
     assert_eq!(driver.state().continuations_used, 4);
     assert_eq!(driver.state().time_used_seconds, 9);
@@ -1190,7 +1200,9 @@ fn reload_skips_invalid_rows() {
             })),
         )
         .unwrap();
-    driver.reload_from_branch(&session, GoalBranchReload::FaithfulBranch);
+    driver
+        .reload_from_branch(&session, GoalBranchReload::FaithfulBranch)
+        .unwrap();
     assert_eq!(driver.state().status, GoalStatus::Active);
     assert!(driver.state().goal_id.is_some());
 
@@ -1204,7 +1216,9 @@ fn reload_skips_invalid_rows() {
             },
         ))
         .unwrap();
-    driver.reload_from_branch(&fresh, GoalBranchReload::FaithfulBranch);
+    driver
+        .reload_from_branch(&fresh, GoalBranchReload::FaithfulBranch)
+        .unwrap();
     assert_eq!(driver.state(), &empty_goal_state());
 }
 

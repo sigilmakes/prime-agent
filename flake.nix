@@ -25,6 +25,7 @@
                 packages = with pkgs; [
                     cargo rustc rustfmt clippy pkg-config
                     git uv fd ripgrep python3 actionlint shellcheck gnumake
+                    util-linux iproute2
                 ];
                 CARGO_BUILD_JOBS = "2";
                 CARGO_PROFILE_DEV_DEBUG = "0";

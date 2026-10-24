@@ -207,15 +207,21 @@ pub async fn sync_after_compaction(
         return Ok(None);
     };
     let row = notice_message(content);
-    {
-        let mut session = session.lock().await;
-        session.append_custom_message(
-            &row.custom_type,
-            row.content.clone(),
-            row.display,
-            row.details.clone(),
-        )?;
-    }
+    crate::session::canonical::persist_metadata_entry(
+        session,
+        pa_types::session::FileEntry::CustomMessage {
+            base: super::canonical_live::draft_base(),
+            payload: pa_types::session::CustomMessageEntry {
+                custom_type: row.custom_type.clone(),
+                content: row.content.clone(),
+                display: row.display,
+                details: row.details.clone(),
+                rest: row.rest.clone(),
+            },
+        },
+    )
+    .await
+    .map_err(std::io::Error::other)?;
     let Some(loop_message) = crate::session_engine::session_message_to_loop(
         &pa_types::session::AgentMessage::Custom(row.clone()),
     ) else {

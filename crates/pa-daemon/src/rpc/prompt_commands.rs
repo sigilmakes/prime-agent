@@ -84,6 +84,7 @@ async fn write_command_row(state: &RpcState, message: &CustomMessage) {
     // own fields (a bare round-trip cannot recover it, the session row
     // type carries no role).
     let custom = pa_agent::types::CustomAgentMessage {
+        delivery: pa_agent::types::CustomMessageDelivery::Input,
         role: "custom".to_string(),
         payload: serde_json::to_value(message).unwrap_or(serde_json::Value::Null),
     };

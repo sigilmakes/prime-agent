@@ -129,6 +129,13 @@ impl SessionFile {
                 origin,
             })?,
         };
+        if self.is_canonical_bound() {
+            // The report ID already IS this journal row's stable identity. The
+            // exact named owner action writes it once and leaves the checkpoint
+            // pending until Core's next NOIO adoption and matching Prepared ACK.
+            self.stage_owned_entry(entry)?;
+            return Ok(ChildUsageAppendResult::Created(aggregate));
+        }
         // Capture only this owned row, not the transcript. The EOF anchor and
         // existing file identity distinguish an absent attempt from a partial
         // or foreign change. Bootstrap rewrite has no existing append offset.

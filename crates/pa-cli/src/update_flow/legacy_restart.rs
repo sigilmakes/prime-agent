@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello};
 
+mod retention;
+
 pub(super) async fn run(
     socket: &Path,
     status_path: &Path,
@@ -128,6 +130,15 @@ async fn restart(
                         supervisor_owner_token: None,
                         rest: serde_json::Map::new(),
                     };
+                    retention::publish(
+                        status_path,
+                        id,
+                        origin,
+                        &roster,
+                        &attempt_path,
+                        &source_path,
+                        /*prepared_source*/ None,
+                    )?;
                     anyhow::ensure!(
                         wait_for_exit(&predecessor, budget.predecessor_exit_ms).await,
                         "the checkpoint predecessor has not verifiably exited"
@@ -137,6 +148,7 @@ async fn restart(
                         status_path,
                         &roster_path,
                         &roster,
+                        origin,
                         status,
                         &budget,
                     )
@@ -163,6 +175,7 @@ async fn restart(
         value["predecessor"] = json!(predecessor);
         persist(status_path, &value)?;
     }
+    let mut prepared_source = None;
     let roster = if let Some(roster) = recover_prepared(
         &roster_path,
         &attempt_path,
@@ -220,9 +233,18 @@ async fn restart(
         };
         match manifest {
             Ok(manifest) => {
+                // A prepare reply alone is not durable recovery evidence. Retain
+                // the actual TS file, including its original UTF-8 formatting.
+                let source_text = std::fs::read_to_string(&source_path)
+                    .context("read the durable TypeScript prepare manifest")?;
+                anyhow::ensure!(
+                    serde_json::from_str::<Value>(&source_text)? == manifest,
+                    "TypeScript prepare response differs from its durable manifest"
+                );
                 let roster = super::legacy_roster::convert(&manifest, &hello, id, socket, origin)?;
                 validate_recovery(&roster, socket, crate::config::version())?;
                 persist(&roster_path, &serde_json::to_value(&roster)?)?;
+                prepared_source = Some(source_text);
                 roster
             }
             Err(error) => {
@@ -243,6 +265,17 @@ async fn restart(
             }
         }
     };
+    // TS prepare already stops workers. On any retention error leave all
+    // active recovery scratch intact, without stopping or replacing TS.
+    retention::publish(
+        status_path,
+        id,
+        origin,
+        &roster,
+        &attempt_path,
+        &source_path,
+        prepared_source.as_deref(),
+    )?;
     {
         let mut value = status.lock().await;
         value["phase"] = json!("stopping");
@@ -260,6 +293,7 @@ async fn restart(
     // TS deduplicates by client ID and envelope ID across connections.
     // A reconnected client's default counter restarts at daemon_1, which
     // would replay the prepare result instead of executing shutdown.
+    retention::verify(status_path, &json!(id), origin, &roster)?;
     let shutdown = client
         .request_supervisor_with_id(
             DaemonCommand::Shutdown {
@@ -278,7 +312,16 @@ async fn restart(
         wait_for_exit(&predecessor, budget.predecessor_exit_ms).await,
         "previous daemon did not stop: {shutdown:?}"
     );
-    boot_roster(socket, status_path, &roster_path, &roster, status, &budget).await
+    boot_roster(
+        socket,
+        status_path,
+        &roster_path,
+        &roster,
+        origin,
+        status,
+        &budget,
+    )
+    .await
 }
 
 // A source TS manifest contains no owner identity. Only adopt one written
@@ -295,49 +338,29 @@ fn recover_prepared(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    if let Some(roster) = roster {
-        validate_recovery(&roster, socket, crate::config::version())?;
-        if let Some(hello) = live_hello {
-            let owner = identity_from_hello(hello);
-            anyhow::ensure!(
-                owner.pid == roster.supervisor.pid
-                    && owner.process_start_id == roster.supervisor.process_start_id
-                    && owner.supervisor_generation.as_deref()
-                        == Some(roster.supervisor.generation.as_str()),
-                "recovery checkpoint belongs to another predecessor"
-            );
+    if let Some(roster) = &roster {
+        validate_recovery(roster, socket, crate::config::version())?;
+    }
+    let attempt_text = match std::fs::read_to_string(attempt_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && roster.is_none() => {
+            return Ok(None);
         }
-        return Ok(Some(roster));
-    }
-    let attempt: Value = match std::fs::read(attempt_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error).context("read the recorded preparation attempt"),
     };
-    anyhow::ensure!(
-        attempt["socket"] == socket.to_string_lossy().as_ref()
-            && attempt["version"] == crate::config::version(),
-        "prepared attempt belongs to another socket or release"
-    );
-    let recorded = identity_from_hello(&attempt["hello"]);
-    anyhow::ensure!(
-        recorded.pid > 0
-            && recorded.process_start_id.is_some()
-            && recorded.supervisor_generation.is_some(),
-        "prepared attempt has no fixed predecessor identity"
-    );
-    if let Some(hello) = live_hello {
-        anyhow::ensure!(
-            identity_from_hello(hello) == recorded,
-            "prepared attempt belongs to another predecessor"
-        );
-    }
+    let attempt: Value = serde_json::from_str(&attempt_text)?;
     let text = match std::fs::read_to_string(source_path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && roster.is_none() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read the TypeScript recovery source"),
     };
     if attempt["previousDigest"] == pa_daemon::paths::hash_key(&text, 64) {
+        anyhow::ensure!(
+            roster.is_none(),
+            "checkpoint source predates its preparation attempt"
+        );
         return Ok(None);
     }
     let modified = std::fs::metadata(source_path)?
@@ -351,18 +374,23 @@ fn recover_prepared(
         modified + 1000 >= u128::from(started),
         "TypeScript recovery manifest is stale"
     );
-    let manifest: Value = serde_json::from_str(&text)?;
-    let id: UpdateId = serde_json::from_value(attempt["updateId"].clone())?;
-    let roster = super::legacy_roster::convert(
-        &manifest,
-        &attempt["hello"],
-        &id,
-        socket,
-        attempt["origin"].as_str(),
-    )?;
-    validate_recovery(&roster, socket, crate::config::version())?;
-    persist(roster_path, &serde_json::to_value(&roster)?)?;
-    Ok(Some(roster))
+    let converted = retention::reconvert(&text, &attempt_text, socket)?;
+    if let Some(hello) = live_hello {
+        anyhow::ensure!(
+            identity_from_hello(hello) == identity_from_hello(&attempt["hello"]),
+            "prepared attempt belongs to another predecessor"
+        );
+    }
+    if let Some(roster) = roster {
+        anyhow::ensure!(
+            serde_json::to_value(&roster)? == serde_json::to_value(&converted)?,
+            "recovery checkpoint differs from its source and attempt"
+        );
+        Ok(Some(roster))
+    } else {
+        persist(roster_path, &serde_json::to_value(&converted)?)?;
+        Ok(Some(converted))
+    }
 }
 
 fn validate_recovery(roster: &UpdateRoster, socket: &Path, version: &str) -> Result<()> {
@@ -381,11 +409,14 @@ async fn boot_roster(
     status_path: &Path,
     roster_path: &Path,
     roster: &UpdateRoster,
+    origin: Option<&str>,
     status: &Arc<Mutex<Value>>,
     budget: &UpdateTimeoutBudget,
 ) -> Result<()> {
     {
         let mut value = status.lock().await;
+        // Also fence direct checkpoint recovery and successful scratch cleanup.
+        retention::verify(status_path, &value["requestId"], origin, roster)?;
         value["phase"] = json!("starting_daemon");
         persist(status_path, &value)?;
     }
@@ -424,6 +455,12 @@ async fn boot_roster(
         value["phase"] = json!("complete");
     }
     if counts.failed == 0 {
+        retention::verify(
+            status_path,
+            &status.lock().await["requestId"],
+            origin,
+            roster,
+        )?;
         std::fs::remove_file(roster_path)?;
         match std::fs::remove_file(roster_path.with_extension("attempt.json")) {
             Ok(()) => {}
@@ -484,6 +521,8 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (sent, received) = tokio::sync::oneshot::channel();
         let source_copy = source.clone();
+        let sidecar = directory.path().join("status.recovery.json");
+        let sidecar_copy = sidecar.clone();
         let next_turn = json!([{"customType":"pending","content":"queued witness","display":false,"timestamp":1}]);
         let actions = json!({"formatVersion":1,"actions":[{"payload":{"kind":"turn","message":"queued action"}}]});
         let manifest = json!({"formatVersion":1,"createdAt":"2026-10-09T00:00:00Z","sessions":[{
@@ -519,6 +558,16 @@ mod tests {
                         prepare_key,
                         "TS would replay prepare instead of executing shutdown"
                     );
+                    let record: Value = serde_json::from_slice(
+                        &std::fs::read(&sidecar_copy).expect("archive before shutdown"),
+                    )
+                    .unwrap();
+                    let source_text = std::fs::read_to_string(&source_copy).unwrap();
+                    assert_eq!(record["sourceManifestText"], source_text);
+                    assert_eq!(
+                        record["sourceSHA256"],
+                        pa_daemon::paths::hash_key(&source_text, 64)
+                    );
                     sent.send(()).unwrap();
                     std::future::pending::<()>().await;
                     return;
@@ -546,6 +595,10 @@ mod tests {
         let _ = operation.await;
         let _ = server.await;
         assert!(source.exists(), "retain the TS source until adoption");
+        assert!(
+            sidecar.exists(),
+            "retain durable recovery evidence independently"
+        );
         let roster = recover_prepared(
             &checkpoint,
             &checkpoint.with_extension("attempt.json"),

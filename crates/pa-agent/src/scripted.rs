@@ -411,6 +411,7 @@ pub fn tool_call_turn_steps(
         )));
         content_index += 1;
     }
+    partial.stop_reason = StopReason::ToolUse;
     steps.push(ScriptStep::Event(Box::new(AssistantMessageEvent::Done {
         reason: StopReason::ToolUse,
         message: partial,

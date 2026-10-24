@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use pa_core::session_engine::compact_session::CompactOutcome;
+use pa_core::session_engine::compact_session::{prepare_compaction, CompactOutcome};
 use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
 use pa_core::session_engine::provider_adapter::{json_round_trip, real_stream_fn};
 use pa_core::session_engine::{PromptOptions, PromptOutcome};
@@ -141,15 +141,18 @@ async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
     std::fs::write(
         agent_dir.join("settings.json"),
         serde_json::json!({
-            "compaction": { "enabled": true, "reserveTokens": 1000, "keepRecentTokens": 10 }
+            "compaction": { "enabled": true, "reserveTokens": 1000, "keepRecentTokens": 5 }
         })
         .to_string(),
     )
     .expect("settings");
 
-    // Two plain text turns (a single turn is too short for a cut). The tiny
-    // keep-recent budget splits the second turn, so compaction needs separate
-    // history and turn-prefix replies. No `ipython` tool call anywhere.
+    // Two plain text turns (a single turn has no prior history for this cut).
+    // The last assistant is five estimated tokens, so keeping five splits the
+    // second turn: both history and its turn prefix need separate summaries.
+    // Keeping ten would also retain the four-token second user and reach the
+    // first turn, where the legitimate no-prior-history arm makes only one call.
+    // No `ipython` tool call anywhere.
     let faux = faux_session(vec![
         "history one noted".to_string(),
         "history two noted".to_string(),
@@ -185,6 +188,43 @@ async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
         assert_eq!(outcome, PromptOutcome::Prompt);
         engine.session.agent().wait_for_idle().await;
     }
+
+    // Prove the intended cut over the actual session history before any paid
+    // summary call. No fixture-manufactured messages or alternate model path.
+    let entries = engine.session.entries().await;
+    let message_indices: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| matches!(entry, FileEntry::Message { .. }).then_some(index))
+        .collect();
+    assert_eq!(message_indices.len(), 4, "two actual user/assistant turns");
+    let preparation = prepare_compaction(&entries, 5).expect("prepare the actual history");
+    assert!(preparation.cut.is_split_turn);
+    assert_eq!(preparation.cut.turn_start_index, Some(message_indices[2]));
+    assert_eq!(preparation.cut.first_kept_entry_index, message_indices[3]);
+    assert!(preparation.boundary_start <= message_indices[0]);
+    assert!(
+        preparation.boundary_start < message_indices[2],
+        "prior history is nonempty"
+    );
+    assert!(
+        message_indices[2] < message_indices[3],
+        "the split turn prefix is nonempty"
+    );
+    assert!(matches!(
+        &entries[message_indices[2]],
+        FileEntry::Message {
+            message: pa_types::session::AgentMessage::User(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &entries[message_indices[3]],
+        FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(_),
+            ..
+        }
+    ));
 
     let compacted = tokio::time::timeout(
         Duration::from_secs(15),

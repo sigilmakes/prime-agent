@@ -29,6 +29,13 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
+    let fixture = crate::agent_engine::tests::abort_fixture::AbortFixture::install(
+        worker
+            .agent_engine
+            .as_ref()
+            .expect("the worker owns the real agent engine"),
+        crate::agent_engine::tests::abort_fixture::AbortCase::BeforeStream,
+    );
     let created = worker
         .dispatch(
             "create",
@@ -78,9 +85,12 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    // Let the admitted turn reach the provider: the held reply keeps the fetch
-    // in flight, so the abort lands mid-provider-wait and settles the aborted row.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // The actual second provider future is held until cancellation. A context
+    // row or a wall-clock delay does not prove that this request has started.
+    fixture
+        .admitted()
+        .await
+        .expect("the continuation reached its provider");
     let abort = worker.dispatch("abort", &json!({})).await;
     assert!(abort.success, "abort failed: {abort:?}");
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;

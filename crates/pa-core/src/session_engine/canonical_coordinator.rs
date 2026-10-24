@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 mod epoch;
 pub use epoch::{
-    CanonicalAppendGrant, CanonicalClosing, CanonicalDrainView, CanonicalEpoch,
-    CanonicalProviderStep, CanonicalRetiredEpoch,
+    CanonicalAdmittedTool, CanonicalAppendGrant, CanonicalClosing, CanonicalDrainView,
+    CanonicalEpoch, CanonicalOwnerEpoch, CanonicalOwnerRun, CanonicalProviderStep,
+    CanonicalRetiredEpoch, MetadataAction,
 };
 
 use crate::session::canonical::{

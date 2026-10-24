@@ -2,6 +2,7 @@
 //! The worker owns the session - the append-only store, the queue lanes, event sequencing, and turn
 //! execution.
 
+mod canonical_live;
 mod config;
 mod context_selection;
 mod env;

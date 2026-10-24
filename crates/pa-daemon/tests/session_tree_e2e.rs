@@ -584,11 +584,16 @@ fn session_tree_commands_over_the_direct_worker_link() {
     );
     let flat = tree["data"]["flatNodes"].as_array().expect("flatNodes");
     let entry_of = |content: &str, role: &str| {
+        let expected_content = if role == "assistant" {
+            serde_json::json!([{ "type": "text", "text": content }])
+        } else {
+            serde_json::json!(content)
+        };
         flat.iter()
             .find(|node| {
                 node["entry"]["type"] == "message"
                     && node["entry"]["message"]["role"] == role
-                    && node["entry"]["message"]["content"].as_str() == Some(content)
+                    && node["entry"]["message"]["content"] == expected_content
             })
             .map_or_else(
                 || panic!("the {role} entry for {content}"),

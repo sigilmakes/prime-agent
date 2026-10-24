@@ -177,7 +177,12 @@ impl Worker {
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
-                if let Some(store) = core.store.as_mut() {
+                if let Some(store) = core
+                    .store
+                    .as_mut()
+                    .filter(|store| !store.is_canonical_bound())
+                {
+                    // A bound live Core switch has already committed this intent.
                     let _ = store.persist_entry(
                         "model_change",
                         json!({ "provider": provider, "modelId": model_id }),
@@ -383,25 +388,33 @@ impl Worker {
         let effective = effective_service_tier(Some(tier), self.engine.as_ref()).unwrap_or(tier);
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
-            // The engine's request slot moves under the SAME lock as the core publish:
-            // a concurrent turn must never read the new state with the old-tier target.
+            let preference_changed = core.service_tier != Some(tier);
+            if preference_changed {
+                if let Some(store) = core.store.as_mut() {
+                    if let Err(error) = store.persist_owner_metadata(
+                        "service_tier_change",
+                        json!({ "serviceTier": tier }),
+                    ) {
+                        return response_failure(
+                            None,
+                            "set_service_tier",
+                            &error.to_string(),
+                            None,
+                        );
+                    }
+                }
+            }
+            // The actual owner has staged its exact durable row and blocks the
+            // next projection until Core adopts and ACKs the certified checkpoint.
             self.engine.configure_service_tier(Some(effective));
-            let preference = core.service_tier;
             let previous_active = core.active_service_tier;
             core.service_tier = Some(tier);
             core.active_service_tier = Some(effective);
-            let effective_changed = previous_active != Some(effective);
-            let preference_changed = preference != Some(tier);
-            let mut cwd = core.cwd.clone();
-            if preference_changed {
-                if let Some(store) = core.store.as_mut() {
-                    // The durable row keeps the REQUESTED tier, not the clamped one.
-                    let _ =
-                        store.persist_entry("service_tier_change", json!({ "serviceTier": tier }));
-                }
-                cwd.clone_from(&core.cwd);
-            }
-            (preference_changed, effective_changed, cwd)
+            (
+                preference_changed,
+                previous_active != Some(effective),
+                core.cwd.clone(),
+            )
         };
         if preference_changed && engine_supports_service_tier(self.engine.as_ref(), tier) {
             // Persist the default only when the model supports the tier.

@@ -224,7 +224,13 @@ impl AgentSession {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .drain(..)
-                .filter_map(|row| session_message_to_loop(&SessionAgentMessage::Custom(row)))
+                .filter_map(|row| {
+                    let mut message = session_message_to_loop(&SessionAgentMessage::Custom(row))?;
+                    if let pa_agent::types::AgentMessage::Custom(custom) = &mut message {
+                        custom.delivery = pa_agent::types::CustomMessageDelivery::Context;
+                    }
+                    Some(message)
+                })
                 .collect(),
         )
     }

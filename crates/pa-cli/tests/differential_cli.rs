@@ -447,6 +447,119 @@ fn sandbox(prefix: &str) -> PathBuf {
     base
 }
 
+// These are declared native contracts, not stream fallbacks. Help snapshots are
+// derived from each command registry and its formatter. Native update/package
+// behavior is documented in docs/legacy-upgrade-contract.md. args.rs tests pin
+// bounded u32 and unknown-option validation; model list declares only [search],
+// not a --json option. ACP shares the native non-interactive @file rejection.
+// Installed TS registry: prime-agent 0.9.8; main.js SHA256
+// e917d025aa3ab1d3d250842b56d0cd8bdf9503de19475e134d8f64505a600192.
+fn declared_output_matches(
+    output: &InvocationOutput,
+    exit: i32,
+    stdout: &str,
+    stderr: &str,
+    sandbox_roots: &[&Path],
+) -> bool {
+    let normalize_contract = |text: &str| {
+        let mut text = text.to_owned();
+        for root in sandbox_roots {
+            text = text.replace(&root.display().to_string(), "<SANDBOX>");
+        }
+        normalize_versions(&normalize_docs_paths(&text))
+    };
+    output.exit_code == Some(exit)
+        && if stdout.is_empty() {
+            output.stdout.is_empty()
+        } else {
+            normalize_contract(&output.stdout) == normalize_contract(stdout)
+        }
+        && if stderr.is_empty() {
+            output.stderr.is_empty()
+        } else {
+            normalize_contract(&output.stderr) == normalize_contract(stderr)
+        }
+}
+
+fn declared_native_contract(
+    case: &[&str],
+    ts: &InvocationOutput,
+    native: &InvocationOutput,
+    roots: &[&Path],
+) -> Option<bool> {
+    match case {
+        ["--help" | "-h"] => Some(
+            declared_output_matches(ts, 0, "", include_str!("fixtures/native-cli-contract/ts-help.txt"), roots)
+                && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-help.txt"), "", roots),
+        ),
+        ["help"] => Some(
+            declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-help.txt"), "", roots)
+                && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-help.txt"), "", roots),
+        ),
+        ["help", "package"] => Some(
+            declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-package-help.txt"), "", roots)
+                && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-package-help.txt"), "", roots),
+        ),
+        ["help", "update"] => Some(
+            declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-update-help.txt"), "", roots)
+                && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-update-help.txt"), "", roots),
+        ),
+        ["--autonomous-max-turns", "0" | "abc"] => Some(
+            declared_output_matches(ts, 1, "", "Error: --autonomous-max-turns must be a positive integer\n", roots)
+                && declared_output_matches(native, 1, "", "Error: --autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)\n", roots),
+        ),
+        ["--mode", "rpc" | "daemon", "@file.txt"] => Some(
+            declared_output_matches(ts, 1, "", "Error: @file arguments are not supported in RPC or daemon mode\n", roots)
+                && declared_output_matches(native, 1, "", "Error: @file arguments are not supported in RPC, daemon, or ACP mode\n", roots),
+        ),
+        ["model", "list", "--json"] => Some(
+            declared_output_matches(ts, 0, "", "No models available. Use /login to log into a provider via OAuth or API key. See:\n  <PACKAGE_DOCS>/docs/providers.md\n  <PACKAGE_DOCS>/docs/models.md\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Unknown option: --json\n", roots),
+        ),
+        ["update", "--self"] | ["update", "--force", "--self"] => Some(
+            declared_output_matches(ts, 1, "", "Error: An update target is no longer needed.\nUse \"prime-agent update [--force]\".\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Unknown option for update: --self\nRun \"prime-agent help update\" for usage.\n", roots),
+        ),
+        ["update", "package"] => Some(
+            declared_output_matches(ts, 1, "", "Error: Package updates moved to the package command.\nUse \"prime-agent package update [source]\".\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Unknown option for update: package\nRun \"prime-agent help update\" for usage.\n", roots),
+        ),
+        ["update", "--extensions"] => Some(
+            declared_output_matches(ts, 1, "", "Error: Package updates moved to the package command.\nUse \"prime-agent package update [source]\".\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Unknown option for update: --extensions\nRun \"prime-agent help update\" for usage.\n", roots),
+        ),
+        ["update", "--self", "package"] => Some(
+            declared_output_matches(ts, 1, "", "Error: Prime Agent and package updates are now separate.\nRun \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Unknown option for update: --self\nRun \"prime-agent help update\" for usage.\n", roots),
+        ),
+        ["update", "self", "pkg"] => Some(
+            declared_output_matches(ts, 1, "", "Error: Prime Agent and package updates are now separate.\nRun \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Unknown option for update: self\nRun \"prime-agent help update\" for usage.\n", roots),
+        ),
+        ["package", "update", "--self" | "--force"] | ["package", "update", "--extension", "x", "--self" | "y"] | ["package", "update", "--extensions", "--rollback"] => Some(
+            declared_output_matches(ts, 1, "", "Error: Package updates accept only an optional source. Use \"prime-agent update --force\" to update Prime Agent.\n", roots)
+                && declared_output_matches(native, 1, "", "Error: Package updates accept only an optional source. Use \"prime-agent update\" to update Prime Agent.\n", roots),
+        ),
+        _ => None,
+    }
+}
+
+// main.js takes over stdout only after early public-command dispatch. These
+// exact late rewrite/flag cases use TS stderr and native stdout. Early public
+// commands retain the original two-stream comparison below.
+fn declared_late_console_case(case: &[&str]) -> bool {
+    matches!(
+        case,
+        ["--version" | "-v"]
+            | ["model", "list"]
+            | [
+                "model",
+                "list",
+                "gpt" | "claude" | "z-ai" | "zzz-nomatch-xyz"
+            ]
+    )
+}
+
 #[test]
 fn differential_corpus_matches_ts_binary() {
     let Some(ts) = ts_binary() else {
@@ -462,11 +575,24 @@ fn differential_corpus_matches_ts_binary() {
     for case in CORPUS {
         let ts_out = run(&ts, case, &ts_sandbox);
         let rs_out = run(&rust, case, &rs_sandbox);
-        let ok = ts_out.exit_code == rs_out.exit_code
-            && normalize(&ts_out.stdout, &sandbox_roots)
-                == normalize(&rs_out.stdout, &sandbox_roots)
-            && normalize(&ts_out.stderr, &sandbox_roots)
-                == normalize(&rs_out.stderr, &sandbox_roots);
+        let ok = if let Some(matches) =
+            declared_native_contract(case, &ts_out, &rs_out, &sandbox_roots)
+        {
+            matches
+        } else if declared_late_console_case(case) {
+            ts_out.exit_code == Some(0)
+                && rs_out.exit_code == Some(0)
+                && ts_out.stdout.is_empty()
+                && rs_out.stderr.is_empty()
+                && normalize(&ts_out.stderr, &sandbox_roots)
+                    == normalize(&rs_out.stdout, &sandbox_roots)
+        } else {
+            ts_out.exit_code == rs_out.exit_code
+                && normalize(&ts_out.stdout, &sandbox_roots)
+                    == normalize(&rs_out.stdout, &sandbox_roots)
+                && normalize(&ts_out.stderr, &sandbox_roots)
+                    == normalize(&rs_out.stderr, &sandbox_roots)
+        };
         if !ok {
             failures.push(format!(
                 "argv: {:?}\n  ts exit {:?} rs exit {:?}\n  ts stdout: {:?}\n  rs stdout: {:?}\n  ts stderr: {:?}\n  rs stderr: {:?}",
@@ -610,16 +736,19 @@ fn differential_session_export_matches_ts_binary() {
         &["session", "export", fixture, "out.html"],
         &rs_sandbox,
     );
-    assert_eq!(ts_out.exit_code, rs_out.exit_code, "exit codes");
-    assert_eq!(
-        normalize(&ts_out.stdout, &sandbox_roots),
-        normalize(&rs_out.stdout, &sandbox_roots),
-        "stdout"
+    assert_eq!(ts_out.exit_code, Some(0), "TS export exit");
+    assert_eq!(rs_out.exit_code, Some(0), "native export exit");
+    // session export rewrites to --export, after TS main's stdout takeover.
+    // Its declared TS payload is stderr; native informational output is stdout.
+    assert!(ts_out.stdout.is_empty(), "TS export stdout must be unused");
+    assert!(
+        rs_out.stderr.is_empty(),
+        "native export stderr must be unused"
     );
     assert_eq!(
         normalize(&ts_out.stderr, &sandbox_roots),
-        normalize(&rs_out.stderr, &sandbox_roots),
-        "stderr"
+        normalize(&rs_out.stdout, &sandbox_roots),
+        "declared export payload"
     );
     assert!(
         rs_out.stdout.contains("Exported to: out.html"),
@@ -654,6 +783,15 @@ fn differential_session_export_matches_ts_binary() {
     let ts_missing = run(&ts, &["session", "export", "nope.jsonl"], &ts_sandbox);
     let rs_missing = run(&rust, &["session", "export", "nope.jsonl"], &rs_sandbox);
     assert_eq!(ts_missing.exit_code, rs_missing.exit_code);
+    assert_eq!(ts_missing.exit_code, Some(1), "missing export must fail");
+    assert!(
+        ts_missing.stdout.is_empty(),
+        "TS missing export has no stdout"
+    );
+    assert!(
+        rs_missing.stdout.is_empty(),
+        "native missing export has no stdout"
+    );
     assert_eq!(
         normalize(&ts_missing.stderr, &sandbox_roots),
         normalize(&rs_missing.stderr, &sandbox_roots),

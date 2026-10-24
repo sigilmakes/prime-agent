@@ -32,6 +32,9 @@ pub(crate) mod canonical_adapter;
 mod canonical_io;
 #[cfg(test)]
 mod canonical_io_seam_tests;
+mod canonical_live;
+#[cfg(test)]
+mod canonical_live_tests;
 pub(crate) mod canonical_raw;
 pub(crate) mod canonical_revision;
 #[cfg(test)]
@@ -174,6 +177,10 @@ pub struct SessionFile {
     /// changes. A turn that writes content must leave this at zero, so a path
     /// that writes a real row without an epoch moves the count instead of hiding.
     pub(crate) rows_written_without_epoch: u64,
+    /// Created only at the actual writer lease attachment boundary.
+    canonical_live: Option<canonical_live::LiveCanonicalOwner>,
+    canonical_delivered: std::collections::VecDeque<String>,
+    canonical_delivered_custom: std::collections::VecDeque<String>,
 }
 
 #[derive(Debug, Clone)]

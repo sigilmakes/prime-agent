@@ -240,6 +240,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         engine.set_prompt_context_boundary(boundary);
         let mut accepted = false;
         let mut model_user_content = None;
+        let mut settled_messages = Vec::new();
         let mut result = None;
         engine.run_prompt(
             prompt_index,
@@ -271,19 +272,15 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                             .store
                             .as_mut()
                             .unwrap()
-                            .persist_entry("message", json!({ "message": message }))
-                            .expect("worker persists accepted prompt");
+                            .persist_delivered_user(message)
+                            .expect("worker durably stages actual accepted prompt");
                     }
                     EngineEvent::AssistantMessage(message)
                     | EngineEvent::ToolResultMessage(message) => {
-                        store
-                            .lock()
-                            .unwrap()
-                            .store
-                            .as_mut()
-                            .unwrap()
-                            .persist_entry("message", json!({ "message": message }))
-                            .expect("worker persists settled message");
+                        // This synchronous callback runs inside Tokio. Capture
+                        // publication; inspect its real receipt asynchronously
+                        // after run_prompt returns, never append a second row.
+                        settled_messages.push(message);
                     }
                     EngineEvent::AgentEnd { messages } => {
                         model_user_content = Some(
@@ -308,7 +305,53 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             Some(vec![expected_content.clone()]),
             "each run emits exactly its own admitted prompt/image pair"
         );
-        let core = engine.session.blocking_lock().clone().expect("core built");
+        let (core, terminal_ids) = engine.runtime.block_on(async {
+            let core = engine.session.lock().await.clone().expect("core built");
+            let persistence = core.session.shared_persistence();
+            let terminal_ids = {
+                let inner = persistence.lock().await;
+                assert!(inner.canonical_binding().is_some());
+                inner
+                    .retained_entries()
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry,
+                            pa_types::session::FileEntry::Message {
+                                message: pa_types::session::AgentMessage::Assistant(_)
+                                    | pa_types::session::AgentMessage::ToolResult(_),
+                                ..
+                            }
+                        )
+                    })
+                    .map(|entry| entry.id().expect("native canonical row ID").to_owned())
+                    .collect::<Vec<_>>()
+            };
+            (core, terminal_ids)
+        });
+        assert_eq!(
+            settled_messages.len(),
+            1,
+            "one terminal publication per turn"
+        );
+        assert_eq!(
+            terminal_ids.len(),
+            prompt_index + 1,
+            "each settled turn must have exactly one canonical terminal"
+        );
+        {
+            let owner = store.lock().unwrap();
+            let row = owner
+                .store
+                .as_ref()
+                .unwrap()
+                .entry(terminal_ids.last().unwrap())
+                .expect("SDK receipt ID exists in actual owner");
+            assert_eq!(
+                row.fields["message"], settled_messages[0],
+                "published terminal matches its actual canonical receipt row"
+            );
+        }
         let live_content = engine.runtime.block_on(async {
             core.session
                 .agent()
@@ -372,4 +415,143 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             "the worker-owned durable branch remains single-copy"
         );
     }
+}
+
+/// The helper poll proves the existing gate contract even with a cached SDK.
+/// The real prompt below still persists through the actual canonical owner.
+#[test]
+fn cached_sdk_acceptance_waits_for_build_gate_before_user_receipt() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(&json!({"responses":["gate complete"]}), 1024);
+    let path = dir.path().join("gate-session.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    engine.set_session_file(path);
+    let owner = own_canonical_store(&engine, store);
+    let model = engine.session_model().unwrap();
+    engine.runtime.block_on(async {
+        engine.ensure_core_session_async(&model).await.unwrap();
+        assert!(engine.session.lock().await.is_some());
+        let building = engine.session_build.lock().await;
+        let mut admission = Box::pin(engine.prompt_acceptance_build_guard());
+        tokio::select! {
+            biased;
+            _ = &mut admission => panic!("cached SDK bypassed active build/adoption gate"),
+            () = std::future::ready(()) => {}
+        }
+        drop(building);
+        drop(admission.await.unwrap());
+    });
+    let mut accepted = 0;
+    let mut done = None;
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            message: "gate-protected prompt".to_owned(),
+            batch: Vec::new(),
+            images: Vec::new(),
+            source: "user".to_owned(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            match event {
+                EngineEvent::UserMessage(message) => {
+                    owner
+                        .lock()
+                        .unwrap()
+                        .store
+                        .as_mut()
+                        .unwrap()
+                        .persist_delivered_user(message)
+                        .unwrap();
+                    accepted += 1;
+                }
+                EngineEvent::Done(result) => done = Some(result),
+                _ => {}
+            }
+            true
+        },
+    );
+    assert_eq!(accepted, 1);
+    assert_eq!(done, Some(Ok(())));
+    assert_eq!(
+        owner
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .entries()
+            .iter()
+            .filter(|entry| entry.type_ == "message" && entry.fields["message"]["role"] == "user")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn refused_canonical_model_and_thinking_switches_do_not_publish_new_state() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(&json!({"responses":["unused"]}), 1024);
+    let path = dir.path().join("refused-switch.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    engine.set_session_file(path);
+    let owner = own_canonical_store(&engine, store);
+    let model = engine.session_model().unwrap();
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    let previous_selection = engine.current_selection();
+    let previous_thinking = engine.effective_thinking();
+    let previous_target = engine.provider_target.read().unwrap().clone().unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .store
+        .as_mut()
+        .unwrap()
+        .invalidate_canonical_owner()
+        .unwrap();
+
+    assert!(!engine.switch_thinking_level(pa_types::ai::ModelThinkingLevel::High));
+    assert_eq!(
+        engine.current_selection().thinking,
+        previous_selection.thinking
+    );
+    assert_eq!(engine.effective_thinking(), previous_thinking);
+    assert!(!engine.switch_model(EngineModelSelection {
+        provider: Some(model.provider),
+        model: Some(model.id),
+        api_key: None,
+        thinking: None,
+    }));
+    let target = engine.provider_target.read().unwrap().clone().unwrap();
+    assert_eq!(target.model.provider, previous_target.model.provider);
+    assert_eq!(target.model.id, previous_target.model.id);
+    assert!(
+        target.api_key == previous_target.api_key,
+        "refusal changed request credentials"
+    );
+    assert!(
+        target.headers == previous_target.headers,
+        "refusal changed request headers"
+    );
+    assert_eq!(
+        engine.current_selection().provider,
+        previous_selection.provider
+    );
+    assert_eq!(engine.current_selection().model, previous_selection.model);
+    assert_eq!(engine.effective_thinking(), previous_thinking);
 }

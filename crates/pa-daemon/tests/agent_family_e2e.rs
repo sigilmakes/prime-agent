@@ -202,6 +202,80 @@ impl Client {
     }
 }
 
+/// Fixed-shape progress evidence: never print message, tool, or credential bodies.
+fn child_phase(client: &mut Client, active_session_id: &str) -> Value {
+    let wire: Value = serde_json::from_str(&client.messages("gm-child-phase", active_session_id))
+        .expect("child message response JSON");
+    let rows = wire["messages"].as_array().expect("child messages array");
+    let role_count = |role: &str| {
+        rows.iter()
+            .filter(|row| row["role"].as_str() == Some(role))
+            .count()
+    };
+    let tool_calls = rows
+        .iter()
+        .filter(|row| row["role"] == "assistant")
+        .filter_map(|row| row["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "toolCall")
+        .count();
+    json!({
+        "acceptedAgentMessages": rows.iter().filter(|row| row["customType"] == "agent_message").count(),
+        "assistants": role_count("assistant"),
+        "toolCalls": tool_calls,
+        "toolResults": role_count("toolResult"),
+        "assistantErrors": rows.iter().filter(|row| row["role"] == "assistant" && row["stopReason"] == "error").count(),
+        "toolErrors": rows.iter().filter(|row| row["role"] == "toolResult" && row["isError"] == true).count(),
+    })
+}
+
+/// Forward only the producer's finite static grammar, never an error detail or raw log tail.
+/// Read the actual worker without attaching or changing its kernel/passivation policy.
+fn owning_worker_phase(client: &mut Client, active_session_id: &str, agent_dir: &Path) -> Value {
+    client.send_command(
+        "owning-worker-phase",
+        &json!({ "type": "get_connection_state", "activeSessionId": active_session_id }),
+    );
+    let response = client.read_response("owning-worker-phase");
+    let state = &response["data"];
+    let phase = match state["sessionActions"]["active"]["phase"].as_str() {
+        Some("preparing") => "preparing",
+        Some("committing") => "committing",
+        Some("running") => "running",
+        None => "no_active_action",
+        Some(_) => "other_active_phase",
+    };
+    let log_path = agent_dir
+        .join("logs")
+        .join(format!("worker-{active_session_id}.stderr.log"));
+    let log = std::fs::read_to_string(log_path).ok();
+    json!({
+        "stateReadOk": response["success"] == true,
+        "isStreaming": state["isStreaming"].as_bool(),
+        "isCompacting": state["isCompacting"].as_bool(),
+        "queuedCount": state["sessionActions"]["queuedCount"].as_u64(),
+        "activePhase": phase,
+        "workerLogPresent": log.is_some(),
+        "workerPanic": log.as_ref().is_some_and(|log| log.contains("panicked at")),
+        "fauxExhausted": log.as_ref().is_some_and(|log| log.contains("No more faux responses queued")),
+        "canonicalUnresolved": log.as_ref().is_some_and(|log| log.contains("Canonical source is unresolved")),
+    })
+}
+
+fn recorded_cell_phase(dir: &Path, name: &str) -> &'static str {
+    if dir.join(format!("{name}.error")).exists() {
+        "error_recorded"
+    } else if let Ok(receipt) = std::fs::read_to_string(dir.join(format!("{name}.json"))) {
+        if serde_json::from_str::<Value>(&receipt).is_ok() {
+            "receipt_recorded"
+        } else {
+            "receipt_incomplete"
+        }
+    } else {
+        "no_record"
+    }
+}
+
 /// The kernel Python with the runtime installed; the child's reply cell needs it. Skipped (with a
 /// note) without a live install.
 fn kernel_python() -> Option<PathBuf> {
@@ -312,8 +386,11 @@ fn read_recorded(dir: &Path, name: &str) -> Value {
 kernel error record: {}; daemon log tail: {}",
             dir.display(),
             receipt_listing(dir),
-            std::fs::read_to_string(dir.join(format!("{name}.error")))
-                .unwrap_or_else(|_| "<none>".to_string()),
+            std::fs::read_to_string(dir.join(format!(
+                "{}.error",
+                name.strip_suffix(".json").unwrap_or(name)
+            )))
+            .unwrap_or_else(|_| "<none>".to_string()),
             daemon_log_tail(dir)
         );
         std::thread::sleep(Duration::from_millis(50));
@@ -529,8 +606,9 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             }
             assert!(
                 Instant::now() < card_deadline,
-                "the parent never rendered the child's reply to the {selector} send: {}",
-                client.messages("gm-parent", &parent_active_session_id)
+                "the parent never rendered the child's reply to the {selector} send; child phase: {}; reply cell: {}",
+                child_phase(&mut client, &child_active_session_id),
+                recorded_cell_phase(&receipts_dir, "child-reply")
             );
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -828,7 +906,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     client.wait_idle("w-parent-a-cells", parent_a_active);
     let _parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
 
-    let drive_kid_turn = |client: &mut Client, id: &str, message: &str| {
+    let drive_kid_turn = |client: &mut Client, id: &str, message: &str| -> Result<(), Value> {
+        let deadline = Instant::now() + Duration::from_secs(30);
         client.send_command(
             id,
             &json!({
@@ -842,13 +921,47 @@ async fn family_edges_never_cross_families_end_to_end() {
         let response = client.read_response(id);
         assert_eq!(response["success"], true, "send {id} failed: {response}");
         client.wait_idle(id, kid_a_active);
+        let cell = match id {
+            "to-kid-1" => "kid-sibling-cross",
+            "to-kid-2" => "kid-parent-reply",
+            "to-kid-3" => "kid-broadcast",
+            "to-kid-4" => "kid-observe",
+            _ => unreachable!("fixed kid-drive phase"),
+        };
+        loop {
+            let phase = recorded_cell_phase(&receipts_dir, cell);
+            if matches!(phase, "receipt_recorded" | "error_recorded") {
+                eprintln!(
+                    "family fixed cell phase {cell}: {}; receipt: {phase}",
+                    child_phase(client, kid_a_active),
+                );
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(json!({
+                    "cell": cell,
+                    "receipt": phase,
+                    "child": child_phase(client, kid_a_active),
+                    "owner": owning_worker_phase(client, kid_a_active, &agent_dir),
+                }));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
     };
     for (id, message) in [
         ("to-kid-1", "drive the sibling probe"),
         ("to-kid-2", "drive the parent reply"),
         ("to-kid-3", "drive the broadcast"),
     ] {
-        drive_kid_turn(&mut client, id, message);
+        if let Err(phase) = drive_kid_turn(&mut client, id, message) {
+            let retained = dir.path().to_path_buf();
+            std::mem::forget(dir);
+            panic!(
+                "family fixed cell failed: {phase}; private fixture retained at {}",
+                retained.display(),
+            );
+        }
     }
 
     // The grandchild: a worker spawned through a registry bound to KID-A's durable identity.
@@ -892,7 +1005,14 @@ async fn family_edges_never_cross_families_end_to_end() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
-    drive_kid_turn(&mut client, "to-kid-4", "drive the kid observe");
+    if let Err(phase) = drive_kid_turn(&mut client, "to-kid-4", "drive the kid observe") {
+        let retained = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        panic!(
+            "family fixed cell failed: {phase}; private fixture retained at {}",
+            retained.display(),
+        );
+    }
     // The cross-family sibling probe fails closed: not addressable by name.
     let Ok(crossed) = std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) else {
         let transcript = client.messages("gm-kid-debug", kid_a_active);

@@ -382,8 +382,9 @@ mod tests {
             std::path::Path::new("/tmp").join(&tag)
         };
         let mut dir = base;
-        // Keep at least one byte of room for a file name after the separator.
-        while dir.as_os_str().len() + 22 <= target {
+        // Leave a separator and a nonempty final component after each 21-byte step.
+        // An empty component adds a trailing slash that a later join normalizes away.
+        while dir.as_os_str().len() + 23 <= target {
             dir = dir.join("d".repeat(20));
         }
         // Pad one final component: appending adds a separator plus the name.

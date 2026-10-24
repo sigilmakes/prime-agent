@@ -81,22 +81,33 @@ impl AgentSessionEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
-        // Admit ONE provider step for this attempt, BEFORE the prompt is issued:
-        // one attempt is one provider step, and the assistant row's grant is sealed
-        // to it. The subscriber closure below captures no slot - a clone there would
-        // be a second owner. No epoch attached is not an error (the turn runs
-        // uncovered and the counter moves); a refusal under a live epoch is.
-        if let Some(admission) = self
-            .canonical_step
+        // Live canonical sessions admit each ACTUAL model callback in Core,
+        // not this whole prompt attempt. Keep legacy standalone admission only.
+        let live_canonical = self
+            .session
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            admission.admit(std::sync::Arc::new(
-                crate::session_store::canonical_adapter::ProviderStepIdentity,
-            ))?;
+            .await
+            .as_ref()
+            .is_some_and(|engine| engine.session.has_canonical_live_owner());
+        if !live_canonical {
+            if let Some(admission) = self
+                .canonical_step
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                admission.admit(std::sync::Arc::new(
+                    crate::session_store::canonical_adapter::ProviderStepIdentity,
+                ))?;
+            }
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
+        // AgentStart is an awaited listener call after the run owns its abort
+        // controller. Hold it until this driver transfers the delivery's cancel
+        // flag: aborting before registration is a no-op, and returning before
+        // registration loses the accepted turn's durable outcome.
+        let (registration_tx, mut registration_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
         // Goal usage accounting at the message_end hook: each settled non-error
         // assistant message records its token delta, from the engine mirror.
         let goal_runtime = self.goal_runtime.lock().expect("goal runtime lock").clone();
@@ -107,6 +118,7 @@ impl AgentSessionEngine {
         let boundary_passed = std::sync::Arc::clone(boundary_passed);
         let subscription = {
             let tx = tx.clone();
+            let registration_tx = registration_tx.clone();
             let pending_model_changes = pending_model_changes.clone();
             let boundary_passed = std::sync::Arc::clone(&boundary_passed);
             let autonomous_state = std::sync::Arc::clone(&self.autonomous);
@@ -119,6 +131,7 @@ impl AgentSessionEngine {
             agent
                 .subscribe(move |event, _signal| {
                     let tx = tx.clone();
+                    let registration_tx = registration_tx.clone();
                     let pending_model_changes = pending_model_changes.clone();
                     let boundary_passed = std::sync::Arc::clone(&boundary_passed);
                     let autonomous_state = std::sync::Arc::clone(&autonomous_state);
@@ -127,6 +140,14 @@ impl AgentSessionEngine {
                     let goal_budget_crossed = goal_budget_crossed.clone();
                     Box::pin(async move {
                         use pa_agent::types::AgentEvent;
+                        if matches!(event, AgentEvent::AgentStart) {
+                            let (release, released) = tokio::sync::oneshot::channel();
+                            if registration_tx.send(release).is_ok() {
+                                // A dropped driver drops the release sender too: no
+                                // listener remains parked after forwarding fails.
+                                let _ = released.await;
+                            }
+                        }
                         if let AgentEvent::MessageEnd {
                             message:
                                 pa_agent::types::AgentMessage::Standard(
@@ -137,8 +158,10 @@ impl AgentSessionEngine {
                             if let Some(message) =
                                 json_round_trip::<_, pa_types::ai::AssistantMessage>(assistant)
                             {
-                                let mut state = autonomous_state.lock().await;
-                                autonomous_driver.account_message(&mut state, &message);
+                                {
+                                    let mut state = autonomous_state.lock().await;
+                                    autonomous_driver.account_message(&mut state, &message);
+                                }
                                 // Goal accounting: only turns neither errors
                                 // nor aborted spend the budget, only while
                                 // active.
@@ -148,19 +171,16 @@ impl AgentSessionEngine {
                                         pa_types::ai::StopReason::Error
                                             | pa_types::ai::StopReason::Aborted
                                     ) {
-                                        let mut driver = handles.driver.lock().await;
-                                        let mut session = handles.session.lock().await;
-                                // The timestamp is the double-counting guard identity (no
-                                // in-process ids).
                                         let message_id = format!("a-{}", message.timestamp);
-                                        // A budget crossing moves the goal to
-                                        // `budget_limited` (the wrapper publishes
-                                        // the `goal_update`; the boundary mints
-                                        // the wrap-up steer); a failed persist
-                                        // only warns.
-                                        match driver
-                                            .record_assistant_usage(&mut session, &message_id, &message.usage)
-                                        {
+                                        let usage = message.usage.clone();
+                                        // The goal candidate is published only after the
+                                        // canonical receipt ACK. No SDK/driver lock
+                                        // remains held across the owner callback.
+                                        match pa_core::session_engine::goal_driver::persist_goal_mutation(
+                                            &handles.driver,
+                                            &handles.session,
+                                            move |driver, drafts| driver.record_assistant_usage(drafts, &message_id, &usage),
+                                        ).await {
                                             Ok(
                                                 pa_core::session_engine::goal_driver::UsageOutcome::BudgetReached,
                                             ) => {
@@ -346,15 +366,8 @@ impl AgentSessionEngine {
         // hands each streamed event to `emit` the moment it arrives (buffering
         // made clients render a turn as one final batch).
         let prompt = prompt.clone();
-        // The same admission consult as [`Self::run_model_turn`]'s, at the
-        // admission future's head: the whole [pickup, registration] window
-        // honours the delivery's cancel flag.
-        let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
+        let abort_requested = aborted;
         let mut admitted = std::pin::pin!(async {
-            if aborted() {
-                abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
-                return Ok(());
-            }
             if first_attempt {
                 // The session lock covers the clone only: holding it across
                 // the turn serialized every client read seam (the 2026-09-22
@@ -413,6 +426,12 @@ impl AgentSessionEngine {
         let mut settled = false;
         loop {
             tokio::select! {
+                Some(release) = registration_rx.recv() => {
+                    if abort_requested() {
+                        agent.abort();
+                    }
+                    let _ = release.send(());
+                }
                 event = rx.recv() => {
                     match event {
                         Some(event) => {
@@ -457,12 +476,12 @@ impl AgentSessionEngine {
         if aborted {
             return Ok(TurnOnce::Aborted);
         }
-        // The admission consult fired: the turn never started — the aborted
-        // outcome, never an admission error the retry driver would re-issue.
-        if abort_raced_admission.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(TurnOnce::Aborted);
-        }
         if let Some(error) = admission_error {
+            // A cancellation latched at registration settles through the normal
+            // lifecycle failure row, not through provider failure/retry policy.
+            if pa_agent::abort::is_abort_error(&error) {
+                return Ok(TurnOnce::Aborted);
+            }
             return Err(anyhow::anyhow!("{error:#}"));
         }
         let state = agent.state().await;

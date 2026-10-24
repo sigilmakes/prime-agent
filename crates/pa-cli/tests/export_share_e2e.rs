@@ -171,7 +171,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
 /// A stub `gh` binary: `auth status` succeeds, `gist create` requires the
 /// upload file and prints a gist URL. No upload ever leaves the box.
 fn write_stub_gh(dir: &Path) {
-    let script = r#"#!/bin/bash
+    let script = r#"#!/bin/sh
 case "$1" in
   auth) exit 0 ;;
   gist)

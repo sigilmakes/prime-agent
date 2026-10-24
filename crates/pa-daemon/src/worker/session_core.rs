@@ -106,12 +106,18 @@ pub(crate) struct SessionCore {
 }
 
 impl SessionCore {
-    /// The step channel for the next turn: the store's attached epoch (if any) plus
-    /// this core's slot. `None` epoch is the covered-by-counter path, not an error.
+    /// The legacy standalone step channel for the next turn. A live owner admits
+    /// the actual provider callback in Core, so this unused legacy channel must
+    /// not retain its previous serving epoch across the next ordered boundary.
+    /// Without an epoch, standalone writes remain covered by their counter.
     pub(crate) fn canonical_step_admission(
         &self,
     ) -> crate::session_store::canonical_adapter::CanonicalStepAdmission {
-        let epoch = self.store.as_ref().and_then(|store| store.epoch.as_ref());
+        let epoch = self
+            .store
+            .as_ref()
+            .filter(|store| !store.is_canonical_bound())
+            .and_then(|store| store.epoch.as_ref());
         crate::session_store::canonical_adapter::CanonicalStepAdmission::new(
             epoch.map(|handle| std::sync::Arc::clone(&handle.0)),
             std::sync::Arc::clone(&self.canonical_step),

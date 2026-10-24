@@ -12,7 +12,7 @@
 //! End-to-end daemon-command tests: spawn the real `pa-daemon` supervisor on a
 //! temp socket, drive `prime-agent` list/stop/rename against it, and diff the
 //! output against goldens captured from the installed TS `prime-agent` binary.
-//! A second test spawns the TS daemon itself and runs both CLIs against it.
+//! A second test gives each CLI a private TS counterpart at its own product default.
 //!
 //! Goldens (captured from the live TS binary, protocol 7):
 //!
@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 
 /// Env keys this box's own worker sets; they must not leak into spawned
 /// daemons. `PI_PACKAGE_DIR` too: a Rust-checkout value kills the TS CLI.
-const SCRUB_ENV: [&str; 10] = [
+const SCRUB_ENV: [&str; 11] = [
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER",
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN",
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID",
@@ -62,6 +62,9 @@ const SCRUB_ENV: [&str; 10] = [
     "PRIME_AGENT_INTERNAL_SESSION_LEASES",
     "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID",
     "PI_PACKAGE_DIR",
+    // The workspace gate pins its own endpoint. Counterpart CLIs must resolve
+    // their selected private product defaults from this fixture's child TMPDIR.
+    "PRIME_AGENT_DAEMON_SOCKET",
 ];
 
 /// Locate the built `pa-daemon` binary next to this crate's `prime-agent`
@@ -228,6 +231,10 @@ fn create_session(
     });
     if let Some(script) = script {
         config["script"] = json!(script.to_string_lossy());
+    } else {
+        // TS runtime config resolves these strings through its real registry.
+        config["provider"] = json!("daemon-cli-fixture");
+        config["model"] = json!("scripted");
     }
     let response = wire.request(
         id,
@@ -248,7 +255,12 @@ fn run_cli(binary: &Path, dir: &Path, agent_dir: &Path, args: &[&str]) -> Output
         .args(args)
         .current_dir(dir)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
-        .env("TMPDIR", dir);
+        .env("TMPDIR", dir)
+        // TS uses Date.toLocaleString; the native formatter is US English/UTC.
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("LC_TIME", "en_US.UTF-8")
+        .env("TZ", "UTC");
     for key in SCRUB_ENV {
         command.env_remove(key);
     }
@@ -380,14 +392,15 @@ struct CliPair {
     ts: PathBuf,
     rust: PathBuf,
     dir: PathBuf,
-    agent_dir: PathBuf,
+    ts_agent_dir: PathBuf,
+    rust_agent_dir: PathBuf,
 }
 
 impl CliPair {
     /// Run one command through both CLIs and record any output mismatch.
     fn compare(&self, failures: &mut Vec<String>, ts_args: &[&str], rs_args: &[&str], label: &str) {
-        let ts_out = run_cli(&self.ts, &self.dir, &self.agent_dir, ts_args);
-        let rs_out = run_cli(&self.rust, &self.dir, &self.agent_dir, rs_args);
+        let ts_out = run_cli(&self.ts, &self.dir, &self.ts_agent_dir, ts_args);
+        let rs_out = run_cli(&self.rust, &self.dir, &self.rust_agent_dir, rs_args);
         let ok = ts_out.status.code() == rs_out.status.code()
             && normalize(&stdout(&ts_out)) == normalize(&stdout(&rs_out))
             && normalize(&stderr(&ts_out)) == normalize(&stderr(&rs_out));
@@ -401,6 +414,48 @@ impl CliPair {
             stdout(&rs_out),
             stderr(&rs_out)
         ));
+        }
+    }
+
+    /// JSON contains actual owner IDs and paths. Each CLI must preserve its own
+    /// server's full payload rather than inventing cross-owner identities.
+    fn compare_rpc_json(
+        &self,
+        failures: &mut Vec<String>,
+        wires: &mut (&mut Wire, &mut Wire),
+        args: &[&str],
+        request: &Value,
+        label: &str,
+    ) {
+        let ts_out = run_cli(&self.ts, &self.dir, &self.ts_agent_dir, args);
+        let rs_out = run_cli(&self.rust, &self.dir, &self.rust_agent_dir, args);
+        assert_eq!(
+            ts_out.status.code(),
+            Some(0),
+            "TS {label} must succeed: {}",
+            stderr(&ts_out)
+        );
+        assert_eq!(
+            rs_out.status.code(),
+            Some(0),
+            "Rust {label} must succeed: {}",
+            stderr(&rs_out)
+        );
+        let ts_json: Value = serde_json::from_str(&stdout(&ts_out)).expect("TS JSON");
+        let rs_json: Value = serde_json::from_str(&stdout(&rs_out)).expect("Rust JSON");
+        let ts_rpc = wires.0.request("json-oracle", request);
+        let rs_rpc = wires.1.request("json-oracle", request);
+        assert_eq!(ts_rpc["success"], true, "TS owner oracle");
+        assert_eq!(rs_rpc["success"], true, "Rust counterpart owner oracle");
+        if canonicalize(&ts_json) != canonicalize(&ts_rpc["data"]) {
+            failures.push(format!(
+                "{label}: TS CLI changed its actual owner RPC payload"
+            ));
+        }
+        if canonicalize(&rs_json) != canonicalize(&rs_rpc["data"]) {
+            failures.push(format!(
+                "{label}: Rust CLI changed its actual owner RPC payload"
+            ));
         }
     }
 }
@@ -756,7 +811,149 @@ fn schedule_usage_errors_and_valid_invocations() {
     }
 }
 
-// TS differential: both CLIs against the same TS daemon
+/// Start a TS counterpart at one product's actual default socket. Both public
+/// clients use their own defaults; schedule has no socket-override operand.
+#[allow(clippy::zombie_processes)]
+fn spawn_ts_daemon(ts: &Path, socket: &Path, work: &Path, tmp: &Path, agent_dir: &Path) -> Daemon {
+    std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket parent dir");
+    let mut command = Command::new(ts);
+    command
+        .args(["--mode", "daemon", "--daemon-socket"])
+        .arg(socket)
+        .current_dir(work)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
+        .env("TMPDIR", tmp)
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("LC_TIME", "en_US.UTF-8")
+        .env("TZ", "UTC")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for key in SCRUB_ENV {
+        command.env_remove(key);
+    }
+    command.env(
+        pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+        "15000",
+    );
+    let child = command.spawn().expect("spawn TS daemon counterpart");
+    let daemon = Daemon {
+        child,
+        socket: socket.to_path_buf(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while UnixStream::connect(socket).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "selected private default socket unreachable"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    daemon
+}
+
+/// Install a documented TS custom provider in one private owner. The required
+/// literal API key is fixture data, not a credential: streamSimple performs no
+/// network I/O. Real SDK startup, model selection, journal writes and wake run.
+fn install_ts_scripted_provider(agent_dir: &Path) {
+    let extensions = agent_dir.join("extensions");
+    std::fs::create_dir_all(&extensions).expect("fixture extension directory");
+    std::fs::write(
+        extensions.join("daemon-cli-fixture.ts"),
+        r#"import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+export default function (pi) {
+    pi.registerProvider("daemon-cli-fixture", {
+        api: "daemon-cli-fixture-api",
+        baseUrl: "http://127.0.0.1:1/unused-scripted-provider",
+        apiKey: "fixture-only-not-a-credential",
+        models: [{
+            id: "scripted", name: "Scripted fixture", reasoning: false,
+            input: ["text"], contextWindow: 128000, maxTokens: 4096,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        }],
+        streamSimple(model) {
+            const stream = createAssistantMessageEventStream();
+            const message = {
+                role: "assistant", content: [{ type: "text", text: "fixture reply" }],
+                api: model.api, provider: model.provider, model: model.id,
+                usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+                    totalTokens: 0,
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+                stopReason: "stop", timestamp: Date.now()
+            };
+            stream.push({ type: "start", partial: message });
+            stream.push({ type: "done", reason: "stop", message });
+            stream.end();
+            return stream;
+        }
+    });
+}
+"#,
+    )
+    .expect("write documented custom-provider extension");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"defaultProvider":"daemon-cli-fixture", "defaultModel":"scripted"}).to_string(),
+    )
+    .expect("write private saved model selection");
+}
+
+/// Prove actual configured selection before sends and after real saved wake.
+fn assert_ts_fixture_model(wire: &mut Wire, active_id: &str) {
+    let state = wire.request(
+        "fixture-model",
+        &json!({"type":"get_state", "activeSessionId":active_id}),
+    );
+    assert_eq!(state["success"], true, "actual owner model state");
+    assert_eq!(state["data"]["model"]["provider"], "daemon-cli-fixture");
+    assert_eq!(state["data"]["model"]["id"], "scripted");
+}
+
+/// Check completed real SDK turns, not merely two matching error receipts.
+fn assert_ts_fixture_turns(wire: &mut Wire, name: &str, expected: usize) {
+    let listed = wire.request("fixture-live", &json!({"type":"list", "all":false}));
+    assert_eq!(listed["success"], true);
+    let row = listed["data"]["sessions"]
+        .as_array()
+        .expect("actual live owner rows")
+        .iter()
+        .find(|row| row["sessionName"] == name)
+        .expect("actual named live owner");
+    let active_id = row["id"].as_str().expect("actual active owner ID");
+    assert_ts_fixture_model(wire, active_id);
+    let idle = wire.request(
+        "fixture-idle",
+        &json!({"type":"wait_for_idle", "activeSessionId":active_id}),
+    );
+    assert_eq!(idle["success"], true, "actual completed owner turn");
+    let response = wire.request(
+        "fixture-messages",
+        &json!({"type":"get_messages", "activeSessionId":active_id}),
+    );
+    assert_eq!(response["success"], true);
+    let assistants: Vec<_> = response["data"]["messages"]
+        .as_array()
+        .expect("actual SDK messages")
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect();
+    assert_eq!(
+        assistants.len(),
+        expected,
+        "actual completed SDK assistant turns"
+    );
+    for message in assistants {
+        assert_eq!(message["provider"], "daemon-cli-fixture");
+        assert_eq!(message["model"], "scripted");
+        assert_eq!(message["stopReason"], "stop");
+        assert_eq!(
+            message["content"],
+            json!([{"type":"text", "text":"fixture reply"}])
+        );
+    }
+}
+
+// TS differential: each CLI uses its own product-default TS counterpart server
 
 #[test]
 fn ts_daemon_differential_cli_output() {
@@ -765,76 +962,79 @@ fn ts_daemon_differential_cli_output() {
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    let sessions = agent_dir.join("sessions");
+    let ts_agent_dir = dir.path().join("ts-agent");
+    let rust_agent_dir = dir.path().join("rust-agent");
+    let ts_sessions = ts_agent_dir.join("sessions");
+    let rust_sessions = rust_agent_dir.join("sessions");
     let work = dir.path().join("work");
-    std::fs::create_dir_all(&sessions).expect("sessions dir");
-    std::fs::create_dir_all(&work).expect("work dir");
-    // `schedule` cannot take --daemon-socket (TS parity); the daemon uses the default path.
-    std::env::set_var("TMPDIR", dir.path());
-    let socket = pa_daemon::socket::default_daemon_socket_path();
-    // The TS daemon does not create the socket's parent on bind (the Rust
-    // supervisor does), so the parent must exist first.
-    std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket parent dir");
-    let mut daemon_command = Command::new(&ts);
-    daemon_command
-        .arg("--mode")
-        .arg("daemon")
-        .arg("--daemon-socket")
-        .arg(&socket)
-        // The TS CLI resolves its manifest by walking up from the cwd; a Rust
-        // checkout has no package.json, so run from the scratch work dir.
-        .current_dir(&work)
-        .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
-        .env("TMPDIR", dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for key in SCRUB_ENV {
-        daemon_command.env_remove(key);
+    for path in [&ts_sessions, &rust_sessions, &work] {
+        std::fs::create_dir_all(path).expect("private counterpart directories");
     }
-    // Teardown symmetry: the TS worker's orphan-exit window is the same env var.
-    daemon_command.env(
-        pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
-        "15000",
+    install_ts_scripted_provider(&ts_agent_dir);
+    install_ts_scripted_provider(&rust_agent_dir);
+    // These namespaces intentionally differ in the product sources.
+    // TS schedule does not honor Rust's socket-override environment variable.
+    // SCRUB_ENV removes the gate's inherited Rust override before either CLI.
+    // Do not mutate the test process's TMPDIR or alias either live endpoint.
+    let uid = pa_core::platform::process::current_user_id();
+    let ts_socket = dir.path().join(format!("prime-agent-{uid}/daemon.sock"));
+    let rust_socket = dir
+        .path()
+        .join(format!("prime-agent-rust-{uid}/daemon.sock"));
+    assert_ne!(ts_socket, rust_socket);
+    let _ts_daemon = spawn_ts_daemon(&ts, &ts_socket, &work, dir.path(), &ts_agent_dir);
+    let _rust_counterpart = spawn_ts_daemon(&ts, &rust_socket, &work, dir.path(), &rust_agent_dir);
+    let (mut ts_wire, ts_hello) = Wire::connect(&ts_socket);
+    let (mut rs_wire, rs_hello) = Wire::connect(&rust_socket);
+    assert_eq!(
+        ts_hello["type"], "daemon_hello",
+        "TS selected-default reachability"
     );
-    let mut daemon = daemon_command.spawn().expect("spawn TS daemon");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if UnixStream::connect(&socket).is_ok() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "TS daemon socket never appeared");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
+    assert_eq!(
+        rs_hello["type"], "daemon_hello",
+        "Rust selected-default reachability"
+    );
+    assert!(ts_socket.starts_with(dir.path()) && rust_socket.starts_with(dir.path()));
     let rust = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
     let pair = CliPair {
         ts: ts.clone(),
         rust: rust.clone(),
         dir: dir.path().to_path_buf(),
-        agent_dir: agent_dir.clone(),
+        ts_agent_dir: ts_agent_dir.clone(),
+        rust_agent_dir: rust_agent_dir.clone(),
     };
     let mut failures: Vec<String> = Vec::new();
     let compare = |failures: &mut Vec<String>, ts_args: &[&str], rs_args: &[&str], label: &str| {
         pair.compare(failures, ts_args, rs_args, label);
     };
 
-    // Both CLIs against the same TS daemon: identical normalized output.
+    // Text stays a cross-product comparison using the original normalizer.
     compare(&mut failures, &["list"], &["list"], "empty list");
-    let (mut wire, hello) = Wire::connect(&socket);
-    assert_eq!(hello["type"], "daemon_hello", "TS daemon hello");
-    let primary = create_session(&mut wire, "c1", "parity", &work, &sessions, None);
-    let secondary = create_session(&mut wire, "c2", "parity-b", &work, &sessions, None);
-    let tertiary = create_session(&mut wire, "c3", "parity-c", &work, &sessions, None);
-    compare(&mut failures, &["list"], &["list"], "session table");
-
-    let ts_list_json = run_cli(&ts, dir.path(), &agent_dir, &["list", "--json"]);
-    let rs_list_json = run_cli(&rust, dir.path(), &agent_dir, &["list", "--json"]);
-    let ts_json: Value = serde_json::from_str(&stdout(&ts_list_json)).expect("ts json");
-    let rs_json: Value = serde_json::from_str(&stdout(&rs_list_json)).expect("rust json");
-    if canonicalize(&ts_json) != canonicalize(&rs_json) {
-        failures.push(format!("list --json: ts {ts_json} vs rs {rs_json}"));
+    let ts_primary = create_session(&mut ts_wire, "c1", "parity", &work, &ts_sessions, None);
+    let rs_primary = create_session(&mut rs_wire, "c1", "parity", &work, &rust_sessions, None);
+    let ts_target = create_session(&mut ts_wire, "c2", "parity-c", &work, &ts_sessions, None);
+    let rs_target = create_session(&mut rs_wire, "c2", "parity-c", &work, &rust_sessions, None);
+    assert_ne!(ts_primary, rs_primary, "actual independent primary owners");
+    assert_ne!(
+        ts_target, rs_target,
+        "actual independent send-target owners"
+    );
+    for (wire, ids) in [
+        (&mut ts_wire, [&ts_primary, &ts_target]),
+        (&mut rs_wire, [&rs_primary, &rs_target]),
+    ] {
+        for active_id in ids {
+            assert_ts_fixture_model(wire, active_id);
+        }
     }
+    compare(&mut failures, &["list"], &["list"], "session table");
+    pair.compare_rpc_json(
+        &mut failures,
+        &mut (&mut ts_wire, &mut rs_wire),
+        &["list", "--json"],
+        &json!({"type":"list", "all":false}),
+        "list --json",
+    );
 
     // The sessions operator table (TS #2422): the same list RPC as the one-line table.
     compare(
@@ -855,34 +1055,33 @@ fn ts_daemon_differential_cli_output() {
         &["sessions", "--bogus"],
         "sessions unknown option",
     );
-    let ts_sessions_json = run_cli(&ts, dir.path(), &agent_dir, &["sessions", "--json"]);
-    let rs_sessions_json = run_cli(&rust, dir.path(), &agent_dir, &["sessions", "--json"]);
-    let ts_sessions: Value =
-        serde_json::from_str(&stdout(&ts_sessions_json)).expect("ts sessions json");
-    let rs_sessions: Value =
-        serde_json::from_str(&stdout(&rs_sessions_json)).expect("rust sessions json");
-    if canonicalize(&ts_sessions) != canonicalize(&rs_sessions) {
-        failures.push(format!(
-            "sessions --json: ts {ts_sessions} vs rs {rs_sessions}"
-        ));
-    }
-
-    let rename: Vec<&str> = vec!["rename", primary.as_str(), "parity-renamed"];
-    compare(&mut failures, &rename, &rename, "rename");
+    pair.compare_rpc_json(
+        &mut failures,
+        &mut (&mut ts_wire, &mut rs_wire),
+        &["sessions", "--json"],
+        &json!({"type":"list", "all":false}),
+        "sessions --json",
+    );
+    let ts_rename = ["rename", ts_primary.as_str(), "parity-renamed"];
+    let rs_rename = ["rename", rs_primary.as_str(), "parity-renamed"];
+    compare(&mut failures, &ts_rename, &rs_rename, "rename");
     // Sends start a real turn, so each CLI sends to its own session; same receipt shape.
     let ts_send = run_cli(
         &ts,
         dir.path(),
-        &agent_dir,
-        &["send", secondary.as_str(), "differential message"],
+        &ts_agent_dir,
+        &["send", ts_target.as_str(), "differential message"],
     );
     let rs_send = run_cli(
         &rust,
         dir.path(),
-        &agent_dir,
-        &["send", tertiary.as_str(), "differential message"],
+        &rust_agent_dir,
+        &["send", rs_target.as_str(), "differential message"],
     );
-    if ts_send.status.code() != rs_send.status.code()
+    if ts_send.status.code() != Some(0)
+        || rs_send.status.code() != Some(0)
+        || !stderr(&ts_send).is_empty()
+        || !stderr(&rs_send).is_empty()
         || !stdout(&ts_send).starts_with("Sent to ")
         || !stdout(&rs_send).starts_with("Sent to ")
     {
@@ -892,21 +1091,33 @@ fn ts_daemon_differential_cli_output() {
             (rs_send.status.code(), stdout(&rs_send), stderr(&rs_send))
         ));
     }
+    if ts_send.status.success() && rs_send.status.success() {
+        assert_ts_fixture_turns(&mut ts_wire, "parity-c", 1);
+        assert_ts_fixture_turns(&mut rs_wire, "parity-c", 1);
+    }
     compare(
         &mut failures,
         &["schedule", "list"],
         &["schedule", "list"],
         "schedule list",
     );
-    let add: Vec<&str> = vec![
+    let ts_add = [
         "schedule",
         "add",
-        primary.as_str(),
+        ts_primary.as_str(),
         "every 10 minutes",
         "--",
         "differential job",
     ];
-    compare(&mut failures, &add, &add, "schedule add");
+    let rs_add = [
+        "schedule",
+        "add",
+        rs_primary.as_str(),
+        "every 10 minutes",
+        "--",
+        "differential job",
+    ];
+    compare(&mut failures, &ts_add, &rs_add, "schedule add");
     compare(
         &mut failures,
         &["schedule", "list"],
@@ -919,27 +1130,41 @@ fn ts_daemon_differential_cli_output() {
         &["schedule", "list", "--all"],
         "schedule list --all",
     );
-    compare(
+    pair.compare_rpc_json(
         &mut failures,
+        &mut (&mut ts_wire, &mut rs_wire),
         &["schedule", "list", "--json"],
-        &["schedule", "list", "--json"],
+        &json!({"type":"cron_list", "includeInactive":false}),
         "schedule list --json",
     );
-    // Cancel round-trip: each CLI cancels one job and both render the same emptied list.
-    let ts_schedule_json = run_cli(&ts, dir.path(), &agent_dir, &["schedule", "list", "--json"]);
-    let job_ids: Vec<String> = serde_json::from_str::<Value>(&stdout(&ts_schedule_json))
-        .expect("schedule list json")
-        .get("jobs")
-        .and_then(Value::as_array)
-        .expect("jobs array")
-        .iter()
-        .map(|job| job["id"].as_str().expect("job id").to_string())
-        .collect();
-    assert_eq!(job_ids.len(), 2, "one stored job per CLI add");
+    // Each real CLI creates exactly one job in its own owner's store, then
+    // cancels that exact returned job. No shared-state second add or fake ID.
+    let ts_schedule_json = run_cli(
+        &ts,
+        dir.path(),
+        &ts_agent_dir,
+        &["schedule", "list", "--json"],
+    );
+    let rs_schedule_json = run_cli(
+        &rust,
+        dir.path(),
+        &rust_agent_dir,
+        &["schedule", "list", "--json"],
+    );
+    let ts_jobs: Value =
+        serde_json::from_str(&stdout(&ts_schedule_json)).expect("TS schedule JSON");
+    let rs_jobs: Value =
+        serde_json::from_str(&stdout(&rs_schedule_json)).expect("Rust schedule JSON");
+    let ts_jobs = ts_jobs["jobs"].as_array().expect("TS jobs array");
+    let rs_jobs = rs_jobs["jobs"].as_array().expect("Rust jobs array");
+    assert_eq!(ts_jobs.len(), 1, "one actual TS CLI job");
+    assert_eq!(rs_jobs.len(), 1, "one actual Rust CLI job");
+    let ts_job_id = ts_jobs[0]["id"].as_str().expect("actual TS job ID");
+    let rs_job_id = rs_jobs[0]["id"].as_str().expect("actual Rust job ID");
     compare(
         &mut failures,
-        &["schedule", "cancel", job_ids[0].as_str()],
-        &["schedule", "cancel", job_ids[1].as_str()],
+        &["schedule", "cancel", ts_job_id],
+        &["schedule", "cancel", rs_job_id],
         "schedule cancel",
     );
     compare(
@@ -948,7 +1173,13 @@ fn ts_daemon_differential_cli_output() {
         &["schedule", "list"],
         "schedule list after cancel",
     );
-    let socket_arg = socket.to_string_lossy().to_string();
+    for (binary, owner_dir) in [(&ts, &ts_agent_dir), (&rust, &rust_agent_dir)] {
+        let cancelled = run_cli(binary, dir.path(), owner_dir, &["schedule", "list"]);
+        assert_eq!(cancelled.status.code(), Some(0));
+        assert_eq!(stdout(&cancelled), "No scheduled prompts.\n");
+    }
+    let ts_socket_arg = ts_socket.to_string_lossy().to_string();
+    let rs_socket_arg = rust_socket.to_string_lossy().to_string();
     compare(
         &mut failures,
         &["schedule", "cancel"],
@@ -969,22 +1200,32 @@ fn ts_daemon_differential_cli_output() {
     );
     compare(
         &mut failures,
-        &["--daemon-socket", socket_arg.as_str(), "schedule", "list"],
-        &["--daemon-socket", socket_arg.as_str(), "schedule", "list"],
+        &[
+            "--daemon-socket",
+            ts_socket_arg.as_str(),
+            "schedule",
+            "list",
+        ],
+        &[
+            "--daemon-socket",
+            rs_socket_arg.as_str(),
+            "schedule",
+            "list",
+        ],
         "daemon-socket before schedule list",
     );
     compare(
         &mut failures,
         &[
             "--daemon-socket",
-            socket_arg.as_str(),
+            ts_socket_arg.as_str(),
             "schedule",
             "cancel",
             "id",
         ],
         &[
             "--daemon-socket",
-            socket_arg.as_str(),
+            rs_socket_arg.as_str(),
             "schedule",
             "cancel",
             "id",
@@ -992,8 +1233,8 @@ fn ts_daemon_differential_cli_output() {
         "daemon-socket before schedule cancel",
     );
     // TS stops the primary session, the Rust CLI the secondary: same golden output.
-    let ts_stop_args: Vec<&str> = vec!["stop", primary.as_str()];
-    let rust_stop_args: Vec<&str> = vec!["stop", tertiary.as_str()];
+    let ts_stop_args: Vec<&str> = vec!["stop", ts_primary.as_str()];
+    let rust_stop_args: Vec<&str> = vec!["stop", rs_target.as_str()];
     compare(&mut failures, &ts_stop_args, &rust_stop_args, "stop");
 
     // Saved-session wake on the TS daemon: each CLI sends to its own stopped session;
@@ -1001,16 +1242,19 @@ fn ts_daemon_differential_cli_output() {
     let ts_wake = run_cli(
         &ts,
         dir.path(),
-        &agent_dir,
+        &ts_agent_dir,
         &["send", "parity-renamed", "wake from ts"],
     );
     let rs_wake = run_cli(
         &rust,
         dir.path(),
-        &agent_dir,
+        &rust_agent_dir,
         &["send", "parity-c", "wake from rs"],
     );
-    if ts_wake.status.code() != rs_wake.status.code()
+    if ts_wake.status.code() != Some(0)
+        || rs_wake.status.code() != Some(0)
+        || !stderr(&ts_wake).is_empty()
+        || !stderr(&rs_wake).is_empty()
         || stdout(&ts_wake) != "Sent to parity-renamed\n"
         || stdout(&rs_wake) != "Sent to parity-c\n"
     {
@@ -1021,9 +1265,11 @@ fn ts_daemon_differential_cli_output() {
         ));
     }
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
-    std::env::remove_var("TMPDIR");
+    if ts_wake.status.success() && rs_wake.status.success() {
+        assert_ts_fixture_turns(&mut ts_wire, "parity-renamed", 1);
+        assert_ts_fixture_turns(&mut rs_wire, "parity-c", 2);
+    }
+
     assert!(
         failures.is_empty(),
         "TS differential mismatches:\n{}",

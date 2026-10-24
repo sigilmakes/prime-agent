@@ -11,9 +11,8 @@ use crate::cron::store::{
 };
 use crate::cron::{AgentCronJob, DeliveryMode, JobStatus};
 use crate::goals::{goal_host_response, GoalHostResponse, GoalState, GoalStatus};
-use crate::session::manager::SessionManager;
 
-use super::goal_driver::GoalDriver;
+use super::goal_driver::{GoalDriver, GoalStateStore};
 
 /// The `snake_case` heartbeat payload returned to the skill.
 pub fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
@@ -67,8 +66,9 @@ pub fn handle_goal_host_request(
     request_type: &str,
     payload: &Value,
     driver: &mut GoalDriver,
-    session: &mut SessionManager,
+    session: &mut impl GoalStateStore,
 ) -> anyhow::Result<GoalHostResponse> {
+    driver.ensure_ready()?;
     let record = payload.as_object().cloned().unwrap_or_default();
     match request_type {
         // The creation-based timer: the served state reads the goal's age
@@ -103,7 +103,7 @@ pub fn handle_goal_host_request(
 
 fn create_goal_from_host(
     driver: &mut GoalDriver,
-    session: &mut SessionManager,
+    session: &mut impl GoalStateStore,
     objective: &str,
     token_budget: Option<u64>,
 ) -> anyhow::Result<GoalState> {
@@ -126,7 +126,7 @@ fn create_goal_from_host(
 
 fn complete_goal_from_host(
     driver: &mut GoalDriver,
-    session: &mut SessionManager,
+    session: &mut impl GoalStateStore,
 ) -> anyhow::Result<GoalState> {
     if driver.state().objective.is_none() || driver.state().status == GoalStatus::Idle {
         anyhow::bail!("cannot complete goal because this thread has no goal");

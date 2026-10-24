@@ -571,11 +571,29 @@ enum KnownFileEntry {
         base: EntryBase,
     },
     CustomMessage {
-        #[serde(flatten)]
+        #[serde(
+            flatten,
+            deserialize_with = "deserialize_journal_custom_message_payload"
+        )]
         payload: CustomMessageEntry,
         #[serde(flatten)]
         base: EntryBase,
     },
+}
+
+// The two flattened journal fields share serde's buffered map. The payload's
+// catch-all rest map sees copies of the canonical envelope before EntryBase
+// reads it. Consume those recognized envelope names only in this journal
+// payload copy; do not mutate the shared map or CustomMessageEntry's general
+// deserializer. EntryBase still validates and retains the actual tree identity.
+fn deserialize_journal_custom_message_payload<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<CustomMessageEntry, D::Error> {
+    let mut payload = CustomMessageEntry::deserialize(deserializer)?;
+    for key in ["id", "parentId", "timestamp"] {
+        payload.rest.remove(key);
+    }
+    Ok(payload)
 }
 
 impl From<KnownFileEntry> for FileEntry {
@@ -800,5 +818,47 @@ mod tests {
             parsed,
             [true, false, false, false, false, false, false, false]
         );
+    }
+    #[test]
+    fn custom_journal_payload_excludes_only_entry_envelope_and_keeps_exact_base() {
+        let raw = r#"{ "type":"custom_message", "id":"owner-row", "parentId":"prior-row", "timestamp":"2026-10-24T15:00:00.123Z", "customType":"goal_context", "content":"exact accepted intent", "display":true, "details":{"id":"payload-id","timestamp":777}, "future":{"parentId":"payload-parent","native":"AAE="}, "futureNull":null }"#;
+        let expected: CustomMessageEntry = serde_json::from_value(serde_json::json!({
+            "customType":"goal_context", "content":"exact accepted intent", "display":true,
+            "details":{"id":"payload-id","timestamp":777},
+            "future":{"parentId":"payload-parent","native":"AAE="}, "futureNull":null
+        }))
+        .unwrap();
+        let decoded = entry(raw);
+        let FileEntry::CustomMessage { payload, base } = &decoded else {
+            panic!("valid custom journal row expected")
+        };
+        assert_eq!(
+            payload, &expected,
+            "the real journal consumer gets exact semantic intent"
+        );
+        assert_eq!(base.id.as_deref(), Some("owner-row"));
+        assert_eq!(base.parent_id.as_deref(), Some("prior-row"));
+        assert_eq!(base.timestamp.as_deref(), Some("2026-10-24T15:00:00.123Z"));
+        for key in ["id", "parentId", "timestamp"] {
+            assert!(!payload.rest.contains_key(key));
+        }
+        assert_roundtrips(raw);
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::from_str::<Value>(raw).unwrap()
+        );
+        // The journal-only boundary does not filter ordinary payload decoding.
+        let standalone: CustomMessageEntry = serde_json::from_value(serde_json::json!({"customType":"opaque", "content":"body", "display":false, "id":"standalone-unknown"})).unwrap();
+        assert_eq!(
+            standalone.rest.get("id"),
+            Some(&serde_json::json!("standalone-unknown"))
+        );
+    }
+
+    #[test]
+    fn malformed_custom_journal_base_remains_unknown_losslessly() {
+        let raw = r#"{"type":"custom_message","id":37,"parentId":"prior","timestamp":"t","customType":"opaque","content":"body","display":false,"future":{"native":"AAE="}}"#;
+        assert!(matches!(entry(raw), FileEntry::Unknown { .. }));
+        assert_roundtrips(raw);
     }
 }

@@ -423,6 +423,11 @@ impl TurnRunner {
             let mut engine_turn_ended = false;
             let mut active_committed = false;
             let mut active_running = false;
+            // Only this delivery's initial rows have already been accepted.
+            // A plain abort must retain them, but must not accept an in-run
+            // queued continuation or the compact path's suppressed rows.
+            let mut pending_admission_rows = request.batch.len() + 1;
+            let injected_admission = request.custom_message.is_some();
             // Restored next-turn rows are PREFIX rows: the "Starting" row
             // drops at the accepted row. The flip closure reads the flag
             // while the prefix loop writes it, hence the Cell.
@@ -488,19 +493,26 @@ impl TurnRunner {
                 if agent_end && !more_queued {
                     engine.clear_progress_note();
                 }
+                let accepted_row = pending_admission_rows > 0
+                    && !emitting_prefix_rows.get()
+                    && (matches!(&event, EngineEvent::UserMessage(_))
+                        || (injected_admission && matches!(&event, EngineEvent::CustomMessage(_))));
                 // Durable model cleanup is independent of visual abort-row
                 // suppression and emits no client-facing frame.
                 if core.abort_requested && !matches!(&event, EngineEvent::ModelChange(_)) {
                     // The sighting arms the fallback's silence only when
                     // load-bearing: a sighting on a run that completed on its own
                     // cancels nothing.
-                    if core.suppress_aborted_row || !(abort_settle || aborted_row) {
+                    if core.suppress_aborted_row || !(abort_settle || aborted_row || accepted_row) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                         return false;
                     }
                     if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
+                }
+                if accepted_row {
+                    pending_admission_rows -= 1;
                 }
                 // The pane reporter's engine boundaries (the TS
                 // `agent_start` / `agent_end` hooks and the auto-retry
@@ -544,12 +556,16 @@ impl TurnRunner {
                 // so a verbatim copy retains nothing on the durable read.
                 // Re-pin the boundary to the durable cut (TS: one store,
                 // ids match by construction) before persist + broadcast.
+                let canonical_bound = core
+                    .store
+                    .as_ref()
+                    .is_some_and(crate::session_store::SessionFile::is_canonical_bound);
                 if let EngineEvent::Compaction {
                     ref mut entry,
                     event: ref mut payload,
                 } = event
                 {
-                    if !entry.is_null() {
+                    if !canonical_bound && !entry.is_null() {
                         let repin_started = std::time::Instant::now();
                         let durable_entries = core
                             .store
@@ -579,7 +595,9 @@ impl TurnRunner {
                 }
                 match &event {
                     EngineEvent::ModelChange(change) => {
-                        if let Some(Err(error)) = core.store.as_mut().map(|store| {
+                        if canonical_bound {
+                            // The awaited live receipt already committed and ACKed it.
+                        } else if let Some(Err(error)) = core.store.as_mut().map(|store| {
                             store.persist_entry(
                                 "model_change",
                                 json!({
@@ -599,7 +617,7 @@ impl TurnRunner {
                     // let the user row take the step, drop the seal silently, and make
                     // every assistant row refuse. The user and tool results are written
                     // without touching the slot.
-                    EngineEvent::AssistantMessage(message) => {
+                    EngineEvent::AssistantMessage(message) if !canonical_bound => {
                         // The assistant row is the native final output: hand the store
                         // the step the engine admitted for this attempt, so the row is
                         // written under a sealed epoch grant. Taking it here keeps the
@@ -617,17 +635,33 @@ impl TurnRunner {
                                 // A refused assistant row is a bug to SURFACE, never a
                                 // row to drop quietly: the epoch had work admitted and
                                 // the row did not reach the file.
-                                eprintln!("pa-daemon: assistant row refused by its epoch grant: {error:#}");
+                                eprintln!(
+                                    "pa-daemon: assistant row refused by its epoch grant: {error:#}"
+                                );
                             }
                         }
                     }
-                    EngineEvent::UserMessage(message) | EngineEvent::ToolResultMessage(message) => {
-                        // Declared: tool result rows are content-bearing and stay
-                        // COUNTED (`rows_written_without_epoch`), so a zero count is
-                        // impossible for any turn that calls a tool. The counter is
-                        // stated per ROW CLASS, never per turn.
+                    EngineEvent::UserMessage(message) if accepted_row => {
+                        // Acceptance is durable before a lazy SDK build or an early abort.
+                        // The exact returned ID enters the delivery FIFO; the live SDK
+                        // later adopts this same row and never writes a second copy.
                         if let Some(store) = core.store.as_mut() {
-                            let _ = store.persist_entry("message", json!({ "message": message }));
+                            if let Err(error) = store.persist_delivered_user(message.clone()) {
+                                eprintln!("pa-daemon: accepted user row refused: {error:#}");
+                                return false;
+                            }
+                        }
+                    }
+                    EngineEvent::UserMessage(message) | EngineEvent::ToolResultMessage(message)
+                        if !canonical_bound =>
+                    {
+                        if let Some(store) = core.store.as_mut() {
+                            if let Err(error) =
+                                store.persist_entry("message", json!({ "message": message }))
+                            {
+                                eprintln!("pa-daemon: message row persistence failed: {error:#}");
+                                return false;
+                            }
                         }
                     }
                     // The in-flight tool-call set, updated under the same core lock
@@ -639,20 +673,33 @@ impl TurnRunner {
                     EngineEvent::ToolExecutionEnd { tool_call_id, .. } => {
                         core.running_tool_calls.remove(tool_call_id);
                     }
-                    EngineEvent::CustomMessage(message) => {
+                    EngineEvent::CustomMessage(message)
+                        if accepted_row || emitting_prefix_rows.get() || !canonical_bound =>
+                    {
                         if let Some(store) = core.store.as_mut() {
-                            let _ = store.persist_entry(
-                                "custom_message",
-                                json!({
-                                    "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                                    "content": message.get("content").cloned().unwrap_or(Value::Null),
-                                    "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                                    "details": message.get("details").cloned().unwrap_or(Value::Null),
-                                }),
-                            );
+                            let Some(mut fields) = message.as_object().cloned() else {
+                                eprintln!("pa-daemon: custom row is not an object");
+                                return false;
+                            };
+                            // These SDK envelope fields are not custom-entry payload.
+                            // Keep every other field, including unknown metadata.
+                            fields.remove("role");
+                            fields.remove("timestamp");
+                            let fields = Value::Object(fields);
+                            let persisted = if accepted_row || emitting_prefix_rows.get() {
+                                store.persist_delivered_custom(fields)
+                            } else {
+                                // Pre-build UI records (for example slash-command
+                                // results) are durable, but have no SDK delivery.
+                                store.persist_owner_metadata("custom_message", fields)
+                            };
+                            if let Err(error) = persisted {
+                                eprintln!("pa-daemon: custom row persistence refused: {error:#}");
+                                return false;
+                            }
                         }
                     }
-                    EngineEvent::Compaction { entry, .. } => {
+                    EngineEvent::Compaction { entry, .. } if !canonical_bound => {
                         // A skipped compaction carries a null entry:
                         // publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
@@ -667,7 +714,7 @@ impl TurnRunner {
                         }
                     }
                     // The durable mirror of a goal-state change: each row is the new state.
-                    EngineEvent::GoalUpdate { goal } => {
+                    EngineEvent::GoalUpdate { goal } if !canonical_bound => {
                         if let Some(store) = core.store.as_mut() {
                             let _ = store.persist_entry(
                                 "custom",
@@ -947,7 +994,7 @@ impl TurnRunner {
                         let outcome = crate::session_commands::custom_message_value(&outcome);
                         if outcome.is_object() {
                             if let Some(store) = core.store.as_mut() {
-                                let _ = store.persist_entry(
+                                if let Err(error) = store.persist_owner_metadata(
                                     "custom_message",
                                     json!({
                                         "customType": outcome.get("customType").cloned().unwrap_or(Value::Null),
@@ -955,7 +1002,10 @@ impl TurnRunner {
                                         "display": outcome.get("display").cloned().unwrap_or(Value::Bool(true)),
                                         "details": outcome.get("details").cloned().unwrap_or(Value::Null),
                                     }),
-                                );
+                                ) {
+                                    eprintln!("pa-daemon: provider retry outcome refused: {error:#}");
+                                    return false;
+                                }
                             }
                         }
                         vec![
@@ -1063,7 +1113,13 @@ impl TurnRunner {
             }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
-        let _ = turn.await;
+        if let Err(error) = turn.await {
+            eprintln!(
+                "pa-daemon: turn task failed: is_panic={} is_cancelled={}",
+                error.is_panic(),
+                error.is_cancelled(),
+            );
+        }
         // The emit path is joined: a stale parked partial must not
         // surface after the settle events.
         coalescer.close();

@@ -7,7 +7,19 @@ use super::{
 };
 
 impl SessionManager {
+    pub(crate) fn require_local_append(&self) -> std::io::Result<()> {
+        if self.canonical_binding().is_some() {
+            return Err(std::io::Error::other(
+                "canonical live mirror requires owner receipt; local append refused",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn append_entry(&mut self, entry: FileEntry) -> std::io::Result<()> {
+        self.require_local_append()?;
+        self.invalidate_canonical_local_revision()
+            .map_err(std::io::Error::other)?;
         let was_assistant = self.has_assistant_entry;
         let was_flushed = self.flushed;
         if matches!(
@@ -56,6 +68,7 @@ impl SessionManager {
     /// I/O error when the durable append fails; the entry is not kept in
     /// the in-memory index.
     pub fn append_message(&mut self, message: AgentMessage) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Message { message, base })?;
@@ -70,6 +83,7 @@ impl SessionManager {
     /// # Errors
     /// An ID does not name a retained user row.
     pub fn replay_admitted_user_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
+        self.require_local_append()?;
         for id in &ids {
             if !matches!(
                 self.retained_entries()
@@ -86,6 +100,8 @@ impl SessionManager {
                 ));
             }
         }
+        self.invalidate_canonical_local_revision()
+            .map_err(std::io::Error::other)?;
         self.admitted_user_rows = ids.into();
         Ok(())
     }
@@ -97,6 +113,12 @@ impl SessionManager {
         &mut self,
         message: AgentMessage,
     ) -> (String, Option<std::io::Error>) {
+        if let Err(error) = self.require_local_append() {
+            return (String::new(), Some(error));
+        }
+        if let Err(error) = self.invalidate_canonical_local_revision() {
+            return (String::new(), Some(std::io::Error::other(error)));
+        }
         let admitted = match &message {
             AgentMessage::User(_) => self.admitted_user_rows.pop_front(),
             AgentMessage::Assistant(_)
@@ -135,6 +157,7 @@ impl SessionManager {
         &mut self,
         thinking_level: &str,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ThinkingLevelChange {
@@ -153,6 +176,7 @@ impl SessionManager {
         &mut self,
         service_tier: Option<pa_types::ai::ServiceTier>,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ServiceTierChange {
@@ -170,6 +194,7 @@ impl SessionManager {
         provider: &str,
         model_id: &str,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ModelChange {
@@ -193,6 +218,7 @@ impl SessionManager {
         &mut self,
         payload: pa_types::session::CompactionEntry,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Compaction { payload, base })?;
@@ -207,6 +233,7 @@ impl SessionManager {
         custom_type: &str,
         data: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Custom {
@@ -228,6 +255,12 @@ impl SessionManager {
         custom_type: &str,
         data: Option<serde_json::Value>,
     ) -> (String, Option<std::io::Error>) {
+        if let Err(error) = self.require_local_append() {
+            return (String::new(), Some(error));
+        }
+        if let Err(error) = self.invalidate_canonical_local_revision() {
+            return (String::new(), Some(std::io::Error::other(error)));
+        }
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.file_entries.push(FileEntry::Custom {
@@ -263,6 +296,7 @@ impl SessionManager {
         display: bool,
         details: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::CustomMessage {
@@ -289,6 +323,12 @@ impl SessionManager {
         display: bool,
         details: Option<serde_json::Value>,
     ) -> (String, Option<std::io::Error>) {
+        if let Err(error) = self.require_local_append() {
+            return (String::new(), Some(error));
+        }
+        if let Err(error) = self.invalidate_canonical_local_revision() {
+            return (String::new(), Some(std::io::Error::other(error)));
+        }
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.file_entries.push(FileEntry::CustomMessage {
@@ -329,6 +369,7 @@ impl SessionManager {
         aggregate_usage: pa_types::ai::Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> std::io::Result<String> {
+        self.require_local_append()?;
         let target_index = self.by_id.get(target_id).copied().filter(|&index| {
             matches!(
                 self.file_entries[index],
@@ -376,6 +417,7 @@ impl SessionManager {
     ///
     /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_info(&mut self, name: &str) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionInfo {
@@ -392,6 +434,10 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     pub(crate) fn set_leaf_id(&mut self, leaf_id: Option<&str>) {
+        assert!(
+            self.canonical_binding().is_none(),
+            "canonical branch navigation requires owner-approved checkpoint"
+        );
         assert!(
             self.window.is_none(),
             "hydrate full session history before this operation"
@@ -421,6 +467,7 @@ impl SessionManager {
     ///
     /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_state(&mut self, status: SessionStateStatus) -> std::io::Result<String> {
+        self.require_local_append()?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionState {

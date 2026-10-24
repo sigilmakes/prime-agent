@@ -3,6 +3,22 @@
 //! the `goal_update` emission family.
 use super::{json, AgentSessionEngine, CoreSessionEngine, EngineEvent, GoalRuntimeHandles, Value};
 
+fn max_depth_entry(max_depth: u64) -> pa_types::session::FileEntry {
+    pa_types::session::FileEntry::Custom {
+        base: pa_types::session::EntryBase {
+            id: None,
+            parent_id: None,
+            timestamp: None,
+            rest: serde_json::Map::default(),
+        },
+        payload: pa_types::session::CustomEntry {
+            custom_type: "rlm_max_depth_state".to_owned(),
+            data: Some(json!({ "maxDepth": max_depth })),
+            rest: serde_json::Map::default(),
+        },
+    }
+}
+
 impl AgentSessionEngine {
     /// Write the durable `rlm_max_depth_state` entry: straight into the
     /// built session's persistence handle, or parked for the build.
@@ -10,13 +26,14 @@ impl AgentSessionEngine {
         let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
         match handles {
             Some(handles) => {
-                let mut manager = self
-                    .runtime
-                    .block_on(async { handles.session.lock().await });
-                if let Err(error) = manager.append_custom_entry(
-                    "rlm_max_depth_state",
-                    Some(json!({ "maxDepth": max_depth })),
-                ) {
+                let entry = max_depth_entry(max_depth);
+                if let Err(error) =
+                    self.runtime
+                        .block_on(pa_core::session::canonical::persist_metadata_entry(
+                            &handles.session,
+                            entry,
+                        ))
+                {
                     eprintln!("pa-daemon: failed to persist rlm_max_depth_state: {error:#}");
                 }
             }
@@ -42,23 +59,23 @@ impl AgentSessionEngine {
     }
 
     /// Flush a parked `rlm_max_depth_state` entry once the session built.
-    pub(super) fn flush_pending_max_depth(
+    pub(super) async fn flush_pending_max_depth(
         &self,
-        manager: &mut pa_core::session::manager::SessionManager,
-    ) {
+        session: &std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>,
+    ) -> anyhow::Result<()> {
         let pending = self
             .pending_max_depth
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(max_depth) = pending {
-            if let Err(error) = manager.append_custom_entry(
-                "rlm_max_depth_state",
-                Some(json!({ "maxDepth": max_depth })),
-            ) {
-                eprintln!("pa-daemon: failed to flush pending rlm_max_depth_state: {error:#}");
-            }
+            pa_core::session::canonical::persist_metadata_entry(
+                session,
+                max_depth_entry(max_depth),
+            )
+            .await?;
         }
+        Ok(())
     }
 
     /// Arm the no-progress backoff's one-shot wake: a durable cron job at
@@ -147,7 +164,14 @@ impl AgentSessionEngine {
     /// stays held across a turn's admission, so goal checks in emit callbacks
     /// read the mirror.
     pub(super) async fn mirror_goal_runtime(&self, core: &CoreSessionEngine) {
-        let pending = core.goal_driver.lock().await.pending_continuation_handle();
+        let pending = {
+            let driver = core.goal_driver.lock().await;
+            if let Err(error) = driver.ensure_ready() {
+                eprintln!("pa-daemon: goal runtime mirror blocked: {error:#}");
+                return;
+            }
+            driver.pending_continuation_handle()
+        };
         *self
             .pending_goal_continuation
             .lock()
@@ -169,6 +193,7 @@ impl AgentSessionEngine {
             .expect("goal runtime lock")
             .clone()?;
         let driver = handles.driver.try_lock().ok()?;
+        driver.ensure_ready().ok()?;
         Some(driver.state_with_creation_elapsed())
     }
 
@@ -282,5 +307,109 @@ impl AgentSessionEngine {
             }
             self.goal_update_if_changed(emit)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_engine::tests::{admit, faux_engine_with_settings, FAUX_TEST_LOCK};
+    use std::sync::Arc;
+
+    #[test]
+    fn max_depth_facade_and_pending_flush_keep_exact_metadata_payloads() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            &serde_json::json!({ "responses": [{"text": "warm"}] }),
+            u64::MAX,
+        );
+        let mut events = Vec::new();
+        admit(&engine, "warm".to_owned(), &mut events);
+        let handles = engine
+            .goal_runtime
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("goal handles");
+        engine.persist_max_depth_state(4);
+        *engine.pending_max_depth.lock().unwrap() = Some(7);
+        engine
+            .runtime
+            .block_on(engine.flush_pending_max_depth(&handles.session))
+            .expect("pending metadata persisted");
+        let entries: Vec<_> = engine.runtime.block_on(async {
+            handles
+                .session
+                .lock()
+                .await
+                .get_entries()
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    pa_types::session::FileEntry::Custom { payload, .. }
+                        if payload.custom_type == "rlm_max_depth_state" =>
+                    {
+                        Some(payload)
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        let expected: Vec<_> = [4, 7]
+            .into_iter()
+            .map(|max_depth| {
+                let pa_types::session::FileEntry::Custom { payload, .. } =
+                    max_depth_entry(max_depth)
+                else {
+                    panic!("max-depth must remain an exact custom metadata row");
+                };
+                payload
+            })
+            .collect();
+        assert_eq!(entries, expected);
+        assert!(engine.pending_max_depth.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn blocked_goal_driver_cannot_refresh_state_or_pending_handle_mirrors() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            &serde_json::json!({ "responses": [{"text": "warm"}] }),
+            u64::MAX,
+        );
+        let mut events = Vec::new();
+        admit(&engine, "warm".to_owned(), &mut events);
+        let handles = engine
+            .goal_runtime
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("goal handles");
+        assert!(engine.current_goal_state().is_some());
+        engine.runtime.block_on(async {
+            let mut driver = handles.driver.lock().await;
+            driver.block_unresolved_handoff();
+        });
+        assert!(engine.current_goal_state().is_none());
+        let previous = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *engine.pending_goal_continuation.lock().unwrap() = Some(previous.clone());
+        engine.runtime.block_on(async {
+            let core = engine.session.lock().await;
+            engine
+                .mirror_goal_runtime(core.as_deref().expect("built core"))
+                .await;
+        });
+        assert!(Arc::ptr_eq(
+            &previous,
+            engine
+                .pending_goal_continuation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap(),
+        ));
     }
 }

@@ -47,6 +47,11 @@ impl SessionNavigation {
                 .await;
         let previous = {
             let mut core = self.core.lock().unwrap();
+            if let Some(previous) = core.store.as_mut() {
+                previous
+                    .invalidate_canonical_owner()
+                    .map_err(|error| error.to_string())?;
+            }
             core.store.replace(file)
         };
         // The old store's lease release flushes the window and info
@@ -112,7 +117,7 @@ impl SessionNavigation {
                         "new_session",
                         "Session is still initializing",
                         None,
-                    ))
+                    ));
                 }
             }
         };
@@ -200,7 +205,7 @@ impl SessionNavigation {
                     "import_jsonl",
                     "Session is still initializing",
                     None,
-                ))
+                ));
             }
         };
         std::fs::create_dir_all(target.parent().unwrap_or(std::path::Path::new(".")))

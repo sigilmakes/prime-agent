@@ -9,9 +9,10 @@ use crate::packages::source::SourceScope;
 use crate::packages::{PackageManager, PackageManagerOptions};
 use crate::settings::SettingsManager;
 
-/// Environment mutations (HOME, `PI_OFFLINE`) are process-wide: tests that
-/// touch them, and tests that read the env-sensitive update flows,
-/// serialize through the shared packages lock.
+/// HOME mutations are process-wide: package tests that touch it or read
+/// env-sensitive update flows serialize through the shared packages lock.
+/// The offline-mode fixture uses a child process because catalog readers
+/// outside the packages module do not take this lock.
 use crate::packages::test_support::ENV_MUTEX;
 
 struct Fixture {
@@ -825,9 +826,31 @@ fn different_packages_in_both_scopes_both_resolve() {
 
 #[test]
 fn offline_mode_skips_installing_missing_sources() {
-    let _guard = ENV_MUTEX.lock().unwrap();
-    let previous = std::env::var("PI_OFFLINE").ok();
-    std::env::set_var("PI_OFFLINE", "1");
+    const CHILD: &str = "PA_PACKAGES_OFFLINE_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Catalog/update tests read PI_OFFLINE without the packages-only lock.
+        // Give this fixture its own process instead of disabling their loopback I/O.
+        let previous = std::env::var_os("PI_OFFLINE");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "packages::resolve::tests::offline_mode_skips_installing_missing_sources",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("PI_OFFLINE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "offline fixture failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::env::var_os("PI_OFFLINE"), previous);
+        return;
+    }
+    assert_eq!(std::env::var("PI_OFFLINE").as_deref(), Ok("1"));
     let mut fixture = Fixture::new();
     fixture.set_user_packages(serde_json::json!(["npm:missing-package"]));
     let project_dir = fixture.manager.cwd().join(crate::settings::CONFIG_DIR_NAME);
@@ -846,11 +869,6 @@ fn offline_mode_skips_installing_missing_sources() {
         .chain(&result.prompts)
         .chain(&result.themes)
         .any(|r| r.metadata.origin == ResourceOrigin::Package));
-
-    match previous {
-        Some(value) => std::env::set_var("PI_OFFLINE", value),
-        None => std::env::remove_var("PI_OFFLINE"),
-    }
 }
 
 #[test]

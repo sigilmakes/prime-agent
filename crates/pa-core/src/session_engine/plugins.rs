@@ -85,11 +85,17 @@ pub(crate) struct SessionPlugins {
     agent_dir: PathBuf,
     diagnostic: Mutex<Option<String>>,
     context_selection: Mutex<Option<Contribution>>,
+    // Rotated only while holding context_selection. This identifies one actual
+    // selection registration, including away-then-back to the same generation.
+    context_registration: Mutex<Arc<()>>,
     disabled_plugins: Mutex<std::collections::BTreeSet<String>>,
     pinned_context_strategy: Mutex<Option<String>>,
     optional_builtins: Mutex<std::collections::BTreeMap<String, String>>,
     capabilities: Arc<SessionFacts>,
 }
+
+#[derive(Clone)]
+pub(super) struct ContextRegistration(Arc<()>);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +151,7 @@ impl SessionPlugins {
             agent_dir,
             diagnostic: Mutex::default(),
             context_selection: Mutex::new(Some(context_selection)),
+            context_registration: Mutex::new(Arc::new(())),
             disabled_plugins: Mutex::default(),
             pinned_context_strategy: Mutex::new(None),
             optional_builtins: Mutex::default(),
@@ -227,6 +234,7 @@ impl SessionPlugins {
                     .is_some_and(|target| removed.contains(&target.plugin))
                 {
                     *selection = None;
+                    *manager.context_registration.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(());
                 }
                 disabled.extend(removed.iter().cloned());
                 manager.disabled_plugins.lock().unwrap_or_else(PoisonError::into_inner).clone_from(&disabled);
@@ -355,7 +363,7 @@ impl SessionPlugins {
                         }
                         Ok(())
                     })?;
-            *selection = if selection_disabled {
+            let next_selection = if selection_disabled {
                 None
             } else {
                 Some(crate::plugins::context::resolve(
@@ -364,6 +372,10 @@ impl SessionPlugins {
                     strategy,
                 )?)
             };
+            if *selection != next_selection {
+                *manager.context_registration.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(());
+                *selection = next_selection;
+            }
             *manager
                 .disabled_plugins
                 .lock()
@@ -477,6 +489,10 @@ impl SessionPlugins {
                 .unwrap_or_else(PoisonError::into_inner) =
                 Some(format!("{}/{}", target.plugin, target.name));
             *selection = Some(target.clone());
+            *self
+                .context_registration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Arc::new(());
             Ok(())
         })?
     }
@@ -542,6 +558,51 @@ impl SessionPlugins {
             return Err(crate::plugins::PluginError::Retired.into());
         }
         self.host.with_current_contributions(&[target], commit)?
+    }
+
+    pub(super) fn capture_context_registration(
+        &self,
+        strategy: &Contribution,
+    ) -> anyhow::Result<ContextRegistration> {
+        self.with_strategy_authority(strategy, || {
+            Ok(ContextRegistration(Arc::clone(
+                &self
+                    .context_registration
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )))
+        })
+    }
+
+    // A successful prewrite closure admits exactly one already-built mutation.
+    // Retirement after admission may not cancel its receipt adoption/ACK, but
+    // publication must pass this same registration guard again after ACK.
+    pub(super) fn with_registered_context_authority<T>(
+        &self,
+        registration: &ContextRegistration,
+        strategy: &Contribution,
+        compactor: &Contribution,
+        commit: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let selection = self
+            .context_selection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = Arc::ptr_eq(
+            &registration.0,
+            &self
+                .context_registration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        if !current || selection.as_ref() != Some(strategy) {
+            return Err(crate::plugins::PluginError::Retired.into());
+        }
+        if compactor.kind != ContributionKind::Compactor {
+            bail!("not a compactor contribution");
+        }
+        self.host
+            .with_current_contributions(&[strategy, compactor], commit)?
     }
 
     pub(super) fn with_context_authority<T>(
@@ -1257,5 +1318,125 @@ mod context_selection_tests {
             .invoke_context(&strategy, json!({}), &cancel)
             .await
             .is_err());
+    }
+    #[tokio::test]
+    async fn context_registration_rejects_away_then_back_even_same_generation() {
+        let f = Fixture::new();
+        std::fs::write(f.manager.cwd.join("away.lua"), "return {context_strategies={{name='other',run=function(input) return {messages=input.messages} end}}}").unwrap();
+        f.configure(&json!({"plugins":{"away":{"enabled":true,"path":"away.lua"}}}));
+        f.manager.reload().await.unwrap();
+        let strategy = f.manager.context_selection().unwrap();
+        let compactor = f
+            .manager
+            .context_compactor("standard_compaction/standard")
+            .unwrap();
+        let registration = f.manager.capture_context_registration(&strategy).unwrap();
+        f.manager
+            .with_registered_context_authority(&registration, &strategy, &compactor, || Ok(()))
+            .unwrap();
+        let away = f.manager.context_target("away/other").unwrap();
+        f.manager
+            .commit_context_selection(&away, || Ok(()))
+            .unwrap();
+        f.manager
+            .commit_context_selection(&strategy, || Ok(()))
+            .unwrap();
+        assert_eq!(f.manager.context_selection().unwrap(), strategy);
+        let mut published = false;
+        assert!(f
+            .manager
+            .with_registered_context_authority(&registration, &strategy, &compactor, || {
+                published = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!published);
+    }
+
+    #[tokio::test]
+    async fn context_commit_admission_does_not_publish_after_compactor_retirement() {
+        let f = Fixture::new();
+        let strategy = f.manager.context_selection().unwrap();
+        let compactor = f
+            .manager
+            .context_compactor("standard_compaction/standard")
+            .unwrap();
+        let registration = f.manager.capture_context_registration(&strategy).unwrap();
+        let admitted = f
+            .manager
+            .with_registered_context_authority(&registration, &strategy, &compactor, || {
+                Ok("one frozen write")
+            })
+            .unwrap();
+        f.configure(&json!({"plugins":{"standard_compaction":{"enabled":false},"default_context":{"config":{"compactors":[]}}}}));
+        f.manager.reload().await.unwrap();
+        // Owner work already admitted must still finish; only publication is refused.
+        assert_eq!(admitted, "one frozen write");
+        let mut published = false;
+        assert!(f
+            .manager
+            .with_registered_context_authority(&registration, &strategy, &compactor, || {
+                published = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!published);
+    }
+    #[tokio::test]
+    async fn concrete_context_admission_checks_actual_registration_exact_draft_and_once() {
+        let f = Fixture::new();
+        let strategy = f.manager.context_selection().unwrap();
+        let compactor = f
+            .manager
+            .context_compactor("standard_compaction/standard")
+            .unwrap();
+        let registration = f.manager.capture_context_registration(&strategy).unwrap();
+        let draft = crate::session::canonical::CanonicalEntryDraft::new(crate::session::canonical::CanonicalMutationKind::ContextPolicy,
+            serde_json::from_value(json!({"type":"compaction","summary":"actual policy","firstKeptEntryId":"kept","tokensBefore":1})).unwrap()).unwrap();
+        let cap = super::super::canonical_live::CanonicalLiveContextAdmission::new(
+            f.manager.clone(),
+            registration,
+            strategy.clone(),
+            compactor.clone(),
+            draft.clone(),
+        );
+        let changed = crate::session::canonical::CanonicalEntryDraft::new(crate::session::canonical::CanonicalMutationKind::ContextPolicy,
+            serde_json::from_value(json!({"type":"compaction","summary":"different policy","firstKeptEntryId":"kept","tokensBefore":1})).unwrap()).unwrap();
+        let mut entered = 0;
+        assert!(cap
+            .with_admission(&changed, || {
+                entered += 1;
+                Ok(())
+            })
+            .is_err());
+        cap.with_admission(&draft, || {
+            entered += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(cap
+            .with_admission(&draft, || {
+                entered += 1;
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(entered, 1);
+        let registration = f.manager.capture_context_registration(&strategy).unwrap();
+        let cap = super::super::canonical_live::CanonicalLiveContextAdmission::new(
+            f.manager.clone(),
+            registration,
+            strategy,
+            compactor,
+            draft.clone(),
+        );
+        f.configure(&json!({"plugins":{"standard_compaction":{"enabled":false},"default_context":{"config":{"compactors":[]}}}}));
+        f.manager.reload().await.unwrap();
+        assert!(cap
+            .with_admission(&draft, || {
+                entered += 1;
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(entered, 1);
     }
 }

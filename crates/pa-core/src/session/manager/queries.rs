@@ -8,6 +8,9 @@ impl SessionManager {
     /// attached window contributes only its settings overlay.
     #[must_use]
     pub fn active_context(&self) -> super::SessionContext {
+        if self.canonical_binding().is_some() {
+            return self.canonical_visible_context();
+        }
         let mut context = super::build_session_context(&self.file_entries, self.get_leaf_id());
         if let Some(window) = &self.window {
             if !window.full_history() {
@@ -36,6 +39,7 @@ impl SessionManager {
             .map(|window| window.source_path().to_owned())
             .or_else(|| self.session_file.clone().filter(|path| path.exists()));
         let retained = self.file_entries.clone();
+        let canonical_coverage = self.canonical_raw_coverage();
         // Full-history fast path: the retained copy is exactly the file's rows
         // plus the unpersisted tail; without the lease the gate stays closed.
         let fast_path = self
@@ -44,6 +48,13 @@ impl SessionManager {
             .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
             && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld;
         async move {
+            match canonical_coverage {
+                Some(super::canonical::CanonicalRawCoverage::Full) => return Ok(retained),
+                Some(super::canonical::CanonicalRawCoverage::OwnerVerifiedSparse) => {
+                    anyhow::bail!("full canonical history requires an owner-certified checkpoint")
+                }
+                None => {}
+            }
             if fast_path {
                 return Ok(retained);
             }

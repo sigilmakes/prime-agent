@@ -200,9 +200,14 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
         if line["event"]["type"].as_str() == Some("message_end")
             && line["event"]["message"]["role"] == "assistant"
         {
-            break line["event"]["message"]["content"]
+            let content = line["event"]["message"]["content"]
+                .as_array()
+                .expect("native scripted assistant content");
+            assert_eq!(content.len(), 1);
+            assert_eq!(content[0]["type"], "text");
+            break content[0]["text"]
                 .as_str()
-                .expect("final text")
+                .expect("final assistant text")
                 .to_string();
         }
     };

@@ -114,6 +114,12 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
+    let provider = ProviderAdmission::install(
+        worker
+            .agent_engine
+            .as_ref()
+            .expect("the worker owns the real agent engine"),
+    );
     let created = worker
         .dispatch(
             "create",
@@ -144,7 +150,7 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    provider.wait_for(1).await;
     // Parked steering and one follow-up behind the running turn.
     for message in ["steering one", "steering two"] {
         let steered = worker

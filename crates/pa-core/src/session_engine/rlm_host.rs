@@ -236,10 +236,16 @@ impl RlmSubagentHost for NoRlmChildren {
             if session_id.is_some() {
                 anyhow::bail!("rlm.rename with session_id requires a daemon-backed session");
             }
-            let mut session = session.lock().await;
-            session
-                .append_session_info(&name)
-                .map_err(anyhow::Error::from)?;
+            crate::session::canonical::persist_metadata_entry(
+                &session,
+                pa_types::session::FileEntry::SessionInfo {
+                    base: super::canonical_live::draft_base(),
+                    payload: pa_types::session::SessionInfoEntry {
+                        name: Some(name.trim().to_string()),
+                    },
+                },
+            )
+            .await?;
             Ok(name)
         })
     }
@@ -1629,6 +1635,84 @@ mod tests {
             error.to_string(),
             "rlm.rename session_id must be a non-empty string"
         );
+    }
+
+    struct RejectRenameWriter {
+        session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>,
+        expected_entries: Vec<pa_types::session::FileEntry>,
+    }
+
+    impl crate::session::canonical::CanonicalMetadataWriter for RejectRenameWriter {
+        fn observe_metadata_source(
+            self: std::sync::Arc<Self>,
+        ) -> crate::session::canonical::CanonicalFuture<()> {
+            panic!("rename must not enter goal source observation")
+        }
+
+        fn append_metadata_from(
+            self: std::sync::Arc<Self>,
+            _entry: pa_types::session::FileEntry,
+            _expected: crate::session::canonical::CanonicalCursor,
+        ) -> crate::session::canonical::CanonicalFuture<
+            crate::session::canonical::CanonicalMetadataReceipt,
+        > {
+            panic!("this standalone test writer has no certified canonical source")
+        }
+
+        fn append_metadata(
+            self: Arc<Self>,
+            entry: pa_types::session::FileEntry,
+        ) -> crate::session::canonical::CanonicalFuture<String> {
+            Box::pin(async move {
+                let session = self.session.try_lock().expect("rename released SDK guard");
+                assert_eq!(session.retained_entries(), self.expected_entries);
+                assert_eq!(
+                    entry,
+                    pa_types::session::FileEntry::SessionInfo {
+                        base: super::super::canonical_live::draft_base(),
+                        payload: pa_types::session::SessionInfoEntry {
+                            name: Some("owner-name".to_owned())
+                        },
+                    }
+                );
+                Err(crate::session::canonical::CanonicalStoreError {
+                    kind: crate::session::canonical::CanonicalFailureKind::Io,
+                    requested: crate::session::canonical::CanonicalRequestedWrite::Unknown,
+                    source: crate::session::canonical::CanonicalSourceDisposition::NeedsReconcile,
+                    detail: "injected rename receipt failure".to_owned(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn no_children_bound_rename_uses_owner_without_local_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::session::manager::SessionManager::in_memory(tmp.path()),
+        ));
+        let expected_entries = session.lock().await.retained_entries().to_vec();
+        assert!(matches!(
+            expected_entries.as_slice(),
+            [pa_types::session::FileEntry::Header { .. }]
+        ));
+        let writer: Arc<dyn crate::session::canonical::CanonicalMetadataWriter> =
+            Arc::new(RejectRenameWriter {
+                session: session.clone(),
+                expected_entries: expected_entries.clone(),
+            });
+        session
+            .lock()
+            .await
+            .bind_canonical_metadata_writer(Arc::downgrade(&writer));
+        let result = NoRlmChildren::new(session.clone())
+            .rename("owner-name".to_owned(), None)
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("injected rename receipt failure"));
+        assert_eq!(session.lock().await.retained_entries(), expected_entries);
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
 use pa_types::session::CustomMessage;
 
 use super::engine::SessionEngine;
-use super::goal_driver::UsageOutcome;
+use super::goal_driver::{persist_goal_mutation, UsageOutcome};
 use crate::goals::{create_goal_context_message, GoalContextKind, GoalStatus};
 
 /// Convert one custom row to its loop form via the shared wire shape, for
@@ -35,16 +35,16 @@ impl SessionEngine {
         token_budget: Option<u64>,
     ) -> anyhow::Result<bool> {
         let persistence = self.session.shared_persistence();
-        // The driver-first lock order the other arms use: one order
-        // across the boundary stays deadlock-free.
-        let mut driver = self.goal_driver.lock().await;
-        let mut session = persistence.lock().await;
-        if !super::goal_driver::GoalDriver::is_branch_seedable(&session) {
+        let state = persist_goal_mutation(&self.goal_driver, &persistence, |driver, drafts| {
+            if !drafts.is_branch_seedable() {
+                return Ok(None);
+            }
+            driver.start(drafts, objective, token_budget).map(Some)
+        })
+        .await?;
+        let Some(state) = state else {
             return Ok(false);
-        }
-        let state = driver.start(&mut session, objective, token_budget)?;
-        drop(session);
-        drop(driver);
+        };
         let context = create_goal_context_message(&state, GoalContextKind::Continuation, &[])?;
         self.session.queue_next_turn_row(context);
         Ok(true)
@@ -63,15 +63,20 @@ impl SessionEngine {
         usage: &pa_types::ai::Usage,
     ) -> anyhow::Result<UsageOutcome> {
         let persistence = self.session.shared_persistence();
-        let mut driver = self.goal_driver.lock().await;
-        let mut session = persistence.lock().await;
-        driver.record_assistant_usage(&mut session, message_id, usage)
+        persist_goal_mutation(&self.goal_driver, &persistence, |driver, drafts| {
+            driver.record_assistant_usage(drafts, message_id, usage)
+        })
+        .await
     }
 
     /// The budget-limit wrap-up context: a `budget_limited` goal steers
     /// the run with this message next; `None` outside that state.
     pub async fn goal_budget_limit_steer(&self) -> Option<CustomMessage> {
         let driver = self.goal_driver.lock().await;
+        if let Err(error) = driver.ensure_ready() {
+            tracing::warn!("goal budget steer blocked: {error:#}");
+            return None;
+        }
         match driver.state().status {
             GoalStatus::BudgetLimited => {}
             _ => return None,
@@ -118,35 +123,27 @@ impl SessionEngine {
     /// Mint one goal continuation: an active goal consumes one slot and
     /// returns its context row — the armed RLM deferral delivers first
     /// (whichever consult runs after the blockers clear consumes it) — and
-    /// a failed persist fails the goal and mints nothing.
+    /// a failed persist blocks goal publication and mints nothing.
     pub async fn mint_goal_continuation(&self) -> Option<CustomMessage> {
         let last_turn = self.last_turn_for_goal_mint().await;
         let persistence = self.session.shared_persistence();
-        let mut driver = self.goal_driver.lock().await;
-        if !driver.owns_continuation_wakeup() {
-            return None;
-        }
-        let mut session = persistence.lock().await;
-        let was_owed = driver.owes_continuation();
-        let minted = if was_owed {
-            driver.take_owed_continuation(&mut session, last_turn.as_ref())
-        } else {
-            driver.next_continuation_message(&mut session, last_turn.as_ref())
-        };
+        let minted = persist_goal_mutation(&self.goal_driver, &persistence, |driver, drafts| {
+            if !driver.owns_continuation_wakeup() {
+                return Ok(None);
+            }
+            if driver.owes_continuation() {
+                driver.take_owed_continuation(drafts, last_turn.as_ref())
+            } else {
+                driver.next_continuation_message(drafts, last_turn.as_ref())
+            }
+        })
+        .await;
         match minted {
             Ok(message) => message,
             Err(error) => {
-                let message = format!("{error:#}");
-                tracing::warn!("goal continuation mint failed the persist: {message}");
-                // Best-effort: its own persist failure must not reject
-                // the boundary hook either.
-                if let Err(fail_error) = driver.finish_for_terminal_message(
-                    &mut session,
-                    pa_types::ai::StopReason::Error,
-                    Some(&message),
-                ) {
-                    tracing::warn!("goal error finish also failed: {fail_error:#}");
-                }
+                // A failed canonical transaction remains explicitly blocked.
+                // Another write must not hide the failed receipt or publish a candidate.
+                tracing::warn!("goal continuation mint failed: {error:#}");
                 None
             }
         }
@@ -164,19 +161,30 @@ impl SessionEngine {
         error_message: Option<&str>,
     ) -> anyhow::Result<()> {
         let persistence = self.session.shared_persistence();
-        let mut driver = self.goal_driver.lock().await;
-        let mut session = persistence.lock().await;
-        driver.finish_for_terminal_message(
-            &mut session,
-            pa_types::ai::StopReason::Error,
-            error_message,
-        )
+        persist_goal_mutation(&self.goal_driver, &persistence, |driver, drafts| {
+            driver.finish_for_terminal_message(
+                drafts,
+                pa_types::ai::StopReason::Error,
+                error_message,
+            )
+        })
+        .await
     }
 
     /// The current goal state (the drivers' publish-dedupe read): the
     /// timer reads the goal's creation-based age fresh.
     pub async fn goal_state(&self) -> crate::goals::GoalState {
         self.goal_driver.lock().await.state_with_creation_elapsed()
+    }
+
+    /// A publishable state, only after the exact goal transaction is acknowledged.
+    ///
+    /// # Errors
+    /// Refuses publication while a canonical goal transaction is pending or blocked.
+    pub async fn goal_state_ready(&self) -> anyhow::Result<crate::goals::GoalState> {
+        let driver = self.goal_driver.lock().await;
+        driver.ensure_ready()?;
+        Ok(driver.state_with_creation_elapsed())
     }
 
     /// Take the armed no-progress backoff window's deadline while the goal
@@ -216,9 +224,14 @@ impl SessionEngine {
             }
         }
         let persistence = self.session.shared_persistence();
-        let mut driver = self.goal_driver.lock().await;
-        let mut session = persistence.lock().await;
-        let _ = driver.take_owed_continuation(&mut session, /*last_turn*/ None);
+        if let Err(error) =
+            persist_goal_mutation(&self.goal_driver, &persistence, |driver, drafts| {
+                driver.take_owed_continuation(drafts, /*last_turn*/ None)
+            })
+            .await
+        {
+            tracing::warn!("dropping owed goal continuation failed: {error:#}");
+        }
     }
 
     /// Deliver the RLM-deferred goal continuation once descendant work
@@ -228,13 +241,15 @@ impl SessionEngine {
     pub async fn take_owed_goal_continuation(&self) -> Option<CustomMessage> {
         let last_turn = self.last_turn_for_goal_mint().await;
         let persistence = self.session.shared_persistence();
-        let mut driver = self.goal_driver.lock().await;
-        let mut session = persistence.lock().await;
-        match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
+        match persist_goal_mutation(&self.goal_driver, &persistence, |driver, drafts| {
+            driver.take_owed_continuation(drafts, last_turn.as_ref())
+        })
+        .await
+        {
             Ok(message) => message,
             Err(error) => {
                 tracing::warn!("owed goal continuation mint failed: {error:#}");
-                // The driver restored the deferral on its failed mint.
+                // The unpublished candidate is discarded; the old driver stays blocked.
                 None
             }
         }

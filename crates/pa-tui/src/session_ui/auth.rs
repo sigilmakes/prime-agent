@@ -196,6 +196,12 @@ impl SessionUi {
             self.exit_guard.note_ctrl_c_handled();
         }
         let kb = view.editor.keybindings();
+        // Answering the team picker changes its input to Working. Capture its ownership before
+        // dispatch so Esc cancels only the picker, not the login waiting for that answer.
+        let team_picker = view
+            .auth_panel
+            .as_ref()
+            .is_some_and(crate::auth_panel::AuthPanel::team_picker_mounted);
         if let Some(panel) = view.auth_panel.as_mut() {
             panel.handle_key(&id, kb, &mut self.osc_sink);
         }
@@ -203,10 +209,6 @@ impl SessionUi {
         // match unmounts: a raw ctrl+c with the binding remapped away is an unhandled key, not a
         // cancel — unmounting without marking leaves a live flow that can persist credentials.
         let cancel_key = kb.matches(&id, "tui.select.cancel");
-        let team_picker = view
-            .auth_panel
-            .as_ref()
-            .is_some_and(crate::auth_panel::AuthPanel::team_picker_mounted);
         if cancel_key && !team_picker {
             if let Some(cancel) = self.auth_panel_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -14,6 +14,9 @@ use crate::session_store::{SessionEntry, SessionFile};
 use crate::session_tree;
 use crate::worker::{SessionCore, Worker};
 use pa_agent::abort::AbortController;
+use pa_core::session::canonical::{CanonicalEntryDraft, CanonicalMutationKind};
+use pa_core::session_engine::canonical_live::CanonicalLiveSession;
+use pa_types::session::{EntryBase, FileEntry, LabelEntry};
 
 /// One completed abandoned-branch summary to persist: the text, its usage block, its
 /// file-op details, and the model the summary served on (`None` keeps the attribution).
@@ -23,6 +26,16 @@ type PendingBranchSummary = (
     Option<Value>,
     Option<(String, String)>,
 );
+
+enum NavigationWork {
+    Noop,
+    Aborted,
+    Prepared {
+        new_leaf: Option<String>,
+        editor_text: Option<String>,
+        summary: Option<Box<PendingBranchSummary>>,
+    },
+}
 
 pub(crate) struct TreeNavigation {
     engine: Arc<dyn SessionEngine>,
@@ -176,6 +189,20 @@ impl TreeNavigation {
         // A navigation interrupts the running turn first (TS
         // `acquireQueuedWorkPause` + `waitForIdle`).
         self.wait_turn_end().await;
+        match self.engine.canonical_navigation_session().await {
+            Ok(Some(live)) => {
+                return match self.navigate_canonical(payload, live).await {
+                    Ok(data) => response_success(None, "navigate_tree", Some(data)),
+                    Err(error) => {
+                        response_failure(None, "navigate_tree", &format!("{error:#}"), None)
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return response_failure(None, "navigate_tree", &format!("{error:#}"), None);
+            }
+        }
 
         let (new_leaf, editor_text) = navigation_point(&target);
 
@@ -195,44 +222,13 @@ impl TreeNavigation {
                     target_id,
                 );
             if !collected.entries.is_empty() {
-                let controller = Arc::new(AbortController::new());
-                {
-                    let mut slot = self
-                        .abort
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    *slot = Some(Arc::clone(&controller));
-                }
-                let outcome = {
-                    let engine = Arc::clone(&self.engine);
-                    let signal = controller.signal();
-                    tokio::task::spawn_blocking(move || {
-                        engine.run_branch_summary(
-                            BranchSummaryRequest {
-                                entries: collected.entries,
-                                custom_instructions,
-                                replace_instructions,
-                            },
-                            &signal,
-                        )
-                    })
-                    .await
-                    .unwrap_or_else(|join_error| {
-                        crate::engine::BranchSummaryOutcome::Failed {
-                            error: format!("branch summary run failed: {join_error}"),
-                        }
-                    })
-                };
-                let mut slot = self
-                    .abort
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if slot
-                    .as_ref()
-                    .is_some_and(|live| Arc::ptr_eq(live, &controller))
-                {
-                    *slot = None;
-                }
+                let outcome = self
+                    .run_branch_summary_once(
+                        collected.entries,
+                        custom_instructions,
+                        replace_instructions,
+                    )
+                    .await;
                 match outcome {
                     crate::engine::BranchSummaryOutcome::Complete { run } => {
                         summary = Some((run.summary, run.usage, run.details, run.model));
@@ -242,10 +238,10 @@ impl TreeNavigation {
                             None,
                             "navigate_tree",
                             Some(json!({ "cancelled": true, "aborted": true })),
-                        )
+                        );
                     }
                     crate::engine::BranchSummaryOutcome::Failed { error } => {
-                        return response_failure(None, "navigate_tree", &error, None)
+                        return response_failure(None, "navigate_tree", &error, None);
                     }
                 }
             }
@@ -290,7 +286,7 @@ impl TreeNavigation {
                         summary_entry = store.entry(&summary_id).map(session_tree::entry_json);
                     }
                     Err(error) => {
-                        return response_failure(None, "navigate_tree", &error.to_string(), None)
+                        return response_failure(None, "navigate_tree", &error.to_string(), None);
                     }
                 }
             } else {
@@ -324,6 +320,247 @@ impl TreeNavigation {
             data["summaryEntry"] = summary_entry;
         }
         response_success(None, "navigate_tree", Some(data))
+    }
+
+    /// Canonical navigation certifies the old source before paid work, closes
+    /// that operation, then adopts one ordered branch successor before any summary.
+    async fn navigate_canonical(
+        &self,
+        payload: &Value,
+        live: Arc<CanonicalLiveSession>,
+    ) -> anyhow::Result<Value> {
+        let target_id = payload
+            .get("targetId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let summarize = payload.get("summarize").and_then(Value::as_bool) == Some(true);
+        let custom_instructions = payload
+            .get("customInstructions")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let replace_instructions =
+            payload.get("replaceInstructions").and_then(Value::as_bool) == Some(true);
+        let label = payload
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let ticket = live
+            .prepare_mutation(CanonicalMutationKind::ContextPolicy)
+            .await?;
+        let expected = ticket.source_cursor().clone();
+        let computation: anyhow::Result<NavigationWork> = async {
+                let core = self.core.clone();
+                let expected_snapshot = expected.clone();
+                let target_snapshot = target_id.clone();
+                let (target, old_leaf, file_entries) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let mut core = core.lock().map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+                    let store = core.store.as_mut().ok_or_else(|| anyhow::anyhow!("Session is still initializing"))?;
+                    anyhow::ensure!(store.attach_canonical_owner()? == expected_snapshot, "navigation source changed before policy");
+                    let lease = store.lease.clone().ok_or_else(|| anyhow::anyhow!("canonical navigation requires actual session lease"))?;
+                    lease.with_owned_mutation(&store.path, || {
+                        // Recapture only the exact FULL source certified by prepare.
+                        // The loaded index can contain usage overlays or omit rows.
+                        let raw = crate::session_store::canonical_raw::RawCapture::capture(
+                            &store.path,
+                            crate::session_store::canonical_raw::RawPosition {
+                                owner: expected_snapshot.owner.clone(),
+                                canonical_revision: expected_snapshot.canonical_revision,
+                                branch_revision: expected_snapshot.branch_revision,
+                                selected_leaf: expected_snapshot.selected_leaf.clone(),
+                            },
+                            crate::session_store::canonical_raw::CaptureMode::Full,
+                        )?;
+                        anyhow::ensure!(raw.cursor == expected_snapshot, "certified navigation source changed before policy");
+                        let target = raw.retained.iter().find(|row| row.entry().id() == Some(target_snapshot.as_str()))
+                            .ok_or_else(|| anyhow::anyhow!("Entry {target_snapshot} not found"))?;
+                        let target = serde_json::from_slice::<SessionEntry>(target.raw())?;
+                        let old_leaf = raw.cursor.selected_leaf.clone();
+                        let entries = raw.retained.iter().map(|row| row.entry().clone()).collect::<Vec<FileEntry>>();
+                        Ok((target, old_leaf, entries))
+                    })
+                }).await??;
+                if old_leaf.as_deref() == Some(target_id.as_str()) {
+                    return Ok(NavigationWork::Noop);
+                }
+                let (new_leaf, editor_text) = navigation_point(&target);
+                let mut summary = None;
+                if summarize {
+                    let collected = pa_core::session_engine::branch_summarization::collect_entries_for_branch_summary(
+                        &file_entries, old_leaf.as_deref(), &target_id,
+                    );
+                    if !collected.entries.is_empty() {
+                        match self.run_branch_summary_once(collected.entries, custom_instructions, replace_instructions).await {
+                            crate::engine::BranchSummaryOutcome::Complete { run } => {
+                                summary = Some(Box::new((run.summary, run.usage, run.details, run.model)));
+                            }
+                            crate::engine::BranchSummaryOutcome::Aborted => return Ok(NavigationWork::Aborted),
+                            crate::engine::BranchSummaryOutcome::Failed { error } => anyhow::bail!(error),
+                        }
+                    }
+                }
+                Ok(NavigationWork::Prepared { new_leaf, editor_text, summary })
+            }.await;
+        // Explicitly abandon only the old prepared operation. Paid output is
+        // retained below; an error never reruns the callback against new history.
+        ticket.abandon().await?;
+        let (new_leaf, editor_text, summary) = match computation? {
+            NavigationWork::Noop => return Ok(json!({"cancelled":false})),
+            NavigationWork::Aborted => return Ok(json!({"cancelled":true,"aborted":true})),
+            NavigationWork::Prepared {
+                new_leaf,
+                editor_text,
+                summary,
+            } => (new_leaf, editor_text, summary),
+        };
+        // Validate the retained output before changing the actual branch.
+        let summary_intent = summary
+            .as_deref()
+            .map(|(summary, usage, details, model)| {
+                session_tree::branch_summary_intent(
+                    new_leaf.as_deref(),
+                    summary,
+                    details.clone(),
+                    usage.clone(),
+                    model
+                        .as_ref()
+                        .map(|(provider, model)| (provider.as_str(), model.as_str())),
+                )
+            })
+            .transpose()?;
+        let core = self.core.clone();
+        let before_navigation = expected.clone();
+        let selected = new_leaf.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let mut core = core
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+            let store = core
+                .store
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("Session is still initializing"))?;
+            store
+                .prepare_canonical_navigation(&before_navigation, selected.as_deref())
+                .map_err(anyhow::Error::from)
+        })
+        .await??;
+        let navigated_source = prepared.checkpoint.cursor.clone();
+        live.adopt_navigation(prepared, expected).await?;
+
+        let summarized = summary_intent.is_some();
+        let summary_id = if let Some(entry) = summary_intent {
+            let ticket = live
+                .prepare_mutation(CanonicalMutationKind::ContextPolicy)
+                .await?;
+            if ticket.source_cursor() != &navigated_source {
+                ticket.abandon().await?;
+                anyhow::bail!("navigation source changed before retained summary commit");
+            }
+            let draft = CanonicalEntryDraft::new(CanonicalMutationKind::ContextPolicy, entry)?;
+            Some(ticket.commit(draft).await?)
+        } else {
+            None
+        };
+        if let Some(label) = label {
+            live.append(
+                CanonicalMutationKind::OwnerMetadata,
+                FileEntry::Label {
+                    base: EntryBase {
+                        id: None,
+                        parent_id: None,
+                        timestamp: None,
+                        rest: serde_json::Map::default(),
+                    },
+                    payload: LabelEntry {
+                        target_id: summary_id.clone().unwrap_or(target_id),
+                        label: Some(label),
+                    },
+                },
+            )
+            .await?;
+        }
+        let (branch_entries, summary_entry) = {
+            let core = self
+                .core
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+            let store = core
+                .store
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Session is still initializing"))?;
+            let summary_entry = match summary_id.as_ref() {
+                Some(id) => Some(session_tree::entry_json(store.entry(id).ok_or_else(
+                    || anyhow::anyhow!("acknowledged branch summary is missing"),
+                )?)),
+                None => None,
+            };
+            (store.branch_file_entries(), summary_entry)
+        };
+        let goal_reload = if summarized {
+            pa_core::session_engine::goal_driver::GoalBranchReload::SameTimeline
+        } else {
+            pa_core::session_engine::goal_driver::GoalBranchReload::FaithfulBranch
+        };
+        rebuild_engine_context(&self.engine, branch_entries, goal_reload)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let mut data = json!({"cancelled":false});
+        if let Some(text) = editor_text {
+            data["editorText"] = json!(text);
+        }
+        if let Some(entry) = summary_entry {
+            data["summaryEntry"] = entry;
+        }
+        Ok(data)
+    }
+
+    /// One paid callback. Navigation retains the result across its owner
+    /// boundary and never calls this again when source validation fails.
+    async fn run_branch_summary_once(
+        &self,
+        entries: Vec<FileEntry>,
+        custom_instructions: Option<String>,
+        replace_instructions: bool,
+    ) -> crate::engine::BranchSummaryOutcome {
+        let controller = Arc::new(AbortController::new());
+        {
+            let mut slot = self
+                .abort
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(Arc::clone(&controller));
+        }
+        let outcome = {
+            let engine = Arc::clone(&self.engine);
+            let signal = controller.signal();
+            tokio::task::spawn_blocking(move || {
+                engine.run_branch_summary(
+                    BranchSummaryRequest {
+                        entries,
+                        custom_instructions,
+                        replace_instructions,
+                    },
+                    &signal,
+                )
+            })
+            .await
+            .unwrap_or_else(|join_error| {
+                crate::engine::BranchSummaryOutcome::Failed {
+                    error: format!("branch summary run failed: {join_error}"),
+                }
+            })
+        };
+        let mut slot = self
+            .abort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|live| Arc::ptr_eq(live, &controller))
+        {
+            *slot = None;
+        }
+        outcome
     }
 
     /// `fork`'s prepare phase: settle the running turn first (the branch copy reads the
@@ -416,7 +653,7 @@ impl TreeNavigation {
                     match store.create_branched_file(leaf_id, session_dir) {
                         Ok(forked) => forked,
                         Err(error) => {
-                            return Err(response_failure(None, "fork", &error.to_string(), None))
+                            return Err(response_failure(None, "fork", &error.to_string(), None));
                         }
                     }
                 }
@@ -441,6 +678,11 @@ impl TreeNavigation {
                 .await;
         let previous = {
             let mut core = self.core.lock().unwrap();
+            if let Some(previous) = core.store.as_mut() {
+                previous
+                    .invalidate_canonical_owner()
+                    .map_err(|error| error.to_string())?;
+            }
             core.store.replace(forked)
         };
         // The old store's lease release flushes the window and info
@@ -603,3 +845,6 @@ impl Worker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

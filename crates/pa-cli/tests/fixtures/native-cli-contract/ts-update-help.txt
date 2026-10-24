@@ -1,0 +1,10 @@
+Usage:
+  prime-agent update [--force] [--rollback] [--nightly|--stable]
+
+Update Prime Agent.
+
+Options:
+  --force     Reinstall even if the current version is the latest on the channel
+  --rollback  Restore the previous compiled release
+  --nightly   Switch updates to the nightly channel (unreleased builds, may be broken)
+  --stable    Return updates to the stable channel

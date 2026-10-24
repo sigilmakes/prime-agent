@@ -298,6 +298,17 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
             response["data"]["sessionId"],
             format!("cwd-regression-{index}")
         );
+        let reopened_file = std::path::Path::new(
+            response["data"]["sessionFile"]
+                .as_str()
+                .expect("the reopened physical journal"),
+        );
+        assert!(reopened_file.is_absolute());
+        assert_eq!(
+            reopened_file.canonicalize().expect("reopened journal"),
+            saved.canonicalize().expect("original journal"),
+            "resume keeps the same physical journal"
+        );
         let active = &response["data"]["id"];
         client.send_command(
             "context",

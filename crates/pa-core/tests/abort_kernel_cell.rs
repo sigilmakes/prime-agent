@@ -162,6 +162,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         generic_mcp_servers: Vec::new(),
         allow_recursion: None,
         session_manager: Some(session),
+        canonical_live_owner: None,
         extra_host_handlers: None,
         conversation_log_path: None,
         additional_skill_paths: Vec::new(),

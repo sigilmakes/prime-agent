@@ -309,14 +309,18 @@ impl AgentSessionEngine {
         let Some(persistence) = persistence else {
             return;
         };
-        let mut session = persistence.lock().await;
         // The resume path's live clear still stands (the quota IS back),
         // so a failed write surfaces as a log; the restart's arms own
-        // the recovery.
-        if let Err(write_error) = session.append_custom_entry(
-            pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
-            Some(serde_json::json!({ "outcome": outcome })),
-        ) {
+        // the recovery. No SDK guard crosses the owner receipt await.
+        if let Err(write_error) = pa_core::session::canonical::persist_metadata_entry(
+            &persistence,
+            quota_metadata_entry(
+                pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
+                serde_json::json!({ "outcome": outcome }),
+            ),
+        )
+        .await
+        {
             eprintln!(
                 "pa-daemon: quota resume entry write failed (outcome {outcome}): {write_error}"
             );
@@ -357,13 +361,16 @@ impl AgentSessionEngine {
         let Some(persistence) = persistence else {
             return Ok(());
         };
-        let mut session = persistence.lock().await;
-        session
-            .append_custom_entry(
+        pa_core::session::canonical::persist_metadata_entry(
+            &persistence,
+            quota_metadata_entry(
                 pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,
-                Some(data),
-            )
-            .map(|_| ())
+                data,
+            ),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| std::io::Error::other(error.to_string()))
     }
 
     async fn installed_persistence(
@@ -421,5 +428,25 @@ impl AgentSessionEngine {
                 },
             ));
         }
+    }
+}
+
+/// Pure quota metadata intent. Identity and timestamp belong to the writer.
+fn quota_metadata_entry(
+    custom_type: &str,
+    data: serde_json::Value,
+) -> pa_types::session::FileEntry {
+    pa_types::session::FileEntry::Custom {
+        base: pa_types::session::EntryBase {
+            id: None,
+            parent_id: None,
+            timestamp: None,
+            rest: serde_json::Map::default(),
+        },
+        payload: pa_types::session::CustomEntry {
+            custom_type: custom_type.to_owned(),
+            data: Some(data),
+            rest: serde_json::Map::default(),
+        },
     }
 }

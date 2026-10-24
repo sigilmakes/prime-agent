@@ -139,6 +139,7 @@ pub(crate) async fn build_faux_engine_with(
             context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
             context_startup_admitted_user_ids: Vec::new(),
             on_initial_context_selection: None,
+            canonical_live_owner: None,
             cron_store: None,
             semantic_edges: None,
             steering_mode: None,

@@ -5,12 +5,14 @@ Enter `nix develop --no-update-lock-file` first. Dependency downloads are allowe
 provider/MCP credentials are not. One target/cache is reused, never per-lane copies.
 """
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -80,14 +82,8 @@ def isolated_environment(repo, state, target, cargo_home, ambient):
         "XDG_DATA_HOME": str(state / "data"), "XDG_STATE_HOME": str(state / "state"),
         "XDG_RUNTIME_DIR": str(state / "run"),
         "PRIME_AGENT_CODING_AGENT_DIR": str(state / "agent"),
-        "PRIME_AGENT_SESSION_DIR": str(state / "sessions"),
-        "PRIME_AGENT_CODING_AGENT_SESSION_DIR": str(state / "sessions"),
         "PRIME_AGENT_KERNEL_VENV": str(kernel),
         "PRIME_AGENT_DAEMON_SOCKET": str(state / "run/daemon.sock"),
-        "RLM_SESSION_DIR": str(state / "artifacts"),
-        "RLM_HARNESS_STATE_DIR": str(state / "harness-local"),
-        "RLM_GLOBAL_HARNESS_STATE_DIR": str(state / "harness-global"),
-        "PI_PACKAGE_DIR": str(repo), "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1",
         "DO_NOT_TRACK": "1", "PRIME_AGENT_TELEMETRY": "0",
         "CARGO_TARGET_DIR": str(target), "CARGO_HOME": str(cargo_home),
         "CARGO_BUILD_JOBS": "2", "CARGO_INCREMENTAL": "0",
@@ -100,7 +96,43 @@ def isolated_environment(repo, state, target, cargo_home, ambient):
     return env
 
 
-def run(command, *, repo, env, deadline, capture=False):
+def loopback_command(command):
+    """Keep real HTTP semantics while blocking all external test egress."""
+    return ["unshare", "--user", "--map-current-user", "--net", "--keep-caps", "--",
+            sys.executable, str(Path(__file__).resolve()), "--loopback-exec", *command]
+
+
+def exec_loopback(command):
+    if not command or {name for _, name in socket.if_nameindex()} != {"lo"}:
+        raise ValueError("workspace gate requires a fresh loopback-only network namespace")
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+    # Verify readiness, not elapsed time. No test starts with a down loopback.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        with socket.create_connection(listener.getsockname(), timeout=2) as client:
+            peer, _ = listener.accept()
+            with peer:
+                peer.sendall(b"ok")
+                if client.recv(2) != b"ok":
+                    raise ValueError("loopback fixture transport is not ready")
+    with socket.socket() as external:
+        external.settimeout(2)
+        try:
+            external.connect(("192.0.2.1", 9))  # RFC 5737 documentation address.
+        except OSError as error:
+            if error.errno != errno.ENETUNREACH:
+                raise ValueError("external egress is not proven unreachable") from error
+        else:
+            raise ValueError("external egress unexpectedly available")
+    print(f"Loopback-only test network verified: {os.readlink('/proc/self/ns/net')}",
+          file=sys.stderr, flush=True)
+    os.execvpe(command[0], command, os.environ)
+
+
+def run(command, *, repo, env, deadline, capture=False, loopback_only=False):
+    if loopback_only:
+        command = loopback_command(command)
     print("+ " + " ".join(map(str, command)), flush=True)
     child = subprocess.Popen(command, cwd=repo, env=env, start_new_session=True,
                              stdout=subprocess.PIPE if capture else None,
@@ -187,20 +219,23 @@ def main():
     with (target / ".downstream-workspace-check.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         env = isolated_environment(repo, state, target, cargo_home, os.environ)
-        for key in ("HOME", "TMPDIR", "XDG_RUNTIME_DIR", "PRIME_AGENT_CODING_AGENT_DIR",
-                    "PRIME_AGENT_SESSION_DIR", "RLM_SESSION_DIR"):
+        for key in ("HOME", "TMPDIR", "XDG_RUNTIME_DIR", "PRIME_AGENT_CODING_AGENT_DIR"):
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
         deadline = time.monotonic() + args.timeout
         prepare_kernel(repo, env, deadline, args.kernel_python)
         run(["cargo", "build", "--locked", "--workspace", "--bins"],
             repo=repo, env=env, deadline=deadline)
-        run(["make", "workspace-check"], repo=repo, env=env, deadline=deadline)
+        test_env = dict(env, CARGO_NET_OFFLINE="true", UV_OFFLINE="1")
+        run(["make", "workspace-check"], repo=repo, env=test_env, deadline=deadline,
+            loopback_only=True)
     print("Full workspace gate passed", flush=True)
     return 0
 
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:2] == ["--loopback-exec"]:
+            exec_loopback(sys.argv[2:])
         raise SystemExit(main())
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"Workspace gate failed: {error}", file=sys.stderr)

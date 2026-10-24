@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use pa_core::session_engine::goal_driver::persist_goal_mutation;
+
 use crate::agent_engine::AgentSessionEngine;
 use crate::engine::{GoalContinuation, GoalTurnEndWork, PromptRequest};
 
@@ -78,19 +80,48 @@ impl AgentSessionEngine {
     /// An error assistant message fails an active goal (an abort keeps
     /// it); the state change surfaces through the run's tracking wrapper.
     pub(crate) fn finish_goal_for_terminal_error(&self, error: &str) {
-        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+        let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
+        eprintln!(
+            "pa-daemon: goal terminal finish phase=enter runtime_present={}",
+            handles.is_some()
+        );
+        let Some(handles) = handles else {
             return;
         };
         self.runtime.block_on(async {
-            let mut driver = handles.driver.lock().await;
-            let mut session = handles.session.lock().await;
-            if let Err(persist_error) = driver.finish_for_terminal_message(
-                &mut session,
-                pa_types::ai::StopReason::Error,
-                Some(error),
-            ) {
-                // The best-effort terminal hook must not reject the caller.
-                eprintln!("pa-daemon: goal terminal finish persist failed: {persist_error:#}");
+            let result =
+                persist_goal_mutation(&handles.driver, &handles.session, |driver, drafts| {
+                    eprintln!(
+                        "pa-daemon: goal terminal finish phase=mutation goal_active={} status_active={}",
+                        driver.state().active,
+                        driver.state().status == pa_core::goals::GoalStatus::Active
+                    );
+                    driver.finish_for_terminal_message(
+                        drafts,
+                        pa_types::ai::StopReason::Error,
+                        Some(error),
+                    )
+                })
+                .await;
+            // The best-effort terminal hook must not reject the caller.
+            match result {
+                Ok(()) => eprintln!(
+                    "pa-daemon: goal terminal finish phase=return success=true error_kind=none"
+                ),
+                Err(persist_error) => {
+                    let kind = if let Some(error) = persist_error
+                        .downcast_ref::<pa_core::session::canonical::CanonicalStoreError>()
+                    {
+                        format!("canonical_{:?}", error.kind)
+                    } else if let Some(error) = persist_error.downcast_ref::<std::io::Error>() {
+                        format!("io_{:?}", error.kind())
+                    } else {
+                        "other".to_string()
+                    };
+                    eprintln!(
+                        "pa-daemon: goal terminal finish phase=return success=false error_kind={kind}"
+                    );
+                }
             }
         });
     }
@@ -123,7 +154,6 @@ impl AgentSessionEngine {
     /// The settle-site body: exactly-once delivery under the driver lock,
     /// deferral kept while descendants or queued input own the boundary.
     async fn goal_children_settled(&self) {
-        // A closed session (killed/stopped) drops the retry.
         if self.session_is_closed() {
             return;
         }
@@ -132,79 +162,94 @@ impl AgentSessionEngine {
         };
         {
             let driver = handles.driver.lock().await;
-            if !driver.owes_continuation() {
+            if driver.ensure_ready().is_err() || !driver.owes_continuation() {
                 return;
             }
         }
         if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
             return;
         }
-        // Queued input or the post-abort suspension owns the boundary.
         if self.session_input_queued() {
             return;
         }
-        // Read the last assistant message before the driver lock (the
-        // session mutex never nests under it); the failed pair's drop
-        // happens inside, only once the consult examines the corpse.
         let last_turn = self.last_loop_assistant_message_async().await;
-        if last_turn
-            .as_ref()
-            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
-                turn.stop_reason == pa_agent::types::StopReason::Error
-                    || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
-            })
-        {
+        if last_turn.as_ref().is_some_and(|turn| {
+            turn.stop_reason == pa_agent::types::StopReason::Error
+                || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+        }) {
             self.drop_failed_goal_continuation_pair().await;
         }
-        let mut driver = handles.driver.lock().await;
-        let mut session = handles.session.lock().await;
-        let message = match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
-            Ok(Some(message)) => message,
-            Ok(None) => {
-                // An inactive goal drops the deferral; a live goal in the
-                // no-progress backoff arms the one-shot wake. The refusal
-                // changed the durable state — publish it outside the turn.
-                let state = driver.state_with_creation_elapsed();
-                let wake_at = driver.backoff_wake_at();
-                drop(driver);
-                self.publish_goal_state(&state);
-                if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
+        // The candidate is private while the owner writes, adopts and ACKs its
+        // rows. No goal or manager guard survives that await.
+        let (message, revision) =
+            match persist_goal_mutation(&handles.driver, &handles.session, |driver, drafts| {
+                // The helper installs the original local revision + 1; internal
+                // mutations of its private candidate do not change that stamp.
+                let revision = driver.revision().wrapping_add(1);
+                let message = driver.take_owed_continuation(drafts, last_turn.as_ref())?;
+                Ok((message, revision))
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("pa-daemon: owed goal continuation mint persist failed: {error:#}");
+                    return;
                 }
-                return;
+            };
+        let Some(message) = message else {
+            let wake_at = {
+                let driver = handles.driver.lock().await;
+                if driver.ensure_ready().is_err() {
+                    return;
+                }
+                self.publish_goal_state(&driver.state_with_creation_elapsed());
+                driver.backoff_wake_at()
+            };
+            if let Some(wake_at) = wake_at {
+                self.schedule_goal_backoff_wake(wake_at).await;
             }
-            Err(error) => {
-                // A failed persist drops the deferral without minting.
-                eprintln!("pa-daemon: owed goal continuation mint persist failed: {error:#}");
-                return;
-            }
+            return;
         };
-        // The mint succeeded: retire the pending wake instead of firing
-        // one more marker turn.
         self.cancel_goal_backoff_wake();
-        // This mint's own guard handle: later releases clear exactly this
-        // handle, never the mutable mirror (a core rebuild may have
-        // re-swapped it meanwhile).
-        let pending_handle = Some(driver.pending_continuation_handle());
-        // Input or a close arriving during the mint cancels it: the owed
-        // slot survives (a later resumed session retries), and the stopped
-        // session's durable state stays as the close left it.
         if self.session_input_queued() || self.session_is_closed() {
-            if let Err(error) = driver.rollback_continuation_mint(&mut session) {
-                // Warn, do not reject: a re-owed mint would double-charge.
-                eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
-            } else {
-                driver.mark_continuation_owed();
+            if let Err(error) =
+                persist_goal_mutation(&handles.driver, &handles.session, |driver, drafts| {
+                    anyhow::ensure!(
+                        driver.revision() == revision && driver.pending_continuation(),
+                        "goal continuation changed before rollback"
+                    );
+                    driver.rollback_continuation_mint(drafts)?;
+                    driver.mark_continuation_owed();
+                    Ok(())
+                })
+                .await
+            {
+                // Closure rejection may precede installing a mutation flight.
+                // Quarantine the actual driver, never just its private candidate.
+                handles.driver.lock().await.block_unresolved_handoff();
+                eprintln!("pa-daemon: goal mint rollback blocked until durable rebuild: {error:#}");
             }
             return;
         }
-        let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
-        drop(driver);
-        // A close that lands while the awaits above ran: the mint is
-        // consumed (the owed flag was already taken) and the unconsumed
-        // mint releases the pending guard with it.
+        let (goal_update, pending_handle) = {
+            let mut driver = handles.driver.lock().await;
+            if driver.ensure_ready().is_err()
+                || driver.revision() != revision
+                || !driver.pending_continuation()
+            {
+                driver.block_unresolved_handoff();
+                eprintln!(
+                    "pa-daemon: owed goal handoff changed after ACK; blocked until durable rebuild"
+                );
+                return;
+            }
+            (
+                self.publish_goal_state(&driver.state_with_creation_elapsed()),
+                Some(driver.pending_continuation_handle()),
+            )
+        };
         if self.session_is_closed() {
-            // Release the mint's own pending guard.
             AgentSessionEngine::release_goal_continuation_handle(pending_handle.as_ref());
             return;
         }
@@ -269,103 +314,135 @@ impl AgentSessionEngine {
     /// continuation turn, deferred (owed, not consumed) behind unsettled
     /// descendant work or a background bash handle.
     fn mint_goal_continuation(&self) -> GoalBoundary {
-        // A closed session never continues: no mint, no owed-continuation
-        // consumption.
         if self.session_is_closed() {
             return GoalBoundary::Proceed;
         }
         let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
             return GoalBoundary::Proceed;
         };
-        // Read the just-settled turn BEFORE the driver lock (the session
-        // mutex never nests under it). The failed pair's drop happens
-        // inside, once the consult examines the corpse — an early drop
-        // would hide the no-progress turn from the later consults.
         let last_turn = self.last_loop_assistant_message();
         self.runtime.block_on(async {
-            let mut driver = handles.driver.lock().await;
-            if !driver.owns_continuation_wakeup() {
-                let mut session = handles.session.lock().await;
-                if driver.owes_continuation() {
-                    let _ = driver.take_owed_continuation(&mut session, None);
-                }
-                return GoalBoundary::Proceed;
-            }
-            // Queued session input owns the boundary; the queued work's own
-            // settle re-consults.
-            if self.session_input_queued() {
-                return GoalBoundary::End;
-            }
-            // The quiescence gate: the continuation waits (not consumed)
-            // until the descendants settle or the bash handles finish.
-            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
-                driver.mark_continuation_owed();
-                return GoalBoundary::End;
-            }
-            // Now the trailing failed continuation pair can leave the
-            // live loop (the captured `last_turn` still carries the
-            // corpse's verdict for the check below).
-            if last_turn
-                .as_ref()
-                .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
-                    turn.stop_reason == pa_agent::types::StopReason::Error
-                        || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
-                })
-            {
-                drop(driver);
-                self.drop_failed_goal_continuation_pair().await;
-                driver = handles.driver.lock().await;
-            }
-            let was_owed = driver.owes_continuation();
-            let mut session = handles.session.lock().await;
-            let message = if was_owed {
-                driver.take_owed_continuation(&mut session, last_turn.as_ref())
-            } else {
-                driver.next_continuation_message(&mut session, last_turn.as_ref())
-            };
-            let message = match message {
-                Ok(message) => message,
-                Err(error) => {
-                    // The hook must not reject: a failed persist ends the
-                    // boundary without a continuation.
-                    eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
+            let owns_wakeup = {
+                let driver = handles.driver.lock().await;
+                if driver.ensure_ready().is_err() {
                     return GoalBoundary::End;
                 }
+                driver.owns_continuation_wakeup()
             };
-            if message.is_none() {
-                // A refused mint with the window still armed schedules the
-                // one-shot retry (without a wake the refusal would stall
-                // the goal); publish the refused state.
-                let state = driver.state_with_creation_elapsed();
-                let wake_at = driver.backoff_wake_at();
-                drop(driver);
-                self.publish_goal_state(&state);
-                if let Some(wake_at) = wake_at {
-                    self.schedule_goal_backoff_wake(wake_at).await;
-                }
+            if !owns_wakeup {
+                // Drop any inactive owed slot through the same staged mutation.
+                return match persist_goal_mutation(
+                    &handles.driver,
+                    &handles.session,
+                    |driver, drafts| {
+                        if driver.owns_continuation_wakeup() {
+                            return Ok(false);
+                        }
+                        if driver.owes_continuation() {
+                            driver.take_owed_continuation(drafts, None)?;
+                        }
+                        Ok(true)
+                    },
+                )
+                .await
+                {
+                    Ok(true) => GoalBoundary::Proceed,
+                    Ok(false) => GoalBoundary::End,
+                    Err(error) => {
+                        eprintln!("pa-daemon: inactive goal deferral persist failed: {error:#}");
+                        GoalBoundary::End
+                    }
+                };
+            }
+            if self.session_input_queued() {
                 return GoalBoundary::End;
             }
-            // The mint succeeded: retire any stale wake instead of firing
-            // one more marker turn.
-            self.cancel_goal_backoff_wake();
-            // This mint's own guard handle.
-            let pending_handle = Some(driver.pending_continuation_handle());
-            // Input that arrived while the mint ran rolls the slot back
-            // so the next boundary re-mints without double-counting.
-            if self.session_input_queued() {
-                if let Err(error) = driver.rollback_continuation_mint(&mut session) {
-                    // Warn, do not reject: re-owing would re-mint and
-                    // double-charge the eventual turn, so the cancelled
-                    // boundary absorbs the spent slot.
-                    eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
-                } else if was_owed {
+            if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+                let mut driver = handles.driver.lock().await;
+                if driver.ensure_ready().is_ok() {
                     driver.mark_continuation_owed();
                 }
                 return GoalBoundary::End;
             }
-            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
-            let message = message.expect("the mint produced a message");
-            drop(driver);
+            if last_turn.as_ref().is_some_and(|turn| {
+                turn.stop_reason == pa_agent::types::StopReason::Error
+                    || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+            }) {
+                self.drop_failed_goal_continuation_pair().await;
+            }
+            let (message, was_owed, revision) =
+                match persist_goal_mutation(&handles.driver, &handles.session, |driver, drafts| {
+                    let revision = driver.revision().wrapping_add(1);
+                    let was_owed = driver.owes_continuation();
+                    let message = if was_owed {
+                        driver.take_owed_continuation(drafts, last_turn.as_ref())?
+                    } else {
+                        driver.next_continuation_message(drafts, last_turn.as_ref())?
+                    };
+                    Ok((message, was_owed, revision))
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
+                        return GoalBoundary::End;
+                    }
+                };
+            let Some(message) = message else {
+                let wake_at = {
+                    let driver = handles.driver.lock().await;
+                    if driver.ensure_ready().is_err() {
+                        return GoalBoundary::End;
+                    }
+                    self.publish_goal_state(&driver.state_with_creation_elapsed());
+                    driver.backoff_wake_at()
+                };
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
+                return GoalBoundary::End;
+            };
+            self.cancel_goal_backoff_wake();
+            if self.session_input_queued() {
+                if let Err(error) =
+                    persist_goal_mutation(&handles.driver, &handles.session, |driver, drafts| {
+                        anyhow::ensure!(
+                            driver.revision() == revision && driver.pending_continuation(),
+                            "goal continuation changed before rollback"
+                        );
+                        driver.rollback_continuation_mint(drafts)?;
+                        if was_owed {
+                            driver.mark_continuation_owed();
+                        }
+                        Ok(())
+                    })
+                    .await
+                {
+                    handles.driver.lock().await.block_unresolved_handoff();
+                    eprintln!(
+                        "pa-daemon: goal mint rollback blocked until durable rebuild: {error:#}"
+                    );
+                }
+                return GoalBoundary::End;
+            }
+            let (goal_update, pending_handle) = {
+                let mut driver = handles.driver.lock().await;
+                if driver.ensure_ready().is_err()
+                    || driver.revision() != revision
+                    || !driver.pending_continuation()
+                {
+                    driver.block_unresolved_handoff();
+                    eprintln!(
+                        "pa-daemon: goal handoff changed after ACK; blocked until durable rebuild"
+                    );
+                    return GoalBoundary::End;
+                }
+                (
+                    self.publish_goal_state(&driver.state_with_creation_elapsed()),
+                    Some(driver.pending_continuation_handle()),
+                )
+            };
             self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
                 request: goal_prompt_request(&message),
                 goal_update,
@@ -389,6 +466,7 @@ impl AgentSessionEngine {
             .clone()?;
         let message = self.runtime.block_on(async {
             let driver = handles.driver.lock().await;
+            driver.ensure_ready().ok()?;
             let state = driver.state_with_creation_elapsed();
             if state.status != pa_core::goals::GoalStatus::BudgetLimited {
                 return None;
@@ -569,5 +647,51 @@ mod tests {
                 .block_on(async { handles.driver.lock().await.owes_continuation() }),
             "the delivered continuation consumed the owed slot"
         );
+    }
+
+    #[test]
+    fn unresolved_goal_handoff_is_display_only_and_cannot_admit_continuations() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (engine, _dir) = faux_engine_with_settings(
+            &serde_json::json!({ "responses": [{"text": "warm"}] }),
+            u64::MAX,
+        );
+        let engine = Arc::new(engine);
+        let work = goal_admission_collector(&engine);
+        let mut events = Vec::new();
+        admit(&engine, "warm".to_owned(), &mut events);
+        let handles = engine
+            .goal_runtime
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("built goal handles");
+        let before = engine.runtime.block_on(async {
+            let mut driver = handles.driver.lock().await;
+            let before = driver.state().clone();
+            driver.block_unresolved_handoff();
+            before
+        });
+        *engine.published_goal.lock().unwrap() = Some(before.clone());
+        assert_eq!(
+            crate::engine::SessionEngine::goal_state_value(&*engine),
+            serde_json::to_value(&before).unwrap(),
+            "ordinary display may retain the last published state",
+        );
+        assert_eq!(engine.goal_turn_end_boundary(), GoalBoundary::End);
+        assert!(
+            crate::engine::SessionEngine::mint_post_compaction_goal_continuation(&*engine)
+                .is_none()
+        );
+        engine.runtime.block_on(engine.goal_children_settled());
+        engine.finish_goal_for_terminal_error("must not unblock a lost transaction");
+        assert!(work.lock().unwrap().is_empty());
+        engine.runtime.block_on(async {
+            let driver = handles.driver.lock().await;
+            assert_eq!(driver.state(), &before);
+            assert!(driver.ensure_ready().is_err());
+        });
     }
 }

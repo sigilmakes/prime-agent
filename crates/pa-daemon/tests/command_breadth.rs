@@ -525,11 +525,26 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
 /// The accept list is the TS list, in TS order, then the Rust-native supervisor/worker frames.
 #[test]
 fn known_command_types_match_the_ts_list() {
-    assert!(KNOWN_COMMAND_TYPES.len() > TS_DAEMON_COMMAND_TYPES.len());
-    let (head, tail) = KNOWN_COMMAND_TYPES.split_at(TS_DAEMON_COMMAND_TYPES.len());
+    // Keep the ordered TS baseline intact. These declared public extensions
+    // have fixed positions in the compatible command prefix.
+    let mut expected = Vec::with_capacity(TS_DAEMON_COMMAND_TYPES.len() + 4);
+    for command in TS_DAEMON_COMMAND_TYPES {
+        match *command {
+            "get_resource_snapshot" => expected.push("plugin_command"),
+            "get_queue" => expected.extend([
+                "refresh_models",
+                "apply_model_snapshots",
+                "refresh_all_models",
+            ]),
+            _ => {}
+        }
+        expected.push(*command);
+    }
+    assert!(KNOWN_COMMAND_TYPES.len() > expected.len());
+    let (head, tail) = KNOWN_COMMAND_TYPES.split_at(expected.len());
     assert_eq!(
-        head, TS_DAEMON_COMMAND_TYPES,
-        "accept list must start with the TS list"
+        head, expected,
+        "accept list must preserve the TS prefix with declared public extensions"
     );
     for extra in tail {
         // Rust-native frames only; a new TS type must extend the TS constant.

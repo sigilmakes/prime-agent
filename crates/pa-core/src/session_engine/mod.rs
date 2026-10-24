@@ -7,6 +7,7 @@ pub mod auto_retry;
 pub mod auxiliary_model;
 pub mod branch_summarization;
 pub mod canonical_coordinator;
+pub mod canonical_live;
 pub mod compact_session;
 pub mod compaction;
 pub mod compaction_exec;
@@ -134,6 +135,7 @@ pub struct AgentSession {
     agent: Arc<Agent>,
     ollama_cloud: Arc<ollama_cloud::SessionOllamaCloud>,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
+    canonical_live: Option<Arc<canonical_live::CanonicalLiveSession>>,
     prompt_templates: Vec<PromptTemplate>,
     slash_commands: SlashCommandRegistry,
     plugins: Option<Arc<plugins::SessionPlugins>>,
@@ -274,12 +276,26 @@ impl AgentSession {
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         prompt_templates: Vec<PromptTemplate>,
     ) -> anyhow::Result<Self> {
+        Self::from_session_arc_live(agent, session, prompt_templates, None).await
+    }
+
+    async fn from_session_arc_live(
+        agent: Arc<Agent>,
+        session: Arc<tokio::sync::Mutex<SessionManager>>,
+        prompt_templates: Vec<PromptTemplate>,
+        canonical_live: Option<Arc<canonical_live::CanonicalLiveSession>>,
+    ) -> anyhow::Result<Self> {
         let persistence = session.clone();
+        let live_persistence = canonical_live.clone();
         agent
             .subscribe(move |event, _signal| {
                 let persistence = persistence.clone();
+                let live = live_persistence.clone();
                 Box::pin(async move {
-                    persist_event(&persistence, event).await?;
+                    // Bound durability ran before Agent's delivery/state guards.
+                    if live.is_none() {
+                        persist_event(&persistence, None, event).await?;
+                    }
                     Ok(())
                 })
             })
@@ -288,6 +304,7 @@ impl AgentSession {
             agent,
             ollama_cloud: Arc::default(),
             session,
+            canonical_live,
             prompt_templates,
             slash_commands: SlashCommandRegistry::builtin(),
             plugins: None,
@@ -313,6 +330,90 @@ impl AgentSession {
         Ok(this)
     }
 
+    /// Whether persistence is bound to an actual external canonical owner.
+    #[must_use]
+    pub fn has_canonical_live_owner(&self) -> bool {
+        self.canonical_live.is_some()
+    }
+
+    /// Clone the bound live persistence facade without retaining any SDK guard.
+    #[must_use]
+    pub fn canonical_live_session(&self) -> Option<Arc<canonical_live::CanonicalLiveSession>> {
+        self.canonical_live.clone()
+    }
+
+    /// Adopt an owner-prepared exact branch successor and its ACK-approved view.
+    ///
+    /// # Errors
+    /// Refuses unbound sessions or any owner/source/local revision conflict.
+    pub async fn adopt_canonical_navigation(
+        &self,
+        prepared: crate::session::canonical::CanonicalPrepared,
+        expected: crate::session::canonical::CanonicalCursor,
+    ) -> anyhow::Result<()> {
+        self.canonical_live
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session has no canonical live owner"))?
+            .adopt_navigation(prepared, expected)
+            .await?;
+        Ok(())
+    }
+
+    /// Reassemble the already adopted bound branch, never replace raw history.
+    ///
+    /// # Errors
+    /// Refuses blocked receipts, changed branches or invalid/retired strategy views.
+    pub async fn rebuild_canonical_branch_context(&self) -> anyhow::Result<()> {
+        let live = self
+            .canonical_live
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session has no canonical live owner"))?;
+        live.ensure_ready()?;
+        let target = self
+            .plugins
+            .as_ref()
+            .map(|plugins| plugins.context_selection())
+            .transpose()?;
+        let (revision, binding) = {
+            let session = self.session.lock().await;
+            (
+                session.canonical_local_revision(),
+                session
+                    .canonical_binding()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("canonical branch has no binding"))?,
+            )
+        };
+        let messages = self.context_messages().await?;
+        let session = self.session.lock().await;
+        let result = self
+            .agent
+            .commit_idle_messages(
+                messages
+                    .iter()
+                    .filter_map(session_message_to_loop)
+                    .collect(),
+                || {
+                    let commit = || {
+                        session.check_canonical_live_revision(revision, &binding)?;
+                        live.ensure_ready()?;
+                        Ok(())
+                    };
+                    match (&self.plugins, &target) {
+                        (Some(plugins), Some(target)) => {
+                            plugins.with_strategy_authority(target, commit)
+                        }
+                        _ => commit(),
+                    }
+                },
+            )
+            .await;
+        if result.is_err() {
+            live.block_projection();
+        }
+        result
+    }
+
     /// The underlying agent loop (steering, state, subscriptions).
     pub fn agent(&self) -> &Arc<Agent> {
         &self.agent
@@ -328,6 +429,14 @@ impl AgentSession {
     /// daemon's ACP transport records goal usage into it).
     pub fn shared_persistence(&self) -> Arc<tokio::sync::Mutex<SessionManager>> {
         self.session.clone()
+    }
+
+    /// Persist one envelope-free metadata intent through the actual owner.
+    ///
+    /// # Errors
+    /// Returns owner, adoption, ACK, or standalone persistence failures.
+    pub async fn persist_metadata_entry(&self, entry: FileEntry) -> anyhow::Result<String> {
+        crate::session::canonical::persist_metadata_entry(&self.session, entry).await
     }
 
     /// Session id (persistence identity).
@@ -518,6 +627,19 @@ impl AgentSession {
         provider: &str,
         model_id: &str,
     ) -> anyhow::Result<()> {
+        if let Some(live) = &self.canonical_live {
+            live.append(
+                crate::session::canonical::CanonicalMutationKind::OwnerMetadata,
+                FileEntry::ModelChange {
+                    base: canonical_live::draft_base(),
+                    payload: pa_types::session::ModelChangeEntry {
+                        provider: provider.to_owned(),
+                        model_id: model_id.to_owned(),
+                    },
+                },
+            )
+            .await?;
+        }
         let model = self.configure_ollama_model(model);
         let wire: pa_agent::types::Model = serde_json::from_value(
             serde_json::to_value(&model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
@@ -528,8 +650,12 @@ impl AgentSession {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(model.clone());
         self.agent.set_model(wire).await;
-        let mut session = self.session.lock().await;
-        session.append_model_change(provider, model_id)?;
+        if self.canonical_live.is_none() {
+            self.session
+                .lock()
+                .await
+                .append_model_change(provider, model_id)?;
+        }
         Ok(())
     }
 
@@ -548,6 +674,19 @@ impl AgentSession {
         model_id: &str,
         thinking_level: ThinkingLevel,
     ) -> anyhow::Result<()> {
+        if let Some(live) = &self.canonical_live {
+            live.append(
+                crate::session::canonical::CanonicalMutationKind::OwnerMetadata,
+                FileEntry::ModelChange {
+                    base: canonical_live::draft_base(),
+                    payload: pa_types::session::ModelChangeEntry {
+                        provider: provider.to_owned(),
+                        model_id: model_id.to_owned(),
+                    },
+                },
+            )
+            .await?;
+        }
         let model = self.configure_ollama_model(model);
         let wire: pa_agent::types::Model = serde_json::from_value(
             serde_json::to_value(&model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
@@ -560,8 +699,12 @@ impl AgentSession {
         self.agent
             .set_model_and_thinking_level(wire, thinking_level)
             .await;
-        let mut session = self.session.lock().await;
-        session.append_model_change(provider, model_id)?;
+        if self.canonical_live.is_none() {
+            self.session
+                .lock()
+                .await
+                .append_model_change(provider, model_id)?;
+        }
         Ok(())
     }
 
@@ -571,22 +714,54 @@ impl AgentSession {
     ///
     /// Returns an error when the thinking-level change row cannot be persisted.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) -> anyhow::Result<()> {
+        let thinking_level = format!("{level:?}").to_lowercase();
+        if let Some(live) = &self.canonical_live {
+            live.append(
+                crate::session::canonical::CanonicalMutationKind::OwnerMetadata,
+                FileEntry::ThinkingLevelChange {
+                    base: canonical_live::draft_base(),
+                    payload: pa_types::session::ThinkingLevelChangeEntry { thinking_level },
+                },
+            )
+            .await?;
+        } else {
+            self.session
+                .lock()
+                .await
+                .append_thinking_level_change(&thinking_level)?;
+        }
         self.agent.set_thinking_level(level).await;
-        let mut session = self.session.lock().await;
-        session.append_thinking_level_change(&format!("{level:?}").to_lowercase())?;
         Ok(())
     }
 }
 
 async fn persist_event(
     session: &Arc<tokio::sync::Mutex<SessionManager>>,
+    live: Option<&canonical_live::CanonicalLiveSession>,
     event: AgentEvent,
 ) -> std::io::Result<()> {
     match event {
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => {
+            if let Some(live) = live {
+                live.start_tool(tool_call_id, tool_name, args)
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
+        }
         AgentEvent::MessageEnd { message, .. } => {
             let Some(session_message) = loop_message_to_session(&message) else {
                 return Ok(());
             };
+            if let Some(live) = live {
+                return live
+                    .persist_message(session_message)
+                    .await
+                    .map_err(std::io::Error::other);
+            }
             let mut session = session.lock().await;
             // TS `_processAgentEvent` swallows persistence failures and keeps
             // the row in memory: the loop already reduced the event into live
@@ -616,7 +791,89 @@ async fn persist_event(
         // session lock released. A session's captures are sequential (the loop
         // awaits every listener), the cwd never changes, and no other lock
         // holder appends `git_state`, so re-taking the lock cannot race.
-        AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {
+        boundary @ (AgentEvent::AgentStart | AgentEvent::AgentEnd { .. }) => {
+            if let Some(live) = live {
+                if matches!(&boundary, AgentEvent::AgentStart) {
+                    live.start_run().await.map_err(std::io::Error::other)?;
+                } else {
+                    live.cancel_projection_at_run_end();
+                }
+                // Prepare the exact owner source before probing git. The
+                // prepared lease is already ACKed/released; no SDK guard or
+                // writer lock survives the blocking probe.
+                let metadata = live
+                    .prepare_mutation(
+                        crate::session::canonical::CanonicalMutationKind::OwnerMetadata,
+                    )
+                    .await
+                    .map_err(std::io::Error::other)?;
+                let (cwd, active_git) = {
+                    let manager = session.lock().await;
+                    if manager.canonical_binding() != Some(metadata.cursor())
+                        || manager.canonical_raw_full_rows().is_none()
+                    {
+                        return Err(std::io::Error::other(
+                            "run-boundary git state requires an exact complete canonical source",
+                        ));
+                    }
+                    let mut selected = metadata.cursor().selected_leaf.clone();
+                    let mut active_git = None;
+                    while let Some(id) = selected {
+                        let entry = manager.canonical_raw_entry(&id).ok_or_else(|| {
+                            std::io::Error::other("run-boundary git ancestry is not retained")
+                        })?;
+                        if let FileEntry::GitState { payload, .. } = entry.entry() {
+                            active_git = Some(payload.git.clone());
+                            break;
+                        }
+                        selected = entry.entry().parent_id().map(str::to_owned);
+                    }
+                    if active_git.is_none() {
+                        let header = manager.canonical_raw_header().ok_or_else(|| {
+                            std::io::Error::other("run-boundary git source has no canonical header")
+                        })?;
+                        let FileEntry::Header { header } = header.entry() else {
+                            return Err(std::io::Error::other(
+                                "run-boundary git source header is invalid",
+                            ));
+                        };
+                        active_git.clone_from(&header.git);
+                    }
+                    (manager.get_cwd().to_path_buf(), active_git)
+                };
+                let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
+                let changed = git.filter(|git| {
+                    !active_git.as_ref().is_some_and(|active| {
+                        // Match TS gitContextsEqual: future metadata is retained
+                        // but does not change repository identity.
+                        active.repo_url == git.repo_url
+                            && active.commit == git.commit
+                            && active.branch == git.branch
+                    })
+                });
+                if let Some(git) = changed {
+                    let draft = crate::session::canonical::CanonicalEntryDraft::new(
+                        crate::session::canonical::CanonicalMutationKind::OwnerMetadata,
+                        FileEntry::GitState {
+                            base: canonical_live::draft_base(),
+                            payload: pa_types::session::GitStateEntry { git },
+                        },
+                    )
+                    .map_err(std::io::Error::other)?;
+                    metadata
+                        .commit(draft)
+                        .await
+                        .map_err(std::io::Error::other)?;
+                } else {
+                    metadata.abandon().await.map_err(std::io::Error::other)?;
+                }
+                // Keep the actual run identity until the git row's receipt has
+                // been adopted and ACKed (or unchanged preparation abandoned).
+                if matches!(boundary, AgentEvent::AgentEnd { .. }) {
+                    live.end_run();
+                }
+                return Ok(());
+            }
             let cwd = {
                 let session = session.lock().await;
                 session

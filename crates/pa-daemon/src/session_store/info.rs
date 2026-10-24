@@ -633,8 +633,12 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
     };
     match entry.type_.as_ref() {
         "session" => {
-            let parsed: SessionHeader = serde_json::from_str(trimmed).ok()?;
-            acc.header = Some(parsed);
+            let pa_types::session::FileEntry::Header { header } =
+                serde_json::from_str(trimmed).ok()?
+            else {
+                return None;
+            };
+            acc.header = Some(header);
         }
         "session_info" => {
             acc.name = raw_string(entry.name)

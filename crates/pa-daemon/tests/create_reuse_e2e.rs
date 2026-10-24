@@ -167,10 +167,15 @@ impl Client {
             }
             if line["type"] == "session_event" {
                 match line["event"]["type"].as_str() {
-                    Some("message_end") => {
-                        final_text = line["event"]["message"]["content"]
+                    Some("message_end") if line["event"]["message"]["role"] == "assistant" => {
+                        let content = line["event"]["message"]["content"]
+                            .as_array()
+                            .expect("native scripted assistant content");
+                        assert_eq!(content.len(), 1);
+                        assert_eq!(content[0]["type"], "text");
+                        final_text = content[0]["text"]
                             .as_str()
-                            .unwrap_or_default()
+                            .expect("final assistant text")
                             .to_string();
                     }
                     Some("turn_end") => turn_ended = true,

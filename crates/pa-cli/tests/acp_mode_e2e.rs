@@ -30,10 +30,10 @@ struct AcpChild {
     stdin: Option<std::process::ChildStdin>,
     lines: Receiver<String>,
     next_id: u64,
-    /// Held (never read) so the child's cwd directory outlives the process:
+    /// Held so the child's cwd directory outlives the process:
     /// dropping the tempdir deletes it and the child's `current_dir` fails.
     /// `None` for a second child sharing another child's home.
-    _home: Option<tempfile::TempDir>,
+    home: Option<tempfile::TempDir>,
     spawn_stderr: Option<std::process::ChildStderr>,
     /// The sandboxed supervisor socket the child spawned: the drop shuts
     /// the supervisor down with it (a killed child must not leak the
@@ -73,7 +73,7 @@ impl AcpChild {
             stdin: Some(stdin),
             lines,
             next_id: 0,
-            _home: home,
+            home,
             spawn_stderr: Some(stderr),
             socket,
         }
@@ -224,6 +224,15 @@ fn daemon_attached_command(
         .arg("--daemon-socket")
         .arg(socket)
         .env("HOME", home)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", home.join(".prime/agent"))
+        .env(
+            "PRIME_AGENT_SESSION_DIR",
+            home.join(".prime/agent/sessions"),
+        )
+        .env(
+            "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+            home.join(".prime/agent/sessions"),
+        )
         .env("PRIME_AGENT_FAUX_SCRIPT", home.join("worker-script.json"))
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
@@ -255,6 +264,15 @@ fn worker_descriptor(home: &std::path::Path) -> Value {
 
 impl Drop for AcpChild {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Some(home) = self.home.take() {
+                let path = home.keep();
+                eprintln!(
+                    "[canon-acp-diag] retained_private_sandbox={}",
+                    path.display()
+                );
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         if let Some(mut stderr) = self.spawn_stderr.take() {
@@ -861,7 +879,10 @@ fn acp_mode_daemon_unreachable_exits_1_without_fallback() {
         "the startup failure is an error line: {stderr}"
     );
     assert!(
-        stderr.contains("Timed out waiting for the Prime Agent daemon to start"),
+        stderr.contains(&format!(
+            "Timed out waiting for the Prime Agent Rust daemon to start on selected socket {}.",
+            socket.display()
+        )),
         "the daemon never became reachable: {stderr}"
     );
 }

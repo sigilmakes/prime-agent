@@ -189,7 +189,7 @@ impl Worker {
                         command,
                         &format!("session reload failed: {error}"),
                         None,
-                    )
+                    );
                 }
                 Err(error) => {
                     return response_failure(
@@ -197,7 +197,7 @@ impl Worker {
                         command,
                         &format!("session reload failed: {error}"),
                         None,
-                    )
+                    );
                 }
             }
         }
@@ -218,6 +218,9 @@ impl Worker {
                         .as_mut()
                         .context("Session is still initializing")
                         .and_then(|store| {
+                            if store.is_canonical_bound() {
+                                return Ok(());
+                            }
                             store.persist_entry("custom_message", json!({
                         "customType": message.custom_type, "content": value["content"],
                         "display": message.display, "details": message.details,

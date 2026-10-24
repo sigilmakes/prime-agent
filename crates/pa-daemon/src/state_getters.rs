@@ -68,6 +68,18 @@ impl Worker {
         // borrow-based, so the request answers from memory even on a grown store.
         let (label, context_usage, own_usage, total_usage, session_id, own_usage_by_model) = {
             let core = self.core.lock().unwrap();
+            if core
+                .store
+                .as_ref()
+                .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
+            {
+                return response_failure(
+                    None,
+                    "get_context_tree",
+                    "Canonical source is unresolved",
+                    None,
+                );
+            }
             let store = core.store.as_ref();
             let label = store
                 .and_then(|store| store.session_name().map(str::to_string))
@@ -181,6 +193,18 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
+        if core
+            .store
+            .as_ref()
+            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
+        {
+            return response_failure(
+                None,
+                "get_session_context",
+                "Canonical source is unresolved",
+                None,
+            );
+        }
         let Some(store) = core.store.as_ref() else {
             return response_failure(
                 None,

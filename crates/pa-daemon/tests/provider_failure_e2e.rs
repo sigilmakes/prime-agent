@@ -41,6 +41,212 @@ impl Drop for Supervisor {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if !std::thread::panicking() {
+            return;
+        }
+        let Some(agent_dir) = self.stderr_path.parent() else {
+            return;
+        };
+        let Ok(logs) = std::fs::read_dir(agent_dir.join("logs")) else {
+            return;
+        };
+        for entry in logs.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("worker-") || !name.ends_with(".stderr.log") {
+                continue;
+            }
+            let Ok(stderr) = std::fs::File::open(entry.path()) else {
+                continue;
+            };
+            // Forward only whole-line, fixed-token goal diagnostics before TempDir
+            // removes the private capture. Never forward arbitrary worker stderr.
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let Some(fields) = line.strip_prefix("pa-daemon: goal terminal finish ") else {
+                    continue;
+                };
+                let safe_fields = match fields {
+                    "phase=enter runtime_present=true" => Some("phase=enter runtime_present=true"),
+                    "phase=enter runtime_present=false" => {
+                        Some("phase=enter runtime_present=false")
+                    }
+                    "phase=mutation goal_active=true status_active=true" => {
+                        Some("phase=mutation goal_active=true status_active=true")
+                    }
+                    "phase=mutation goal_active=true status_active=false" => {
+                        Some("phase=mutation goal_active=true status_active=false")
+                    }
+                    "phase=mutation goal_active=false status_active=true" => {
+                        Some("phase=mutation goal_active=false status_active=true")
+                    }
+                    "phase=mutation goal_active=false status_active=false" => {
+                        Some("phase=mutation goal_active=false status_active=false")
+                    }
+                    "phase=return success=true error_kind=none" => {
+                        Some("phase=return success=true error_kind=none")
+                    }
+                    "phase=return success=false error_kind=other" => {
+                        Some("phase=return success=false error_kind=other")
+                    }
+                    "phase=return success=false error_kind=canonical_InvalidRequest" => {
+                        Some("phase=return success=false error_kind=canonical_InvalidRequest")
+                    }
+                    "phase=return success=false error_kind=canonical_OwnerChanged" => {
+                        Some("phase=return success=false error_kind=canonical_OwnerChanged")
+                    }
+                    "phase=return success=false error_kind=canonical_BranchChanged" => {
+                        Some("phase=return success=false error_kind=canonical_BranchChanged")
+                    }
+                    "phase=return success=false error_kind=canonical_SourceChanged" => {
+                        Some("phase=return success=false error_kind=canonical_SourceChanged")
+                    }
+                    "phase=return success=false error_kind=canonical_AuthorityClosed" => {
+                        Some("phase=return success=false error_kind=canonical_AuthorityClosed")
+                    }
+                    "phase=return success=false error_kind=canonical_Io" => {
+                        Some("phase=return success=false error_kind=canonical_Io")
+                    }
+                    "phase=return success=false error_kind=canonical_Cancelled" => {
+                        Some("phase=return success=false error_kind=canonical_Cancelled")
+                    }
+                    "phase=return success=false error_kind=canonical_CallerAbandoned" => {
+                        Some("phase=return success=false error_kind=canonical_CallerAbandoned")
+                    }
+                    "phase=return success=false error_kind=canonical_AdoptionConflict" => {
+                        Some("phase=return success=false error_kind=canonical_AdoptionConflict")
+                    }
+                    "phase=return success=false error_kind=io_NotFound" => {
+                        Some("phase=return success=false error_kind=io_NotFound")
+                    }
+                    "phase=return success=false error_kind=io_PermissionDenied" => {
+                        Some("phase=return success=false error_kind=io_PermissionDenied")
+                    }
+                    "phase=return success=false error_kind=io_ConnectionRefused" => {
+                        Some("phase=return success=false error_kind=io_ConnectionRefused")
+                    }
+                    "phase=return success=false error_kind=io_ConnectionReset" => {
+                        Some("phase=return success=false error_kind=io_ConnectionReset")
+                    }
+                    "phase=return success=false error_kind=io_HostUnreachable" => {
+                        Some("phase=return success=false error_kind=io_HostUnreachable")
+                    }
+                    "phase=return success=false error_kind=io_NetworkUnreachable" => {
+                        Some("phase=return success=false error_kind=io_NetworkUnreachable")
+                    }
+                    "phase=return success=false error_kind=io_ConnectionAborted" => {
+                        Some("phase=return success=false error_kind=io_ConnectionAborted")
+                    }
+                    "phase=return success=false error_kind=io_NotConnected" => {
+                        Some("phase=return success=false error_kind=io_NotConnected")
+                    }
+                    "phase=return success=false error_kind=io_AddrInUse" => {
+                        Some("phase=return success=false error_kind=io_AddrInUse")
+                    }
+                    "phase=return success=false error_kind=io_AddrNotAvailable" => {
+                        Some("phase=return success=false error_kind=io_AddrNotAvailable")
+                    }
+                    "phase=return success=false error_kind=io_NetworkDown" => {
+                        Some("phase=return success=false error_kind=io_NetworkDown")
+                    }
+                    "phase=return success=false error_kind=io_BrokenPipe" => {
+                        Some("phase=return success=false error_kind=io_BrokenPipe")
+                    }
+                    "phase=return success=false error_kind=io_AlreadyExists" => {
+                        Some("phase=return success=false error_kind=io_AlreadyExists")
+                    }
+                    "phase=return success=false error_kind=io_WouldBlock" => {
+                        Some("phase=return success=false error_kind=io_WouldBlock")
+                    }
+                    "phase=return success=false error_kind=io_NotADirectory" => {
+                        Some("phase=return success=false error_kind=io_NotADirectory")
+                    }
+                    "phase=return success=false error_kind=io_IsADirectory" => {
+                        Some("phase=return success=false error_kind=io_IsADirectory")
+                    }
+                    "phase=return success=false error_kind=io_DirectoryNotEmpty" => {
+                        Some("phase=return success=false error_kind=io_DirectoryNotEmpty")
+                    }
+                    "phase=return success=false error_kind=io_ReadOnlyFilesystem" => {
+                        Some("phase=return success=false error_kind=io_ReadOnlyFilesystem")
+                    }
+                    "phase=return success=false error_kind=io_FilesystemLoop" => {
+                        Some("phase=return success=false error_kind=io_FilesystemLoop")
+                    }
+                    "phase=return success=false error_kind=io_StaleNetworkFileHandle" => {
+                        Some("phase=return success=false error_kind=io_StaleNetworkFileHandle")
+                    }
+                    "phase=return success=false error_kind=io_InvalidInput" => {
+                        Some("phase=return success=false error_kind=io_InvalidInput")
+                    }
+                    "phase=return success=false error_kind=io_InvalidData" => {
+                        Some("phase=return success=false error_kind=io_InvalidData")
+                    }
+                    "phase=return success=false error_kind=io_TimedOut" => {
+                        Some("phase=return success=false error_kind=io_TimedOut")
+                    }
+                    "phase=return success=false error_kind=io_WriteZero" => {
+                        Some("phase=return success=false error_kind=io_WriteZero")
+                    }
+                    "phase=return success=false error_kind=io_StorageFull" => {
+                        Some("phase=return success=false error_kind=io_StorageFull")
+                    }
+                    "phase=return success=false error_kind=io_NotSeekable" => {
+                        Some("phase=return success=false error_kind=io_NotSeekable")
+                    }
+                    "phase=return success=false error_kind=io_QuotaExceeded" => {
+                        Some("phase=return success=false error_kind=io_QuotaExceeded")
+                    }
+                    "phase=return success=false error_kind=io_FileTooLarge" => {
+                        Some("phase=return success=false error_kind=io_FileTooLarge")
+                    }
+                    "phase=return success=false error_kind=io_ResourceBusy" => {
+                        Some("phase=return success=false error_kind=io_ResourceBusy")
+                    }
+                    "phase=return success=false error_kind=io_ExecutableFileBusy" => {
+                        Some("phase=return success=false error_kind=io_ExecutableFileBusy")
+                    }
+                    "phase=return success=false error_kind=io_Deadlock" => {
+                        Some("phase=return success=false error_kind=io_Deadlock")
+                    }
+                    "phase=return success=false error_kind=io_CrossesDevices" => {
+                        Some("phase=return success=false error_kind=io_CrossesDevices")
+                    }
+                    "phase=return success=false error_kind=io_TooManyLinks" => {
+                        Some("phase=return success=false error_kind=io_TooManyLinks")
+                    }
+                    "phase=return success=false error_kind=io_InvalidFilename" => {
+                        Some("phase=return success=false error_kind=io_InvalidFilename")
+                    }
+                    "phase=return success=false error_kind=io_ArgumentListTooLong" => {
+                        Some("phase=return success=false error_kind=io_ArgumentListTooLong")
+                    }
+                    "phase=return success=false error_kind=io_Interrupted" => {
+                        Some("phase=return success=false error_kind=io_Interrupted")
+                    }
+                    "phase=return success=false error_kind=io_Unsupported" => {
+                        Some("phase=return success=false error_kind=io_Unsupported")
+                    }
+                    "phase=return success=false error_kind=io_UnexpectedEof" => {
+                        Some("phase=return success=false error_kind=io_UnexpectedEof")
+                    }
+                    "phase=return success=false error_kind=io_OutOfMemory" => {
+                        Some("phase=return success=false error_kind=io_OutOfMemory")
+                    }
+                    "phase=return success=false error_kind=io_InProgress" => {
+                        Some("phase=return success=false error_kind=io_InProgress")
+                    }
+                    "phase=return success=false error_kind=io_Other" => {
+                        Some("phase=return success=false error_kind=io_Other")
+                    }
+                    _ => None,
+                };
+                if let Some(safe_fields) = safe_fields {
+                    eprintln!("pa-daemon: goal terminal finish {safe_fields}");
+                }
+            }
+        }
     }
 }
 
@@ -1145,16 +1351,21 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
     };
     assert_eq!(
         roles_of(agent_ends[0]),
-        ["custom", "user", "assistant"],
-        "the initial run's message set (the deferred harness digest rides first): {agent_ends:?}"
+        ["user", "assistant"],
+        "the initial run carries only the prompt and failed assistant: {agent_ends:?}"
+    );
+    assert!(
+        agent_ends.iter().all(|frame| {
+            frame["messages"].as_array().is_some_and(|messages| {
+                messages.iter().all(|message| {
+                    message.get("customType").and_then(Value::as_str) != Some("harness_digest")
+                })
+            })
+        }),
+        "no run reintroduces a legacy host-owned harness digest: {agent_ends:?}"
     );
     assert_eq!(
-        agent_ends[0]["messages"][0]["customType"],
-        json!("harness_digest"),
-        "the deferred digest row is the run's first message"
-    );
-    assert_eq!(
-        agent_ends[0]["messages"][2]["stopReason"],
+        agent_ends[0]["messages"][1]["stopReason"],
         json!("error"),
         "the initial run ends on the error row"
     );

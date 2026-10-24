@@ -40,12 +40,96 @@ struct Supervisor {
     child: Child,
     #[allow(dead_code)]
     socket: PathBuf,
+    agent_dir: PathBuf,
 }
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if !std::thread::panicking() {
+            return;
+        }
+        let Ok(logs) = std::fs::read_dir(self.agent_dir.join("logs")) else {
+            return;
+        };
+        for entry in logs.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("worker-") || !name.ends_with(".stderr.log") {
+                continue;
+            }
+            let Ok(stderr) = std::fs::File::open(entry.path()) else {
+                continue;
+            };
+            // Select only static literals by whole-line equality. No private
+            // worker text or path can reach the test's failure output.
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let Some(fields) = line.strip_prefix("pa-daemon: compaction outcome ") else {
+                    continue;
+                };
+                let safe_fields = [
+                    "phase=return success=false error_kind=other",
+                    "phase=return success=false error_kind=canonical_InvalidRequest",
+                    "phase=return success=false error_kind=canonical_OwnerChanged",
+                    "phase=return success=false error_kind=canonical_BranchChanged",
+                    "phase=return success=false error_kind=canonical_SourceChanged",
+                    "phase=return success=false error_kind=canonical_AuthorityClosed",
+                    "phase=return success=false error_kind=canonical_Io",
+                    "phase=return success=false error_kind=canonical_Cancelled",
+                    "phase=return success=false error_kind=canonical_CallerAbandoned",
+                    "phase=return success=false error_kind=canonical_AdoptionConflict",
+                    "phase=return success=false error_kind=io_NotFound",
+                    "phase=return success=false error_kind=io_PermissionDenied",
+                    "phase=return success=false error_kind=io_ConnectionRefused",
+                    "phase=return success=false error_kind=io_ConnectionReset",
+                    "phase=return success=false error_kind=io_HostUnreachable",
+                    "phase=return success=false error_kind=io_NetworkUnreachable",
+                    "phase=return success=false error_kind=io_ConnectionAborted",
+                    "phase=return success=false error_kind=io_NotConnected",
+                    "phase=return success=false error_kind=io_AddrInUse",
+                    "phase=return success=false error_kind=io_AddrNotAvailable",
+                    "phase=return success=false error_kind=io_NetworkDown",
+                    "phase=return success=false error_kind=io_BrokenPipe",
+                    "phase=return success=false error_kind=io_AlreadyExists",
+                    "phase=return success=false error_kind=io_WouldBlock",
+                    "phase=return success=false error_kind=io_NotADirectory",
+                    "phase=return success=false error_kind=io_IsADirectory",
+                    "phase=return success=false error_kind=io_DirectoryNotEmpty",
+                    "phase=return success=false error_kind=io_ReadOnlyFilesystem",
+                    "phase=return success=false error_kind=io_FilesystemLoop",
+                    "phase=return success=false error_kind=io_StaleNetworkFileHandle",
+                    "phase=return success=false error_kind=io_InvalidInput",
+                    "phase=return success=false error_kind=io_InvalidData",
+                    "phase=return success=false error_kind=io_TimedOut",
+                    "phase=return success=false error_kind=io_WriteZero",
+                    "phase=return success=false error_kind=io_StorageFull",
+                    "phase=return success=false error_kind=io_NotSeekable",
+                    "phase=return success=false error_kind=io_QuotaExceeded",
+                    "phase=return success=false error_kind=io_FileTooLarge",
+                    "phase=return success=false error_kind=io_ResourceBusy",
+                    "phase=return success=false error_kind=io_ExecutableFileBusy",
+                    "phase=return success=false error_kind=io_Deadlock",
+                    "phase=return success=false error_kind=io_CrossesDevices",
+                    "phase=return success=false error_kind=io_TooManyLinks",
+                    "phase=return success=false error_kind=io_InvalidFilename",
+                    "phase=return success=false error_kind=io_ArgumentListTooLong",
+                    "phase=return success=false error_kind=io_Interrupted",
+                    "phase=return success=false error_kind=io_Unsupported",
+                    "phase=return success=false error_kind=io_UnexpectedEof",
+                    "phase=return success=false error_kind=io_OutOfMemory",
+                    "phase=return success=false error_kind=io_InProgress",
+                    "phase=return success=false error_kind=io_Other",
+                ]
+                .into_iter()
+                .find(|candidate| *candidate == fields);
+                if let Some(safe_fields) = safe_fields {
+                    eprintln!("pa-daemon: compaction outcome {safe_fields}");
+                }
+            }
+        }
     }
 }
 
@@ -244,6 +328,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
             return Supervisor {
                 child,
                 socket: socket.to_path_buf(),
+                agent_dir: agent_dir.to_path_buf(),
             };
         }
         std::thread::sleep(Duration::from_millis(20));

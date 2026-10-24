@@ -43,7 +43,11 @@ pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
     if value.get("type").and_then(Value::as_str) != Some("session") {
         return None;
     }
-    serde_json::from_value(value).ok()
+    let pa_types::session::FileEntry::Header { header } = serde_json::from_value(value).ok()?
+    else {
+        return None;
+    };
+    Some(header)
 }
 
 /// Read the file's first line when it ends within `max_bytes` bytes. `None`
@@ -146,8 +150,11 @@ impl SessionFile {
         if header_value.get("type").and_then(Value::as_str) != Some("session") {
             return Err(anyhow!("missing session header in {}", path.display()));
         }
-        let header: SessionHeader = serde_json::from_value(header_value)
-            .with_context(|| format!("invalid session header in {}", path.display()))?;
+        let pa_types::session::FileEntry::Header { header } = serde_json::from_value(header_value)
+            .with_context(|| format!("invalid session header in {}", path.display()))?
+        else {
+            return Err(anyhow!("missing session header in {}", path.display()));
+        };
         let mut file = SessionFile {
             path: path.to_path_buf(),
             header,
@@ -161,6 +168,9 @@ impl SessionFile {
             skipped_lines: 0,
             epoch: None,
             rows_written_without_epoch: 0,
+            canonical_live: None,
+            canonical_delivered: std::collections::VecDeque::new(),
+            canonical_delivered_custom: std::collections::VecDeque::new(),
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -222,6 +232,9 @@ impl SessionFile {
             skipped_lines: 0,
             epoch: None,
             rows_written_without_epoch: 0,
+            canonical_live: None,
+            canonical_delivered: std::collections::VecDeque::new(),
+            canonical_delivered_custom: std::collections::VecDeque::new(),
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -287,6 +300,13 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
+        full.canonical_live.clone_from(&self.canonical_live);
+        full.canonical_delivered
+            .clone_from(&self.canonical_delivered);
+        full.canonical_delivered_custom
+            .clone_from(&self.canonical_delivered_custom);
+        full.epoch.clone_from(&self.epoch);
+        full.rows_written_without_epoch = self.rows_written_without_epoch;
         full.child_usage_recovery
             .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
@@ -322,6 +342,9 @@ impl SessionFile {
             skipped_lines: 0,
             epoch: None,
             rows_written_without_epoch: 0,
+            canonical_live: None,
+            canonical_delivered: std::collections::VecDeque::new(),
+            canonical_delivered_custom: std::collections::VecDeque::new(),
         }
     }
 }

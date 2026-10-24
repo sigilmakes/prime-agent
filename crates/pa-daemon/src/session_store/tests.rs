@@ -1407,3 +1407,57 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
     );
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reopened-canonical.jsonl");
+    let mut original = SessionFile::create("/repo", None, 0);
+    original.header.rest.insert(
+        "vendor".to_owned(),
+        json!({
+            "type":"extension-tag", "nested":{"items":[{"type":"preserved","value":11}]},
+        }),
+    );
+    let expected = original.header.clone();
+    original.set_path(path.clone());
+    original.rewrite().unwrap();
+    drop(original);
+    let before = fs::read(&path).unwrap();
+    let mut reopened = SessionFile::open(&path).unwrap();
+    assert_eq!(reopened.header, expected);
+    assert_eq!(read_session_header(&path), Some(expected.clone()));
+    assert_eq!(read_session_header_bounded(&path), Some(expected.clone()));
+    assert!(
+        !reopened.header.rest.contains_key("type"),
+        "wire discriminator is not a header extension"
+    );
+    let mut scan = SessionScanAccumulator::default();
+    fold_scan_entry(
+        &mut scan,
+        std::str::from_utf8(&before)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&scan).unwrap()["header"],
+        serde_json::to_value(&expected).unwrap()
+    );
+    reopened.lease = Some(std::sync::Arc::new(
+        crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
+    ));
+    let cursor = reopened.attach_canonical_owner().unwrap();
+    assert_eq!(
+        reopened.attach_canonical_owner().unwrap(),
+        cursor,
+        "real loaded header passes both unchanged strict owner checks"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "header decoding and owner attach never rewrite bytes"
+    );
+}

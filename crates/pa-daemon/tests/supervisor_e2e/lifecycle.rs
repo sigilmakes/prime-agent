@@ -50,6 +50,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
             "heartbeat_management",
             "model_catalog",
             "model_refresh",
+            "plugin_commands",
             "side_question_transcript",
             "transient_bash",
             "kernel_bash_activity",
@@ -224,11 +225,15 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
         match event["type"].as_str() {
             Some("message_start") => saw_start = true,
             Some("message_update") => updates += 1,
-            Some("message_end") => {
-                // The scripted engine emits plain-string content.
-                final_text = event["message"]["content"]
+            Some("message_end") if event["message"]["role"] == "assistant" => {
+                let content = event["message"]["content"]
+                    .as_array()
+                    .expect("native scripted assistant content");
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0]["type"], "text");
+                final_text = content[0]["text"]
                     .as_str()
-                    .expect("final text")
+                    .expect("final assistant text")
                     .to_string();
             }
             Some("turn_end") => break,

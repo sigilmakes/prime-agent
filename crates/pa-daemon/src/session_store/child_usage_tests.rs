@@ -475,10 +475,16 @@ fn recovery_preserves_complete_wire_header_extensions_across_plain_reopen() {
         .is_err());
     let before = std::fs::read(&store.path).unwrap();
     let reopened = SessionFile::open(&store.path).unwrap();
-    assert_eq!(reopened.header.rest.get("type"), Some(&json!("session")));
+    assert!(!reopened.header.rest.contains_key("type"));
     let before_header: serde_json::Value =
         serde_json::from_slice(before.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+    assert_eq!(
+        reopened.header.rest.get("extension"),
+        before_header.get("extension"),
+        "genuine unknown wire header fields survive the real reopen",
+    );
     let reopened_header = super::session_header_line(&reopened.header);
+    assert_eq!(reopened_header["type"], json!("session"));
     assert_eq!(before_header, reopened_header);
     assert!(matches!(
         store

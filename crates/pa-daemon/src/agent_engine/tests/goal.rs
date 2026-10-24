@@ -1036,7 +1036,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     assert_eq!(before["status"], json!("active"), "state: {before:?}");
     assert!(
         before["tokensUsed"].as_u64().unwrap_or(0) > 0,
-        "the goal-start turn's usage accounted: {before:?}"
+        "the goal-start turn's usage accounted: {before:?}; actual turn events: {events:?}"
     );
     let history_before = engine_session_entries(&engine);
     let queued_before = goal_work.lock().unwrap().len();

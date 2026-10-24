@@ -27,6 +27,7 @@ mod lifecycle;
 use super::window;
 
 mod canonical;
+pub(crate) use canonical::CanonicalLivePublication;
 pub use canonical::{CanonicalLocalAdoption, CanonicalRawCoverage};
 
 // `get_session_file_path` has zero external callers; the re-export keeps
@@ -75,6 +76,8 @@ pub struct SessionManager {
     file_entries: Vec<FileEntry>,
     canonical_raw: Option<canonical::RawCanonicalState>,
     canonical_local_revision: u64,
+    canonical_metadata_writer:
+        Option<std::sync::Weak<dyn super::canonical::CanonicalMetadataWriter>>,
     window: Option<super::window::WindowedSessionStore>,
     by_id: HashMap<String, usize>,
     labels_by_id: HashMap<String, String>,

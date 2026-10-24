@@ -159,7 +159,7 @@ impl AgentSessionEngine {
             threshold_checks_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
-            session_build: tokio::sync::Mutex::new(()),
+            session_build: tokio::sync::Mutex::new(None),
             pending_branch: std::sync::Mutex::new(None),
             prompt_context_boundary: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -254,17 +254,47 @@ impl AgentSessionEngine {
     /// The async build of the core session, awaited on the caller's
     /// runtime: unbuilt read seams build here.
     pub(crate) async fn ensure_core_session_async(&self, model: &Model) -> anyhow::Result<()> {
-        let _build = self.session_build.lock().await;
+        let mut completion_state = self.session_build.lock().await;
+        if let Some(error) = completion_state.as_ref() {
+            anyhow::bail!(error.clone());
+        }
         {
             let guard = self.session.lock().await;
             if guard.is_some() {
                 return Ok(());
             }
         }
-        let built = Arc::new(self.build_session(model).await?);
-        self.adopt_built_session(&built).await?;
-        self.session.lock().await.replace(built);
-        Ok(())
+        let result: anyhow::Result<()> = async {
+            let built = Arc::new(self.build_session(model).await?);
+            self.adopt_built_session(&built).await?;
+            self.session.lock().await.replace(built);
+            Ok(())
+        }
+        .await;
+        match &result {
+            Ok(()) => *completion_state = None,
+            Err(error) => *completion_state = Some(format!("{error:#}")),
+        }
+        result
+    }
+
+    /// Serialize accepted rows behind any active build/adoption without starting
+    /// a lazy build. A failed build must not rerun its callbacks on this path.
+    pub(super) async fn prompt_acceptance_build_guard(
+        &self,
+    ) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<String>>> {
+        let completion_state = self.session_build.lock().await;
+        if let Some(error) = completion_state.as_ref() {
+            anyhow::bail!(error.clone());
+        }
+        Ok(completion_state)
+    }
+
+    /// Order a blocking model command behind construction without building a lazy session.
+    pub(crate) fn model_mutation_build_guard(
+        &self,
+    ) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<String>>> {
+        self.runtime.block_on(self.prompt_acceptance_build_guard())
     }
 
     /// Install the worker's live compaction summary-delta sink: every built session adopts it.
@@ -345,15 +375,26 @@ impl AgentSessionEngine {
         let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
             return;
         };
-        let mut session = handles.session.lock().await;
         let normalized = pa_core::goals::normalize_goal_state(terminal);
         match serde_json::to_value(&normalized) {
             Ok(value) => {
-                let appended = session
-                    .append_custom_entry(pa_core::goals::GOAL_STATE_CUSTOM_TYPE, Some(value))
-                    .map(|_| ())
-                    .and_then(|()| session.flush_now());
-                if let Err(persist_error) = appended {
+                let entry = pa_types::session::FileEntry::Custom {
+                    base: pa_types::session::EntryBase {
+                        id: None,
+                        parent_id: None,
+                        timestamp: None,
+                        rest: serde_json::Map::default(),
+                    },
+                    payload: pa_types::session::CustomEntry {
+                        custom_type: pa_core::goals::GOAL_STATE_CUSTOM_TYPE.to_string(),
+                        data: Some(value),
+                        rest: serde_json::Map::default(),
+                    },
+                };
+                if let Err(persist_error) =
+                    pa_core::session::canonical::persist_metadata_entry(&handles.session, entry)
+                        .await
+                {
                     eprintln!("pa-daemon: stale goal terminal persist failed: {persist_error:#}");
                 }
             }
@@ -458,8 +499,7 @@ impl AgentSessionEngine {
         {
             let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
             if let Some(handles) = handles {
-                let mut manager = handles.session.lock().await;
-                self.flush_pending_max_depth(&mut manager);
+                self.flush_pending_max_depth(&handles.session).await?;
             }
         }
         let pending_branch = self
@@ -659,7 +699,7 @@ impl AgentSessionEngine {
                 let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
                 if let Some(handles) = handles {
                     let mut driver = handles.driver.lock().await;
-                    driver.restore_from_persisted(terminal.clone());
+                    driver.restore_from_persisted(terminal.clone())?;
                     drop(driver);
                 }
                 *self
@@ -674,11 +714,22 @@ impl AgentSessionEngine {
                 let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
                 if let Some(handles) = handles {
                     let mut driver = handles.driver.lock().await;
-                    driver.restore_from_persisted(state.clone());
+                    driver.restore_from_persisted(state.clone())?;
                     drop(driver);
                 }
                 *self.published_goal.lock().expect("published goal lock") = Some(state);
             }
+        }
+        if let Some(live) = built.session.canonical_live_session() {
+            // This mirror is already bound. Restore the actual owner's exact
+            // raw receipt and ACK-approved pre-admission view, never reinstall
+            // the legacy window or replay a second local admission ledger.
+            live.observe().await?;
+            built.session.rebuild_canonical_branch_context().await?;
+            self.restore_quota_park(built).await;
+            self.flush_pending_stale_goal_terminal().await;
+            self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
+            return Ok(());
         }
         if let Some(entries) = pending_branch {
             built
@@ -825,7 +876,8 @@ impl AgentSessionEngine {
     /// must not carry the old session's namespace — and the build gate
     /// is held across the teardown.
     pub(crate) async fn retire_session_runtime(&self) {
-        let _build = self.session_build.lock().await;
+        let mut completion_state = self.session_build.lock().await;
+        *completion_state = None;
         let built = self.session.lock().await.take();
         *self
             .prompt_context_boundary
@@ -1138,7 +1190,7 @@ impl AgentSessionEngine {
                 .and_then(std::path::Path::parent)
                 .map(std::path::Path::to_owned)
         });
-        let (session_manager, on_initial_context_selection) = self
+        let (session_manager, on_initial_context_selection, canonical_live_owner) = self
             .build_session_mirror(cwd.clone(), session_dir, session_file.clone())
             .await?;
         // Capture after the verified mirror: prompt admission sets its boundary
@@ -1218,6 +1270,7 @@ impl AgentSessionEngine {
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager: Some(session_manager),
+            canonical_live_owner,
             context_startup_boundary,
             context_startup_admitted_user_ids,
             on_initial_context_selection,

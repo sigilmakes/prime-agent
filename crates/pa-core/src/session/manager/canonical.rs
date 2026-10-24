@@ -186,7 +186,6 @@ impl SessionManager {
     /// Invalidate previously captured local CAS inputs before parent-routed mutation.
     /// # Errors
     /// Refuses revision overflow without changing state.
-    #[allow(dead_code)] // Parent-owned append/routing guards use this in their separate delta.
     pub(crate) fn invalidate_canonical_local_revision(&mut self) -> anyhow::Result<()> {
         self.canonical_local_revision = self
             .canonical_local_revision
@@ -872,4 +871,368 @@ fn validate_window(
         );
     }
     Ok(())
+}
+
+impl SessionManager {
+    /// Install a live owner checkpoint as one no-I/O candidate. Bootstrap replaces
+    /// a derived legacy mirror, never the canonical file or its raw owner rows.
+    #[allow(clippy::too_many_arguments)] // One complete CAS candidate, never partially applied setters.
+    pub(crate) fn install_canonical_live_checkpoint(
+        &mut self,
+        operation: &CanonicalOperation,
+        revision: u64,
+        binding: Option<&CanonicalCursor>,
+        checkpoint: CanonicalCheckpoint,
+        admission: CanonicalAdmissionPolicy,
+        serving: &Arc<()>,
+    ) -> anyhow::Result<CanonicalAdoptionCertificate> {
+        self.validate_cas(revision, binding)?;
+        let previous_visible = self.canonical_visible_leaf().map(str::to_owned);
+        if self.canonical_raw.is_some() {
+            let prepared_local = CanonicalLocalAdoption {
+                approved: Some(PreparedApproval {
+                    operation: operation.clone(),
+                    cursor: checkpoint.cursor.clone(),
+                    policy: admission,
+                    serving: Arc::downgrade(serving),
+                    local_revision: revision,
+                    previous_visible: previous_visible.clone(),
+                    visible: previous_visible,
+                }),
+            };
+            return self.install_canonical_checkpoint(
+                operation,
+                revision,
+                binding,
+                checkpoint,
+                prepared_local,
+            );
+        }
+        ensure!(
+            !self.persist && self.session_file.is_none(),
+            "live mirror must not own journal I/O"
+        );
+        let FileEntry::Header { header } = checkpoint.header.entry() else {
+            anyhow::bail!("live owner has no header")
+        };
+        ensure!(
+            header.id == self.session_id,
+            "live owner session differs from mirror"
+        );
+        let mut candidate =
+            Self::in_memory_from_header(&self.cwd, &self.session_dir, header.clone())
+                .map_err(anyhow::Error::msg)?;
+        candidate.canonical_local_revision = revision;
+        ensure!(
+            !matches!(admission, CanonicalAdmissionPolicy::Append(_)),
+            "first bind requires explicit owner replay reset"
+        );
+        // No raw leaf is visible until the matching owner ACK supplies its exact
+        // safe prefix, accounting for both User and Custom delivery ledgers.
+        let visible = None;
+        let local = CanonicalLocalAdoption {
+            approved: Some(PreparedApproval {
+                operation: operation.clone(),
+                cursor: checkpoint.cursor.clone(),
+                policy: admission,
+                serving: Arc::downgrade(serving),
+                local_revision: revision,
+                previous_visible: None,
+                visible,
+            }),
+        };
+        let certificate =
+            candidate.install_canonical_checkpoint(operation, revision, None, checkpoint, local)?;
+        // Move only canonical/view fields; runtime directories and observers stay owned here.
+        self.file_entries = candidate.file_entries;
+        self.by_id = candidate.by_id;
+        self.labels_by_id = candidate.labels_by_id;
+        self.label_timestamps_by_id = candidate.label_timestamps_by_id;
+        self.leaf_id = candidate.leaf_id;
+        self.admitted_user_rows = candidate.admitted_user_rows;
+        self.has_assistant_entry = candidate.has_assistant_entry;
+        self.flushed = candidate.flushed;
+        self.window = candidate.window;
+        self.canonical_raw = candidate.canonical_raw;
+        self.canonical_local_revision = candidate.canonical_local_revision;
+        Ok(certificate)
+    }
+
+    /// Sealed live publication after the matching owner ACK. Raw adoption alone
+    /// cannot call this from outside Core. Any local change invalidates its CAS.
+    pub(crate) fn publish_canonical_live_receipt(
+        &mut self,
+        publication: CanonicalLivePublication,
+    ) -> anyhow::Result<()> {
+        let certificate = publication.certificate();
+        self.validate_cas(certificate.local_revision(), Some(certificate.cursor()))?;
+        let raw = self
+            .canonical_raw
+            .as_ref()
+            .context("live publication has no raw binding")?;
+        let visible = publication.visible_leaf;
+        validate_live_visible(raw, visible.as_deref(), &self.admitted_user_rows)?;
+        let revision = self
+            .canonical_local_revision
+            .checked_add(1)
+            .context("canonical local revision overflow")?;
+        self.leaf_id.clone_from(&visible);
+        self.canonical_raw
+            .as_mut()
+            .expect("validated binding")
+            .visible = visible;
+        self.canonical_local_revision = revision;
+        Ok(())
+    }
+
+    /// Consume only the exact owner-delivered FIFO head after Prepared ACK.
+    pub(crate) fn consume_canonical_live_user(
+        &mut self,
+        operation: &CanonicalOperation,
+        cursor: &CanonicalCursor,
+        local_revision: u64,
+        id: &str,
+        visible_leaf: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.validate_cas(local_revision, Some(cursor))?;
+        ensure!(
+            self.canonical_binding() == Some(cursor),
+            "delivered User binding changed"
+        );
+        ensure!(
+            self.admitted_user_rows.front().map(String::as_str) == Some(id),
+            "delivered User is not FIFO head"
+        );
+        let raw = self
+            .canonical_raw
+            .as_ref()
+            .context("delivered User has no raw source")?;
+        ensure!(
+            raw.used_approvals.contains(operation),
+            "delivered User operation was not approved"
+        );
+        ensure!(
+            raw.rows.iter().any(|row| row.entry().id() == Some(id)),
+            "delivered User raw row absent"
+        );
+        let mut pending = self.admitted_user_rows.clone();
+        pending.pop_front();
+        validate_live_visible(raw, visible_leaf.as_deref(), &pending)?;
+        let revision = self
+            .canonical_local_revision
+            .checked_add(1)
+            .context("canonical local revision overflow")?;
+        self.admitted_user_rows = pending;
+        self.leaf_id.clone_from(&visible_leaf);
+        self.canonical_raw
+            .as_mut()
+            .expect("validated binding")
+            .visible = visible_leaf;
+        self.canonical_local_revision = revision;
+        Ok(())
+    }
+}
+
+/// Sealed approval created only after this driver's matching successful owner ACK.
+/// A raw-adoption certificate alone cannot advance the visible scope.
+pub(crate) struct CanonicalLivePublication {
+    certificate: CanonicalAdoptionCertificate,
+    _serving: Arc<()>,
+    visible_leaf: Option<String>,
+}
+impl CanonicalLivePublication {
+    /// Only the live Core driver may issue this after matching owner ACK success.
+    pub(crate) fn after_owner_ack(
+        certificate: CanonicalAdoptionCertificate,
+        serving: &Arc<()>,
+        visible_leaf: Option<String>,
+    ) -> Self {
+        Self {
+            certificate,
+            _serving: Arc::clone(serving),
+            visible_leaf,
+        }
+    }
+    pub(crate) fn certificate(&self) -> &CanonicalAdoptionCertificate {
+        &self.certificate
+    }
+}
+
+impl SessionManager {
+    pub(crate) fn bind_canonical_metadata_writer(
+        &mut self,
+        writer: std::sync::Weak<dyn crate::session::canonical::CanonicalMetadataWriter>,
+    ) {
+        self.canonical_metadata_writer = Some(writer);
+    }
+    pub(crate) fn canonical_metadata_writer(
+        &self,
+    ) -> Option<Arc<dyn crate::session::canonical::CanonicalMetadataWriter>> {
+        self.canonical_metadata_writer
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+    }
+    pub(crate) fn append_metadata_intent(
+        &mut self,
+        mut entry: FileEntry,
+    ) -> std::io::Result<String> {
+        self.require_local_append()?;
+        let (FileEntry::ThinkingLevelChange { base, .. }
+        | FileEntry::ServiceTierChange { base, .. }
+        | FileEntry::ModelChange { base, .. }
+        | FileEntry::Custom { base, .. }
+        | FileEntry::ChildUsageAttributed { base, .. }
+        | FileEntry::Label { base, .. }
+        | FileEntry::SessionInfo { base, .. }
+        | FileEntry::SessionState { base, .. }
+        | FileEntry::GitState { base, .. }
+        | FileEntry::CustomMessage { base, .. }
+        | FileEntry::Message {
+            base,
+            message: AgentMessage::BashExecution(_),
+        }) = &mut entry
+        else {
+            return Err(std::io::Error::other(
+                "metadata intent is not a metadata action",
+            ));
+        };
+        if base.id.is_some() || base.parent_id.is_some() || base.timestamp.is_some() {
+            return Err(std::io::Error::other(
+                "metadata intent supplied canonical identity",
+            ));
+        }
+        *base = self.next_base();
+        let id = base.id.clone().expect("local base minted identity");
+        self.append_entry(entry)?;
+        Ok(id)
+    }
+}
+
+impl SessionManager {
+    /// Exact custom delivery after the owner has certified and acknowledged its checkpoint.
+    pub(crate) fn consume_canonical_live_custom(
+        &mut self,
+        operation: &CanonicalOperation,
+        cursor: &CanonicalCursor,
+        local_revision: u64,
+        id: &str,
+        visible_leaf: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.validate_cas(local_revision, Some(cursor))?;
+        ensure!(
+            self.canonical_binding() == Some(cursor),
+            "custom delivery binding changed"
+        );
+        let raw = self
+            .canonical_raw
+            .as_ref()
+            .context("custom delivery has no source")?;
+        ensure!(
+            raw.used_approvals.contains(operation),
+            "custom delivery operation not approved"
+        );
+        ensure!(
+            raw.rows.iter().any(|row| row.entry().id() == Some(id)
+                && matches!(row.entry(), FileEntry::CustomMessage { .. })),
+            "custom delivery raw row absent"
+        );
+        validate_live_visible(raw, visible_leaf.as_deref(), &self.admitted_user_rows)?;
+        let revision = self
+            .canonical_local_revision
+            .checked_add(1)
+            .context("canonical local revision overflow")?;
+        self.leaf_id.clone_from(&visible_leaf);
+        self.canonical_raw
+            .as_mut()
+            .expect("validated binding")
+            .visible = visible_leaf;
+        self.canonical_local_revision = revision;
+        Ok(())
+    }
+}
+
+impl SessionManager {
+    pub(crate) fn check_canonical_live_revision(
+        &self,
+        revision: u64,
+        cursor: &CanonicalCursor,
+    ) -> anyhow::Result<()> {
+        self.validate_cas(revision, Some(cursor))
+    }
+}
+
+fn validate_live_visible(
+    raw: &RawCanonicalState,
+    visible: Option<&str>,
+    pending_users: &VecDeque<String>,
+) -> anyhow::Result<()> {
+    let Some(visible) = visible else {
+        return Ok(());
+    };
+    let mut current = raw.cursor.selected_leaf.as_deref();
+    let mut ancestors = HashSet::new();
+    while let Some(id) = current {
+        ensure!(
+            ancestors.insert(id.to_owned()),
+            "cycle in owner publication ancestry"
+        );
+        current = raw
+            .rows
+            .iter()
+            .find(|row| row.entry().id() == Some(id))
+            .context("owner publication ancestry is not retained")?
+            .entry()
+            .parent_id();
+    }
+    ensure!(
+        ancestors.contains(visible),
+        "owner publication leaf is not on selected ancestry"
+    );
+    let mut current = Some(visible);
+    while let Some(id) = current {
+        ensure!(
+            !pending_users.iter().any(|pending| pending == id),
+            "owner publication includes undelivered User"
+        );
+        current = raw
+            .rows
+            .iter()
+            .find(|row| row.entry().id() == Some(id))
+            .context("owner publication prefix absent")?
+            .entry()
+            .parent_id();
+    }
+    Ok(())
+}
+
+impl SessionManager {
+    /// Called only by the live driver after checking its exact owner ACK proof.
+    pub(crate) fn publish_canonical_live_prepared(
+        &mut self,
+        operation: &CanonicalOperation,
+        cursor: &CanonicalCursor,
+        revision: u64,
+        visible_leaf: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.validate_cas(revision, Some(cursor))?;
+        let raw = self
+            .canonical_raw
+            .as_ref()
+            .context("prepared publication has no raw binding")?;
+        ensure!(
+            raw.used_approvals.contains(operation),
+            "prepared publication operation not approved"
+        );
+        validate_live_visible(raw, visible_leaf.as_deref(), &self.admitted_user_rows)?;
+        let revision = revision
+            .checked_add(1)
+            .context("canonical local revision overflow")?;
+        self.leaf_id.clone_from(&visible_leaf);
+        self.canonical_raw
+            .as_mut()
+            .expect("validated binding")
+            .visible = visible_leaf;
+        self.canonical_local_revision = revision;
+        Ok(())
+    }
 }

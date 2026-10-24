@@ -226,7 +226,7 @@ pub struct AgentSessionEngine {
     threshold_checks_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// The build gate: at most one `build_session` in flight; the eager build
     /// and the first demand seam meet at one build.
-    pub(crate) session_build: tokio::sync::Mutex<()>,
+    pub(crate) session_build: tokio::sync::Mutex<Option<String>>,
     /// A branch move that landed before the first turn: consumed at build so
     /// the session starts on the moved branch.
     pending_branch: std::sync::Mutex<Option<Vec<pa_types::session::FileEntry>>>,

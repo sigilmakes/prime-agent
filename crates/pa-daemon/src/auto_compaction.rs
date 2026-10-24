@@ -101,17 +101,20 @@ impl AgentSessionEngine {
             return AutoCompactionRun::NotDue;
         };
         let outcome = {
-            // The abort race drops the summarizer request in flight; the
-            // signal also lands the pre-commit check inside the compaction.
+            // Core owns canonical pre-commit cancellation and the exact
+            // prepared receipt's abandon ACK. Do not drop that cleanup future.
             let compact = async {
                 engine
                     .session
                     .compact(None, &model, api_key, Some(&signal))
                     .await
             };
-            let outcome = self
-                .runtime
-                .block_on(pa_agent::abort::race_with_abort(compact, &signal));
+            let outcome = if engine.session.has_canonical_live_owner() {
+                Ok(self.runtime.block_on(compact))
+            } else {
+                self.runtime
+                    .block_on(pa_agent::abort::race_with_abort(compact, &signal))
+            };
             self.clear_auto_compaction_abort(&controller);
             outcome
         };

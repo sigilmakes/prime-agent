@@ -320,6 +320,14 @@ pub enum Message {
     ToolResult(ToolResultMessage),
 }
 
+/// Process-local producer intent for a custom message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CustomMessageDelivery {
+    #[default]
+    Input,
+    Context,
+}
+
 /// An app-specific custom agent message: hosts use arbitrary roles here
 /// and filter/convert them in `convert_to_llm`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,6 +335,9 @@ pub struct CustomAgentMessage {
     pub role: String,
     #[serde(flatten)]
     pub payload: serde_json::Value,
+    // Producer-assigned, process-local intent. Wire input cannot select this path.
+    #[serde(skip)]
+    pub delivery: CustomMessageDelivery,
 }
 
 /// Agent-level message: standard messages plus custom app messages.
@@ -631,3 +642,29 @@ pub struct ShouldStopAfterTurnContext {
 }
 
 pub type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
+
+#[cfg(test)]
+mod custom_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn custom_delivery_is_process_local_and_preserves_unknown_wire_fields() {
+        let wire = serde_json::json!({
+            "role":"custom", "customType":"notice", "content":"message", "display":true,
+            "timestamp":7, "delivery":"opaque-wire-value", "unknown":{"value":null},
+        });
+        let mut message: CustomAgentMessage = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(message.delivery, CustomMessageDelivery::Input);
+        message.delivery = CustomMessageDelivery::Context;
+        let mut cloned = message.clone();
+        assert_eq!(cloned.delivery, CustomMessageDelivery::Context);
+        cloned.delivery = CustomMessageDelivery::Input;
+        assert_eq!(cloned.delivery, CustomMessageDelivery::Input);
+        assert_eq!(message.delivery, CustomMessageDelivery::Context);
+        let encoded = serde_json::to_value(&message).unwrap();
+        assert_eq!(encoded, wire);
+        let restored: CustomAgentMessage = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.delivery, CustomMessageDelivery::Input);
+        assert_eq!(restored.payload, message.payload);
+    }
+}

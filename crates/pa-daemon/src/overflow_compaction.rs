@@ -292,9 +292,14 @@ impl AgentSessionEngine {
                     )
                     .await
             };
-            let outcome = self
-                .runtime
-                .block_on(pa_agent::abort::race_with_abort(compact, &signal));
+            // Keep the canonical ticket alive while Core cancels only its
+            // provider work and awaits the existing abandon acknowledgement.
+            let outcome = if engine.session.has_canonical_live_owner() {
+                Ok(self.runtime.block_on(compact))
+            } else {
+                self.runtime
+                    .block_on(pa_agent::abort::race_with_abort(compact, &signal))
+            };
             self.clear_auto_compaction_abort(&controller);
             outcome
         };

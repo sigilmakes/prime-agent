@@ -12,6 +12,17 @@ use pa_core::session_engine::provider_retry::{ProviderRetryPolicy, UNBOUNDED_BAC
 use pa_core::session_engine::side_question::{SideQuestionSink, SideQuestionTurn};
 use serde_json::{json, Value};
 
+type CanonicalNavigationFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    Option<Arc<pa_core::session_engine::canonical_live::CanonicalLiveSession>>,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
 mod wire;
 pub use scripted::ScriptedEngine;
 pub(crate) use wire::session_wire_value;
@@ -170,6 +181,13 @@ pub trait SessionEngine: Send + Sync {
     /// Abort the in-flight automatic compaction — TS `abortCompaction`
     /// also aborts the auto controller, not just the manual run.
     fn abort_auto_compaction(&self) {}
+
+    /// Obtain the actual live canonical session for a navigation transaction.
+    /// Standalone engines return `None`; native engines build before policy
+    /// preflight and release their session guard before returning the handle.
+    fn canonical_navigation_session(&self) -> CanonicalNavigationFuture<'_> {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Run one branch summary (`navigate_tree` with `summarize`): summarize
     /// the abandoned branch's entries; the engine owns the model call.

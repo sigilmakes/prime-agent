@@ -1,0 +1,1808 @@
+//! Live physical owner of the canonical journal. No model callbacks or async locks.
+//!
+//! The state is attached once at the actual lease boundary, shared by snapshots,
+//! and retained until exact Core adoption is acknowledged. A lost receipt never
+//! turns into permission to write or project another source.
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, Weak};
+
+use pa_core::session::canonical::{
+    CanonicalAckPhase, CanonicalAcknowledgement, CanonicalAdmissionPolicy, CanonicalAppendReceipt,
+    CanonicalCallerGuard, CanonicalCallerNotifier, CanonicalCallerSignal,
+    CanonicalCommitDisposition, CanonicalCursor, CanonicalFailureKind, CanonicalIoStage,
+    CanonicalOperation, CanonicalPrepareMode, CanonicalPrepared, CanonicalRequestedWrite,
+    CanonicalSourceDisposition, CanonicalStoreError,
+};
+use pa_core::session_engine::canonical_coordinator::{
+    CanonicalAdmittedTool, CanonicalAppendGrant, CanonicalOwnerEpoch, CanonicalOwnerRun,
+    CanonicalProviderStep, MetadataAction,
+};
+use pa_core::session_engine::canonical_live::{
+    CanonicalLiveAcknowledged, CanonicalLiveAppendRequest, CanonicalLiveCustomPrepared,
+    CanonicalLiveCustomRequest, CanonicalLivePrepareRequest, CanonicalLiveProviderStepRequest,
+    CanonicalLiveRun, CanonicalLiveRunRequest, CanonicalLiveToolRequest, CanonicalLiveUserPrepared,
+    CanonicalLiveUserRequest,
+};
+
+use super::canonical_raw::{CaptureMode, RawCapture, RawPosition};
+use super::canonical_revision::{BarrierTicket, CanonicalRevision};
+use super::{SessionEntry, SessionFile};
+
+#[derive(Clone, Copy)]
+enum NavigationPreparation {
+    MoveOnly,
+    PrepareCheckpoint,
+}
+
+#[derive(Clone, Copy)]
+enum OwnerDelivery {
+    User,
+    Custom,
+    Metadata,
+}
+
+type Result<T> = std::result::Result<T, CanonicalStoreError>;
+
+fn failure(detail: impl std::fmt::Display) -> CanonicalStoreError {
+    CanonicalStoreError {
+        kind: CanonicalFailureKind::InvalidRequest,
+        requested: CanonicalRequestedWrite::NotWritten,
+        source: CanonicalSourceDisposition::Unchanged,
+        detail: detail.to_string(),
+    }
+}
+
+fn unresolved(detail: impl std::fmt::Display) -> CanonicalStoreError {
+    let detail = detail.to_string();
+    // Report only fixed source-check labels, never the dynamic error payload.
+    let reason = match detail.as_str() {
+        "canonical owner has unacknowledged or uncertain source" => {
+            "canonical_owner_has_unacknowledged_or_uncertain_source"
+        }
+        "canonical lease expired" => "canonical_lease_expired",
+        "canonical owner path/header/lease changed" => "canonical_owner_path_header_lease_changed",
+        "canonical serving epoch is poisoned" => "canonical_serving_epoch_is_poisoned",
+        "canonical owner mutex poisoned" => "canonical_owner_mutex_poisoned",
+        "actual tool executions still lack terminal adoption" => {
+            "actual_tool_executions_still_lack_terminal_adoption"
+        }
+        "serving epoch still borrowed at ordered boundary" => {
+            "serving_epoch_still_borrowed_at_ordered_boundary"
+        }
+        "prepared mutation lost caller binding" => "prepared_mutation_lost_caller_binding",
+        "commit pending state lost" => "commit_pending_state_lost",
+        "staged delivery has no FIFO head" => "staged_delivery_has_no_fifo_head",
+        "staged delivery FIFO changed" => "staged_delivery_fifo_changed",
+        "user pending state lost" => "user_pending_state_lost",
+        "staged operation lost" => "staged_operation_lost",
+        "staged delivery lost" => "staged_delivery_lost",
+        "delivered Custom FIFO row missing from physical source" => {
+            "delivered_custom_fifo_row_missing_from_physical_source"
+        }
+        "delivered Custom FIFO changed during preparation" => {
+            "delivered_custom_fifo_changed_during_preparation"
+        }
+        detail if detail.starts_with("revision: ") => "revision",
+        detail if detail.starts_with("invalidate: ") => "invalidate",
+        detail if detail.starts_with("navigation prepare barrier: ") => {
+            "navigation_prepare_barrier"
+        }
+        detail if detail.starts_with("ordered source boundary: ") => "ordered_source_boundary",
+        detail if detail.starts_with("ACK barrier: ") => "ack_barrier",
+        detail if detail.starts_with("commit admission: ") => "commit_admission",
+        detail if detail.starts_with("commit start: ") => "commit_start",
+        detail if detail.starts_with("commit finish: ") => "commit_finish",
+        detail if detail.starts_with("user admission: ") => "user_admission",
+        detail if detail.starts_with("user write start: ") => "user_write_start",
+        detail if detail.starts_with("user finish: ") => "user_finish",
+        detail if detail.starts_with("delivery admission: ") => "delivery_admission",
+        detail if detail.starts_with("delivery write start: ") => "delivery_write_start",
+        detail if detail.starts_with("delivery finish: ") => "delivery_finish",
+        _ => "unclassified_owner_error",
+    };
+    eprintln!("pa-daemon: canonical refusal phase=owner reason={reason}");
+    CanonicalStoreError {
+        kind: CanonicalFailureKind::AdoptionConflict,
+        requested: CanonicalRequestedWrite::Unknown,
+        source: CanonicalSourceDisposition::NeedsReconcile,
+        detail,
+    }
+}
+
+struct Notify;
+impl CanonicalCallerNotifier for Notify {
+    fn changed(&self) {}
+}
+
+struct Pending {
+    operation: CanonicalOperation,
+    cursor: CanonicalCursor,
+    barrier: BarrierTicket,
+    prepared: bool,
+    mutation: bool,
+    signal: Option<CanonicalCallerSignal>,
+    staged: bool,
+    from: CanonicalCursor,
+}
+
+struct RegisteredRun {
+    identity: Arc<CanonicalLiveRun>,
+    abort: Option<CanonicalOwnerRun>,
+    ever_provider_admitted: bool,
+    terminal_acked: bool,
+}
+
+struct PreparedBinding {
+    cursor: CanonicalCursor,
+    signal: CanonicalCallerSignal,
+}
+
+struct State {
+    revision: CanonicalRevision,
+    authority: CanonicalOwnerEpoch,
+    provider: Option<CanonicalProviderStep>,
+    serving_run: Option<Arc<CanonicalLiveRun>>,
+    registered_run: Option<RegisteredRun>,
+    tools: HashMap<String, CanonicalAdmittedTool>,
+    lease: Weak<crate::lease::SessionLease>,
+    raw: RawCapture,
+    pending: Option<Pending>,
+    prepared: HashMap<CanonicalOperation, PreparedBinding>,
+    delivered: VecDeque<String>,
+    delivered_custom: VecDeque<String>,
+    registered: HashSet<String>,
+    admitted: HashSet<String>,
+    blocked: bool,
+    callers: Vec<CanonicalCallerSignal>,
+}
+
+/// Clone-shared ownership state. Read-only opens never create this allocation.
+#[derive(Clone)]
+pub(crate) struct LiveCanonicalOwner(Arc<Mutex<State>>);
+impl std::fmt::Debug for LiveCanonicalOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveCanonicalOwner(<lease-bound>)")
+    }
+}
+
+impl LiveCanonicalOwner {
+    pub(super) fn invalidate(&self) {
+        match self.0.lock() {
+            Ok(mut state) => {
+                state.blocked = true;
+                if let Err(error) = state.revision.invalidate() {
+                    eprintln!("pa-daemon: canonical revision invalidation failed: {error:?}");
+                }
+            }
+            Err(_) => eprintln!("pa-daemon: canonical owner mutex poisoned at invalidation"),
+        }
+    }
+}
+
+impl State {
+    fn position(&self, leaf: Option<String>) -> Result<RawPosition> {
+        let revision = self
+            .revision
+            .snapshot()
+            .map_err(|e| unresolved(format!("revision: {e:?}")))?;
+        Ok(RawPosition {
+            owner: revision.owner,
+            canonical_revision: revision.canonical_revision,
+            branch_revision: revision.branch_revision,
+            selected_leaf: leaf,
+        })
+    }
+
+    fn available(&self) -> Result<()> {
+        let blocked = self.blocked;
+        let authority_poison_observed = !blocked && self.authority.poisoned();
+        if blocked
+            || authority_poison_observed
+            || self.pending.is_some()
+            || self.callers.iter().any(|signal| {
+                signal.state() == pa_core::session::canonical::CanonicalCallerState::Abandoned
+            })
+        {
+            return Err(unresolved(
+                "canonical owner has unacknowledged or uncertain source",
+            ));
+        }
+        self.revision
+            .snapshot()
+            .map_err(|e| unresolved(format!("revision: {e:?}")))?;
+        Ok(())
+    }
+
+    fn verify(&self, file: &SessionFile) -> Result<Arc<crate::lease::SessionLease>> {
+        let lease = self
+            .lease
+            .upgrade()
+            .ok_or_else(|| unresolved("canonical lease expired"))?;
+        if !file
+            .lease
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &lease))
+            || file.path != self.raw.cursor.source_path
+            || file.header.id != self.raw.cursor.session_id
+            || !matches!(self.raw.header.entry(), pa_types::session::FileEntry::Header { header } if header == &file.header)
+        {
+            self.revision
+                .invalidate()
+                .map_err(|e| unresolved(format!("invalidate: {e:?}")))?;
+            return Err(unresolved("canonical owner path/header/lease changed"));
+        }
+        if super::canonical_adapter::epoch_is_poisoned(file.epoch.as_ref()) {
+            return Err(unresolved("canonical serving epoch is poisoned"));
+        }
+        Ok(lease)
+    }
+
+    fn current(&self, file: &SessionFile) -> Result<RawCapture> {
+        RawCapture::capture(
+            &file.path,
+            self.position(file.leaf_id.clone())?,
+            CaptureMode::Full,
+        )
+        .map_err(failure)
+    }
+
+    fn safe_visible_leaf(&self) -> anyhow::Result<Option<String>> {
+        let selected: HashMap<_, _> = self
+            .raw
+            .plan
+            .ancestry
+            .iter()
+            .filter_map(|index| {
+                self.raw.plan.rows[*index]
+                    .id
+                    .as_ref()
+                    .map(|id| (id.as_str(), *index))
+            })
+            .collect();
+        let mut queued = HashSet::new();
+        for id in &self.delivered {
+            let index = *selected.get(id.as_str()).ok_or_else(|| {
+                failure("pending User delivery is not on certified selected branch")
+            })?;
+            anyhow::ensure!(
+                queued.insert(id.as_str()),
+                "duplicate pending delivery identity"
+            );
+            anyhow::ensure!(
+                matches!(
+                    self.raw.retained[index].entry(),
+                    pa_types::session::FileEntry::Message {
+                        message: pa_types::session::AgentMessage::User(_),
+                        ..
+                    }
+                ),
+                "pending User ledger has another canonical kind"
+            );
+        }
+        for id in &self.delivered_custom {
+            let index = *selected.get(id.as_str()).ok_or_else(|| {
+                failure("pending Custom delivery is not on certified selected branch")
+            })?;
+            anyhow::ensure!(
+                queued.insert(id.as_str()),
+                "duplicate pending delivery identity"
+            );
+            anyhow::ensure!(
+                matches!(
+                    self.raw.retained[index].entry(),
+                    pa_types::session::FileEntry::CustomMessage { .. }
+                ),
+                "pending Custom ledger has another canonical kind"
+            );
+        }
+        let visible_leaf = self
+            .raw
+            .plan
+            .ancestry
+            .iter()
+            .find_map(|index| {
+                let row = &self.raw.plan.rows[*index];
+                row.id
+                    .as_deref()
+                    .filter(|id| queued.contains(id))
+                    .map(|_| row.parent_id.clone())
+            })
+            .unwrap_or_else(|| self.raw.cursor.selected_leaf.clone());
+        Ok(visible_leaf)
+    }
+
+    fn approve_admission(&self, policy: &CanonicalAdmissionPolicy) -> Result<()> {
+        match policy {
+            CanonicalAdmissionPolicy::Preserve => Ok(()),
+            CanonicalAdmissionPolicy::Append(ids) => {
+                let mut seen = HashSet::new();
+                for id in ids {
+                    if !self.registered.contains(id)
+                        || self.admitted.contains(id)
+                        || !seen.insert(id)
+                    {
+                        return Err(failure(
+                            "user admission lacks exact owner delivery or repeats a delivery",
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            CanonicalAdmissionPolicy::Replace(ids) => {
+                if !self.admitted.is_empty() || ids.iter().any(|id| !self.registered.contains(id)) {
+                    return Err(failure(
+                        "replay reset is not the initial owner-delivered binding",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl SessionFile {
+    /// Attach at the actual writer/lease boundary, never on an SDK cache reload.
+    pub(crate) fn attach_canonical_owner(&mut self) -> Result<CanonicalCursor> {
+        if let Some(owner) = self.canonical_live.clone() {
+            let state = owner
+                .0
+                .lock()
+                .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+            state.available()?;
+            let lease = state.verify(self)?;
+            return lease
+                .with_owned_mutation(&self.path, || {
+                    let current = state.current(self)?;
+                    anyhow::ensure!(
+                        current.cursor == state.raw.cursor,
+                        "canonical source advanced outside owner"
+                    );
+                    Ok(current.cursor)
+                })
+                .map_err(unresolved);
+        }
+        self.confirm_child_usage_write().map_err(failure)?;
+        let lease = self
+            .lease
+            .clone()
+            .ok_or_else(|| failure("live canonical owner requires session lease"))?;
+        let revision = CanonicalRevision::new();
+        let snapshot = revision
+            .snapshot()
+            .map_err(|e| failure(format!("revision: {e:?}")))?;
+        let position = RawPosition {
+            owner: snapshot.owner,
+            canonical_revision: snapshot.canonical_revision,
+            branch_revision: snapshot.branch_revision,
+            selected_leaf: self.leaf_id.clone(),
+        };
+        let raw = lease
+            .with_owned_mutation(&self.path, || {
+                let raw = RawCapture::capture(&self.path, position, CaptureMode::Full)?;
+                anyhow::ensure!(
+                    raw.cursor.session_id == self.header.id,
+                    "canonical header mismatch"
+                );
+                let pa_types::session::FileEntry::Header { header } = raw.header.entry() else {
+                    anyhow::bail!("canonical source lacks header");
+                };
+                anyhow::ensure!(header == &self.header, "canonical owner header differs");
+                Ok(raw)
+            })
+            .map_err(failure)?;
+        let cursor = raw.cursor.clone();
+        self.canonical_live = Some(LiveCanonicalOwner(Arc::new(Mutex::new(State {
+            authority: CanonicalOwnerEpoch::genesis(&cursor),
+            provider: None,
+            serving_run: None,
+            registered_run: None,
+            tools: HashMap::new(),
+            revision,
+            lease: Arc::downgrade(&lease),
+            raw,
+            pending: None,
+            prepared: HashMap::new(),
+            delivered: self.canonical_delivered.clone(),
+            delivered_custom: self.canonical_delivered_custom.clone(),
+            registered: self.canonical_delivered.iter().cloned().collect(),
+            admitted: HashSet::new(),
+            blocked: false,
+            callers: Vec::new(),
+        }))));
+        Ok(cursor)
+    }
+
+    /// The worker calls this only for an actually accepted durable User row.
+    pub(crate) fn register_delivered_user(&mut self, id: &str) -> Result<()> {
+        let row = self
+            .entry(id)
+            .ok_or_else(|| failure("delivered user is not durable owner row"))?;
+        if !super::canonical_adapter::is_user_row(row) {
+            return Err(failure("delivered row is not User"));
+        }
+        if let Some(owner) = &self.canonical_live {
+            let mut state = owner
+                .0
+                .lock()
+                .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+            state.available()?;
+            if !state.registered.insert(id.to_owned()) {
+                return Err(failure("user delivery already registered"));
+            }
+            state.delivered.push_back(id.to_owned());
+        } else {
+            if self.canonical_delivered.iter().any(|prior| prior == id) {
+                return Err(failure("user delivery already registered"));
+            }
+            self.canonical_delivered.push_back(id.to_owned());
+        }
+        Ok(())
+    }
+
+    /// Permanently retire a replaced actual owner. Never resets poison or pending I/O.
+    pub(crate) fn invalidate_canonical_owner(&mut self) -> Result<()> {
+        let Some(owner) = self.canonical_live.clone() else {
+            return Ok(());
+        };
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                anyhow::ensure!(
+                    state.current(self)?.cursor == state.raw.cursor,
+                    "replacement source changed"
+                );
+                self.retire_canonical_source(&mut state)?;
+                state.blocked = true;
+                state
+                    .revision
+                    .invalidate()
+                    .map_err(|e| unresolved(format!("invalidate: {e:?}")))?;
+                Ok(())
+            })
+            .map_err(unresolved)
+    }
+
+    /// Atomically navigate the actual owner, including branch ABA with no new bytes.
+    /// The caller must rebuild its SDK mirror/binding before the next projection.
+    pub(crate) fn advance_canonical_branch(&mut self, selected_leaf: Option<&str>) -> Result<()> {
+        self.navigate_canonical_source(
+            selected_leaf,
+            /* expected */ None,
+            NavigationPreparation::MoveOnly,
+        )?;
+        Ok(())
+    }
+
+    /// Strict old-source CAS, ordered branch successor and new pending checkpoint
+    /// are one lease-fenced operation. Core must explicitly rebind then ACK it.
+    pub(crate) fn prepare_canonical_navigation(
+        &mut self,
+        expected: &CanonicalCursor,
+        selected_leaf: Option<&str>,
+    ) -> Result<CanonicalPrepared> {
+        if self.canonical_live.is_none() {
+            self.attach_canonical_owner()?;
+        }
+        self.navigate_canonical_source(
+            selected_leaf,
+            Some(expected),
+            NavigationPreparation::PrepareCheckpoint,
+        )?
+        .ok_or_else(|| failure("canonical navigation requires actual leased owner"))
+    }
+
+    fn navigate_canonical_source(
+        &mut self,
+        selected_leaf: Option<&str>,
+        expected: Option<&CanonicalCursor>,
+        preparation: NavigationPreparation,
+    ) -> Result<Option<CanonicalPrepared>> {
+        if self.canonical_live.is_none() {
+            self.leaf_id = selected_leaf.map(str::to_owned);
+            return Ok(None);
+        }
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                anyhow::ensure!(
+                    state.current(self)?.cursor == state.raw.cursor,
+                    "navigation source changed"
+                );
+                if let Some(expected) = expected {
+                    anyhow::ensure!(
+                        expected == &state.raw.cursor,
+                        "navigation source/branch/frontier/leaf CAS conflict"
+                    );
+                }
+                anyhow::ensure!(
+                    state.delivered.is_empty() && state.delivered_custom.is_empty(),
+                    "navigation has unconsumed owner-delivered rows"
+                );
+                // Validate membership before closing an otherwise healthy source.
+                RawCapture::capture(
+                    &self.path,
+                    state.position(selected_leaf.map(str::to_owned))?,
+                    CaptureMode::Full,
+                )?;
+                let retired = self.retire_canonical_source(&mut state)?;
+                state
+                    .revision
+                    .advance_branch()
+                    .map_err(|e| failure(format!("navigation: {e:?}")))?;
+                let raw = RawCapture::capture(
+                    &self.path,
+                    state.position(selected_leaf.map(str::to_owned))?,
+                    CaptureMode::Full,
+                )?;
+                anyhow::ensure!(
+                    raw.cursor.raw_source_generation == state.raw.cursor.raw_source_generation
+                        && raw.cursor.frontier == state.raw.cursor.frontier
+                        && raw.cursor.header_certificate == state.raw.cursor.header_certificate,
+                    "navigation changed physical journal"
+                );
+                state.authority =
+                    CanonicalOwnerEpoch::successor_after_navigation(&raw.cursor, retired)?;
+                state.raw = raw;
+                state.prepared.clear();
+                state.admitted.clear();
+                state.serving_run = None;
+                self.leaf_id = selected_leaf.map(str::to_owned);
+                match preparation {
+                    NavigationPreparation::MoveOnly => Ok(None),
+                    NavigationPreparation::PrepareCheckpoint => {
+                        let checkpoint = state.raw.checkpoint(
+                            pa_core::session::canonical::CanonicalSourceRequest::Full,
+                        )?;
+                        let operation = CanonicalOperation::new();
+                        let barrier = state.revision.set_barrier(&operation).map_err(|e| {
+                            unresolved(format!("navigation prepare barrier: {e:?}"))
+                        })?;
+                        let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+                        state.pending = Some(Pending {
+                            operation: operation.clone(),
+                            cursor: checkpoint.cursor.clone(),
+                            barrier,
+                            prepared: true,
+                            mutation: false,
+                            signal: Some(signal),
+                            staged: false,
+                            from: checkpoint.cursor.clone(),
+                        });
+                        Ok(Some(CanonicalPrepared {
+                            caller,
+                            operation,
+                            checkpoint,
+                        }))
+                    }
+                }
+            })
+            .map_err(unresolved)
+    }
+
+    fn retire_canonical_source(
+        &mut self,
+        state: &mut State,
+    ) -> Result<pa_core::session_engine::canonical_coordinator::CanonicalRetiredEpoch> {
+        if !state.tools.is_empty() {
+            return Err(unresolved(
+                "actual tool executions still lack terminal adoption",
+            ));
+        }
+        if let Some(run) = state.registered_run.as_mut() {
+            if let Some(abort) = run.abort.take() {
+                abort.finish_ordered_boundary();
+            }
+        }
+        let closing = state
+            .authority
+            .request_close_at_current_source(&state.raw.cursor)?;
+        if let Some(handle) = self.epoch.take() {
+            let epoch = match Arc::try_unwrap(handle.0) {
+                Ok(epoch) => epoch,
+                Err(epoch) => {
+                    self.epoch = Some(super::canonical_adapter::EpochHandle(epoch));
+                    state.blocked = true;
+                    return Err(unresolved(
+                        "serving epoch still borrowed at ordered boundary",
+                    ));
+                }
+            };
+            state.provider = None;
+            epoch.finish_ordered_boundary();
+        }
+        closing
+            .finish()
+            .map_err(|e| unresolved(format!("ordered source boundary: {e:?}")))
+    }
+
+    pub(crate) fn prepare_canonical(
+        &mut self,
+        request: CanonicalLivePrepareRequest,
+    ) -> Result<CanonicalPrepared> {
+        if self.canonical_live.is_none() {
+            self.attach_canonical_owner()?;
+        }
+        self.confirm_child_usage_write().map_err(failure)?;
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        let staged = state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.staged && pending.signal.is_none());
+        if !staged {
+            state.available()?;
+        }
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path, || {
+                let raw = state.current(self)?;
+                anyhow::ensure!(
+                    raw.cursor == state.raw.cursor,
+                    "canonical source changed outside owner"
+                );
+                if let Some(expected) = &request.expected {
+                    let accepted = staged
+                        && state
+                            .pending
+                            .as_ref()
+                            .is_some_and(|pending| expected == &pending.from);
+                    anyhow::ensure!(
+                        expected == &raw.cursor || accepted,
+                        "canonical prepare source/branch CAS conflict"
+                    );
+                }
+                state.approve_admission(&request.admission)?;
+                let checkpoint = raw.checkpoint(request.source)?;
+                let (operation, barrier, from) = if staged {
+                    let pending = state
+                        .pending
+                        .as_ref()
+                        .ok_or_else(|| failure("staged delivery disappeared"))?;
+                    (
+                        pending.operation.clone(),
+                        pending.barrier.clone(),
+                        pending.from.clone(),
+                    )
+                } else {
+                    let operation = CanonicalOperation::new();
+                    let barrier = state
+                        .revision
+                        .set_barrier(&operation)
+                        .map_err(|e| failure(format!("prepare barrier: {e:?}")))?;
+                    (operation, barrier, checkpoint.cursor.clone())
+                };
+                let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+                let ids = match request.admission {
+                    CanonicalAdmissionPolicy::Append(ids)
+                    | CanonicalAdmissionPolicy::Replace(ids) => ids,
+                    CanonicalAdmissionPolicy::Preserve => Vec::new(),
+                };
+                state.admitted.extend(ids);
+                state.pending = Some(Pending {
+                    operation: operation.clone(),
+                    cursor: checkpoint.cursor.clone(),
+                    barrier,
+                    prepared: true,
+                    mutation: matches!(request.mode, CanonicalPrepareMode::Mutation(_)),
+                    signal: Some(signal),
+                    staged,
+                    from,
+                });
+                Ok(CanonicalPrepared {
+                    caller,
+                    operation,
+                    checkpoint,
+                })
+            })
+            .map_err(failure)
+    }
+
+    pub(crate) fn acknowledge_canonical(
+        &mut self,
+        request: CanonicalAcknowledgement,
+    ) -> Result<CanonicalLiveAcknowledged> {
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path, || {
+                if request.phase == CanonicalAckPhase::AbandonPreparedOnly
+                    && state.pending.is_none()
+                {
+                    state.available()?;
+                    let prepared = state
+                        .prepared
+                        .get(&request.operation)
+                        .ok_or_else(|| failure("no matching prepared-only canonical operation"))?;
+                    anyhow::ensure!(
+                        prepared.cursor == request.cursor,
+                        "prepared-only abandon cursor mismatch"
+                    );
+                    anyhow::ensure!(
+                        prepared.signal.state()
+                            != pa_core::session::canonical::CanonicalCallerState::Abandoned,
+                        "prepared-only caller already abandoned"
+                    );
+                    anyhow::ensure!(
+                        state.current(self)?.cursor == request.cursor
+                            && state.raw.cursor == request.cursor,
+                        "prepared-only source advanced; no requested row written"
+                    );
+                    let visible_leaf = state.safe_visible_leaf()?;
+                    state.prepared.remove(&request.operation);
+                    return Ok(CanonicalLiveAcknowledged {
+                        operation: request.operation,
+                        cursor: request.cursor,
+                        visible_leaf,
+                    });
+                }
+                let pending = state
+                    .pending
+                    .as_ref()
+                    .ok_or_else(|| failure("no canonical adoption pending"))?;
+                anyhow::ensure!(
+                    pending.operation == request.operation && pending.cursor == request.cursor,
+                    "canonical ACK operation/cursor mismatch"
+                );
+                let phase_matches = match request.phase {
+                    CanonicalAckPhase::Prepared | CanonicalAckPhase::AbandonPreparedOnly => {
+                        pending.prepared
+                    }
+                    CanonicalAckPhase::AppliedReady => !pending.prepared,
+                    CanonicalAckPhase::ReconciledBlocked | CanonicalAckPhase::Quarantined => false,
+                };
+                anyhow::ensure!(
+                    phase_matches,
+                    "canonical ACK cannot reopen blocked or wrong-stage source"
+                );
+                if request.phase != CanonicalAckPhase::AbandonPreparedOnly {
+                    let certificate = request.adoption.as_ref().ok_or_else(|| {
+                        failure("canonical ACK requires Core adoption certificate")
+                    })?;
+                    anyhow::ensure!(
+                        certificate.operation() == &request.operation
+                            && certificate.cursor() == &request.cursor,
+                        "canonical adoption certificate mismatch"
+                    );
+                }
+                let current = state.current(self)?;
+                anyhow::ensure!(
+                    current.cursor == pending.cursor,
+                    "canonical source changed before ACK"
+                );
+                if let Some(signal) = &pending.signal {
+                    anyhow::ensure!(
+                        signal.state()
+                            != pa_core::session::canonical::CanonicalCallerState::Abandoned,
+                        "canonical caller abandoned"
+                    );
+                }
+                let visible_leaf = state.safe_visible_leaf()?;
+                anyhow::ensure!(
+                    !state.callers.iter().any(|signal| signal.state()
+                        == pa_core::session::canonical::CanonicalCallerState::Abandoned),
+                    "canonical operation caller abandoned before ACK"
+                );
+                state
+                    .revision
+                    .clear_barrier(&request.operation, &pending.barrier)
+                    .map_err(|e| unresolved(format!("ACK barrier: {e:?}")))?;
+                let pending = state
+                    .pending
+                    .take()
+                    .ok_or_else(|| failure("pending receipt disappeared"))?;
+                if !pending.prepared {
+                    if matches!(
+                        state
+                            .raw
+                            .retained
+                            .last()
+                            .map(pa_core::session::canonical::CanonicalJournalRow::entry),
+                        Some(pa_types::session::FileEntry::Message {
+                            message: pa_types::session::AgentMessage::Assistant(_),
+                            ..
+                        })
+                    ) {
+                        if let Some(run) = state.registered_run.as_mut() {
+                            run.terminal_acked = true;
+                        }
+                    }
+                    let completed_tool =
+                        state.raw.retained.last().and_then(|row| match row.entry() {
+                            pa_types::session::FileEntry::Message {
+                                message: pa_types::session::AgentMessage::ToolResult(result),
+                                ..
+                            } => Some(result.tool_call_id.clone()),
+                            _ => None,
+                        });
+                    if let Some(id) = completed_tool {
+                        state.tools.remove(&id);
+                    }
+                }
+                if let Some(signal) = pending.signal.clone() {
+                    state.callers.retain(|prior| {
+                        prior.state()
+                            != pa_core::session::canonical::CanonicalCallerState::Completed
+                    });
+                    state.callers.push(signal);
+                }
+                if pending.prepared
+                    && pending.mutation
+                    && request.phase == CanonicalAckPhase::Prepared
+                {
+                    let signal = pending
+                        .signal
+                        .ok_or_else(|| unresolved("prepared mutation lost caller binding"))?;
+                    state.prepared.insert(
+                        pending.operation,
+                        PreparedBinding {
+                            cursor: pending.cursor,
+                            signal,
+                        },
+                    );
+                } else {
+                    state.prepared.remove(&request.operation);
+                }
+                Ok(CanonicalLiveAcknowledged {
+                    operation: request.operation,
+                    cursor: request.cursor,
+                    visible_leaf,
+                })
+            })
+            .map_err(unresolved)
+    }
+}
+
+impl SessionFile {
+    pub(crate) fn append_canonical(
+        &mut self,
+        request: CanonicalLiveAppendRequest,
+    ) -> Result<CanonicalCommitDisposition> {
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        if state
+            .prepared
+            .get(&request.operation)
+            .map(|prepared| &prepared.cursor)
+            != Some(&request.expected)
+        {
+            return Err(failure(
+                "canonical append has no matching prepared operation",
+            ));
+        }
+        if matches!(
+            request.draft.entry(),
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::Assistant(_)
+                    | pa_types::session::AgentMessage::ToolResult(_),
+                ..
+            }
+        ) {
+            let actual_run = request
+                .run
+                .as_ref()
+                .ok_or_else(|| failure("native terminal request has no actual run provenance"))?;
+            if !state
+                .registered_run
+                .as_ref()
+                .is_some_and(|run| Arc::ptr_eq(&run.identity, actual_run))
+            {
+                return Err(failure(
+                    "native terminal request belongs to another actual run",
+                ));
+            }
+        }
+        let mut value = serde_json::to_value(request.draft.entry()).map_err(failure)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| failure("canonical draft is not an object"))?;
+        let entry_type = object
+            .remove("type")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| failure("canonical draft lacks type"))?;
+        for key in ["id", "parentId", "timestamp"] {
+            object.remove(key);
+        }
+        let entry = SessionEntry {
+            type_: entry_type,
+            id: if self.window.is_some() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                super::new_entry_id(&self.by_id)
+            },
+            parent_id: self.leaf_id.clone(),
+            timestamp: crate::util::now_iso(),
+            fields: value,
+        };
+        let mut io_started = false;
+        lease.with_owned_mutation(&self.path.clone(), || {
+            let current = state.current(self)?;
+            anyhow::ensure!(current.cursor == state.raw.cursor && current.cursor == request.expected,
+                "canonical append source/branch/frontier/leaf CAS conflict; requested row not written");
+            // Validate sparse support before any requested mutation, never after writing.
+            current.checkpoint(request.source)?;
+            let mut admit = || -> anyhow::Result<_> {
+                // A selected context capability must remain current through the
+                // actual RequestedMutation grant/enter_io and physical admission.
+                let grant = state.grant(self, &request.draft)?;
+                let barrier = state.revision.set_barrier(&request.operation)
+                    .map_err(|e| failure(format!("commit barrier: {e:?}")))?;
+                state.pending = Some(Pending {
+                    operation: request.operation.clone(), cursor: current.cursor.clone(), barrier,
+                    prepared: false, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
+                });
+                let mut attempt = state.revision.admit_write(Some(&request.operation))
+                    .map_err(|e| unresolved(format!("commit admission: {e:?}")))?;
+                attempt.begin_io().map_err(|e| unresolved(format!("commit start: {e:?}")))?;
+                Ok((grant, attempt))
+            };
+            let (grant, attempt) = match request.context_admission.as_ref() {
+                Some(capability) => capability.with_admission(&request.draft, admit)?,
+                None => admit()?,
+            };
+            // Registration/host guards are gone. The admitted writer alone owns
+            // classification and completion; no plugin lock crosses disk I/O.
+            io_started = true;
+            let id = match self.persist_granted_entry(entry, None, Some(grant)) {
+                Ok(id) => id,
+                Err(error) => {
+                    state.blocked = true;
+                    return Err(error);
+                }
+            };
+            attempt.finish_success().map_err(|e| unresolved(format!("commit finish: {e:?}")))?;
+            let position = state.position(self.leaf_id.clone())?;
+            let appended = match RawCapture::append_from(&state.raw, &request.expected, position, CaptureMode::Full) {
+                Ok(appended) => appended,
+                Err(error) => {
+                    state.blocked = true;
+                    return Err(error.into());
+                }
+            };
+            anyhow::ensure!(appended.rows.len() == 1 && appended.rows[0].entry().id() == Some(id.as_str()),
+                "canonical append does not contain exactly the owner's requested row");
+            let to = appended.capture.cursor.clone();
+            state.pending.as_mut().ok_or_else(|| unresolved("commit pending state lost"))?.cursor = to.clone();
+            state.raw = appended.capture;
+            Ok(CanonicalCommitDisposition::Committed(CanonicalAppendReceipt {
+                operation: request.operation,
+                from: request.expected,
+                to,
+                rows: appended.rows,
+                committed_entry_id: Some(id),
+                replacement_window: None,
+            }))
+        }).map_err(|error| {
+            if io_started {
+                unresolved(error)
+            } else {
+                match error.downcast::<CanonicalStoreError>() {
+                    Ok(error) => error,
+                    Err(error) => failure(error),
+                }
+            }
+        })
+    }
+
+    /// Explicit delivered FIFO replay, or one newly accepted SDK continuation.
+    pub(crate) fn admit_canonical_user(
+        &mut self,
+        request: CanonicalLiveUserRequest,
+    ) -> Result<CanonicalLiveUserPrepared> {
+        if let Some(owner) = self.canonical_live.clone() {
+            let staged_id = {
+                let state = owner
+                    .0
+                    .lock()
+                    .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+                if state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.staged && pending.signal.is_none())
+                {
+                    let id = state
+                        .delivered
+                        .front()
+                        .cloned()
+                        .ok_or_else(|| unresolved("staged delivery has no FIFO head"))?;
+                    validate_user_intent(&state.raw, &id, &request.message)?;
+                    Some((id.clone(), state.admitted.contains(&id)))
+                } else {
+                    None
+                }
+            };
+            if let Some((id, already_admitted)) = staged_id {
+                let prepared = self.prepare_canonical(CanonicalLivePrepareRequest {
+                    expected: request.expected,
+                    source: request.source,
+                    mode: CanonicalPrepareMode::Observe,
+                    admission: if already_admitted {
+                        CanonicalAdmissionPolicy::Preserve
+                    } else {
+                        CanonicalAdmissionPolicy::Append(vec![id.clone()])
+                    },
+                })?;
+                let mut state = owner
+                    .0
+                    .lock()
+                    .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+                if state.delivered.pop_front().as_ref() != Some(&id) {
+                    state.blocked = true;
+                    return Err(unresolved("staged delivery FIFO changed"));
+                }
+                return Ok(CanonicalLiveUserPrepared {
+                    prepared,
+                    admitted_entry_id: id,
+                });
+            }
+        }
+        self.attach_canonical_owner()?;
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        lease.with_owned_mutation(&self.path.clone(), || {
+            let current = state.current(self)?;
+            anyhow::ensure!(current.cursor == state.raw.cursor, "canonical source changed outside owner");
+            if let Some(expected) = &request.expected {
+                anyhow::ensure!(expected == &current.cursor, "canonical user admission source CAS conflict");
+            }
+            current.checkpoint(request.source)?;
+            let operation = CanonicalOperation::new();
+            let barrier = state.revision.set_barrier(&operation)
+                .map_err(|e| failure(format!("user prepare barrier: {e:?}")))?;
+            // Arm pending before delivery/write. Losing the reply keeps this barrier.
+            state.pending = Some(Pending {
+                operation: operation.clone(), cursor: current.cursor.clone(), barrier,
+                prepared: true, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
+            });
+            let id = if let Some(id) = state.delivered.front().cloned() {
+                validate_user_intent(&current, &id, &request.message)?;
+                state.delivered.pop_front();
+                id
+            } else {
+                let entry = SessionEntry {
+                    type_: "message".to_owned(),
+                    id: if self.window.is_some() { uuid::Uuid::new_v4().to_string() } else { super::new_entry_id(&self.by_id) },
+                    parent_id: self.leaf_id.clone(),
+                    timestamp: crate::util::now_iso(),
+                    fields: serde_json::json!({"message": pa_types::session::AgentMessage::User(request.message)}),
+                };
+                let grant = state.authority.begin_prepare_append(CanonicalIoStage::PreparePreflight)?;
+                let mut attempt = state.revision.admit_write(Some(&operation))
+                    .map_err(|e| unresolved(format!("user admission: {e:?}")))?;
+                attempt.begin_io().map_err(|e| unresolved(format!("user write start: {e:?}")))?;
+                let id = match self.persist_granted_entry(entry, None, Some(grant)) {
+                    Ok(id) => id,
+                    Err(error) => { state.blocked = true; return Err(error); }
+                };
+                attempt.finish_success().map_err(|e| unresolved(format!("user finish: {e:?}")))?;
+                let appended = RawCapture::append_from(&state.raw, &current.cursor,
+                    state.position(self.leaf_id.clone())?, CaptureMode::Full)?;
+                anyhow::ensure!(appended.rows.len() == 1 && appended.rows[0].entry().id() == Some(id.as_str()),
+                    "canonical User write lacks exact single physical suffix");
+                state.raw = appended.capture;
+                state.registered.insert(id.clone());
+                id
+            };
+            if !state.admitted.contains(&id) {
+                state.approve_admission(&CanonicalAdmissionPolicy::Append(vec![id.clone()]))?;
+            }
+            state.admitted.insert(id.clone());
+            let checkpoint = state.raw.checkpoint(request.source)?;
+            let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+            let pending = state.pending.as_mut().ok_or_else(|| unresolved("user pending state lost"))?;
+            pending.cursor = checkpoint.cursor.clone();
+            pending.signal = Some(signal);
+            Ok(CanonicalLiveUserPrepared {
+                prepared: CanonicalPrepared { caller, operation, checkpoint },
+                admitted_entry_id: id,
+            })
+        }).map_err(unresolved)
+    }
+}
+
+fn metadata_action(entry: &pa_types::session::FileEntry) -> Option<MetadataAction> {
+    use pa_types::session::{AgentMessage, FileEntry};
+    match entry {
+        FileEntry::ModelChange { .. } => Some(MetadataAction::ModelChange),
+        FileEntry::ThinkingLevelChange { .. } => Some(MetadataAction::ThinkingLevelChange),
+        FileEntry::ServiceTierChange { .. } => Some(MetadataAction::ServiceTierChange),
+        FileEntry::SessionInfo { .. } => Some(MetadataAction::SessionInfo),
+        FileEntry::SessionState { .. } => Some(MetadataAction::SessionState),
+        FileEntry::GitState { .. } => Some(MetadataAction::GitState),
+        FileEntry::Label { .. } => Some(MetadataAction::Label),
+        FileEntry::Custom { .. } => Some(MetadataAction::CustomEntry),
+        FileEntry::CustomMessage { .. } => Some(MetadataAction::CustomMessage),
+        FileEntry::ChildUsageAttributed { .. } => Some(MetadataAction::ChildUsageAttributed),
+        FileEntry::Message {
+            message: AgentMessage::BashExecution(_),
+            ..
+        } => Some(MetadataAction::BashExecution),
+        FileEntry::Message { .. }
+        | FileEntry::Header { .. }
+        | FileEntry::Unknown { .. }
+        | FileEntry::Compaction { .. }
+        | FileEntry::BranchSummary { .. } => None,
+    }
+}
+
+fn metadata_draft(
+    entry: &SessionEntry,
+) -> Result<pa_core::session::canonical::CanonicalEntryDraft> {
+    let mut value = serde_json::to_value(entry).map_err(failure)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| failure("metadata row is not an object"))?;
+    for key in ["id", "parentId", "timestamp"] {
+        object.remove(key);
+    }
+    pa_core::session::canonical::CanonicalEntryDraft::new(
+        pa_core::session::canonical::CanonicalMutationKind::OwnerMetadata,
+        serde_json::from_value(value).map_err(failure)?,
+    )
+    .map_err(failure)
+}
+
+impl State {
+    fn grant(
+        &self,
+        file: &SessionFile,
+        draft: &pa_core::session::canonical::CanonicalEntryDraft,
+    ) -> Result<CanonicalAppendGrant> {
+        use pa_types::session::{AgentMessage, FileEntry};
+        let stage = CanonicalIoStage::RequestedMutation;
+        let action = metadata_action(draft.entry());
+        if let Some(action) = action {
+            return self.authority.begin_metadata_append(action, draft, stage);
+        }
+        if matches!(
+            draft.entry(),
+            FileEntry::Compaction { .. } | FileEntry::BranchSummary { .. }
+        ) {
+            return self.authority.begin_context_append(draft, stage);
+        }
+        if matches!(
+            draft.entry(),
+            FileEntry::Message {
+                message: AgentMessage::Assistant(_),
+                ..
+            }
+        ) {
+            let run = self
+                .registered_run
+                .as_ref()
+                .ok_or_else(|| failure("assistant has no registered actual AgentStart run"))?;
+            if !run.ever_provider_admitted {
+                let abort = run
+                    .abort
+                    .as_ref()
+                    .ok_or_else(|| failure("no-provider abort provenance is unavailable"))?;
+                return self.authority.begin_no_provider_abort(abort, draft, stage);
+            }
+        }
+        let epoch = file
+            .epoch
+            .as_ref()
+            .ok_or_else(|| failure("native append has no actual serving capture"))?;
+        match draft.entry() {
+            FileEntry::Message {
+                message: AgentMessage::Assistant(_),
+                ..
+            } => {
+                let step = self
+                    .provider
+                    .as_ref()
+                    .ok_or_else(|| failure("assistant has no admitted provider invocation"))?;
+                epoch.0.begin_terminal_append(step, draft, stage)
+            }
+            FileEntry::Message {
+                message: AgentMessage::ToolResult(result),
+                ..
+            } => {
+                let tool = self
+                    .tools
+                    .get(&result.tool_call_id)
+                    .ok_or_else(|| failure("tool result has no admitted execution"))?;
+                epoch.0.begin_tool_append(tool, draft, stage)
+            }
+            FileEntry::Compaction { .. } | FileEntry::BranchSummary { .. } => {
+                epoch.0.begin_append(stage, draft)
+            }
+            FileEntry::Message { .. }
+            | FileEntry::Header { .. }
+            | FileEntry::ThinkingLevelChange { .. }
+            | FileEntry::ServiceTierChange { .. }
+            | FileEntry::ModelChange { .. }
+            | FileEntry::Custom { .. }
+            | FileEntry::ChildUsageAttributed { .. }
+            | FileEntry::Label { .. }
+            | FileEntry::SessionInfo { .. }
+            | FileEntry::SessionState { .. }
+            | FileEntry::GitState { .. }
+            | FileEntry::CustomMessage { .. }
+            | FileEntry::Unknown { .. } => Err(failure("unsupported canonical grant")),
+        }
+    }
+}
+
+impl SessionFile {
+    pub(crate) fn is_canonical_bound(&self) -> bool {
+        self.canonical_live.is_some()
+    }
+
+    /// Called at the real main stream invocation, before provider I/O.
+    pub(crate) fn begin_canonical_provider_step(
+        &mut self,
+        request: CanonicalLiveProviderStepRequest,
+    ) -> Result<()> {
+        self.attach_canonical_owner()?;
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                anyhow::ensure!(
+                    state.current(self)?.cursor == state.raw.cursor,
+                    "canonical provider source changed"
+                );
+                anyhow::ensure!(request.expected == state.raw.cursor,
+                    "actual provider invocation projected another canonical source; refusing without rebase");
+                anyhow::ensure!(
+                    state.tools.is_empty(),
+                    "previous tool executions have no terminal adoption"
+                );
+                let registered = state.registered_run.as_mut().ok_or_else(|| failure("provider invocation has no actual registered run"))?;
+                anyhow::ensure!(Arc::ptr_eq(&registered.identity, &request.run), "provider invocation belongs to another actual run");
+                // Permanent for this actual AgentStart run, including all source
+                // successors and failed/retired provider captures. Never fall back.
+                registered.ever_provider_admitted = true;
+                let retired = self.retire_canonical_source(&mut state)?;
+                state.authority = CanonicalOwnerEpoch::successor(&state.raw.cursor, retired)?;
+                let epoch = state
+                    .authority
+                    .capture_serving_run(request.run.clone(), request.model)?;
+                state.provider = Some(epoch.admit_provider_step(request.invocation)?);
+                state.serving_run = Some(request.run);
+                self.epoch = Some(super::canonical_adapter::EpochHandle(Arc::new(epoch)));
+                Ok(())
+            })
+            .map_err(unresolved)
+    }
+
+    /// Called by the awaited `ToolExecutionStart` boundary, before tool execution.
+    pub(crate) fn admit_canonical_tool(&mut self, request: CanonicalLiveToolRequest) -> Result<()> {
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path, || {
+                anyhow::ensure!(
+                    state.current(self)?.cursor == state.raw.cursor,
+                    "canonical tool source changed"
+                );
+                anyhow::ensure!(
+                    state
+                        .serving_run
+                        .as_ref()
+                        .is_some_and(|run| Arc::ptr_eq(run, &request.run)),
+                    "tool execution belongs to another actual run"
+                );
+                let id = request.tool.tool_call_id.clone();
+                anyhow::ensure!(
+                    !state.tools.contains_key(&id),
+                    "tool execution already admitted"
+                );
+                // Check the actual start record against the certified assistant. The
+                // authority then pins the same execution allocation through its result.
+                let assistant = state
+                    .raw
+                    .retained
+                    .iter()
+                    .rev()
+                    .find_map(|row| match row.entry() {
+                        pa_types::session::FileEntry::Message {
+                            message: pa_types::session::AgentMessage::Assistant(message),
+                            ..
+                        } => Some(message),
+                        _ => None,
+                    })
+                    .ok_or_else(|| failure("tool start has no canonical assistant"))?;
+                let calls: Vec<_> = assistant
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        pa_types::ai::AssistantContentBlock::ToolCall(call) if call.id == id => {
+                            Some(call)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                anyhow::ensure!(
+                    calls.len() == 1
+                        && calls[0].name == request.tool.tool_name
+                        && request.tool.args.as_object() == Some(&calls[0].arguments),
+                    "actual tool start differs from exact canonical assistant call"
+                );
+                let step = state
+                    .provider
+                    .as_ref()
+                    .ok_or_else(|| failure("tool execution lacks actual provider step"))?;
+                let tool = step.admit_tool(&id, request.tool)?;
+                state.tools.insert(id, tool);
+                Ok(())
+            })
+            .map_err(failure)
+    }
+}
+
+fn validate_user_intent(
+    raw: &RawCapture,
+    id: &str,
+    intended: &pa_types::ai::UserMessage,
+) -> Result<()> {
+    let row = raw
+        .retained
+        .iter()
+        .find(|row| row.entry().id() == Some(id))
+        .ok_or_else(|| failure("delivered FIFO row missing from physical source"))?;
+    let pa_types::session::FileEntry::Message {
+        message: pa_types::session::AgentMessage::User(actual),
+        ..
+    } = row.entry()
+    else {
+        return Err(failure("delivered FIFO row is not User"));
+    };
+    let mut actual = serde_json::to_value(actual).map_err(failure)?;
+    let mut intended = serde_json::to_value(intended).map_err(failure)?;
+    actual
+        .as_object_mut()
+        .ok_or_else(|| failure("User payload is not object"))?
+        .remove("timestamp");
+    intended
+        .as_object_mut()
+        .ok_or_else(|| failure("User intent is not object"))?
+        .remove("timestamp");
+    if actual != intended {
+        return Err(failure(
+            "delivered User FIFO head differs from accepted intent",
+        ));
+    }
+    Ok(())
+}
+
+impl SessionFile {
+    /// Durable acceptance before SDK construction or early abort. Bound acceptance
+    /// leaves an operation-bound staged checkpoint; it never clears its own barrier.
+    pub(crate) fn persist_delivered_user(&mut self, message: serde_json::Value) -> Result<String> {
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+            return Err(failure("accepted user payload has another role"));
+        }
+        let mut fields = serde_json::Map::new();
+        fields.insert("message".to_owned(), message);
+        let fields = serde_json::Value::Object(fields);
+        if !self.is_canonical_bound() {
+            let id = self.persist_entry("message", fields).map_err(failure)?;
+            self.register_delivered_user(&id)?;
+            return Ok(id);
+        }
+        self.stage_delivered_entry("message", fields)
+    }
+
+    pub(crate) fn persist_delivered_custom(&mut self, fields: serde_json::Value) -> Result<String> {
+        if !self.is_canonical_bound() {
+            let id = self
+                .persist_entry("custom_message", fields)
+                .map_err(failure)?;
+            self.canonical_delivered_custom.push_back(id.clone());
+            return Ok(id);
+        }
+        self.stage_delivered_entry("custom_message", fields)
+    }
+
+    fn stage_delivered_entry(
+        &mut self,
+        entry_type: &str,
+        fields: serde_json::Value,
+    ) -> Result<String> {
+        let entry = SessionEntry {
+            type_: entry_type.to_owned(),
+            id: if self.window.is_some() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                super::new_entry_id(&self.by_id)
+            },
+            parent_id: self.leaf_id.clone(),
+            timestamp: crate::util::now_iso(),
+            fields,
+        };
+        let delivery = match entry_type {
+            "message" => OwnerDelivery::User,
+            "custom_message" => OwnerDelivery::Custom,
+            _ => return Err(failure("unsupported delivered row kind")),
+        };
+        self.stage_canonical_entry(entry, delivery)
+    }
+
+    pub(super) fn stage_owned_entry(&mut self, entry: SessionEntry) -> Result<String> {
+        self.stage_canonical_entry(entry, OwnerDelivery::Metadata)
+    }
+
+    fn stage_canonical_entry(
+        &mut self,
+        entry: SessionEntry,
+        delivery: OwnerDelivery,
+    ) -> Result<String> {
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        let staged = state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.staged && pending.signal.is_none());
+        if !staged {
+            state.available()?;
+        }
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                let current = state.current(self)?;
+                anyhow::ensure!(
+                    current.cursor == state.raw.cursor,
+                    "accepted delivery source changed outside owner"
+                );
+                anyhow::ensure!(
+                    !state
+                        .raw
+                        .plan
+                        .rows
+                        .iter()
+                        .any(|row| row.id.as_deref() == Some(entry.id.as_str())),
+                    "canonical stable row identity already exists"
+                );
+                let grant = if matches!(delivery, OwnerDelivery::User)
+                    && super::canonical_adapter::is_user_row(&entry)
+                {
+                    state
+                        .authority
+                        .begin_prepare_append(CanonicalIoStage::PreparePreflight)?
+                } else {
+                    let draft = metadata_draft(&entry)?;
+                    metadata_action(draft.entry())
+                        .ok_or_else(|| failure("unsupported explicit owner staging action"))?;
+                    state.grant(self, &draft)?
+                };
+                let operation = if staged {
+                    state
+                        .pending
+                        .as_ref()
+                        .ok_or_else(|| unresolved("staged operation lost"))?
+                        .operation
+                        .clone()
+                } else {
+                    let operation = CanonicalOperation::new();
+                    let barrier = state
+                        .revision
+                        .set_barrier(&operation)
+                        .map_err(|e| failure(format!("delivery barrier: {e:?}")))?;
+                    state.pending = Some(Pending {
+                        operation: operation.clone(),
+                        cursor: current.cursor.clone(),
+                        barrier,
+                        prepared: true,
+                        mutation: false,
+                        signal: None,
+                        staged: true,
+                        from: current.cursor.clone(),
+                    });
+                    operation
+                };
+                let mut attempt = state
+                    .revision
+                    .admit_write(Some(&operation))
+                    .map_err(|e| unresolved(format!("delivery admission: {e:?}")))?;
+                attempt
+                    .begin_io()
+                    .map_err(|e| unresolved(format!("delivery write start: {e:?}")))?;
+                let id = match self.persist_granted_entry(entry, None, Some(grant)) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        state.blocked = true;
+                        return Err(error);
+                    }
+                };
+                attempt
+                    .finish_success()
+                    .map_err(|e| unresolved(format!("delivery finish: {e:?}")))?;
+                let appended = RawCapture::append_from(
+                    &state.raw,
+                    &current.cursor,
+                    state.position(self.leaf_id.clone())?,
+                    CaptureMode::Full,
+                )?;
+                anyhow::ensure!(
+                    appended.rows.len() == 1 && appended.rows[0].entry().id() == Some(id.as_str()),
+                    "accepted delivery lacks exact physical suffix"
+                );
+                state.raw = appended.capture;
+                let cursor = state.raw.cursor.clone();
+                state
+                    .pending
+                    .as_mut()
+                    .ok_or_else(|| unresolved("staged delivery lost"))?
+                    .cursor = cursor;
+                match delivery {
+                    OwnerDelivery::User => {
+                        state.registered.insert(id.clone());
+                        state.delivered.push_back(id.clone());
+                    }
+                    OwnerDelivery::Custom => state.delivered_custom.push_back(id.clone()),
+                    OwnerDelivery::Metadata => {}
+                }
+                Ok(id)
+            })
+            .map_err(unresolved)
+    }
+}
+
+impl SessionFile {
+    pub(crate) fn admit_canonical_custom(
+        &mut self,
+        request: CanonicalLiveCustomRequest,
+    ) -> Result<CanonicalLiveCustomPrepared> {
+        if self.canonical_live.is_none() {
+            self.attach_canonical_owner()?;
+        }
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let existing = {
+            let state = owner
+                .0
+                .lock()
+                .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+            state.delivered_custom.front().cloned()
+        };
+        let expected_payload = pa_types::session::CustomMessageEntry {
+            custom_type: request.message.custom_type,
+            content: request.message.content,
+            display: request.message.display,
+            details: request.message.details,
+            rest: request.message.rest,
+        };
+        let id = if let Some(id) = existing {
+            id
+        } else {
+            self.persist_delivered_custom(
+                serde_json::to_value(&expected_payload).map_err(failure)?,
+            )?
+        };
+        {
+            let state = owner
+                .0
+                .lock()
+                .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+            let row = state
+                .raw
+                .retained
+                .iter()
+                .find(|row| row.entry().id() == Some(id.as_str()))
+                .ok_or_else(|| {
+                    unresolved("delivered Custom FIFO row missing from physical source")
+                })?;
+            let pa_types::session::FileEntry::CustomMessage { payload, .. } = row.entry() else {
+                return Err(failure("delivered Custom FIFO row has another kind"));
+            };
+            if payload != &expected_payload {
+                return Err(failure(
+                    "delivered Custom FIFO head differs from exact accepted intent",
+                ));
+            }
+        }
+        let prepared = self.prepare_canonical(CanonicalLivePrepareRequest {
+            expected: request.expected,
+            source: request.source,
+            mode: CanonicalPrepareMode::Observe,
+            admission: CanonicalAdmissionPolicy::Preserve,
+        })?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        if state.delivered_custom.pop_front().as_ref() != Some(&id) {
+            state.blocked = true;
+            return Err(unresolved(
+                "delivered Custom FIFO changed during preparation",
+            ));
+        }
+        Ok(CanonicalLiveCustomPrepared {
+            prepared,
+            admitted_entry_id: id,
+        })
+    }
+}
+
+impl SessionFile {
+    /// Actual worker command/lifecycle admission, never a generic canonical write.
+    /// The exact typed row must match one of the named `MetadataAction` variants.
+    pub(crate) fn persist_owner_metadata(
+        &mut self,
+        kind: &str,
+        fields: serde_json::Value,
+    ) -> Result<String> {
+        if !self.is_canonical_bound() {
+            return self.persist_entry(kind, fields).map_err(failure);
+        }
+        let entry = SessionEntry {
+            type_: kind.to_owned(),
+            id: if self.window.is_some() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                super::new_entry_id(&self.by_id)
+            },
+            parent_id: self.leaf_id.clone(),
+            timestamp: crate::util::now_iso(),
+            fields,
+        };
+        let draft = metadata_draft(&entry)?;
+        if metadata_action(draft.entry()).is_none() {
+            return Err(failure(
+                "worker lifecycle row has no exact named MetadataAction",
+            ));
+        }
+        self.stage_owned_entry(entry)
+    }
+}
+
+impl SessionFile {
+    /// Uncertain/invalid source, distinct from a known durable staged acceptance.
+    /// UI may show known durable rows while Core still owes their exact ACK.
+    pub(crate) fn canonical_source_uncertain(&self) -> bool {
+        let Some(owner) = &self.canonical_live else {
+            return super::canonical_adapter::epoch_is_poisoned(self.epoch.as_ref());
+        };
+        let Ok(state) = owner.0.lock() else {
+            return true;
+        };
+        let Ok(revision) = state.revision.snapshot() else {
+            return true;
+        };
+        let blocked = state.blocked;
+        let authority_poison_observed = !blocked && state.authority.poisoned();
+        if blocked
+            || authority_poison_observed
+            || revision.canonical_revision != state.raw.cursor.canonical_revision
+            || revision.branch_revision != state.raw.cursor.branch_revision
+            || state.pending.as_ref().is_some_and(|pending| {
+                pending.prepared && !pending.staged && pending.signal.is_none()
+            })
+            || state.callers.iter().any(|signal| {
+                signal.state() == pa_core::session::canonical::CanonicalCallerState::Abandoned
+            })
+            || state
+                .pending
+                .as_ref()
+                .and_then(|pending| pending.signal.as_ref())
+                .is_some_and(|signal| {
+                    signal.state() == pa_core::session::canonical::CanonicalCallerState::Abandoned
+                })
+        {
+            return true;
+        }
+        let Ok(lease) = state.verify(self) else {
+            return true;
+        };
+        lease.with_owned_mutation(&self.path, || Ok(())).is_err()
+    }
+}
+
+impl SessionFile {
+    /// Actual awaited `AgentStart`, after raw adoption/ACK and before any paid work.
+    pub(crate) fn register_canonical_run(
+        &mut self,
+        request: CanonicalLiveRunRequest,
+    ) -> Result<()> {
+        self.attach_canonical_owner()?;
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.available()?;
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                anyhow::ensure!(
+                    state.current(self)?.cursor == state.raw.cursor
+                        && request.expected == state.raw.cursor,
+                    "actual AgentStart belongs to another certified source"
+                );
+                if let Some(previous) = &state.registered_run {
+                    anyhow::ensure!(
+                        !Arc::ptr_eq(&previous.identity, &request.run),
+                        "actual run was already registered"
+                    );
+                    anyhow::ensure!(
+                        previous.terminal_acked,
+                        "previous actual run has no acknowledged native terminal row"
+                    );
+                }
+                let retired = self.retire_canonical_source(&mut state)?;
+                state.authority = CanonicalOwnerEpoch::successor(&state.raw.cursor, retired)?;
+                let abort = state.authority.register_run(request.run.clone())?;
+                state.registered_run = Some(RegisteredRun {
+                    identity: request.run,
+                    abort: Some(abort),
+                    ever_provider_admitted: false,
+                    terminal_acked: false,
+                });
+                state.provider = None;
+                state.serving_run = None;
+                Ok(())
+            })
+            .map_err(unresolved)
+    }
+}

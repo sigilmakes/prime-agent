@@ -86,72 +86,84 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn mint_post_compaction_goal_continuation(&self) -> Option<crate::engine::GoalContinuation> {
-        // The mirrored locks are async, so the mint runs on the engine runtime.
         let handles = self
             .goal_runtime
             .lock()
             .expect("goal runtime lock")
             .clone()?;
-        // The progress check's input, read before the driver lock. The
-        // failed pair's DROP happens INSIDE the quiescence gate (an early
-        // drop would remint).
         let last_turn = self.last_loop_assistant_message();
         let continuation = self.runtime.block_on(async {
-            let mut driver = handles.driver.lock().await;
-            // The quiescence arm: unsettled work defers the mint (owed, not consumed).
+            {
+                let driver = handles.driver.lock().await;
+                driver.ensure_ready().ok()?;
+            }
             if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+                let mut driver = handles.driver.lock().await;
+                driver.ensure_ready().ok()?;
                 driver.mark_continuation_owed();
                 return None;
             }
-            // Now the failed pair can leave the loop (`last_turn` still
-            // carries the corpse's verdict).
-            if last_turn
-                .as_ref()
-                .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
-                    turn.stop_reason == pa_agent::types::StopReason::Error
-                        || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
-                })
-            {
-                drop(driver);
+            if last_turn.as_ref().is_some_and(|turn| {
+                turn.stop_reason == pa_agent::types::StopReason::Error
+                    || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+            }) {
                 self.drop_failed_goal_continuation_pair().await;
-                driver = handles.driver.lock().await;
             }
-            let mut session = handles.session.lock().await;
-            // The OWED delivery, not a fresh mint: arming then taking keeps
-            // one continuation per owed boundary (an inactive goal or a
-            // failed persist ends the boundary without minting).
-            driver.mark_continuation_owed();
-            let message = match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
-                Ok(message) => message,
-                Err(error) => {
-                    eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
-                    None
-                }
-            };
-            if message.is_none() {
-                // A refused mint still changed the state: publish it and arm the backoff wake.
-                let state = driver.state_with_creation_elapsed();
-                let wake_at = driver.backoff_wake_at();
-                drop(driver);
-                self.publish_goal_state(&state);
+            let (message, revision) =
+                match pa_core::session_engine::goal_driver::persist_goal_mutation(
+                    &handles.driver,
+                    &handles.session,
+                    |driver, drafts| {
+                        // The helper installs the original local revision + 1; internal
+                        // mutations of its private candidate do not change that stamp.
+                        let revision = driver.revision().wrapping_add(1);
+                        driver.mark_continuation_owed();
+                        let message = driver.take_owed_continuation(drafts, last_turn.as_ref())?;
+                        Ok((message, revision))
+                    },
+                )
+                .await
+                {
+                    Ok(message) => message,
+                    Err(error) => {
+                        eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
+                        return None;
+                    }
+                };
+            let Some(message) = message else {
+                let wake_at = {
+                    let driver = handles.driver.lock().await;
+                    driver.ensure_ready().ok()?;
+                    self.publish_goal_state(&driver.state_with_creation_elapsed());
+                    driver.backoff_wake_at()
+                };
                 if let Some(wake_at) = wake_at {
                     self.schedule_goal_backoff_wake(wake_at).await;
                 }
                 return None;
-            }
-            let message = message?;
-            // This mint's own guard handle: the admission sink releases
-            // exactly it, never the mirror.
-            let pending_handle = Some(driver.pending_continuation_handle());
-            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
-            drop(driver);
+            };
+            let (goal_update, pending_handle) = {
+                let mut driver = handles.driver.lock().await;
+                if driver.ensure_ready().is_err()
+                    || driver.revision() != revision
+                    || !driver.pending_continuation()
+                {
+                    driver.block_unresolved_handoff();
+                    eprintln!("pa-daemon: postcompaction goal handoff changed after ACK; blocked until durable rebuild");
+                    return None;
+                }
+                (
+                    self.publish_goal_state(&driver.state_with_creation_elapsed()),
+                    Some(driver.pending_continuation_handle()),
+                )
+            };
             self.cancel_goal_backoff_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
                     message: message.content.text(),
                     images: Vec::new(),
-                    source: "user".to_string(),
+                    source: "user".to_owned(),
                     agent_message_id: None,
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
                 },
@@ -383,9 +395,14 @@ impl SessionEngine for AgentSessionEngine {
                 return false;
             }
         }
+        let previous_selection = self.current_selection();
+        let previous_thinking = *self
+            .effective_thinking
+            .read()
+            .expect("effective thinking lock");
         self.merge_model_selection(selection);
         let Ok(model) = self.resolve_model() else {
-            // Preserve configure_model's existing failed-switch cache behavior.
+            // Preserve the existing invalid-selection and failed-switch cache behavior.
             *self
                 .effective_thinking
                 .write()
@@ -393,46 +410,48 @@ impl SessionEngine for AgentSessionEngine {
             let _ = self.effective_thinking();
             return false;
         };
+        let effective = self.thinking_for_model(Some(&model));
+        // Never retain the SDK slot mutex across canonical owner I/O. The actual
+        // worker keeps the existing construction gate through this whole command.
+        let core = { self.session.blocking_lock().clone() };
+        if let Some(core) = &core {
+            let committed = self
+                .runtime
+                .block_on(core.session.set_model_and_thinking_level(
+                    &model,
+                    &model.provider,
+                    &model.id,
+                    map_thinking_level(effective),
+                ));
+            if committed.is_err() {
+                *self.selection.write().expect("model selection lock") = previous_selection;
+                *self
+                    .effective_thinking
+                    .write()
+                    .expect("effective thinking lock") = previous_thinking;
+                return false;
+            }
+        }
         {
-            // The switch's resolve-and-install serializes with `/reload`'s
-            // live-input refresh (the failover callbacks' fence): a reload
-            // landing between this resolution and the slot write must not
-            // be clobbered by the switch's older pair.
+            // Resolve current credentials only after the real model-change ACK.
+            // The existing reload fence protects resolution and publication together.
             let _reload_serialized = self
                 .reload_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (api_key, headers) = self.resolve_request_key_and_headers(&model);
-            let mut target = self.provider_target.write().expect("provider target lock");
-            *target = Some(ProviderTarget {
+            *self.provider_target.write().expect("provider target lock") = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 api_key,
                 model: model.clone(),
                 headers,
             });
         }
-        // Clamp only after publishing the resolved target. The requested level
-        // stays in selection so reasoning -> plain -> reasoning restores it.
         *self
             .effective_thinking
             .write()
-            .expect("effective thinking lock") = None;
-        let _ = self.effective_thinking();
-        let session = self.session.blocking_lock();
-        if let Some(core) = session.as_deref() {
-            let provider = model.provider.clone();
-            let model_id = model.id.clone();
-            // ONE agent-lock acquisition updates model and level together
-            // (a mid-switch turn never sees a mismatch). No durable
-            // `thinking_level_change` row — `/thinking` owns it.
-            let level = map_thinking_level(self.effective_thinking());
-            let _ = self.runtime.block_on(
-                core.session
-                    .set_model_and_thinking_level(&model, &provider, &model_id, level),
-            );
-            // The turn-boundary model facts follow the switch: `model.info`
-            // and the usage estimate's context window report the model now
-            // running. A core that is not built yet rebinds at its build.
+            .expect("effective thinking lock") = Some(effective);
+        if let Some(core) = core {
             core.update_model_facts(&model);
         }
         if let Some(children) = &self.children {
@@ -452,20 +471,28 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn switch_thinking_level(&self, level: pa_types::ai::ModelThinkingLevel) -> bool {
+        let effective = self
+            .session_model()
+            .map_or(pa_types::ai::ModelThinkingLevel::Off, |model| {
+                pa_ai::models::clamp_thinking_level(&model, level)
+            });
+        let core = { self.session.blocking_lock().clone() };
+        if let Some(core) = core {
+            if self
+                .runtime
+                .block_on(
+                    core.session
+                        .set_thinking_level(map_thinking_level(effective)),
+                )
+                .is_err()
+            {
+                return false;
+            }
+        }
         self.configure_model(EngineModelSelection {
             thinking: Some(level),
             ..Default::default()
         });
-        // The effective level is the request clamped to the model's support;
-        // the agent follows next turn.
-        let effective = self.effective_thinking();
-        let session = self.session.blocking_lock();
-        if let Some(core) = session.as_deref() {
-            let _ = self.runtime.block_on(
-                core.session
-                    .set_thinking_level(map_thinking_level(effective)),
-            );
-        }
         true
     }
 
@@ -583,7 +610,7 @@ impl SessionEngine for AgentSessionEngine {
             Err(error) => {
                 return CompactionOutcome::Failed {
                     error: error.to_string(),
-                }
+                };
             }
         };
         if let Err(error) = self.session_agent(&model) {
@@ -595,9 +622,13 @@ impl SessionEngine for AgentSessionEngine {
         // The live target's key: the config key is the startup snapshot and
         // goes stale with provider switches.
         let api_key = self.resolve_request_api_key(&model);
+        // Classify the same actual SDK snapshot that owns this transaction.
+        // No SDK slot guard survives into canonical owner I/O.
+        let session = self.session.blocking_lock().clone();
+        let canonical_bound = session
+            .as_ref()
+            .is_some_and(|engine| engine.session.has_canonical_live_owner());
         let run = async {
-            // The lock covers the clone only; the summarizer call below must not ride it.
-            let session = self.session.lock().await.clone();
             let Some(engine) = session else {
                 anyhow::bail!("session not built");
             };
@@ -613,9 +644,14 @@ impl SessionEngine for AgentSessionEngine {
                 )
                 .await
         };
-        let result = self
-            .runtime
-            .block_on(pa_agent::abort::race_with_abort(run, signal));
+        let result = if canonical_bound {
+            // Core's inner provider-only race retains the exact ticket until
+            // the existing async pre-commit abandon has completed.
+            Ok(self.runtime.block_on(run))
+        } else {
+            self.runtime
+                .block_on(pa_agent::abort::race_with_abort(run, signal))
+        };
         let compaction = match result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
@@ -657,6 +693,39 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    fn canonical_navigation_session(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = anyhow::Result<
+                        Option<
+                            std::sync::Arc<
+                                pa_core::session_engine::canonical_live::CanonicalLiveSession,
+                            >,
+                        >,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let model = self.session_model()?;
+            self.ensure_core_session_async(&model).await?;
+            let live = {
+                let guard = self.session.lock().await;
+                guard
+                    .as_deref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("session disappeared before canonical navigation")
+                    })?
+                    .session
+                    .canonical_live_session()
+            };
+            Ok(live)
+        })
+    }
+
     fn run_branch_summary(
         &self,
         request: BranchSummaryRequest,
@@ -667,7 +736,7 @@ impl SessionEngine for AgentSessionEngine {
             Err(error) => {
                 return BranchSummaryOutcome::Failed {
                     error: error.to_string(),
-                }
+                };
             }
         };
         if let Err(error) = self.ensure_core_session(&model) {
@@ -758,20 +827,28 @@ impl SessionEngine for AgentSessionEngine {
             return Ok(());
         }
         self.runtime.block_on(async move {
-            let guard = self.session.lock().await;
-            let Some(engine) = guard.as_deref() else {
+            let engine = { self.session.lock().await.clone() };
+            let Some(engine) = engine else {
                 return Ok(());
             };
-            engine
-                .session
-                .rebuild_branch_context(branch_entries)
-                .await?;
+            {
+                let driver = engine.goal_driver.lock().await;
+                driver.ensure_ready()?;
+            }
+            if engine.session.canonical_live_session().is_some() {
+                engine.session.rebuild_canonical_branch_context().await?;
+            } else {
+                engine
+                    .session
+                    .rebuild_branch_context(branch_entries)
+                    .await?;
+            }
             // The rebuilt context reads the moved branch's own latest goal
             // entry; the announcement publishes while the driver lock is held.
             let mut driver = engine.goal_driver.lock().await;
             let session = engine.session.shared_persistence();
             let manager = session.lock().await;
-            driver.reload_from_branch(&manager, goal_reload);
+            driver.reload_from_branch(&manager, goal_reload)?;
             let announcement = self.publish_goal_state(&driver.state_with_creation_elapsed());
             *self
                 .reloaded_goal_update
@@ -782,6 +859,8 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn goal_update_after_rebuild(&self) -> Option<Value> {
+        // Pending or blocked state is never a publication-ready rebuild.
+        self.current_goal_state()?;
         // The on-change announcement: already published through the dedupe; taken exactly once.
         self.reloaded_goal_update
             .lock()
@@ -910,12 +989,16 @@ impl SessionEngine for AgentSessionEngine {
         self.runtime.block_on(async {
             let core = self.session.lock().await.clone();
             if let Some(core) = core {
-                core.session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .replay_admitted_user_rows(Vec::new())
-                    .expect("clearing admitted rows cannot fail");
+                // Canonical delivery identities are consumed only by their
+                // matching owner receipt/ACK. Turn settlement cannot erase them.
+                if !core.session.has_canonical_live_owner() {
+                    core.session
+                        .shared_persistence()
+                        .lock()
+                        .await
+                        .replay_admitted_user_rows(Vec::new())
+                        .expect("clearing standalone admitted rows cannot fail");
+                }
             }
         });
         if let Some(children) = &self.children {
@@ -935,7 +1018,7 @@ impl SessionEngine for AgentSessionEngine {
                 return SideQuestionOutcome::Failed {
                     answer: String::new(),
                     error: error.to_string(),
-                }
+                };
             }
         };
         let agent = match self.session_agent(&model) {
@@ -944,7 +1027,7 @@ impl SessionEngine for AgentSessionEngine {
                 return SideQuestionOutcome::Failed {
                     answer: String::new(),
                     error: error.to_string(),
-                }
+                };
             }
         };
         let question = request.question.clone();
@@ -1372,6 +1455,16 @@ impl SessionEngine for AgentSessionEngine {
                 "timestamp": now_millis(),
             }))
         };
+        // A create-owned warmup may still be adopting/ACKing metadata. Hold
+        // its existing gate through accepted-row persistence, without holding
+        // any SDK/owner/core guard or triggering a truly lazy build.
+        let build = match self.runtime.block_on(self.prompt_acceptance_build_guard()) {
+            Ok(build) => build,
+            Err(error) => {
+                emit(EngineEvent::Done(Err(error.to_string())));
+                return;
+            }
+        };
         if !emit(accepted) {
             return;
         }
@@ -1398,6 +1491,8 @@ impl SessionEngine for AgentSessionEngine {
                 return;
             }
         }
+        // The turn's ensure/build path must acquire this same gate itself.
+        drop(build);
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),
             None => TurnPrompt::User {

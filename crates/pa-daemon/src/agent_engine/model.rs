@@ -428,6 +428,19 @@ impl AgentSessionEngine {
             return level;
         }
         let model = self.session_model();
+        let resolved = self.thinking_for_model(model.as_ref().ok());
+        *self
+            .effective_thinking
+            .write()
+            .expect("effective thinking lock") = Some(resolved);
+        resolved
+    }
+
+    /// Resolve the requested level against an explicit model without publishing it.
+    pub(super) fn thinking_for_model(
+        &self,
+        model: Option<&Model>,
+    ) -> pa_types::ai::ModelThinkingLevel {
         let selection = self.current_selection();
         let requested = selection
             .thinking
@@ -448,7 +461,7 @@ impl AgentSessionEngine {
                     .scoped_models
                     .iter()
                     .find(|scoped| {
-                        model.as_ref().is_ok_and(|model| {
+                        model.is_some_and(|model| {
                             scoped.model.provider == model.provider && scoped.model.id == model.id
                         })
                     })?
@@ -468,15 +481,9 @@ impl AgentSessionEngine {
             })
             // TS `DEFAULT_THINKING_LEVEL`.
             .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
-        let resolved = match model {
-            Ok(model) => pa_ai::models::clamp_thinking_level(&model, requested),
-            Err(_) => pa_types::ai::ModelThinkingLevel::Off,
-        };
-        *self
-            .effective_thinking
-            .write()
-            .expect("effective thinking lock") = Some(resolved);
-        resolved
+        model.map_or(pa_types::ai::ModelThinkingLevel::Off, |model| {
+            pa_ai::models::clamp_thinking_level(model, requested)
+        })
     }
 
     /// The request-time api key AND its resolved provider headers (the

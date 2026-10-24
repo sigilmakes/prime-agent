@@ -130,6 +130,37 @@ fn message_text(message: &Value) -> String {
     }
 }
 
+/// Envelope-free context-policy intent for an already computed branch summary.
+/// The actual owner supplies its row identity and new-branch parent.
+pub(crate) fn branch_summary_intent(
+    from_id: Option<&str>,
+    summary: &str,
+    details: Option<Value>,
+    usage: Option<Value>,
+    model: Option<(&str, &str)>,
+) -> Result<FileEntry> {
+    let mut rest = pa_types::JsonMap::new();
+    if let Some((provider, model_id)) = model {
+        rest.insert("provider".into(), json!(provider));
+        rest.insert("modelId".into(), json!(model_id));
+    }
+    Ok(FileEntry::BranchSummary {
+        base: pa_types::session::EntryBase {
+            id: None,
+            parent_id: None,
+            timestamp: None,
+            rest,
+        },
+        payload: pa_types::session::BranchSummaryEntry {
+            from_id: from_id.unwrap_or("root").to_owned(),
+            summary: summary.to_owned(),
+            details,
+            from_hook: None,
+            usage: usage.map(serde_json::from_value).transpose()?,
+        },
+    })
+}
+
 impl SessionFile {
     /// `branch`: move the leaf onto an existing entry; the next append
     /// parents from there.
@@ -138,6 +169,9 @@ impl SessionFile {
     ///
     /// Returns an error when the target entry does not exist; a `None` id clears the leaf.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
+        if self.is_canonical_bound() {
+            return self.advance_canonical_branch(id).map_err(Into::into);
+        }
         match id {
             Some(id) => {
                 if self.entry(id).is_none() {
@@ -166,6 +200,10 @@ impl SessionFile {
         usage: Option<Value>,
         model: Option<(&str, &str)>,
     ) -> Result<String> {
+        anyhow::ensure!(
+            !self.is_canonical_bound(),
+            "canonical branch summaries require prepared navigation and context-policy receipts"
+        );
         self.branch_to(from_id)?;
         let mut fields = json!({
             "fromId": from_id.unwrap_or("root"),
@@ -202,7 +240,8 @@ impl SessionFile {
             Some(label) => fields["label"] = json!(label),
             None => fields["label"] = Value::Null,
         }
-        self.persist_entry("label", fields)
+        self.persist_owner_metadata("label", fields)
+            .map_err(Into::into)
     }
 
     /// The root-to-leaf path of the (new) current leaf as typed entries.
@@ -469,6 +508,33 @@ mod tests {
         assert!(store.branch_to(Some("missing")).is_err());
         store.branch_to(None).unwrap();
         assert_eq!(store.leaf_id(), None);
+    }
+
+    #[test]
+    fn branch_summary_intent_preserves_output_without_a_canonical_envelope() {
+        let entry = branch_summary_intent(
+            Some("selected-parent"),
+            "retained paid summary",
+            Some(json!({"readFiles":["one"],"native":{"bytes":"AA=="}})),
+            None,
+            Some(("actual-provider", "actual-aux-model")),
+        )
+        .unwrap();
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type":"branch_summary", "id":null, "parentId":null, "timestamp":null,
+                "fromId":"selected-parent", "summary":"retained paid summary",
+                "details":{"readFiles":["one"],"native":{"bytes":"AA=="}},
+                "provider":"actual-provider", "modelId":"actual-aux-model"
+            })
+        );
+        assert!(pa_core::session::canonical::CanonicalEntryDraft::new(
+            pa_core::session::canonical::CanonicalMutationKind::ContextPolicy,
+            entry,
+        )
+        .is_ok());
     }
 
     #[test]

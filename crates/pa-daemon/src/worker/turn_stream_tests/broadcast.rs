@@ -140,7 +140,10 @@ async fn an_injected_custom_turn_replaces_the_user_row() {
     });
     assert!(!user_rows, "the injected turn must not emit a user row");
     assert_eq!(events[ends[1]]["message"]["role"], "assistant");
-    assert_eq!(events[ends[1]]["message"]["content"], "notice acknowledged");
+    assert_eq!(
+        events[ends[1]]["message"]["content"],
+        json!([{ "type": "text", "text": "notice acknowledged" }])
+    );
 }
 
 #[tokio::test]
@@ -263,7 +266,7 @@ async fn a_settled_turn_broadcasts_the_engine_agent_end_with_its_messages() {
     );
     assert_eq!(
         messages[1]["content"],
-        json!("settled reply"),
+        json!([{ "type": "text", "text": "settled reply" }]),
         "the settled assistant row rides the payload"
     );
     let turn_ends = positions_of(&events, "turn_end");

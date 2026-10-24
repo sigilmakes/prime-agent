@@ -158,9 +158,10 @@ fn boot_cleanup_preserves_unverifiable_journals_and_waiting_callers_status() {
         !dead_lease.exists(),
         "the provably dead lease was reclaimed"
     );
-    assert!(
-        !obsolete_cache.exists(),
-        "the unused root cache was removed"
+    assert_eq!(
+        std::fs::read(&obsolete_cache).expect("the legacy root cache remains"),
+        b"{}",
+        "ordinary boot preserves the legacy cache byte for byte"
     );
     assert!(
         pa_daemon::lease::acquire_runtime_session_lease(&live_session, &agent_dir).is_err(),

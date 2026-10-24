@@ -282,6 +282,9 @@ pub async fn execute_session_command(
 /// turn's request carries them); the rebuild is idempotent — the compaction
 /// path rebuilds mid-execution.
 async fn sync_live_context(engine: &SessionEngine) -> Result<(), String> {
+    if let Some(live) = &engine.session.canonical_live {
+        live.ensure_ready().map_err(|error| error.to_string())?;
+    }
     let _flight = engine.session.compaction_flight.lock().await;
     let rebuilt = engine
         .session
@@ -337,68 +340,58 @@ async fn execute_goal(
     let goal = parse_goal_command(&command.args)?;
     let driver: Arc<tokio::sync::Mutex<GoalDriver>> = engine.goal_driver.clone();
     let session = engine.session.session_handle().clone();
-    let mut context_message: Option<CustomMessage> = None;
-    {
-        let mut driver = driver.lock().await;
-        let mut session = session.lock().await;
-        // The clear's reply reflects the action, not the post-clear state
-        // (the operator's 2026-09-25 bug report): a clear that removed a goal
-        // record answers "Goal cleared."; nothing-to-clear keeps the plain status.
-        let mut cleared_goal = false;
-        match goal {
-            GoalCommand::Status => {}
-            // TS `_clearGoal`/`_pauseGoal`/`_startGoal` route through
-            // `_clearQueuedGoalContexts` first: a minted continuation
-            // waiting in the queue never runs behind the state change.
-            GoalCommand::Clear => {
-                engine.purge_queued_goal_contexts();
-                cleared_goal =
-                    driver.state().objective.is_some() && driver.state().status != GoalStatus::Idle;
-                driver
-                    .clear(&mut session)
-                    .map_err(|error| format!("{error:#}"))?;
-            }
-            GoalCommand::Pause => {
-                engine.purge_queued_goal_contexts();
-                driver
-                    .pause(&mut session, "Paused by user")
-                    .map_err(|error| format!("{error:#}"))?;
-            }
-            GoalCommand::Resume => {
-                context_message = driver
-                    .resume(&mut session)
-                    .map_err(|error| format!("{error:#}"))?;
-            }
-            GoalCommand::Start {
-                objective,
-                token_budget,
-            } => {
-                engine.purge_queued_goal_contexts();
-                let state = driver
-                    .start(&mut session, &objective, token_budget)
-                    .map_err(|error| format!("{error:#}"))?;
-                // TS `_startGoal`: only the objective-start context takes the
-                // prompt's attached images; the other goal arms ignore them.
-                context_message = Some(
-                    create_goal_context_message(&state, GoalContextKind::Continuation, images)
-                        .map_err(|error| format!("{error:#}"))?,
-                );
-            }
-        }
-        let status_text = if cleared_goal {
-            "Goal cleared.".to_string()
-        } else {
-            goal_status_text(driver.state())
-        };
-        execution.push_message(slash_command_result(
-            command,
-            status_text,
-            true,
-            "info",
-            None,
-            true,
-        ));
+    if matches!(
+        &goal,
+        GoalCommand::Clear | GoalCommand::Pause | GoalCommand::Start { .. }
+    ) {
+        engine.purge_queued_goal_contexts();
     }
+    let (status_text, context_message) =
+        super::goal_driver::persist_goal_mutation(&driver, &session, |driver, drafts| {
+            let mut context_message = None;
+            let mut cleared_goal = false;
+            match goal {
+                GoalCommand::Status => {}
+                GoalCommand::Clear => {
+                    cleared_goal = driver.state().objective.is_some()
+                        && driver.state().status != GoalStatus::Idle;
+                    driver.clear(drafts)?;
+                }
+                GoalCommand::Pause => {
+                    driver.pause(drafts, "Paused by user")?;
+                }
+                GoalCommand::Resume => {
+                    context_message = driver.resume(drafts)?;
+                }
+                GoalCommand::Start {
+                    objective,
+                    token_budget,
+                } => {
+                    let state = driver.start(drafts, &objective, token_budget)?;
+                    context_message = Some(create_goal_context_message(
+                        &state,
+                        GoalContextKind::Continuation,
+                        images,
+                    )?);
+                }
+            }
+            let status_text = if cleared_goal {
+                "Goal cleared.".to_string()
+            } else {
+                goal_status_text(driver.state())
+            };
+            Ok((status_text, context_message))
+        })
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    execution.push_message(slash_command_result(
+        command,
+        status_text,
+        true,
+        "info",
+        None,
+        true,
+    ));
     // The goal-context row becomes the turn's primary record (an
     // injected custom row), never an early durable row — the loop
     // admission appends it once.
@@ -440,19 +433,28 @@ async fn persist_rows<'a>(
     engine: &SessionEngine,
     messages: impl Iterator<Item = &'a CustomMessage>,
 ) -> Result<(), String> {
-    let session = engine.session.session_handle().clone();
-    let mut session = session.lock().await;
     for message in messages {
-        session
-            .append_custom_message(
-                &message.custom_type,
-                message.content.clone(),
-                message.display,
-                message.details.clone(),
-            )
+        engine
+            .session
+            .persist_metadata_entry(pa_types::session::FileEntry::CustomMessage {
+                base: super::canonical_live::draft_base(),
+                payload: pa_types::session::CustomMessageEntry {
+                    custom_type: message.custom_type.clone(),
+                    content: message.content.clone(),
+                    display: message.display,
+                    details: message.details.clone(),
+                    rest: message.rest.clone(),
+                },
+            })
+            .await
             .map_err(|error| error.to_string())?;
     }
-    session.flush_now().map_err(|error| error.to_string())?;
+    // Standalone managers retain their existing explicit flush boundary.
+    let session = engine.session.session_handle().clone();
+    let mut session = session.lock().await;
+    if session.canonical_binding().is_none() {
+        session.flush_now().map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 

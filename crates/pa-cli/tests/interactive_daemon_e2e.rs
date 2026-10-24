@@ -1802,7 +1802,10 @@ async fn tui_session_tree_navigates_forks_and_clones() {
             up.clone(),
             up.clone(),
             enter.clone(),
-            pa_tui::interactive::HeadlessStep::SettleIdle,
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "post-fork answer".to_string(),
+                timeout_ms: 10_000,
+            },
         ],
         width: 100,
         height: 34,
@@ -1852,12 +1855,7 @@ async fn tui_session_tree_navigates_forks_and_clones() {
         rendered.contains("Navigated to selected point"),
         "the navigation note rendered:\n{rendered}"
     );
-    let settled = outcome
-        .frames
-        .iter()
-        .rev()
-        .find(|frame| frame.contains("Navigated to selected point"))
-        .expect("the navigation frame");
+    let settled = outcome.frames.last().expect("the settled navigation frame");
     assert!(
         !settled.contains("post-fork answer"),
         "the abandoned branch dropped from the rebuilt transcript:\n{settled}"

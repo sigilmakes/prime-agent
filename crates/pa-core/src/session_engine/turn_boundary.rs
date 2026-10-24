@@ -293,11 +293,15 @@ impl SessionEngine {
                 .await
         };
         Some(match abort {
-            Some(signal) => match pa_agent::abort::race_with_abort(compact, signal).await {
-                Ok(inner) => inner,
-                Err(error) => Err(error),
-            },
-            None => compact.await,
+            Some(signal) if self.session.canonical_live.is_none() => {
+                match pa_agent::abort::race_with_abort(compact, signal).await {
+                    Ok(inner) => inner,
+                    Err(error) => Err(error),
+                }
+            }
+            // Canonical compaction cancels only its inner provider work, retaining
+            // the prepared transaction until exact abandonment has been ACKed.
+            _ => compact.await,
         })
     }
 

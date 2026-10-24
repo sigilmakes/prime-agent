@@ -160,7 +160,7 @@ impl Worker {
                             command_type,
                             "lines must be between 1 and 200",
                             None,
-                        )
+                        );
                     }
                 },
             }
@@ -246,7 +246,7 @@ impl Worker {
             };
             let prefix = settings.settings().shell_command_prefix.clone();
             let shell_path = settings.settings().shell_path.clone();
-            let end = run_bash(RunBash {
+            let mut end = run_bash(RunBash {
                 command: &command,
                 cwd: &cwd,
                 prefix: prefix.as_deref(),
@@ -258,7 +258,7 @@ impl Worker {
             // Persist the durable row (transient runs live only in their
             // pane; reloads and rebuilds cannot resurface them).
             if !transient {
-                record_bash_result(
+                if let Err(error) = record_bash_result(
                     &core,
                     &command,
                     &BashResult {
@@ -269,7 +269,9 @@ impl Worker {
                         full_output_path: end.full_output_path.clone(),
                     },
                     exclude_from_context,
-                );
+                ) {
+                    end.error_message = Some(format!("Cannot persist bash outcome: {error:#}"));
+                }
             }
             user_bash.release();
             let mut event = json!({
@@ -405,7 +407,15 @@ impl Worker {
             truncated: end.truncated,
             full_output_path: end.full_output_path,
         };
-        record_bash_result(&self.core, &command, &result, false);
+        if let Err(error) = record_bash_result(&self.core, &command, &result, false) {
+            drop(awaited);
+            return response_failure(
+                None,
+                "execute_bash_and_wait",
+                &format!("Cannot persist bash outcome: {error:#}"),
+                None,
+            );
+        }
         drop(awaited);
         response_success(
             None,
@@ -710,10 +720,10 @@ fn record_bash_result(
     command: &str,
     result: &BashResult,
     exclude_from_context: bool,
-) {
+) -> anyhow::Result<()> {
     let mut core = core.lock().unwrap();
     let Some(store) = core.store.as_mut() else {
-        return;
+        return Ok(());
     };
     let mut row = json!({
         "role": "bashExecution",
@@ -732,7 +742,8 @@ fn record_bash_result(
     if exclude_from_context {
         row["excludeFromContext"] = json!(true);
     }
-    let _ = store.persist_entry("message", json!({ "message": row }));
+    store.persist_owner_metadata("message", json!({ "message": row }))?;
+    Ok(())
 }
 
 /// Sanitize one output chunk (TS `strip-ansi` + `sanitizeBinaryOutput` +

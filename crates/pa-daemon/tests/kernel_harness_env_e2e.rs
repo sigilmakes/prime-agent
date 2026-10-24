@@ -1,7 +1,7 @@
-//! Kernel harness-env e2e: a persisted session's kernel must carry the session's RLM
-//! session + local-harness dirs in its env (TS `_rlmKernelEnv`), so kernel-side
-//! `rlm.harness` writes land in the session-local store. Skips (with a note)
-//! without a live kernel install.
+//! Native harness e2e: a persisted session's real kernel uses the explicitly
+//! enabled Lua plugin and host-owned logical session/global scopes. Writes land
+//! in the single native store, never legacy Python-owned harness files.
+//! Skips (with a note) without a live kernel install.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -156,11 +156,31 @@ impl Client {
     }
 }
 
-/// The one scripted cell: create + read back a session-local memory and a global
-/// one, recording success or the failure traceback in a receipt.
+/// The scripted cell creates and reads scoped raw records through the native
+/// plugin. Payload identity fields stay inside `value`, separate from host identity.
 fn harness_cell(receipt: &Path) -> String {
     format!(
-        "import json, traceback\nreceipt = {{\"ok\": False, \"error\": \"\"}}\ntry:\n    rlm.harness.create_memory(title=\"kernel session-local memory\", content=\"persisted from the session kernel\", id=\"kernel-local-memory\")\n    rlm.get_harness_state().entries[\"memory\"][\"kernel-local-memory\"]\n    rlm.harness.create_memory(title=\"kernel global memory\", content=\"persisted from the session kernel\", id=\"kernel-global-memory\", global_=True)\n    receipt = {{\"ok\": True, \"error\": \"\"}}\nexcept Exception:\n    receipt = {{\"ok\": False, \"error\": traceback.format_exc()}}\nopen({receipt_path:?}, \"w\").write(json.dumps(receipt))\n",
+        r#"import json, traceback, rlm
+receipt = {{"ok": False, "error": ""}}
+try:
+    assert not hasattr(rlm, 'harness') and not hasattr(rlm.rlm, 'harness')
+    local_value = {{"id":"kernel-local-memory", "title":"kernel session-local memory", "content":"persisted from the session kernel"}}
+    global_value = {{"id":"kernel-global-memory", "title":"kernel global memory", "content":"persisted from the session kernel"}}
+    await plugin.harness.create(kind="memory", id="kernel-local-memory", value=local_value)
+    local_row = await plugin.harness.get(kind="memory", id="kernel-local-memory")
+    assert local_row["value"] == local_value
+    assert local_row["identity"]["scope"].startswith("session:")
+    await plugin.harness.create(kind="memory", id="kernel-global-memory", value=global_value, scope="global")
+    global_row = await plugin.harness.get(kind="memory", id="kernel-global-memory", scope="global")
+    assert global_row["value"] == global_value
+    assert global_row["identity"]["scope"] == "global"
+    assert await plugin.harness.get(kind="memory", id="kernel-local-memory", scope="global") is None
+    assert await plugin.harness.get(kind="memory", id="kernel-global-memory") is None
+    receipt = {{"ok": True, "error": "", "local":local_row, "global":global_row}}
+except Exception:
+    receipt = {{"ok": False, "error": traceback.format_exc()}}
+open({receipt_path:?}, "w").write(json.dumps(receipt))
+"#,
         receipt_path = receipt.to_string_lossy(),
     )
 }
@@ -186,30 +206,25 @@ fn write_faux_script(dir: &Path, cell: &str) -> PathBuf {
     script
 }
 
-/// The stored entry equals the one the cell created, apart from its timestamps.
+/// The durable native slot preserves raw payload fields and host-owned scope.
 fn assert_stored_memory(state: &Value, id: &str, title: &str, content: &str, scope: &str) {
-    let mut entry = state["entries"]["memory"][id].clone();
-    assert!(entry.is_object(), "memory entry {id} missing: {state}");
-    entry["created_at"] = json!("<timestamp>");
-    entry["updated_at"] = json!("<timestamp>");
+    let identity = json!({"scope":scope, "kind":"memory", "id":id});
+    let records = state["records"].as_array().expect("native records");
+    let matching: Vec<_> = records
+        .iter()
+        .filter(|row| row["identity"] == identity)
+        .collect();
+    assert_eq!(matching.len(), 1, "exactly one scoped native memory");
+    let entry = matching[0];
+    assert!(entry["revision"]
+        .as_u64()
+        .is_some_and(|revision| revision > 0));
     assert_eq!(
-        entry,
+        entry["value"],
         json!({
-            "id": id,
-            "kind": "memory",
-            "title": title,
-            "content": content,
-            "path": "general",
-            "scope": scope,
-            "reference": {},
-            "arguments": {},
-            "metadata": {},
-            "source": "agent",
-            "version": 1,
-            "created_at": "<timestamp>",
-            "updated_at": "<timestamp>",
-        }),
-        "the stored {scope} memory entry diverged"
+            "state":"Present",
+            "value":{"id":id, "title":title, "content":content}
+        })
     );
 }
 
@@ -225,6 +240,11 @@ fn persistent_session_kernel_writes_the_session_local_harness_store() {
     };
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},"autoRefine":{"enabled":false},"plugins":{"harness":{"enabled":true}}}).to_string(),
+    ).expect("explicitly enable native harness plugin");
     let socket = dir.path().join("supervisor.sock");
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
@@ -281,24 +301,28 @@ fn persistent_session_kernel_writes_the_session_local_harness_store() {
         cell_receipt["error"].as_str().unwrap_or_default()
     );
 
-    // The session-local store is the artifact dir's harness file.
-    let artifact_dir = dir.path().join("session-artifacts").join(session_id);
-    let local_state_file = artifact_dir.join("harness").join("harness_state.json");
+    // Both logical scopes persist through the single host-owned native store.
+    let native_state_file = agent_dir.join("plugins/harness/store.json");
+    let state = read_state(&native_state_file);
+    assert_eq!(state["schema"], 1);
+    let local_scope = format!("session:{session_id}");
+    assert_eq!(cell_receipt["local"]["identity"]["scope"], local_scope);
     assert_stored_memory(
-        &read_state(&local_state_file),
+        &state,
         "kernel-local-memory",
         "kernel session-local memory",
         "persisted from the session kernel",
-        "local",
+        &local_scope,
     );
-
-    // The global store stays the agent dir's harness file.
-    let global_state_file = agent_dir.join("harness").join("harness_state.json");
     assert_stored_memory(
-        &read_state(&global_state_file),
+        &state,
         "kernel-global-memory",
         "kernel global memory",
         "persisted from the session kernel",
         "global",
     );
+    // Native writes never recreate either removed Python legacy writer.
+    let artifact_dir = dir.path().join("session-artifacts").join(session_id);
+    assert!(!artifact_dir.join("harness/harness_state.json").exists());
+    assert!(!agent_dir.join("harness/harness_state.json").exists());
 }

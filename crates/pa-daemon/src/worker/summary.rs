@@ -185,7 +185,10 @@ impl Worker {
     pub(crate) fn emit_custom_row(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
-            persist_custom_row(&mut core, message);
+            if let Err(error) = persist_custom_row(&mut core, message) {
+                eprintln!("pa-daemon: custom row refused: {error:#}");
+                return;
+            }
         }
         self.broadcast_custom_row(message);
     }
@@ -260,14 +263,13 @@ impl Worker {
 /// so a row tied to another locked write (the rename's notice, whose
 /// `session_info` name write it must not interleave with under
 /// concurrent worker commands) lands inside the caller's own lock scope.
-/// The persist error is display-row policy shared by every caller: the
-/// row is advisory, so the failure is swallowed, never the caller's.
+/// A rejected durable write is returned before any recorded-row broadcast.
 pub(crate) fn persist_custom_row(
     core: &mut std::sync::MutexGuard<'_, SessionCore>,
     message: &Value,
-) {
+) -> Result<()> {
     if let Some(store) = core.store.as_mut() {
-        let _ = store.persist_entry(
+        store.persist_owner_metadata(
             "custom_message",
             json!({
                 "customType": message.get("customType").cloned().unwrap_or(Value::Null),
@@ -275,8 +277,9 @@ pub(crate) fn persist_custom_row(
                 "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
                 "details": message.get("details").cloned().unwrap_or(Value::Null),
             }),
-        );
+        )?;
     }
+    Ok(())
 }
 
 pub(crate) fn emit_worker_event_with(

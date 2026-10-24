@@ -1,0 +1,12 @@
+Usage:
+  prime-agent package <install|remove|list|update>
+
+Manage capability packages.
+
+Packages can provide extensions, skills, prompts, and themes.
+
+Commands:
+  install  Install a capability package
+  remove   Remove a capability package
+  list     List installed capability packages
+  update   Update capability packages

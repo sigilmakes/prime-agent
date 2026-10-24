@@ -42,6 +42,16 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         selection: ContextSelection,
     ) -> ContextSelectionCommitFuture;
 
+    /// Bind live receipts to the same immutable owner used to build this mirror.
+    /// Read-only/test adapters may retain the standalone behavior.
+    fn live_owner(
+        &self,
+        _source: ContextSelectionSource,
+    ) -> Option<std::sync::Arc<dyn pa_core::session_engine::canonical_live::CanonicalLiveOwner>>
+    {
+        None
+    }
+
     /// The typed refusal for a read under a poisoned epoch, if this owner has one.
     ///
     /// A live epoch that an uncertain write poisoned may not serve its raw tail:
@@ -73,6 +83,7 @@ impl super::AgentSessionEngine {
     ) -> anyhow::Result<(
         pa_core::session::manager::SessionManager,
         Option<pa_core::session_engine::engine::InitialContextSelectionCommit>,
+        Option<std::sync::Arc<dyn pa_core::session_engine::canonical_live::CanonicalLiveOwner>>,
     )> {
         let Some(path) = session_file else {
             let manager = session_dir.map_or_else(
@@ -81,7 +92,7 @@ impl super::AgentSessionEngine {
                     pa_core::session::manager::SessionManager::in_memory_in_session_dir(&cwd, &dir)
                 },
             );
-            return Ok((manager, None));
+            return Ok((manager, None, None));
         };
         let store = self
             .initial_context_selection_store
@@ -149,9 +160,10 @@ impl super::AgentSessionEngine {
             Ok((manager, source))
         })
         .await??;
+        let live_owner = store.live_owner(source.clone());
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =
             std::sync::Arc::new(move |selection| store.commit(source.clone(), selection));
-        Ok((manager, Some(commit)))
+        Ok((manager, Some(commit), live_owner))
     }
 }
 

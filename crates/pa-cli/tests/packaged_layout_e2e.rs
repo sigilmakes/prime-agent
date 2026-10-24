@@ -580,6 +580,8 @@ fn packaging_dry_run_produces_artifact() {
     let runtime = tree.path().join("prime-agent-runtime");
     std::fs::create_dir_all(runtime.join("src").join("rlm")).expect("runtime tree");
     std::fs::write(runtime.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+    let lock_fixture = "# Synthetic packaging fixture, not a bootstrap environment.\nversion = 1\n";
+    std::fs::write(runtime.join("uv.lock"), lock_fixture).expect("runtime lock fixture");
     std::fs::write(
         runtime.join("src").join("rlm").join("repl.py"),
         "def main():\n    pass\n",
@@ -723,6 +725,12 @@ fn packaging_dry_run_produces_artifact() {
             .join("pyproject.toml")
             .is_file(),
         "sidecar manifest missing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(stage.join("prime-agent-runtime").join("uv.lock"))
+            .expect("staged runtime lock"),
+        lock_fixture,
+        "the required runtime lock ships byte-for-byte"
     );
     assert!(
         stage

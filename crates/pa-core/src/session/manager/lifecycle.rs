@@ -115,6 +115,7 @@ impl SessionManager {
             file_entries: Vec::new(),
             canonical_raw: None,
             canonical_local_revision: 0,
+            canonical_metadata_writer: None,
             window: None,
             by_id: HashMap::new(),
             labels_by_id: HashMap::new(),
@@ -311,7 +312,17 @@ impl SessionManager {
     /// Adopt a verified read-only window into an externally persisted
     /// manager: rows go straight to disk, never deferred behind the
     /// bootstrap rule.
+    ///
+    /// # Panics
+    /// Panics if this manager is bound to a canonical live owner. That path
+    /// requires an owner-certified checkpoint instead of local window adoption.
     pub fn adopt_window(&mut self, mut window: super::window::WindowedSessionStore) {
+        assert!(
+            self.canonical_binding().is_none(),
+            "canonical live mirror requires an owner-certified checkpoint for navigation"
+        );
+        self.invalidate_canonical_local_revision()
+            .expect("canonical local revision exhausted");
         self.admitted_user_rows.clear();
         // One-copy adoption: the parsed trees move in (no `to_vec` clone); the
         // window stays attached for its snapshot/settings/metadata state, and
@@ -523,7 +534,17 @@ impl SessionManager {
     /// Adopt a durable branch as this session's entries: keeps the header,
     /// replaces every entry with the given chain, and re-indexes so the leaf
     /// is the last adopted entry. In-memory only — the caller owns persistence.
+    ///
+    /// # Panics
+    /// Panics if this manager is bound to a canonical live owner. That path
+    /// requires an owner-certified checkpoint instead of local entry adoption.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
+        assert!(
+            self.canonical_binding().is_none(),
+            "canonical live mirror requires an owner-certified checkpoint for navigation"
+        );
+        self.invalidate_canonical_local_revision()
+            .expect("canonical local revision exhausted");
         self.admitted_user_rows.clear();
         // The caller supplies the complete selected branch after explicit navigation.
         self.window = None;

@@ -477,7 +477,11 @@ impl Worker {
                         if let Some(goal) = continuation.goal_update {
                             {
                                 let mut core = self.core.lock().unwrap();
-                                if let Some(store) = core.store.as_mut() {
+                                if let Some(store) = core
+                                    .store
+                                    .as_mut()
+                                    .filter(|store| !store.is_canonical_bound())
+                                {
                                     let _ = store.persist_entry(
                                         "custom",
                                         json!({

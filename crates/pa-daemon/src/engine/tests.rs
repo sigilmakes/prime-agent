@@ -27,12 +27,68 @@ fn scripted_engine_replays_then_echoes() {
         });
         final_message
     };
-    assert_eq!(collect(&engine, 0, "hi").unwrap()["content"], "first");
-    assert_eq!(collect(&engine, 1, "go").unwrap()["content"], "second");
-    assert_eq!(
-        collect(&engine, 2, "more").unwrap()["content"],
-        "echo: more"
+    for (index, prompt, expected) in [
+        (0, "hi", "first"),
+        (1, "go", "second"),
+        (2, "more", "echo: more"),
+    ] {
+        let message = collect(&engine, index, prompt).unwrap();
+        assert_eq!(
+            message["content"],
+            json!([{ "type": "text", "text": expected }])
+        );
+        let typed: pa_types::ai::Message = serde_json::from_value(message).unwrap();
+        assert!(matches!(typed, pa_types::ai::Message::Assistant(_)));
+    }
+}
+
+#[test]
+fn scripted_assistant_and_tool_events_use_complete_native_message_wires() {
+    let engine = ScriptedEngine::from_value(&json!({"responses": [{
+        "text": "running the scripted tool",
+        "toolCalls": [{
+            "toolCallId": "call-scripted-1",
+            "toolName": "bash",
+            "args": {"command": "echo done"},
+            "result": "done",
+            "isError": false
+        }]
+    }]}))
+    .unwrap();
+    let mut messages = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: "run the tool".into(),
+            source: "test".into(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            match event {
+                EngineEvent::AssistantUpdate {
+                    message: AssistantSnapshot::Wire(value),
+                    ..
+                }
+                | EngineEvent::AssistantMessage(value)
+                | EngineEvent::ToolResultMessage(value) => messages.push(value),
+                _ => {}
+            }
+            true
+        },
     );
+    assert_eq!(messages.len(), 3);
+    for message in &messages {
+        let _: pa_types::ai::Message = serde_json::from_value(message.clone()).unwrap();
+    }
+    assert_eq!(messages[0]["content"], json!([]));
+    assert_eq!(messages[1]["stopReason"], "toolUse");
+    assert_eq!(messages[1]["content"][1]["id"], "call-scripted-1");
+    assert_eq!(messages[2]["toolCallId"], "call-scripted-1");
+    assert_eq!(messages[2]["content"][0]["text"], "done");
 }
 
 #[test]

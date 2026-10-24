@@ -166,12 +166,11 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     );
 }
 
-/// The abort-and-send idle race's engine seam: an abort landing in the
-/// [pickup, registration] window was entirely lost. The turn settles
-/// aborted BEFORE the provider call, and the scripted response survives
-/// untouched (the next delivery serves it).
+/// Latch cancellation at actual run registration, not before a run exists.
+/// The lifecycle owns both history rows and the aborted settle; no provider
+/// request starts and the next delivery still serves the first script step.
 #[test]
-fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call() {
+fn abort_at_registered_run_start_preserves_the_accepted_turn_without_a_provider_call() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -179,6 +178,8 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
         &serde_json::json!({ "responses": ["raced reply", "next reply"] }),
         1,
     );
+    let engine = Arc::new(engine);
+    let calls = super::abort_fixture::count_provider_calls(&engine);
     let mut events: Vec<EngineEvent> = Vec::new();
     engine.run_prompt(
         0,
@@ -190,12 +191,25 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
             agent_message_id: None,
             custom_message: None,
         },
-        &|| true,
+        &|| {
+            let agent = engine
+                .turn_agent
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("registered agent");
+            assert!(
+                agent.signal().is_some(),
+                "cancel consult must own a live run"
+            );
+            true
+        },
         &mut |event| {
             events.push(event);
             true
         },
     );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     // The accepted row persists; the turn settles the structural aborted.
     assert!(
         matches!(&events[0], EngineEvent::UserMessage(_)),
@@ -207,20 +221,31 @@ fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call()
             .any(|event| matches!(event, EngineEvent::DoneAborted)),
         "the raced turn settles aborted: {events:?}"
     );
-    assert!(
-        events.iter().all(|event| !matches!(
-            event,
-            EngineEvent::AssistantMessage(_) | EngineEvent::AssistantUpdate { .. }
-        )),
-        "no assistant row streamed (the provider call never started): {events:?}"
+    let assistant = events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::AssistantMessage(message) => Some(message),
+            _ => None,
+        })
+        .expect("the registered run records its aborted assistant");
+    assert_eq!(assistant["stopReason"], json!("aborted"));
+    assert_eq!(
+        assistant["content"],
+        json!([{ "type": "text", "text": "" }])
     );
+    assert_eq!(assistant["errorMessage"], json!("Request was aborted"));
+    assert_eq!(assistant["usage"]["totalTokens"], json!(0));
     assert!(
-        events.iter().all(|event| !matches!(
-            event,
-            EngineEvent::TurnEnd { .. } | EngineEvent::AgentEnd { .. }
+        events.iter().any(|event| matches!(event,
+            EngineEvent::AgentEnd { messages } if messages == &vec![assistant.clone()]
         )),
-        "no run boundary frames (no run registered): {events:?}"
+        "the lifecycle's terminal row rides agent_end: {events:?}"
     );
+    // TS agent.ts handleRunFailure emits assistant start/end and agent_end,
+    // but no turn_end when the loop aborts before its first provider call.
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::TurnEnd { .. })));
     // The served-path proof: the scripted response was never consumed.
     let mut next_events: Vec<EngineEvent> = Vec::new();
     admit(&engine, "the next turn".to_string(), &mut next_events);
@@ -578,35 +603,65 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
+    let script = json!({
+        "engine": "faux",
+        "modelId": "faux-1",
+        "modelName": "Faux",
+        "reasoning": false,
+        "contextWindow": 128_000,
+        "tokensPerSecond": 30,
+        "responses": [
+            {"content": [
+                {"type": "text", "text": "Running the wedge cell."},
+                {"type": "toolCall", "name": "python_repl", "id": "toolu_wedge01",
+                 "arguments": {"code":
+                    "import time\nopen('wedge-started', 'w').write('1')\ntime.sleep(300)\nopen('wedge-finished', 'w').write('1')\nprint('cell completed')"}}
+            ]},
+            {"content": [{"type": "text", "text": "The cell completed."}]}
+        ]
+    });
+    let parsed = pa_ai::faux::script::parse_faux_script(&script).expect("wedge script parses");
+    // A process-global `faux` API lets unrelated worker fixtures consume this
+    // queue. The existing registration seam supplies a private API identity.
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: None,
+            provider: Some("faux".to_string()),
+            models: Some(vec![parsed.model]),
+            tokens_per_second: parsed.tokens_per_second,
+            token_size_min: None,
+            token_size_max: None,
+        });
+    registration.set_responses(parsed.responses);
+    assert_eq!(registration.get_pending_response_count(), 2);
+    let model = registration.get_model();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "faux": {
+                    "api": model.api,
+                    "baseUrl": model.base_url,
+                    "apiKey": "sk-faux",
+                    "models": [model],
+                },
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
-        agent_dir: dir.path().join("agent"),
-        provider: None,
-        model: None,
+        agent_dir,
+        provider: Some(model.provider),
+        model: Some(model.id),
         api_key: None,
         thinking: None,
         session_dir: None,
         session_file: None,
-        faux_script: Some(
-            json!({
-                "engine": "faux",
-                "modelId": "faux-1",
-                "modelName": "Faux",
-                "reasoning": false,
-                "contextWindow": 128_000,
-                "tokensPerSecond": 30,
-                "responses": [
-                    {"content": [
-                        {"type": "text", "text": "Running the wedge cell."},
-                        {"type": "toolCall", "name": "python_repl", "id": "toolu_wedge01",
-                         "arguments": {"code":
-                            "import time\nopen('wedge-started', 'w').write('1')\ntime.sleep(300)\nopen('wedge-finished', 'w').write('1')\nprint('cell completed')"}}
-                    ]},
-                    {"content": [{"type": "text", "text": "The cell completed."}]}
-                ]
-            })
-            .to_string(),
-        ),
+        faux_script: None,
         supervisor_link: None,
         telemetry_disabled: None,
         cron_store: None,

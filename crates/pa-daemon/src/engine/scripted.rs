@@ -343,7 +343,7 @@ impl SessionEngine for ScriptedEngine {
         let usage = scripted_usage();
         if !emit(EngineEvent::AssistantUpdate {
             message: AssistantSnapshot::Wire(
-                json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()}),
+                json!({"role": "assistant", "content": [], "api": "scripted", "provider": "scripted", "model": "faux-1", "usage": usage, "stopReason": "stop", "timestamp": crate::util::now_ms()}),
             ),
             stream_event: None,
         }) {
@@ -359,7 +359,7 @@ impl SessionEngine for ScriptedEngine {
         // The real engine's assistant message carries its tool calls as
         // `toolCall` content blocks (session stats count calls from them).
         let final_message = if scripted_tools.is_empty() {
-            json!({"role": "assistant", "content": text, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()})
+            json!({"role": "assistant", "content": [{ "type": "text", "text": text }], "api": "scripted", "provider": "scripted", "model": "faux-1", "usage": usage, "stopReason": "stop", "timestamp": crate::util::now_ms()})
         } else {
             let mut content = vec![json!({ "type": "text", "text": text })];
             for call in &scripted_tools {
@@ -372,7 +372,7 @@ impl SessionEngine for ScriptedEngine {
                     }));
                 }
             }
-            json!({"role": "assistant", "content": content, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()})
+            json!({"role": "assistant", "content": content, "api": "scripted", "provider": "scripted", "model": "faux-1", "usage": usage, "stopReason": "toolUse", "timestamp": crate::util::now_ms()})
         };
         if !emit(EngineEvent::AssistantMessage(final_message.clone())) {
             emit(cancelled());

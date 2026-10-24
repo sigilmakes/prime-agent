@@ -675,6 +675,28 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // A completed scripted child must persist a native assistant before
+    // restart. The running-child case has no assistant yet by design.
+    if display_status == "completed" {
+        let completed_rows = std::fs::read_to_string(&child_file).expect("completed child journal");
+        let completed_assistant = completed_rows
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("child journal row"))
+            .find(|row| row["type"] == "message" && row["message"]["role"] == "assistant")
+            .expect("completed child assistant");
+        let native_message: pa_types::ai::Message =
+            serde_json::from_value(completed_assistant["message"].clone())
+                .expect("the real scripted worker must persist a complete native assistant");
+        assert!(matches!(
+            native_message,
+            pa_types::ai::Message::Assistant(_)
+        ));
+        assert_eq!(
+            completed_assistant["message"]["content"][0]["text"],
+            "kid done"
+        );
+    }
+
     client.send_command("bye", &json!({ "type": "shutdown" }));
     let deadline = Instant::now() + Duration::from_secs(30);
     while daemon

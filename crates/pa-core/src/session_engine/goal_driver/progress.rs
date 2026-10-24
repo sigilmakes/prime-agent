@@ -3,9 +3,9 @@
 //! no-progress streak with its doubling backoff, and the order-safety
 //! rules.
 
+use super::GoalStateStore;
 use super::{now_millis, GoalDriver};
 use crate::goals::{GoalState, GoalStatus};
-use crate::session::manager::SessionManager;
 use crate::session_engine::provider_retry::provider_stream_failure_kind;
 
 /// How many consecutive no-output turns the mint tolerates before the
@@ -70,7 +70,7 @@ impl GoalDriver {
     /// Returns the error when a state transition fails to persist.
     pub(super) fn progress_gate(
         &mut self,
-        session: &mut SessionManager,
+        session: &mut impl GoalStateStore,
         turn: &pa_agent::types::AssistantMessage,
     ) -> anyhow::Result<bool> {
         // Only a turn THIS goal's lifetime produced can judge it: a leftover

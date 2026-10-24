@@ -75,7 +75,15 @@ impl Worker {
         let agent_dir = self.config.agent_dir.clone();
         let provider = provider.to_string();
         let model_id = model_id.to_string();
+        let agent_engine = self.agent_engine.clone();
         let switched = tokio::task::spawn_blocking(move || {
+            let _build = match agent_engine.as_ref() {
+                Some(engine) => match engine.model_mutation_build_guard() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => return None,
+                },
+                None => None,
+            };
             if !engine.switch_model(EngineModelSelection {
                 provider: Some(provider.clone()),
                 model: Some(model_id.clone()),
@@ -86,13 +94,23 @@ impl Worker {
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
-                if let Some(store) = core.store.as_mut() {
+                if let Some(store) = core
+                    .store
+                    .as_mut()
+                    .filter(|store| !store.is_canonical_bound())
+                {
+                    // The live Core switch already adopted and ACKed its real row.
                     // TS `appendModelChange` records every switch, even to
                     // the current model.
-                    let _ = store.persist_entry(
-                        "model_change",
-                        serde_json::json!({ "provider": provider, "modelId": model_id }),
-                    );
+                    if store
+                        .persist_entry(
+                            "model_change",
+                            serde_json::json!({ "provider": provider, "modelId": model_id }),
+                        )
+                        .is_err()
+                    {
+                        return None;
+                    }
                 }
                 core.cwd.clone()
             };
@@ -164,7 +182,15 @@ impl Worker {
             .model_metadata()
             .and_then(|model| model.get("reasoning").and_then(Value::as_bool))
             .unwrap_or(false);
+        let agent_engine = self.agent_engine.clone();
         let applied = tokio::task::spawn_blocking(move || {
+            let _build = match agent_engine.as_ref() {
+                Some(engine) => match engine.model_mutation_build_guard() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => return None,
+                },
+                None => None,
+            };
             if !engine.switch_thinking_level(parsed) {
                 return None;
             }
@@ -178,11 +204,21 @@ impl Worker {
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
-                if let Some(store) = core.store.as_mut() {
-                    let _ = store.persist_entry(
-                        "thinking_level_change",
-                        serde_json::json!({ "thinkingLevel": effective }),
-                    );
+                if let Some(store) = core
+                    .store
+                    .as_mut()
+                    .filter(|store| !store.is_canonical_bound())
+                {
+                    // A bound live Core switch has already committed this intent.
+                    if store
+                        .persist_entry(
+                            "thinking_level_change",
+                            serde_json::json!({ "thinkingLevel": effective }),
+                        )
+                        .is_err()
+                    {
+                        return None;
+                    }
                 }
                 core.cwd.clone()
             };
@@ -313,7 +349,9 @@ mod tests {
         assert_eq!(response.command, "set_model");
         assert_eq!(
             response.error.as_deref(),
-            Some("Model \"prime-inference/mock-1\" is blocked by the daemon model allowlist (settings \"allowedModels\"); the daemon never falls back to a different model. Allow it in the settings or pick an allowed model.")
+            Some(
+                "Model \"prime-inference/mock-1\" is blocked by the daemon model allowlist (settings \"allowedModels\"); the daemon never falls back to a different model. Allow it in the settings or pick an allowed model."
+            )
         );
 
         // An allowing allowlist opens the gate: the scripted engine then

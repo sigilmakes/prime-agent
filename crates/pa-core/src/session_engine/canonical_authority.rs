@@ -4,9 +4,6 @@
 //! final outcomes. These primitives cannot prove that a runtime `SessionLease` was
 //! captured. One short entry lock orders admission/close; no callbacks or waits
 //! occur under it. Backend writers must carry the flight AND its result recorder.
-// This module is intentionally not wired yet. Remove this allowance at integration.
-#![allow(dead_code)]
-
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -17,9 +14,8 @@ use tokio::sync::Notify;
 
 use crate::session::canonical::{
     CanonicalCursor, CanonicalEntryDraft, CanonicalFailureKind, CanonicalIoFlight,
-    CanonicalIoStage, CanonicalMutationKind, CanonicalOperation, CanonicalPrepareMode,
-    CanonicalRequestedWrite, CanonicalSourceDisposition, CanonicalStoreError,
-    CanonicalWriteAuthority, CanonicalWritePermit,
+    CanonicalIoStage, CanonicalMutationKind, CanonicalOperation, CanonicalRequestedWrite,
+    CanonicalSourceDisposition, CanonicalStoreError, CanonicalWriteAuthority, CanonicalWritePermit,
 };
 
 type Result<T> = std::result::Result<T, CanonicalStoreError>;
@@ -52,6 +48,9 @@ pub(super) struct ContributionSelection {
     retired: Arc<AtomicBool>,
 }
 impl ContributionSelection {
+    // Only the authority unit model constructs this capture. Live plugin
+    // admission uses the actual registration in CanonicalLiveContextAdmission.
+    #[cfg(test)]
     pub(super) fn capture<T: Any + Send + Sync>(registration: Arc<T>, generation: u64) -> Self {
         Self {
             registration,
@@ -74,8 +73,10 @@ struct ServingIdentity {
 pub(super) enum CloseReason {
     OrdinaryAbort,
     Retirement,
+    #[cfg(test)]
     Navigation,
     SourceChanged,
+    #[cfg(test)]
     ModelChange,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,7 @@ struct Entry {
     transactions: usize,
     anchors: usize,
     admitted_steps: Vec<Allocation>,
+    registered_run: Option<Arc<OwnerRunState>>,
     poisoned: bool,
     projection_quarantined: bool,
 }
@@ -137,6 +139,7 @@ impl AuthorityOwner {
                     transactions: 0,
                     anchors: 0,
                     admitted_steps: Vec::new(),
+                    registered_run: None,
                     poisoned: false,
                     projection_quarantined: false,
                 }),
@@ -164,6 +167,18 @@ impl AuthorityOwner {
                 .any(|c| c.retired.load(Ordering::Acquire))
         {
             return Err(closed());
+        }
+        let actual_run: Allocation = actual_run;
+        if let Some(registered) = &entry.registered_run {
+            if !registered.active.load(Ordering::Acquire)
+                || registered.sealed.load(Ordering::Acquire)
+                || !Arc::ptr_eq(&registered.actual_run, &actual_run)
+            {
+                return Err(invalid(
+                    "serving capture differs from registered actual run",
+                ));
+            }
+            registered.ever_served.store(true, Ordering::Release);
         }
         let serving = Arc::new(ServingIdentity {
             actual_run,
@@ -207,11 +222,166 @@ impl AuthorityOwner {
         Ok(Self::genesis(actual_source))
     }
 
+    /// Navigation changes only the selected branch, never physical history.
+    /// The actual owner must verify selected-leaf membership before calling.
+    pub(super) fn successor_after_navigation(
+        actual_source: CanonicalCursor,
+        retired: RetiredEpoch,
+    ) -> Result<Self> {
+        let RetiredEpoch {
+            _private: (),
+            source,
+        } = retired;
+        validate_source_identity(&source, &actual_source)?;
+        if source.branch_revision.checked_add(1) != Some(actual_source.branch_revision) {
+            return Err(refused(
+                CanonicalFailureKind::BranchChanged,
+                "navigation must advance exactly one branch epoch",
+            ));
+        }
+        if source.canonical_revision.checked_add(1) != Some(actual_source.canonical_revision)
+            || source.raw_source_generation != actual_source.raw_source_generation
+            || source.frontier != actual_source.frontier
+        {
+            return Err(refused(
+                CanonicalFailureKind::SourceChanged,
+                "navigation must preserve physical history and advance one canonical revision",
+            ));
+        }
+        Ok(Self::genesis(actual_source))
+    }
+
+    /// Register one actual `AgentStart` allocation before any provider capture.
+    pub(super) fn register_run<R: Any + Send + Sync>(
+        &self,
+        actual_run: Arc<R>,
+    ) -> Result<OwnerRun> {
+        let mut entry = self.shared.lock()?;
+        if entry.gate != Gate::Open
+            || entry.poisoned
+            || entry.serving.is_some()
+            || entry.registered_run.is_some()
+            || entry.io != 0
+            || entry.transactions != 0
+        {
+            return Err(closed());
+        }
+        let run = Arc::new(OwnerRunState {
+            actual_run,
+            ever_served: AtomicBool::new(false),
+            sealed: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+        });
+        entry.registered_run = Some(run.clone());
+        entry.anchors += 1;
+        Ok(OwnerRun {
+            shared: self.shared.clone(),
+            source: entry.source.clone(),
+            run,
+            boundary: false,
+        })
+    }
+
+    /// Source-bound receipt-time owner admission, before any serving capture.
+    /// This scope can only prepare; it cannot admit a final requested draft.
+    pub(super) fn prepare_owner_append(&self) -> Result<CapturedScope> {
+        self.owner_scope(Purpose::OwnerPreparation)
+    }
+
+    /// Admit only an exact named lifecycle row, without inventing a serving run.
+    pub(super) fn owner_metadata(
+        &self,
+        action: MetadataAction,
+        draft: CanonicalEntryDraft,
+    ) -> Result<CapturedScope> {
+        if draft.kind() != CanonicalMutationKind::OwnerMetadata || !action.matches(draft.entry()) {
+            return Err(invalid("metadata action differs from exact lifecycle row"));
+        }
+        self.owner_scope(Purpose::Metadata {
+            action,
+            exact: Arc::new(draft),
+        })
+    }
+
+    /// Exact context-policy mutation without inventing a serving run.
+    pub(super) fn owner_context(&self, draft: CanonicalEntryDraft) -> Result<CapturedScope> {
+        if draft.kind() != CanonicalMutationKind::ContextPolicy
+            || !matches!(
+                draft.entry(),
+                FileEntry::Compaction { .. } | FileEntry::BranchSummary { .. }
+            )
+        {
+            return Err(invalid(
+                "owner context admission requires a compaction or branch summary",
+            ));
+        }
+        self.owner_scope(Purpose::OwnerContext {
+            exact: Arc::new(draft),
+        })
+    }
+
+    fn owner_scope(&self, purpose: Purpose) -> Result<CapturedScope> {
+        let entry = self.shared.lock()?;
+        if entry.gate != Gate::Open || entry.poisoned {
+            return Err(closed());
+        }
+        Ok(CapturedScope(Arc::new(ScopeSpec {
+            capture: ScopeCapture::Owner {
+                shared: self.shared.clone(),
+                source: entry.source.clone(),
+            },
+            purpose,
+        })))
+    }
+
+    /// Close at the actual owner's validated, ACK-drained current source.
+    /// The owner proves prefix extension by strict raw capture before this call.
+    pub(super) fn request_close_at_current_source(
+        &self,
+        current: &CanonicalCursor,
+    ) -> Result<CloseTicket> {
+        let mut entry = self.shared.lock()?;
+        validate_source(&entry.source, current)?;
+        if entry.poisoned || entry.gate == Gate::Closed {
+            return Err(closed());
+        }
+        if entry.io != 0 || entry.transactions != 0 {
+            return Err(invalid(
+                "current-source close requires settled owner I/O and transactions",
+            ));
+        }
+        if current.canonical_revision < entry.source.canonical_revision
+            || current.frontier.bytes < entry.source.frontier.bytes
+            || current.frontier.rows < entry.source.frontier.rows
+            || (current.frontier.bytes == entry.source.frontier.bytes
+                && current.frontier.rows == entry.source.frontier.rows
+                && (current.frontier != entry.source.frontier
+                    || current.raw_source_generation != entry.source.raw_source_generation))
+        {
+            return Err(refused(
+                CanonicalFailureKind::SourceChanged,
+                "ordered close cannot rewind or replace the captured physical source",
+            ));
+        }
+        entry.source = current.clone();
+        if entry.gate == Gate::Open || entry.gate == Gate::Closing(CloseReason::OrdinaryAbort) {
+            entry.gate = Gate::Closing(CloseReason::Retirement);
+        }
+        entry.projection_quarantined = true;
+        drop(entry);
+        self.shared.changed.notify_waiters();
+        Ok(CloseTicket {
+            shared: self.shared.clone(),
+            self_hold: None,
+        })
+    }
+
     /// Nonblocking Closing transition. Waiting and activation are separate.
     pub(super) fn request_close(&self, reason: CloseReason) -> CloseTicket {
         stage_close(&self.shared, reason, None)
     }
 
+    #[cfg(test)]
     pub(super) fn retire_contribution(
         &self,
         selection: &ContributionSelection,
@@ -236,6 +406,7 @@ impl AuthorityOwner {
     }
 
     /// Uncertain writes require NEW-owner reconciliation. Cleanup cannot clear it.
+    #[cfg(test)]
     pub(super) fn quarantine(&self) {
         self.shared.quarantine();
     }
@@ -269,6 +440,7 @@ impl AuthorityOwner {
     /// NOT a readiness predicate and it must not gate Ready. It is module-private
     /// on purpose: a future readiness check has to come through an explicit view
     /// type we design then, not by widening this.
+    #[cfg(test)]
     fn projection_not_quarantined(&self) -> bool {
         self.shared
             .lock()
@@ -284,7 +456,7 @@ impl Drop for AuthorityOwner {
     }
 }
 
-fn validate_source(captured: &CanonicalCursor, actual: &CanonicalCursor) -> Result<()> {
+fn validate_source_identity(captured: &CanonicalCursor, actual: &CanonicalCursor) -> Result<()> {
     if captured.owner != actual.owner {
         return Err(refused(
             CanonicalFailureKind::OwnerChanged,
@@ -300,6 +472,10 @@ fn validate_source(captured: &CanonicalCursor, actual: &CanonicalCursor) -> Resu
             "header/path/source identity changed",
         ));
     }
+    Ok(())
+}
+fn validate_source(captured: &CanonicalCursor, actual: &CanonicalCursor) -> Result<()> {
+    validate_source_identity(captured, actual)?;
     if captured.branch_revision != actual.branch_revision {
         return Err(refused(
             CanonicalFailureKind::BranchChanged,
@@ -352,6 +528,7 @@ impl CapturedRun {
     pub(super) fn same_serving(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared) && Arc::ptr_eq(&self.serving, &other.serving)
     }
+    #[cfg(test)]
     pub(super) fn observe(&self) -> CapturedScope {
         self.scope(Purpose::Observe)
     }
@@ -377,7 +554,7 @@ impl CapturedRun {
     }
     fn scope(&self, purpose: Purpose) -> CapturedScope {
         CapturedScope(Arc::new(ScopeSpec {
-            run: self.clone(),
+            capture: ScopeCapture::Serving(self.clone()),
             purpose,
         }))
     }
@@ -408,9 +585,10 @@ impl CapturedRun {
     }
 }
 
-/// Exact supported metadata actions. There is no generic Custom/CustomMessage fallback.
+/// Exact supported owner actions. Each action binds the complete draft payload.
+/// Native assistant/tool/user messages have separate admission paths.
 #[derive(Clone, Copy)]
-pub(super) enum MetadataAction {
+pub enum MetadataAction {
     ModelChange,
     ThinkingLevelChange,
     ServiceTierChange,
@@ -418,6 +596,10 @@ pub(super) enum MetadataAction {
     SessionState,
     GitState,
     Label,
+    CustomEntry,
+    CustomMessage,
+    ChildUsageAttributed,
+    BashExecution,
 }
 impl MetadataAction {
     fn matches(self, entry: &FileEntry) -> bool {
@@ -433,19 +615,143 @@ impl MetadataAction {
                 | (Self::SessionState, FileEntry::SessionState { .. })
                 | (Self::GitState, FileEntry::GitState { .. })
                 | (Self::Label, FileEntry::Label { .. })
+                | (Self::CustomEntry, FileEntry::Custom { .. })
+                | (Self::CustomMessage, FileEntry::CustomMessage { .. })
+                | (
+                    Self::ChildUsageAttributed,
+                    FileEntry::ChildUsageAttributed { .. }
+                )
+                | (
+                    Self::BashExecution,
+                    FileEntry::Message {
+                        message: AgentMessage::BashExecution(_),
+                        ..
+                    }
+                )
         )
     }
 }
+struct OwnerRunState {
+    actual_run: Allocation,
+    ever_served: AtomicBool,
+    sealed: AtomicBool,
+    active: AtomicBool,
+}
+fn validate_owner_run(entry: &Entry, run: &Arc<OwnerRunState>, late: bool) -> Result<()> {
+    if entry.poisoned
+        || !run.active.load(Ordering::Acquire)
+        || run.ever_served.load(Ordering::Acquire)
+        || entry.serving.is_some()
+        || entry
+            .registered_run
+            .as_ref()
+            .is_none_or(|actual| !Arc::ptr_eq(actual, run))
+    {
+        return Err(closed());
+    }
+    match entry.gate {
+        Gate::Open => Ok(()),
+        Gate::Closing(CloseReason::OrdinaryAbort) if late => Ok(()),
+        Gate::Closing(_) | Gate::Closed => Err(closed()),
+    }
+}
+
+/// Actual source-bound run, not a serving-model/provider-step capture.
+pub(super) struct OwnerRun {
+    shared: Arc<Shared>,
+    source: CanonicalCursor,
+    run: Arc<OwnerRunState>,
+    boundary: bool,
+}
+impl OwnerRun {
+    pub(super) fn seal_aborted(
+        &self,
+        owner: &AuthorityOwner,
+        actual: CanonicalEntryDraft,
+    ) -> Result<CapturedScope> {
+        if !Arc::ptr_eq(&self.shared, &owner.shared) {
+            return Err(refused(
+                CanonicalFailureKind::OwnerChanged,
+                "abort run belongs to another owner epoch",
+            ));
+        }
+        let FileEntry::Message {
+            message: AgentMessage::Assistant(message),
+            ..
+        } = actual.entry()
+        else {
+            return Err(invalid(
+                "no-provider terminal must be an actual aborted assistant",
+            ));
+        };
+        if actual.kind() != CanonicalMutationKind::AdmittedTerminal
+            || message.stop_reason != pa_types::ai::StopReason::Aborted
+            || message.usage != pa_types::ai::Usage::default()
+            || message
+                .content
+                .iter()
+                .any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
+        {
+            return Err(invalid(
+                "no-provider terminal requires Aborted, exact zero usage, and no tool calls",
+            ));
+        }
+        let entry = self.shared.lock()?;
+        validate_source(&self.source, &entry.source)?;
+        validate_owner_run(&entry, &self.run, true)?;
+        if self.run.sealed.swap(true, Ordering::AcqRel) {
+            return Err(invalid("registered run abort outcome already sealed"));
+        }
+        Ok(CapturedScope(Arc::new(ScopeSpec {
+            capture: ScopeCapture::OwnerRun {
+                shared: self.shared.clone(),
+                source: self.source.clone(),
+                run: self.run.clone(),
+            },
+            purpose: Purpose::OwnerAbort {
+                seal: Arc::new(TerminalSeal {
+                    draft: actual,
+                    consumed: AtomicBool::new(false),
+                }),
+            },
+        })))
+    }
+    pub(super) fn finish_ordered_boundary(mut self) {
+        self.boundary = true;
+    }
+}
+impl Drop for OwnerRun {
+    fn drop(&mut self) {
+        self.run.active.store(false, Ordering::Release);
+        if let Ok(mut entry) = self.shared.entry.lock() {
+            entry.anchors = entry.anchors.saturating_sub(1);
+            if !self.boundary {
+                entry.poisoned = true;
+                entry.projection_quarantined = true;
+            }
+        }
+        self.shared.changed.notify_waiters();
+    }
+}
+
 struct TerminalSeal {
     draft: CanonicalEntryDraft,
     consumed: AtomicBool,
 }
 enum Purpose {
+    #[cfg(test)]
     Observe,
+    OwnerPreparation,
     ContextPolicy,
+    OwnerContext {
+        exact: Arc<CanonicalEntryDraft>,
+    },
     Metadata {
         action: MetadataAction,
         exact: Arc<CanonicalEntryDraft>,
+    },
+    OwnerAbort {
+        seal: Arc<TerminalSeal>,
     },
     Terminal {
         seal: Arc<TerminalSeal>,
@@ -456,26 +762,28 @@ enum Purpose {
 impl Purpose {
     fn kind(&self) -> CanonicalMutationKind {
         match self {
-            Self::Observe | Self::ContextPolicy => CanonicalMutationKind::ContextPolicy,
+            #[cfg(test)]
+            Self::Observe => CanonicalMutationKind::ContextPolicy,
+            Self::OwnerPreparation | Self::ContextPolicy | Self::OwnerContext { .. } => {
+                CanonicalMutationKind::ContextPolicy
+            }
             Self::Metadata { .. } => CanonicalMutationKind::OwnerMetadata,
-            Self::Terminal { .. } => CanonicalMutationKind::AdmittedTerminal,
-        }
-    }
-    fn mode(&self) -> CanonicalPrepareMode {
-        match self {
-            Self::Observe => CanonicalPrepareMode::Observe,
-            _ => CanonicalPrepareMode::Mutation(self.kind()),
+            Self::Terminal { .. } | Self::OwnerAbort { .. } => {
+                CanonicalMutationKind::AdmittedTerminal
+            }
         }
     }
     fn late(&self) -> bool {
-        matches!(self, Self::Terminal { .. })
+        matches!(self, Self::Terminal { .. } | Self::OwnerAbort { .. })
     }
     fn validate_draft(&self, draft: &CanonicalEntryDraft) -> Result<()> {
         if draft.kind() != self.kind() {
             return Err(invalid("authority kind differs from draft"));
         }
         match self {
+            #[cfg(test)]
             Self::Observe => Err(invalid("observe cannot mutate")),
+            Self::OwnerPreparation => Err(invalid("owner preparation cannot admit a final draft")),
             Self::ContextPolicy => {
                 if matches!(
                     draft.entry(),
@@ -488,6 +796,19 @@ impl Purpose {
                     ))
                 }
             }
+            Self::OwnerContext { exact } => {
+                if matches!(
+                    draft.entry(),
+                    FileEntry::Compaction { .. } | FileEntry::BranchSummary { .. }
+                ) && exact.entry() == draft.entry()
+                {
+                    Ok(())
+                } else {
+                    Err(invalid(
+                        "owner context action differs from exact authorized draft",
+                    ))
+                }
+            }
             Self::Metadata { action, exact } => {
                 if action.matches(draft.entry()) && exact.entry() == draft.entry() {
                     Ok(())
@@ -497,7 +818,7 @@ impl Purpose {
                     ))
                 }
             }
-            Self::Terminal { seal, .. } => {
+            Self::Terminal { seal, .. } | Self::OwnerAbort { seal } => {
                 if seal.draft.entry() == draft.entry() {
                     Ok(())
                 } else {
@@ -509,16 +830,63 @@ impl Purpose {
         }
     }
 }
+#[derive(Clone)]
+enum ScopeCapture {
+    Serving(CapturedRun),
+    Owner {
+        shared: Arc<Shared>,
+        source: CanonicalCursor,
+    },
+    OwnerRun {
+        shared: Arc<Shared>,
+        source: CanonicalCursor,
+        run: Arc<OwnerRunState>,
+    },
+}
+impl ScopeCapture {
+    fn shared(&self) -> &Arc<Shared> {
+        match self {
+            Self::Serving(run) => &run.shared,
+            Self::Owner { shared, .. } | Self::OwnerRun { shared, .. } => shared,
+        }
+    }
+    fn source(&self) -> &CanonicalCursor {
+        match self {
+            Self::Serving(run) => &run.source,
+            Self::Owner { source, .. } | Self::OwnerRun { source, .. } => source,
+        }
+    }
+    fn validate(&self, entry: &Entry, late: bool) -> Result<()> {
+        match self {
+            Self::Serving(run) => validate_capture(entry, run, late),
+            Self::OwnerRun { source, run, .. } => {
+                validate_source(source, &entry.source)?;
+                validate_owner_run(entry, run, late)
+            }
+            Self::Owner { source, .. } => {
+                validate_source(source, &entry.source)?;
+                if entry.gate != Gate::Open || entry.poisoned {
+                    return Err(closed());
+                }
+                Ok(())
+            }
+        }
+    }
+    #[cfg(test)]
+    fn serving(&self) -> Option<&CapturedRun> {
+        match self {
+            Self::Serving(run) => Some(run),
+            Self::Owner { .. } | Self::OwnerRun { .. } => None,
+        }
+    }
+}
 struct ScopeSpec {
-    run: CapturedRun,
+    capture: ScopeCapture,
     purpose: Purpose,
 }
 #[derive(Clone)]
 pub(super) struct CapturedScope(Arc<ScopeSpec>);
 impl CapturedScope {
-    pub(super) fn mode(&self) -> CanonicalPrepareMode {
-        self.0.purpose.mode()
-    }
     /// Multiple operations may observe the same immutable capture.
     pub(super) fn begin_prepare(&self) -> Result<(OperationCapture, AdmittedTransaction)> {
         let operation = OperationCapture(Arc::new(OperationState {
@@ -543,6 +911,9 @@ pub(super) struct ProviderStep {
     state: Mutex<StepState>,
 }
 impl ProviderStep {
+    pub(super) fn belongs_to(&self, run: &CapturedRun) -> bool {
+        self.run.same_serving(run)
+    }
     /// Only the actual native final-output path may call this, exactly once.
     pub(super) fn seal_assistant(&self, actual: CanonicalEntryDraft) -> Result<CapturedScope> {
         if actual.kind() != CanonicalMutationKind::AdmittedTerminal
@@ -637,6 +1008,9 @@ pub(super) struct AdmittedTool {
     sealed: AtomicBool,
 }
 impl AdmittedTool {
+    pub(super) fn belongs_to(&self, run: &CapturedRun) -> bool {
+        self.run.same_serving(run)
+    }
     pub(super) fn seal_final_outcome(&self, actual: CanonicalEntryDraft) -> Result<CapturedScope> {
         let FileEntry::Message {
             message: AgentMessage::ToolResult(result),
@@ -691,8 +1065,8 @@ impl OperationCapture {
         exact: Option<CanonicalEntryDraft>,
     ) -> Result<AdmittedTransaction> {
         let scope = &self.0.scope.0;
-        let mut entry = scope.run.shared.lock()?;
-        validate_capture(&entry, &scope.run, scope.purpose.late())?;
+        let mut entry = scope.capture.shared().lock()?;
+        scope.capture.validate(&entry, scope.purpose.late())?;
         if phase == Phase::Final {
             if !self.0.prepare_released.load(Ordering::Acquire)
                 || self.0.final_admitted.load(Ordering::Acquire)
@@ -710,7 +1084,7 @@ impl OperationCapture {
         }
         entry.transactions += 1;
         let lease = Arc::new(LeaseState {
-            shared: Arc::downgrade(&scope.run.shared),
+            shared: Arc::downgrade(scope.capture.shared()),
             active: Arc::new(AtomicBool::new(true)),
             operation: self.clone(),
             phase,
@@ -738,8 +1112,9 @@ impl OperationCapture {
         }
         self.admit(Phase::Final, Some(draft))
     }
-    pub(super) fn captured_run(&self) -> &CapturedRun {
-        &self.0.scope.0.run
+    #[cfg(test)]
+    pub(super) fn captured_run(&self) -> Option<&CapturedRun> {
+        self.0.scope.0.capture.serving()
     }
 }
 struct LeaseState {
@@ -785,6 +1160,7 @@ pub(super) struct TransactionControl {
 }
 impl TransactionControl {
     /// Explicit release revokes even an incorrectly retained/rewrapped authority.
+    #[cfg(test)]
     pub(super) fn release(&self) {
         if let Some(lease) = self.lease.upgrade() {
             lease.release();
@@ -803,6 +1179,7 @@ impl TransactionControl {
         }
         Ok(IoResultRecorder { flight })
     }
+    #[cfg(test)]
     pub(super) fn request_close(&self, reason: CloseReason) -> Result<CloseTicket> {
         let lease = self.lease.upgrade().ok_or_else(closed)?;
         let shared = lease.shared.upgrade().ok_or_else(closed)?;
@@ -834,13 +1211,13 @@ impl CanonicalWriteAuthority for OwnedAuthority {
     ) -> Result<CanonicalIoFlight> {
         let lease = &self.lease;
         let capture = &lease.operation.0.scope.0;
-        let shared = &capture.run.shared;
+        let shared = capture.capture.shared();
         let mut entry = shared.lock()?;
         if !lease.active.load(Ordering::Acquire) {
             return Err(closed());
         }
-        validate_capture(&entry, &capture.run, capture.purpose.late())?;
-        validate_source(&capture.run.source, cursor)?;
+        capture.capture.validate(&entry, capture.purpose.late())?;
+        validate_source(capture.capture.source(), cursor)?;
         // Mode, stage, purpose, operation and actual payload are checked HERE,
         // even if callers rewrap this Arc with a cross-kind public permit.
         match (lease.phase, stage) {
@@ -867,7 +1244,7 @@ impl CanonicalWriteAuthority for OwnedAuthority {
                 CanonicalIoStage::CommitPreflight | CanonicalIoStage::RequestedMutation,
             )
             | (Phase::Final, CanonicalIoStage::PreparePreflight) => {
-                return Err(invalid("I/O stage differs from transaction phase"))
+                return Err(invalid("I/O stage differs from transaction phase"));
             }
         }
         let mut bound = lease.operation.0.operation.lock().map_err(|_| closed())?;
@@ -886,14 +1263,15 @@ impl CanonicalWriteAuthority for OwnedAuthority {
             return Err(invalid("I/O stage already admitted"));
         }
         if stage == CanonicalIoStage::RequestedMutation {
-            if let Purpose::Terminal { seal, .. } = &capture.purpose {
+            if let Purpose::Terminal { seal, .. } | Purpose::OwnerAbort { seal } = &capture.purpose
+            {
                 if seal.consumed.swap(true, Ordering::AcqRel) {
                     return Err(invalid("native terminal slot already consumed"));
                 }
             }
         }
         let flight_record = Arc::new(FlightState {
-            _capture: capture.run.clone(),
+            _capture: capture.capture.clone(),
             shared: Arc::downgrade(shared),
             recorded: AtomicU8::new(0),
             recorder_claimed: AtomicBool::new(false),
@@ -906,7 +1284,7 @@ impl CanonicalWriteAuthority for OwnedAuthority {
     }
 }
 struct FlightState {
-    _capture: CapturedRun,
+    _capture: ScopeCapture,
     shared: Weak<Shared>,
     recorded: AtomicU8,
     recorder_claimed: AtomicBool,
@@ -919,7 +1297,8 @@ impl Drop for FlightGuard {
         if let Some(shared) = self.state.shared.upgrade() {
             if let Ok(mut entry) = shared.entry.lock() {
                 entry.io = entry.io.saturating_sub(1);
-                if self.state.recorded.load(Ordering::Acquire) != 1 {
+                let recorded = self.state.recorded.load(Ordering::Acquire);
+                if recorded != 1 {
                     entry.poisoned = true;
                     entry.projection_quarantined = true;
                     if entry.gate == Gate::Open {
@@ -972,6 +1351,7 @@ impl LateRunAnchor {
     pub(super) fn finish_ordered_boundary(mut self) {
         self.boundary = true;
     }
+    #[cfg(test)]
     pub(super) fn request_close(&self, reason: CloseReason) -> Result<CloseTicket> {
         let shared = self.shared.upgrade().ok_or_else(closed)?;
         Ok(stage_close(
@@ -1123,12 +1503,14 @@ impl CloseTicket {
                     io,
                     transactions,
                     anchors,
-                })
+                });
             }
             DrainStatus::Drained => {}
         }
         let mut entry = self.shared.lock().map_err(|_| DrainRefusal::Blocked)?;
-        if entry.poisoned {
+        // Several callers may hold close tickets, but only one can retire this
+        // epoch. A later ticket must not mint another successor capability.
+        if entry.poisoned || entry.gate == Gate::Closed {
             return Err(DrainRefusal::Blocked);
         }
         if entry.io != 0 || entry.transactions != 0 || entry.anchors != 0 {
@@ -1266,7 +1648,7 @@ mod tests {
         let flight = enter(
             &tx,
             CanonicalIoStage::PreparePreflight,
-            &scope.0.run,
+            scope.0.capture.serving().expect("serving fixture"),
             &operation,
             None,
         );
@@ -1284,7 +1666,13 @@ mod tests {
             CanonicalIoStage::CommitPreflight,
             CanonicalIoStage::RequestedMutation,
         ] {
-            let flight = enter(&tx, stage, &scope.0.run, &token, Some(draft));
+            let flight = enter(
+                &tx,
+                stage,
+                scope.0.capture.serving().expect("serving fixture"),
+                &token,
+                Some(draft),
+            );
             record(&tx, stage);
             drop(flight);
         }
@@ -1560,7 +1948,10 @@ mod tests {
         let (first, a) = prepared(&scope);
         let (second, b) = prepared(&scope);
         assert_ne!(a, b);
-        assert!(first.captured_run().same_serving(second.captured_run()));
+        assert!(first
+            .captured_run()
+            .expect("serving capture")
+            .same_serving(second.captured_run().expect("serving capture")));
         assert!(first.admit_final(&a, compact()).is_err());
         assert_eq!(f.owner.shared.lock().expect("entry").transactions, 0);
     }
@@ -2169,5 +2560,297 @@ mod tests {
         f.anchor.take().expect("anchor").finish_ordered_boundary();
         assert_eq!(close.status(), DrainStatus::Drained);
         assert!(!f.owner.projection_not_quarantined());
+    }
+
+    #[test]
+    fn source_owner_preparation_cannot_be_reused_for_any_final_draft() {
+        let source = cursor();
+        let owner = AuthorityOwner::genesis(source.clone());
+        let scope = owner.prepare_owner_append().expect("owner-only scope");
+        let (capture, prepare) = scope.begin_prepare().expect("prepare transaction");
+        assert!(capture.captured_run().is_none());
+        let operation = CanonicalOperation::new();
+        let flight = prepare
+            .permit
+            .enter_io(
+                CanonicalIoStage::PreparePreflight,
+                &source,
+                &operation,
+                None,
+            )
+            .expect("source-only prepare");
+        record(&prepare, CanonicalIoStage::PreparePreflight);
+        drop(flight);
+        drop(prepare);
+        assert!(capture.admit_final(&operation, compact()).is_err());
+        assert!(capture
+            .admit_final(&operation, label("not admitted"))
+            .is_err());
+        assert!(capture.admit_final(&operation, assistant(None)).is_err());
+        let close = owner.request_close(CloseReason::Retirement);
+        assert_eq!(close.status(), DrainStatus::Drained);
+        assert!(scope.begin_prepare().is_err());
+        close
+            .finish_at_external_idle()
+            .expect("no invented serving anchor");
+    }
+
+    #[test]
+    fn custom_usage_and_bash_owner_actions_bind_the_full_exact_payload() {
+        let usage = serde_json::json!({
+            "input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
+        });
+        for (action, value) in [
+            (
+                MetadataAction::CustomEntry,
+                serde_json::json!({"type":"custom","customType":"goal",
+                    "data":{"state":[1,null,true]}}),
+            ),
+            (
+                MetadataAction::CustomMessage,
+                serde_json::json!({"type":"custom_message","customType":"ipython_state",
+                    "content":"exact notice","display":true,"details":{"exact":[1,null]}}),
+            ),
+            (
+                MetadataAction::ChildUsageAttributed,
+                serde_json::json!({"type":"child_usage_attributed","targetId":"assistant",
+                    "childUsage":usage,"aggregateUsage":usage,"origin":"spawn_task"}),
+            ),
+            (
+                MetadataAction::BashExecution,
+                serde_json::json!({"type":"message","message":{"role":"bashExecution",
+                    "command":"printf exact","output":"exact","exitCode":0,
+                    "cancelled":false,"truncated":false,"timestamp":3}}),
+            ),
+        ] {
+            let source = cursor();
+            let owner = AuthorityOwner::genesis(source.clone());
+            let actual = draft(CanonicalMutationKind::OwnerMetadata, value.clone());
+            let scope = owner
+                .owner_metadata(action, actual.clone())
+                .expect("named action");
+            let (capture, prepare) = scope.begin_prepare().expect("source-only prepare");
+            let operation = CanonicalOperation::new();
+            let flight = prepare
+                .permit
+                .enter_io(
+                    CanonicalIoStage::PreparePreflight,
+                    &source,
+                    &operation,
+                    None,
+                )
+                .expect("prepare flight");
+            record(&prepare, CanonicalIoStage::PreparePreflight);
+            drop(flight);
+            drop(prepare);
+            let mut altered = value;
+            altered["unrecognizedPayload"] = serde_json::json!({"changed":true});
+            let altered = draft(CanonicalMutationKind::OwnerMetadata, altered);
+            assert!(capture.admit_final(&operation, altered.clone()).is_err());
+            let transaction = capture
+                .admit_final(&operation, actual.clone())
+                .expect("exact final");
+            assert!(transaction
+                .permit
+                .enter_io(
+                    CanonicalIoStage::RequestedMutation,
+                    &source,
+                    &operation,
+                    Some(&altered),
+                )
+                .is_err());
+            let flight = transaction
+                .permit
+                .enter_io(
+                    CanonicalIoStage::RequestedMutation,
+                    &source,
+                    &operation,
+                    Some(&actual),
+                )
+                .expect("full exact payload only");
+            record(&transaction, CanonicalIoStage::RequestedMutation);
+            drop(flight);
+            drop(transaction);
+            for native in [assistant(None), tool("call", &serde_json::json!([]), false)] {
+                let native = CanonicalEntryDraft::new(
+                    CanonicalMutationKind::OwnerMetadata,
+                    native.entry().clone(),
+                )
+                .expect("native intent cannot mint metadata authority");
+                assert!(owner.owner_metadata(action, native).is_err());
+            }
+            assert!(!owner.is_poisoned());
+        }
+    }
+
+    #[test]
+    fn competing_close_tickets_mint_only_one_successor_token() {
+        let source = cursor();
+        let owner = AuthorityOwner::genesis(source.clone());
+        let first = owner.request_close(CloseReason::Retirement);
+        let competing = owner.request_close(CloseReason::Retirement);
+        let retired = first.finish_at_external_idle().expect("first retirement");
+        assert!(matches!(
+            competing.finish_at_external_idle(),
+            Err(DrainRefusal::Blocked)
+        ));
+        assert!(matches!(
+            owner
+                .request_close(CloseReason::Retirement)
+                .finish_at_external_idle(),
+            Err(DrainRefusal::Blocked)
+        ));
+        let successor = AuthorityOwner::successor(source, retired).expect("one successor");
+        assert!(successor.prepare_owner_append().is_ok());
+    }
+
+    #[test]
+    fn current_source_close_refreshes_only_after_io_and_preserves_identity() {
+        let mut source = cursor();
+        source.canonical_revision = 3;
+        let owner = AuthorityOwner::genesis(source.clone());
+        let scope = owner.prepare_owner_append().expect("owner scope");
+        let (_, transaction) = scope.begin_prepare().expect("owner transaction");
+        let operation = CanonicalOperation::new();
+        let flight = transaction
+            .permit
+            .enter_io(
+                CanonicalIoStage::PreparePreflight,
+                &source,
+                &operation,
+                None,
+            )
+            .expect("outstanding physical write");
+        assert!(owner.request_close_at_current_source(&source).is_err());
+        record(&transaction, CanonicalIoStage::PreparePreflight);
+        drop(flight);
+        drop(transaction);
+        for change in 0..7 {
+            let mut invalid = source.clone();
+            match change {
+                0 => invalid.owner = CanonicalOwnerScope::new(),
+                1 => invalid.header_certificate = [77; 32],
+                2 => invalid.source_path = PathBuf::from("/foreign"),
+                3 => invalid.branch_revision += 1,
+                4 => invalid.canonical_revision -= 1,
+                5 => invalid.raw_source_generation = [88; 32],
+                6 => invalid.frontier.rows -= 1,
+                _ => unreachable!(),
+            }
+            assert!(owner.request_close_at_current_source(&invalid).is_err());
+        }
+        let mut current = source;
+        current.canonical_revision += 1;
+        current.frontier.bytes += 70;
+        current.frontier.rows += 1;
+        current.frontier.prefix_certificate = [9; 32];
+        current.raw_source_generation = [8; 32];
+        current.selected_leaf = Some("owner-appended".to_owned());
+        let retired = owner
+            .request_close_at_current_source(&current)
+            .expect("actual owner validated current prefix")
+            .finish_at_external_idle()
+            .expect("exact refreshed retired token");
+        let mut navigated = current;
+        navigated.branch_revision += 1;
+        navigated.canonical_revision += 1;
+        navigated.selected_leaf = None;
+        let successor = AuthorityOwner::successor_after_navigation(navigated, retired)
+            .expect("navigation compares exact current source, not stale genesis");
+        assert!(successor.prepare_owner_append().is_ok());
+        assert!(owner.prepare_owner_append().is_err());
+    }
+
+    #[test]
+    fn navigation_successor_refuses_physical_changes_and_nonexact_revisions() {
+        for change in 0..9 {
+            let source = cursor();
+            let owner = AuthorityOwner::genesis(source.clone());
+            let retired = owner
+                .request_close(CloseReason::Navigation)
+                .finish_at_external_idle()
+                .expect("retired source");
+            let mut navigated = source;
+            navigated.branch_revision += 1;
+            navigated.canonical_revision += 1;
+            match change {
+                0 => navigated.owner = CanonicalOwnerScope::new(),
+                1 => navigated.header_certificate = [77; 32],
+                2 => navigated.raw_source_generation = [88; 32],
+                3 => navigated.frontier.bytes += 1,
+                4 => navigated.frontier.prefix_certificate = [99; 32],
+                5 => navigated.branch_revision += 1,
+                6 => navigated.branch_revision -= 1,
+                7 => navigated.canonical_revision += 1,
+                8 => navigated.canonical_revision -= 1,
+                _ => unreachable!(),
+            }
+            assert!(AuthorityOwner::successor_after_navigation(navigated, retired).is_err());
+        }
+    }
+
+    #[test]
+    fn source_owner_context_binds_exact_policy_draft_and_cannot_write_metadata_or_terminal() {
+        let source = cursor();
+        let owner = AuthorityOwner::genesis(source.clone());
+        assert!(owner.owner_context(label("not context")).is_err());
+        assert!(owner.owner_context(assistant(None)).is_err());
+        let exact = compact();
+        let scope = owner
+            .owner_context(exact.clone())
+            .expect("owner context scope");
+        let (capture, prepare) = scope.begin_prepare().expect("source-only prepare");
+        let operation = CanonicalOperation::new();
+        let flight = prepare
+            .permit
+            .enter_io(
+                CanonicalIoStage::PreparePreflight,
+                &source,
+                &operation,
+                None,
+            )
+            .expect("prepare flight");
+        record(&prepare, CanonicalIoStage::PreparePreflight);
+        drop(flight);
+        drop(prepare);
+        let altered = draft(
+            CanonicalMutationKind::ContextPolicy,
+            serde_json::json!({
+                "type":"compaction", "summary":"different exact summary", "firstKeptEntryId":"a",
+                "tokensBefore":1, "details":{"bytes":"AA=="}
+            }),
+        );
+        assert!(capture.admit_final(&operation, altered.clone()).is_err());
+        let transaction = capture
+            .admit_final(&operation, exact.clone())
+            .expect("exact final");
+        assert!(transaction
+            .permit
+            .enter_io(
+                CanonicalIoStage::RequestedMutation,
+                &source,
+                &operation,
+                Some(&altered),
+            )
+            .is_err());
+        let flight = transaction
+            .permit
+            .enter_io(
+                CanonicalIoStage::RequestedMutation,
+                &source,
+                &operation,
+                Some(&exact),
+            )
+            .expect("exact owner context write");
+        record(&transaction, CanonicalIoStage::RequestedMutation);
+        drop(flight);
+        drop(transaction);
+        let retired = owner
+            .request_close(CloseReason::Retirement)
+            .finish_at_external_idle()
+            .expect("no invented serving anchor");
+        assert!(owner.owner_context(exact).is_err());
+        assert!(AuthorityOwner::successor(source, retired).is_ok());
     }
 }

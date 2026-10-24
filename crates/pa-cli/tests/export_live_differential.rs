@@ -248,6 +248,8 @@ impl Wire {
 /// section omitted. The TS wire usage shape (`input`/`output`/`cost`) is
 /// required: the daemon computes usage summaries at create.
 fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
+    // Synthetic retained history uses the complete native message schema.
+    // These model fields are fixture data, not a live provider admission.
     let usage = json!({
         "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15,
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
@@ -260,7 +262,8 @@ fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
         json!({
             "type": "message", "id": "e1", "parentId": "e0",
             "timestamp": "2026-09-01T10:00:01.000Z",
-            "message": { "role": "user", "content": "export a fixture" },
+            "message": { "role": "user", "content": "export a fixture",
+                         "timestamp": 1_788_256_801_000_u64 },
         }),
         json!({
             "type": "message", "id": "e2", "parentId": "e1",
@@ -268,8 +271,10 @@ fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
             "message": {
                 "role": "assistant",
                 "content": [{ "type": "text", "text": "the answer" }],
+                "api": "openai-completions", "provider": "faux", "model": "faux-1",
                 "usage": usage,
                 "stopReason": "stop",
+                "timestamp": 1_788_256_802_000_u64,
             },
         }),
         json!({
@@ -279,8 +284,10 @@ fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
                 "role": "assistant",
                 "content": [{ "type": "toolCall", "id": "tc1", "name": "my_tool",
                               "arguments": { "query": "hello" } }],
+                "api": "openai-completions", "provider": "faux", "model": "faux-1",
                 "usage": usage,
                 "stopReason": "toolUse",
+                "timestamp": 1_788_256_803_000_u64,
             },
         }),
         json!({
@@ -290,6 +297,7 @@ fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
                 "role": "toolResult", "toolCallId": "tc1", "toolName": "my_tool",
                 "content": [{ "type": "text", "text": "tool output line" }],
                 "isError": false,
+                "timestamp": 1_788_256_804_000_u64,
             },
         }),
     ];
@@ -304,6 +312,35 @@ fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(path, format!("{lines}\n")).expect("write fixture");
+    // Use the physical bytes and the same known-message fallback rule as
+    // RawCapture. A malformed fixture must not look like a missing tool registry.
+    let physical = std::fs::read(path).expect("read fixture wire precondition");
+    let mut offset = 0_u64;
+    for (ordinal, bytes) in physical.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let row = pa_core::session::canonical::CanonicalJournalRow::parse(
+            std::sync::Arc::from(bytes),
+            offset,
+            u64::try_from(ordinal).expect("fixture row ordinal"),
+        )
+        .unwrap_or_else(|_| panic!("[live-export-wire] kind=parse_error ordinal={ordinal}"));
+        if ordinal == 0 {
+            assert!(
+                matches!(row.entry(), pa_types::session::FileEntry::Header { .. }),
+                "[live-export-wire] kind=invalid_header ordinal={ordinal}"
+            );
+        } else {
+            let wire: Value = serde_json::from_slice(bytes)
+                .unwrap_or_else(|_| panic!("[live-export-wire] kind=json_error ordinal={ordinal}"));
+            assert!(
+                !(wire["type"] == "message"
+                    && matches!(row.entry(), pa_types::session::FileEntry::Unknown { .. })),
+                "[live-export-wire] kind=unknown_known_message ordinal={ordinal}"
+            );
+        }
+        offset = offset
+            .checked_add(u64::try_from(bytes.len()).expect("fixture row length"))
+            .expect("fixture physical offset");
+    }
     entries
 }
 

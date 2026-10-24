@@ -294,6 +294,43 @@ fn branch_summary_ack_failure_reaches_no_model() {
     );
     assert_eq!(commits.load(Ordering::SeqCst), 1);
     assert_eq!(store.captures.load(Ordering::SeqCst), 2);
+    // A failed warmup/build is the same failure at every demand seam. Do not
+    // rerun its acknowledged selection callback or persist a fresh User first.
+    let model = engine.session_model().unwrap();
+    assert_eq!(
+        engine.ensure_core_session(&model).unwrap_err().to_string(),
+        ACK_ERROR
+    );
+    let mut accepted = false;
+    let mut done = None;
+    engine.run_prompt(
+        0,
+        crate::engine::PromptRequest {
+            message: "must not persist after failed build".to_owned(),
+            batch: Vec::new(),
+            images: Vec::new(),
+            source: "user".to_owned(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            match event {
+                crate::engine::EngineEvent::UserMessage(_) => accepted = true,
+                crate::engine::EngineEvent::Done(result) => done = Some(result),
+                _ => {}
+            }
+            true
+        },
+    );
+    assert!(!accepted);
+    assert_eq!(done, Some(Err(ACK_ERROR.to_owned())));
+    assert_eq!(
+        commits.load(Ordering::SeqCst),
+        1,
+        "build callback must not rerun"
+    );
+    assert_eq!(store.captures.load(Ordering::SeqCst), 2);
     assert_eq!(
         *selections.lock().unwrap(),
         vec![ContextSelection {

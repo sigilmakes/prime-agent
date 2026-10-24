@@ -39,6 +39,27 @@ class WorkspaceGateTests(unittest.TestCase):
         self.assertEqual(env["NIX_CC"], "/nix/store/compiler")
         self.assertNotIn("PRIME_AGENT_KERNEL_PYTHON", env)
         self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PI_OFFLINE", env)
+        self.assertNotIn("PI_SKIP_VERSION_CHECK", env)
+        for variable in ("PI_PACKAGE_DIR", "PRIME_AGENT_SESSION_DIR",
+                         "PRIME_AGENT_CODING_AGENT_SESSION_DIR", "RLM_SESSION_DIR",
+                         "RLM_HARNESS_STATE_DIR", "RLM_GLOBAL_HARNESS_STATE_DIR"):
+            self.assertNotIn(variable, env)
+        self.assertEqual(env["PRIME_AGENT_CODING_AGENT_DIR"], "/private/state/agent")
+        self.assertEqual(env["PRIME_AGENT_DAEMON_SOCKET"], "/private/state/run/daemon.sock")
+
+    def test_network_wrapper_preserves_uid_and_requires_a_new_network_namespace(self):
+        command = gate.loopback_command(["cargo", "test", "--workspace"])
+        self.assertEqual(command[:7], ["unshare", "--user", "--map-current-user", "--net",
+                                       "--keep-caps", "--", gate.sys.executable])
+        self.assertEqual(command[-4:], ["--loopback-exec", "cargo", "test", "--workspace"])
+
+    def test_loopback_exec_rejects_host_network_before_any_interface_mutation(self):
+        with patch.object(gate.socket, "if_nameindex", return_value=[(1, "lo"), (2, "eth0")]), \
+                patch.object(gate.subprocess, "run") as setup:
+            with self.assertRaisesRegex(ValueError, "fresh loopback-only"):
+                gate.exec_loopback(["cargo", "test"])
+        setup.assert_not_called()
 
     def test_runtime_identity_tracks_lock_sources_and_machine_data_not_cache(self):
         with tempfile.TemporaryDirectory() as temporary:

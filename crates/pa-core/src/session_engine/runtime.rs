@@ -104,14 +104,19 @@ impl SessionRuntime {
                     let purge = purge.clone();
                     Box::pin(async move {
                         let response = {
-                            let mut driver = driver.lock().await;
-                            let mut session = session.lock().await;
-                            handle_goal_host_request(
-                                request_type,
-                                &payload.data,
-                                &mut driver,
-                                &mut session,
-                            )?
+                            super::goal_driver::persist_goal_mutation(
+                                &driver,
+                                &session,
+                                |driver, drafts| {
+                                    handle_goal_host_request(
+                                        request_type,
+                                        &payload.data,
+                                        driver,
+                                        drafts,
+                                    )
+                                },
+                            )
+                            .await?
                         };
                         if let Some(purge) = purge {
                             purge();

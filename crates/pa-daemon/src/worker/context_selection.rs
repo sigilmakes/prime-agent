@@ -36,9 +36,12 @@ fn current_lease(core: &SessionCore) -> Result<Arc<SessionLease>> {
         .as_ref()
         .context("canonical session store has no runtime lease")?;
     ensure!(
-        !core.context_selection_uncertain.as_ref().is_some_and(|uncertain| {
-            std::sync::Weak::ptr_eq(uncertain, &Arc::downgrade(lease))
-        }),
+        !core
+            .context_selection_uncertain
+            .as_ref()
+            .is_some_and(|uncertain| {
+                std::sync::Weak::ptr_eq(uncertain, &Arc::downgrade(lease))
+            }),
         "context selection write outcome is uncertain; reopen the canonical session before inference"
     );
     lease.with_owned_mutation(&store.path, || Ok(()))?;
@@ -105,6 +108,30 @@ fn write_selection(store: &mut SessionFile, selection: &ContextSelection) -> Res
 }
 
 impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
+    fn live_owner(
+        &self,
+        source: ContextSelectionSource,
+    ) -> Option<Arc<dyn pa_core::session_engine::canonical_live::CanonicalLiveOwner>> {
+        // The factory survives SDK rebuilds, but this adapter does not. Read
+        // the actual validated owner state anew, without attaching/resetting it.
+        let bootstrap_admission = (|| -> Result<bool> {
+            let core = self
+                .0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+            validate_source(&core, &source)?;
+            let store = core.store.as_ref().expect("validated canonical store");
+            let lease = store.lease.as_ref().expect("validated canonical lease");
+            lease.with_owned_mutation(&store.path, || Ok(store.is_canonical_bound()))
+        })()
+        .map_err(|error| error.to_string());
+        Some(Arc::new(super::canonical_live::CoreCanonicalLiveOwner {
+            core: Arc::clone(&self.0),
+            source,
+            bootstrap_admission,
+        }))
+    }
+
     fn capture(&self, expected_file: &std::path::Path) -> Result<ContextSelectionSource> {
         let core = self.0.lock().expect("session core lock");
         let lease = current_lease(&core)?;
@@ -126,8 +153,9 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
     /// The typed read refusal: a poisoned epoch may not serve its raw tail.
     fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
         let core = self.0.lock().expect("session core lock");
-        let epoch = core.store.as_ref().and_then(|store| store.epoch.as_ref());
-        crate::session_store::canonical_adapter::epoch_is_poisoned(epoch)
+        core.store
+            .as_ref()
+            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
             .then(crate::session_store::canonical_adapter::refused_poisoned_read)
     }
 

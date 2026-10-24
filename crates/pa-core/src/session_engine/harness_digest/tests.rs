@@ -163,6 +163,7 @@ fn append_replaces_older_digest_rows_and_strips_snapshot_blocks() {
     }));
     assert!(!is_digest_row(&plain, Some("older digest")));
     let unrelated = AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
+        delivery: pa_agent::types::CustomMessageDelivery::Input,
         role: "custom".to_string(),
         payload: serde_json::json!({"customType": "arbitrary_note"}),
     });

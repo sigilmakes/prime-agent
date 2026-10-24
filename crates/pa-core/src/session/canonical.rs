@@ -713,6 +713,73 @@ pub trait CanonicalSessionStore: Send + Sync {
     fn acknowledge(&self, request: CanonicalAcknowledgement) -> CanonicalFuture<()>;
 }
 
+/// Exact completion of one strict metadata write, for chaining only its own frontier.
+pub struct CanonicalMetadataReceipt {
+    pub entry_id: String,
+    pub cursor: CanonicalCursor,
+}
+
+/// Async envelope-free metadata persistence for shared-manager hosts. A live
+/// implementation routes to the actual owner and completes raw adoption + ACK.
+/// Callers must release all SDK/goal/registry guards before awaiting this seam.
+pub trait CanonicalMetadataWriter: Send + Sync {
+    /// Certify and ACK the actual source before deriving a metadata policy intent.
+    fn observe_metadata_source(self: Arc<Self>) -> CanonicalFuture<()>;
+    fn append_metadata(self: Arc<Self>, entry: FileEntry) -> CanonicalFuture<String>;
+    /// A precomputed context-derived intent may not silently rebase after prepare.
+    fn append_metadata_from(
+        self: Arc<Self>,
+        entry: FileEntry,
+        expected: CanonicalCursor,
+    ) -> CanonicalFuture<CanonicalMetadataReceipt>;
+}
+
+/// Persist metadata through the live owner, or the standalone local manager.
+/// The shared manager guard is always released before an owner future is polled.
+///
+/// # Errors
+/// Returns owner, adoption, ACK, or standalone persistence failures.
+pub async fn persist_metadata_entry(
+    session: &Arc<tokio::sync::Mutex<super::manager::SessionManager>>,
+    entry: FileEntry,
+) -> anyhow::Result<String> {
+    let writer = {
+        let mut manager = session.lock().await;
+        if let Some(writer) = manager.canonical_metadata_writer() {
+            writer
+        } else {
+            return manager.append_metadata_intent(entry).map_err(Into::into);
+        }
+    };
+    writer.append_metadata(entry).await.map_err(Into::into)
+}
+
+/// Persist one precomputed metadata intent against its exact captured source.
+/// Source advance stops this draft; callers must not rerun paid policy work.
+///
+/// # Errors
+/// Rejects any source change or incomplete owner adoption/ACK.
+pub async fn persist_metadata_entry_from(
+    session: &Arc<tokio::sync::Mutex<super::manager::SessionManager>>,
+    entry: FileEntry,
+    expected: CanonicalCursor,
+) -> anyhow::Result<CanonicalMetadataReceipt> {
+    let writer = {
+        let manager = session.lock().await;
+        anyhow::ensure!(
+            manager.canonical_binding() == Some(&expected),
+            "metadata source changed before owner preparation"
+        );
+        manager
+            .canonical_metadata_writer()
+            .ok_or_else(|| anyhow::anyhow!("strict metadata source has no live owner"))?
+    };
+    writer
+        .append_metadata_from(entry, expected)
+        .await
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

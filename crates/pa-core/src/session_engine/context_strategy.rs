@@ -100,6 +100,67 @@ fn descendant_entries(
     Some(tail)
 }
 
+// This nonce belongs only to the proposed model view. It is never put in a
+// FileEntry, archive, or canonical ID. The builder emits the newest portable
+// compaction summary at position zero; older retained summaries follow it.
+struct ProposedSummary {
+    key: String,
+    token: Value,
+}
+
+impl ProposedSummary {
+    fn mark(messages: &mut [AgentMessage], portable: bool) -> anyhow::Result<Option<Self>> {
+        if !portable {
+            return Ok(None);
+        }
+        let Some(AgentMessage::CompactionSummary(summary)) = messages.first_mut() else {
+            bail!("portable compaction preview has no leading proposed summary");
+        };
+        let key = format!("__pa_proposed_summary_{}", uuid::Uuid::new_v4());
+        let token = Value::String(uuid::Uuid::new_v4().to_string());
+        summary.rest.insert(key.clone(), token.clone());
+        Ok(Some(Self { key, token }))
+    }
+
+    fn resolve(self, messages: &mut [AgentMessage]) -> anyhow::Result<usize> {
+        let mut position = None;
+        for (index, message) in messages.iter().enumerate() {
+            let rest = match message {
+                AgentMessage::User(message) => &message.rest,
+                AgentMessage::Assistant(message) => &message.rest,
+                AgentMessage::ToolResult(message) => &message.rest,
+                AgentMessage::BashExecution(message) => &message.rest,
+                AgentMessage::Custom(message) => &message.rest,
+                AgentMessage::BranchSummary(message) => &message.rest,
+                AgentMessage::CompactionSummary(message) => &message.rest,
+            };
+            if rest.get(&self.key) == Some(&self.token) {
+                if !matches!(message, AgentMessage::CompactionSummary(_)) {
+                    bail!("context strategy moved proposed summary provenance to another role");
+                }
+                if position.replace(index).is_some() {
+                    bail!("context strategy duplicated proposed summary provenance");
+                }
+            }
+        }
+        let index = position.context("context strategy lost proposed summary provenance")?;
+        if let AgentMessage::CompactionSummary(summary) = &mut messages[index] {
+            summary.rest.remove(&self.key);
+        }
+        Ok(index)
+    }
+}
+
+fn bind_proposed_summary(messages: &mut [AgentMessage], position: Option<usize>, timestamp: u64) {
+    // No strategy callback or reordering occurs after resolve. Standalone tail
+    // adoption only extends this vector, so the certified position stays exact.
+    if let Some(position) = position {
+        if let AgentMessage::CompactionSummary(summary) = &mut messages[position] {
+            summary.timestamp = timestamp;
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Policy {
@@ -306,13 +367,45 @@ impl AgentSession {
         options: &CompactOptions<'_>,
         started: std::time::Instant,
     ) -> anyhow::Result<CompactOutcome> {
+        // Only an unconsumed prepared ticket is eligible for abandonment. Once
+        // commit takes the ticket, all I/O/receipt failures keep their quarantine.
+        macro_rules! before_commit {
+            ($ticket:ident, fail: $error:expr) => {{
+                let original: anyhow::Error = $error.into();
+                if let Some(ticket) = $ticket.take() {
+                    if let Err(abandon) = ticket.abandon().await {
+                        return Err(anyhow::Error::from(abandon).context(format!(
+                            "precommit compaction failed ({original}); abandoning its prepared receipt also failed"
+                        )));
+                    }
+                }
+                return Err(original);
+            }};
+            ($ticket:ident, $result:expr) => {{
+                match $result {
+                    Ok(value) => value,
+                    Err(error) => before_commit!($ticket, fail: error),
+                }
+            }};
+        }
         let plugins = self
             .plugins
             .as_ref()
             .context("session context strategy is unavailable")?;
         for _ in 0..3 {
             pa_agent::abort::throw_if_aborted_signal(options.abort)?;
-            let strategy = plugins.context_selection()?;
+            let mut live_ticket = match &self.canonical_live {
+                Some(live) => Some(
+                    live.prepare_mutation(
+                        crate::session::canonical::CanonicalMutationKind::ContextPolicy,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            let strategy = before_commit!(live_ticket, plugins.context_selection());
+            let registration =
+                before_commit!(live_ticket, plugins.capture_context_registration(&strategy));
             let (snapshot, leaf, context) = {
                 let session = self.session.lock().await;
                 (
@@ -321,15 +414,22 @@ impl AgentSession {
                     session.active_context(),
                 )
             };
-            let history = snapshot.await?;
-            let branch = active_branch(&history, leaf.as_deref())?;
-            let messages = assemble(
+            let history = before_commit!(live_ticket, snapshot.await);
+            let branch = before_commit!(live_ticket, active_branch(&history, leaf.as_deref()));
+            let assembly = assemble(
                 plugins,
                 context.messages,
                 context.archive.as_ref(),
                 Some(&options.model),
-            )
-            .await?;
+            );
+            let assembled = if live_ticket.is_some() {
+                // Keep the prepared ticket outside callback cancellation so its
+                // original caller can await exact known-unwritten abandonment.
+                guarded(plugins, &strategy, None, options.abort, assembly).await
+            } else {
+                assembly.await
+            };
+            let messages = before_commit!(live_ticket, assembled);
             let messages = super::refinement_gate::without_refinements(messages);
             let preparation = Preparation {
                 branch,
@@ -356,32 +456,43 @@ impl AgentSession {
                 "prepare",
                 preparation.leaf.as_deref(),
             );
-            let payload = frame.checked(json!({"stage":"prepare","messages":frame.messages()?,
-                "entries":frame.entries(&preparation.branch)?,"leaf":preparation.leaf}))?;
-            let policy_output = guarded(
-                plugins,
-                &strategy,
-                None,
-                options.abort,
-                plugins.invoke_context(&strategy, payload, &CancellationToken::new()),
-            )
-            .await?;
-            frame.check(&policy_output)?;
-            let policy: Policy = serde_json::from_value(policy_output)?;
+            let frame_messages = before_commit!(live_ticket, frame.messages());
+            let frame_entries = before_commit!(live_ticket, frame.entries(&preparation.branch));
+            let payload = before_commit!(
+                live_ticket,
+                frame.checked(json!({"stage":"prepare","messages":frame_messages,
+                "entries":frame_entries,"leaf":preparation.leaf}))
+            );
+            let policy_output = before_commit!(
+                live_ticket,
+                guarded(
+                    plugins,
+                    &strategy,
+                    None,
+                    options.abort,
+                    plugins.invoke_context(&strategy, payload, &CancellationToken::new()),
+                )
+                .await
+            );
+            before_commit!(live_ticket, frame.check(&policy_output));
+            let policy: Policy = before_commit!(live_ticket, serde_json::from_value(policy_output));
             if !matches!(policy.policy.as_str(), "rolling" | "full") {
-                bail!("unknown context preparation policy");
+                before_commit!(live_ticket, fail: anyhow::anyhow!("unknown context preparation policy"));
             }
             let mut transaction = None;
             let mut accepted = None;
             let mut conflict = false;
             let mut failures = Vec::new();
             let mut skip = "No eligible compactor";
-            let chain = policy
-                .compactors
-                .iter()
-                .filter(|route| !plugins.context_route_disabled(route))
-                .map(|route| plugins.context_compactor(route))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            let chain = before_commit!(
+                live_ticket,
+                policy
+                    .compactors
+                    .iter()
+                    .filter(|route| !plugins.context_route_disabled(route))
+                    .map(|route| plugins.context_compactor(route))
+                    .collect::<anyhow::Result<Vec<_>>>()
+            );
             for target in chain {
                 let frame = input::Frame::new(
                     plugins.context_session_id(),
@@ -404,16 +515,19 @@ impl AgentSession {
                 ).await;
                 let output = match output {
                     Ok(value) => value,
-                    Err(error) if terminal(&error) => return Err(error),
+                    Err(error) if terminal(&error) => before_commit!(live_ticket, fail: error),
                     Err(error) => {
                         failures.push(error.to_string());
                         continue;
                     }
                 };
-                let status = output
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .context("compactor must return an explicit status")?;
+                let status = before_commit!(
+                    live_ticket,
+                    output
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .context("compactor must return an explicit status")
+                );
                 match status {
                     "decline" => continue,
                     "failure" => {
@@ -426,16 +540,20 @@ impl AgentSession {
                         );
                         continue;
                     }
-                    "fatal" => bail!(
+                    "fatal" => before_commit!(live_ticket, fail: anyhow::anyhow!(
                         "fatal compactor error: {}",
                         output
                             .get("reason")
                             .and_then(Value::as_str)
                             .unwrap_or("unknown")
-                    ),
-                    "cancelled" => return Err(pa_agent::abort::aborted_error()),
+                    )),
+                    "cancelled" => {
+                        before_commit!(live_ticket, fail: pa_agent::abort::aborted_error())
+                    }
                     "success" | "native" => {}
-                    other => bail!("unknown compactor status {other}"),
+                    other => {
+                        before_commit!(live_ticket, fail: anyhow::anyhow!("unknown compactor status {other}"))
+                    }
                 }
                 match native::eligible(&preparation, &policy.policy, &output, options) {
                     Ok(Ok(())) => {}
@@ -471,7 +589,7 @@ impl AgentSession {
                 let mut candidate = match result {
                     Ok(Some(candidate)) => candidate,
                     Ok(None) => continue,
-                    Err(error) if terminal(&error) => return Err(error),
+                    Err(error) if terminal(&error) => before_commit!(live_ticket, fail: error),
                     Err(error) => {
                         failures.push(error.to_string());
                         continue;
@@ -528,7 +646,17 @@ impl AgentSession {
                         rest: pa_types::JsonMap::new(),
                     },
                 });
-                let context = crate::session::build_session_context(&preview, None);
+                let mut context = crate::session::build_session_context(&preview, None);
+                let portable = context.archive.as_ref().is_none_or(|archive| {
+                    matches!(
+                        archive.representation,
+                        ContextRepresentation::Standard { .. }
+                    )
+                });
+                let proposed_summary = before_commit!(
+                    live_ticket,
+                    ProposedSummary::mark(&mut context.messages, portable)
+                );
                 let validation = guarded(
                     plugins,
                     &strategy,
@@ -544,13 +672,98 @@ impl AgentSession {
                 .await;
                 let mut view = match validation {
                     Ok(view) => view,
-                    Err(error) if terminal(&error) => return Err(error),
+                    Err(error) if terminal(&error) => before_commit!(live_ticket, fail: error),
                     Err(error) => {
                         failures.push(error.to_string());
                         continue;
                     }
                 };
-                let committed = {
+                // Resolve and remove private provenance BEFORE any write. A
+                // dropped, duplicated, or changed proposal is never guessed by body.
+                let proposed_position = before_commit!(
+                    live_ticket,
+                    proposed_summary
+                        .map(|proposal| proposal.resolve(&mut view))
+                        .transpose()
+                );
+                let committed = if live_ticket.is_some() {
+                    before_commit!(
+                        live_ticket,
+                        pa_agent::abort::throw_if_aborted_signal(options.abort)
+                    );
+                    // Preflight is not writer admission. The concrete capability
+                    // below rechecks the actual registration at the owner's real
+                    // RequestedMutation/enter_io boundary before any disk I/O.
+                    let admitted = plugins.with_registered_context_authority(
+                        &registration,
+                        &strategy,
+                        &target,
+                        || {
+                            crate::session::canonical::CanonicalEntryDraft::new(
+                                crate::session::canonical::CanonicalMutationKind::ContextPolicy,
+                                FileEntry::Compaction {
+                                    base: super::canonical_live::draft_base(),
+                                    payload: candidate.entry.clone(),
+                                },
+                            )
+                        },
+                    );
+                    let draft = before_commit!(live_ticket, admitted);
+                    let admission = super::canonical_live::CanonicalLiveContextAdmission::new(
+                        std::sync::Arc::clone(plugins),
+                        registration.clone(),
+                        strategy.clone(),
+                        target.clone(),
+                        draft.clone(),
+                    );
+                    let ticket = live_ticket
+                        .take()
+                        .expect("checked prepared canonical ticket");
+                    let receipt = ticket
+                        .commit_receipt_with_context(draft, Some(admission))
+                        .await?;
+                    let publication = {
+                        let session = self.session.lock().await;
+                        (|| -> anyhow::Result<()> {
+                            if session.canonical_binding() != Some(&receipt.cursor) {
+                                bail!("canonical source changed after compaction ACK");
+                            }
+                            let row = session
+                                .canonical_raw_entry(&receipt.entry_id)
+                                .context("committed compaction row is not retained")?;
+                            let timestamp =
+                                crate::session::timestamp_to_millis(row.entry().timestamp());
+                            plugins.with_registered_context_authority(
+                                &registration,
+                                &strategy,
+                                &target,
+                                || {
+                                    bind_proposed_summary(&mut view, proposed_position, timestamp);
+                                    if let Some(compaction) = attempt.semantic_compaction.as_mut() {
+                                        compaction.commit();
+                                    }
+                                    *self
+                                        .accepted_context
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        Some(view);
+                                    self.context_archive
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .clone_from(&candidate.entry.context_archive);
+                                    Ok(())
+                                },
+                            )
+                        })()
+                    };
+                    if let Err(error) = publication {
+                        if let Some(live) = &self.canonical_live {
+                            live.block_projection();
+                        }
+                        return Err(error);
+                    }
+                    true
+                } else {
                     let mut session = self.session.lock().await;
                     let Some(tail) = descendant_entries(
                         session.retained_entries(),
@@ -576,13 +789,7 @@ impl AgentSession {
                             let timestamp = session.retained_entries().last().map_or(0, |entry| {
                                 crate::session::timestamp_to_millis(entry.timestamp())
                             });
-                            for message in &mut view {
-                                if let AgentMessage::CompactionSummary(summary) = message {
-                                    if summary.summary == candidate.entry.summary {
-                                        summary.timestamp = timestamp;
-                                    }
-                                }
-                            }
+                            bind_proposed_summary(&mut view, proposed_position, timestamp);
                             *self
                                 .accepted_context
                                 .lock()
@@ -612,7 +819,13 @@ impl AgentSession {
                 })));
             }
             if conflict {
+                if self.canonical_live.is_some() {
+                    before_commit!(live_ticket, fail: anyhow::anyhow!("canonical source changed; paid compaction is not retried"));
+                }
                 continue;
+            }
+            if let Some(ticket) = live_ticket.take() {
+                ticket.abandon().await?;
             }
             if !failures.is_empty() {
                 bail!("compaction chain failed: {}", failures.join("; "));
@@ -628,6 +841,9 @@ impl AgentSession {
                 .await
                 .compaction_prefix_intact(preparation.leaf.as_deref())
             {
+                if self.canonical_live.is_some() {
+                    bail!("canonical source changed; paid compaction is not retried");
+                }
                 continue;
             }
             return Ok(CompactOutcome::Skipped("No eligible compactor"));
@@ -768,3 +984,84 @@ mod tests;
 
 #[cfg(test)]
 mod startup_tests;
+
+#[cfg(test)]
+mod proposed_summary_tests {
+    use super::*;
+
+    fn summary(timestamp: u64) -> AgentMessage {
+        serde_json::from_value(json!({"role":"compactionSummary","summary":"identical summary","tokensBefore":42,"timestamp":timestamp,"futureSummaryMetadata":{"nested":[1,2,3]}})).unwrap()
+    }
+
+    #[test]
+    fn identical_older_summary_is_unchanged_after_reordered_json_proposal_binding() {
+        let old = summary(17);
+        let mut view = vec![summary(18), old.clone()];
+        let proposal = ProposedSummary::mark(&mut view, true).unwrap().unwrap();
+        view.swap(0, 1);
+        let mut view: Vec<AgentMessage> =
+            serde_json::from_value(serde_json::to_value(view).unwrap()).unwrap();
+        let position = proposal.resolve(&mut view).unwrap();
+        assert_eq!(position, 1);
+        bind_proposed_summary(&mut view, Some(position), 99);
+        assert_eq!(view[0], old);
+        assert_eq!(view[1], summary(99));
+        assert!(!serde_json::to_string(&view)
+            .unwrap()
+            .contains("__pa_proposed_summary_"));
+    }
+
+    #[test]
+    fn same_key_with_unrelated_token_is_preserved() {
+        let mut view = vec![summary(18), summary(17)];
+        let proposal = ProposedSummary::mark(&mut view, true).unwrap().unwrap();
+        if let AgentMessage::CompactionSummary(old) = &mut view[1] {
+            old.rest
+                .insert(proposal.key.clone(), json!("unrelated-token"));
+        }
+        let old = view[1].clone();
+        let position = proposal.resolve(&mut view).unwrap();
+        bind_proposed_summary(&mut view, Some(position), 99);
+        assert_eq!(view[1], old);
+    }
+
+    #[test]
+    fn moving_provenance_to_another_role_is_rejected_before_write() {
+        let mut view = vec![summary(18)];
+        let proposal = ProposedSummary::mark(&mut view, true).unwrap().unwrap();
+        let mut changed: AgentMessage =
+            serde_json::from_value(json!({"role":"user","content":"generated","timestamp":18}))
+                .unwrap();
+        if let AgentMessage::User(user) = &mut changed {
+            user.rest
+                .insert(proposal.key.clone(), proposal.token.clone());
+        }
+        view[0] = changed;
+        assert!(proposal.resolve(&mut view).is_err());
+    }
+
+    #[test]
+    fn duplicate_provenance_is_rejected_before_write() {
+        let mut view = vec![summary(18)];
+        let proposal = ProposedSummary::mark(&mut view, true).unwrap().unwrap();
+        view.push(view[0].clone());
+        assert!(proposal.resolve(&mut view).is_err());
+    }
+
+    #[test]
+    fn missing_provenance_never_falls_back_to_identical_body() {
+        let mut view = vec![summary(18), summary(18)];
+        let proposal = ProposedSummary::mark(&mut view, true).unwrap().unwrap();
+        view.remove(0);
+        assert!(proposal.resolve(&mut view).is_err());
+    }
+
+    #[test]
+    fn native_archive_does_not_claim_a_retained_summary() {
+        let old = summary(17);
+        let mut view = vec![old.clone()];
+        assert!(ProposedSummary::mark(&mut view, false).unwrap().is_none());
+        bind_proposed_summary(&mut view, None, 99);
+        assert_eq!(view, vec![old]);
+    }
+}

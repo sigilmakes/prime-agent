@@ -102,17 +102,14 @@ impl AgentSessionEngine {
                 };
             }
         };
-        // The delivery's cancel flag is consulted at the admission, before
-        // the agent run registers: an abort landing in the [pickup,
-        // registration] window is otherwise lost. Delivery-scoped by
-        // construction.
-        if aborted() {
-            return TurnResult::Aborted;
-        }
+        // Cancellation is latched at the registered run's first event in
+        // run_turn_once. Returning here would discard an already accepted
+        // turn without recording its interrupted outcome.
         // A routed image-model episode applies its override BEFORE the
         // first provider call: the serving target swaps to the image
         // model (the agent state itself never swaps — per-run, like TS).
         self.apply_armed_image_route(&agent);
+        let episode_model_override = agent.model_override();
         let policy = self.retry_policy();
         let failover_policy = self.failover_policy();
         // A routed episode serves (and fails over within) the ROUTED
@@ -131,9 +128,9 @@ impl AgentSessionEngine {
         let first_attempt = std::cell::Cell::new(matches!(admission, TurnAdmission::FreshPrompt));
         // Failover switch/restore re-bind the live agent's model, append
         // the model-change row, and re-bind the turn-boundary model facts
-        // (`model.info` follows the session model). The first successful
-        // backup response restores session state before tools, like TS; the
-        // captured run still serves backup traffic until it settles.
+        // (`model.info` follows the session model). Unbound sessions restore
+        // before tools. Bound sessions flush the owner receipt at the existing
+        // settled-loop boundary, outside Agent::event_delivery.
         let core = {
             let guard = self.session.blocking_lock();
             guard.as_ref().cloned()
@@ -146,9 +143,8 @@ impl AgentSessionEngine {
                 .as_deref()
                 .and_then(|engine| engine.session.semantic_edges())
         };
-        // The failover-captured primary target state (TS `_backupModel`):
-        // Session state restores at successful message_end; request auth
-        // stays on the backup until the active run settles.
+        // The failover-captured primary target state (TS `_backupModel`).
+        // Request auth stays on the backup until the active run settles.
         let primary_state = std::sync::Arc::new(std::sync::Mutex::new(None::<FailoverPrimary>));
         let pending_model_changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
             pa_types::session::ModelChangeEntry,
@@ -181,93 +177,129 @@ impl AgentSessionEngine {
             Some(route) => route.target.model.context_window,
             None => model.context_window,
         };
-        let restore_subscription = self.runtime.block_on(async {
-            // Awaited before tool execution. The agent loop has already
-            // captured its serving model, so restoring session state here
-            // does not redirect the remaining backup provider requests.
+        // A bound owner receipt must never wait under Agent::event_delivery.
+        // Its existing restore callback runs after run_turn_once has settled,
+        // before the retry driver publishes restoration or starts another attempt.
+        let canonical_bound = core
+            .as_ref()
+            .is_some_and(|core| core.session.has_canonical_live_owner());
+        let restore_session: pa_core::session_engine::canonical_live::CanonicalAfterAssistantCommitFn = {
             let primary_state = primary_state.clone();
             let pending_model_changes = pending_model_changes.clone();
             let agent_weak = std::sync::Arc::downgrade(&agent);
-            let core = core.clone();
+            let core_weak = core.as_ref().map(std::sync::Arc::downgrade);
             let persistence = persistence.clone();
             let ollama_cloud = self.ollama_cloud.clone();
             let cwd = self.cwd();
             let agent_dir = self.config.agent_dir.clone();
-            agent
-                .subscribe(move |event, _signal| {
-                    let primary_state = primary_state.clone();
-                    let pending_model_changes = pending_model_changes.clone();
-                    let agent_weak = agent_weak.clone();
-                    let core = core.clone();
-                    let persistence = persistence.clone();
-                    let ollama_cloud = ollama_cloud.clone();
-                    let cwd = cwd.clone();
-                    let agent_dir = agent_dir.clone();
-                    Box::pin(async move {
-                        let pa_agent::types::AgentEvent::MessageEnd {
-                            message:
-                                pa_agent::types::AgentMessage::Standard(
-                                    pa_agent::types::Message::Assistant(assistant),
-                                ),
-                        } = event
-                        else {
-                            return Ok(());
-                        };
-                        if matches!(
-                            assistant.stop_reason,
-                            StopReason::Error | StopReason::Aborted
-                        ) {
-                            return Ok(());
-                        }
-                        let primary = primary_state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone();
-                        let Some(mut primary) = primary.filter(|primary| !primary.session_restored)
-                        else {
-                            return Ok(());
-                        };
-                        let Some(agent) = agent_weak.upgrade() else {
-                            return Ok(());
-                        };
-                        primary.model =
-                            ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
-                        let model = json_round_trip(&primary.model)
-                            .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
-                        agent
-                            .set_model_and_thinking_level(model, primary.thinking_level)
-                            .await;
-                        if let Some(core) = core {
-                            core.update_model_facts(&primary.model);
-                        }
-                        if let Some(persistence) = persistence {
-                            persistence
-                                .lock()
-                                .await
-                                .append_model_change(&primary.model.provider, &primary.model.id)?;
-                        }
-                        // The later run_once subscriber forwards this after the
-                        // assistant row and before tool execution, matching TS.
-                        pending_model_changes
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push(pa_types::session::ModelChangeEntry {
-                                provider: primary.model.provider.clone(),
-                                model_id: primary.model.id.clone(),
-                            });
-                        if let Some(primary) = primary_state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .as_mut()
-                        {
-                            primary.session_restored = true;
-                        }
-                        Ok(())
-                    })
+            std::sync::Arc::new(move || {
+                let primary_state = primary_state.clone();
+                let pending_model_changes = pending_model_changes.clone();
+                let agent_weak = agent_weak.clone();
+                let core_weak = core_weak.clone();
+                let persistence = persistence.clone();
+                let ollama_cloud = ollama_cloud.clone();
+                let cwd = cwd.clone();
+                let agent_dir = agent_dir.clone();
+                Box::pin(async move {
+                    let primary = primary_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let Some(mut primary) = primary.filter(|primary| !primary.session_restored)
+                    else {
+                        return Ok(());
+                    };
+                    let agent = agent_weak
+                        .upgrade()
+                        .ok_or_else(|| anyhow::anyhow!("restoration episode Agent retired"))?;
+                    let core = match core_weak {
+                        Some(core) => Some(core.upgrade().ok_or_else(|| {
+                            anyhow::anyhow!("restoration episode Core retired")
+                        })?),
+                        None => None,
+                    };
+                    primary.model =
+                        ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
+                    let model = json_round_trip(&primary.model)
+                        .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                    if let Some(persistence) = persistence {
+                        persist_model_change(
+                            &persistence,
+                            &primary.model.provider,
+                            &primary.model.id,
+                        )
+                        .await?;
+                    }
+                    // ACK precedes session facts; the active backup run and
+                    // provider target remain pinned until the retry driver restores.
+                    agent
+                        .set_model_and_thinking_level(model, primary.thinking_level)
+                        .await;
+                    if let Some(core) = core {
+                        core.update_model_facts(&primary.model);
+                    }
+                    pending_model_changes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(pa_types::session::ModelChangeEntry {
+                            provider: primary.model.provider.clone(),
+                            model_id: primary.model.id.clone(),
+                        });
+                    if let Some(primary) = primary_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_mut()
+                    {
+                        primary.session_restored = true;
+                    }
+                    Ok(())
                 })
-                .await
+            })
+        };
+        let restore_commit_guard = match core
+            .as_ref()
+            .and_then(|core| core.session.canonical_live_session())
+        {
+            Some(live) => match live.register_after_assistant_commit(restore_session.clone()) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    return TurnResult::Error {
+                        error: error.to_string(),
+                        assistant: None,
+                    };
+                }
+            },
+            None => None,
+        };
+        let restore_subscription = (!canonical_bound).then(|| {
+            self.runtime.block_on(async {
+                let restore_session = restore_session.clone();
+                agent
+                    .subscribe(move |event, _signal| {
+                        let restore_session = restore_session.clone();
+                        Box::pin(async move {
+                            if matches!(
+                                event,
+                                pa_agent::types::AgentEvent::MessageEnd {
+                                    message: pa_agent::types::AgentMessage::Standard(
+                                        pa_agent::types::Message::Assistant(assistant)
+                                    )
+                                } if !matches!(
+                                    assistant.stop_reason,
+                                    StopReason::Error | StopReason::Aborted
+                                )
+                            ) {
+                                restore_session().await?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .await
+            })
         });
         let restore_primary = || {
+            let episode_model_override = episode_model_override.clone();
             let emit_cell = &emit_cell;
             let primary_state = primary_state.clone();
             let agent = agent.clone();
@@ -327,16 +359,15 @@ impl AgentSessionEngine {
                         *self.provider_target.write().expect("provider target lock") = Some(target);
                     }
                 }
+                if let Some(persistence) = persistence.filter(|_| !session_restored) {
+                    persist_model_change(&persistence, &primary_model.provider, &primary_model.id)
+                        .await?;
+                }
                 agent.set_model(agent_model).await;
                 agent.set_thinking_level(thinking_level).await;
+                agent.set_model_override(episode_model_override);
                 if let Some(core) = &core {
                     core.update_model_facts(&primary_model);
-                }
-                if let Some(persistence) = persistence.filter(|_| !session_restored) {
-                    persistence
-                        .lock()
-                        .await
-                        .append_model_change(&primary_model.provider, &primary_model.id)?;
                 }
                 if !session_restored
                     && !(emit_cell.borrow_mut())(EngineEvent::ModelChange(
@@ -574,14 +605,32 @@ impl AgentSessionEngine {
                                 });
                             }
                         }
+                        if let Some(persistence) = persistence {
+                            persist_model_change(&persistence, &next.provider, &next.id).await?;
+                        }
+                        // The session facts may restore before backup tools, but
+                        // every continuation of this serving episode must retain
+                        // the actual backup model and request options.
+                        let serving_target = self
+                            .provider_target
+                            .read()
+                            .expect("provider target lock")
+                            .clone()
+                            .ok_or_else(|| anyhow::anyhow!("failover serving target missing"))?;
+                        let serving_model = json_round_trip(&serving_target.model)
+                            .ok_or_else(|| anyhow::anyhow!("serving model conversion failed"))?;
+                        let serving_thinking = pa_ai::models::clamp_thinking_level(
+                            &serving_target.model,
+                            self.effective_thinking(),
+                        );
+                        agent.set_model_override(Some(pa_agent::agent::AgentModelOverride {
+                            model: serving_model,
+                            thinking_level: map_thinking_level(serving_thinking),
+                        }));
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(map_thinking_level(clamped)).await;
                         if let Some(core) = &core {
                             core.update_model_facts(&next);
-                        }
-                        if let Some(persistence) = persistence {
-                            let mut session = persistence.lock().await;
-                            session.append_model_change(&next.provider, &next.id)?;
                         }
                         if !(emit_cell.borrow_mut())(EngineEvent::ModelChange(
                             pa_types::session::ModelChangeEntry {
@@ -598,7 +647,13 @@ impl AgentSessionEngine {
                 park,
             ),
         );
-        self.runtime.block_on(restore_subscription.unsubscribe());
+        // Also restore the previous override when an attempt/listener failed
+        // before the retry driver's normal restoration path.
+        agent.set_model_override(episode_model_override.clone());
+        drop(restore_commit_guard);
+        if let Some(subscription) = restore_subscription {
+            self.runtime.block_on(subscription.unsubscribe());
+        }
         // A failing awaited listener (including a failed model-change
         // append) exits the retry driver before its normal restore callback.
         // Always restore the transport as well, while preserving both errors.
@@ -633,4 +688,30 @@ impl AgentSessionEngine {
             },
         }
     }
+}
+
+/// Model selection is source-independent metadata, but its actual owner receipt
+/// must complete before the loop publishes the switched model or the next call.
+async fn persist_model_change(
+    session: &std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>,
+    provider: &str,
+    model_id: &str,
+) -> anyhow::Result<()> {
+    pa_core::session::canonical::persist_metadata_entry(
+        session,
+        pa_types::session::FileEntry::ModelChange {
+            base: pa_types::session::EntryBase {
+                id: None,
+                parent_id: None,
+                timestamp: None,
+                rest: serde_json::Map::default(),
+            },
+            payload: pa_types::session::ModelChangeEntry {
+                provider: provider.to_owned(),
+                model_id: model_id.to_owned(),
+            },
+        },
+    )
+    .await?;
+    Ok(())
 }

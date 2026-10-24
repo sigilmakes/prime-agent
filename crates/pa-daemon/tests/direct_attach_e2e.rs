@@ -436,7 +436,8 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     };
     assert!(saw_message_start, "the kill happened mid-stream");
     assert_eq!(
-        event["event"]["message"]["content"], "turn-1",
+        event["event"]["message"]["content"],
+        json!([{ "type": "text", "text": "turn-1" }]),
         "the in-flight turn completed over the direct socket with the supervisor dead"
     );
     let mut saw_turn_end = false;
@@ -523,7 +524,11 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
             break event["event"]["message"]["content"].clone();
         }
     };
-    assert_eq!(answer, "turn-2", "second scripted turn completed");
+    assert_eq!(
+        answer,
+        json!([{ "type": "text", "text": "turn-2" }]),
+        "second scripted turn completed"
+    );
 
     client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");

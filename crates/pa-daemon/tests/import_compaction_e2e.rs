@@ -280,9 +280,22 @@ fn session_rows(harness: &Harness, type_: &str) -> Vec<Value> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("grown-import"))
+            path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("grown-import"))
+                && std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|text| {
+                        text.lines()
+                            .find(|line| !line.trim().is_empty())
+                            .and_then(|line| serde_json::from_str::<Value>(line.trim()).ok())
+                    })
+                    .is_some_and(|header| {
+                        header.get("type").and_then(Value::as_str) == Some("session")
+                            && header.get("id").and_then(Value::as_str) == Some("grown-import")
+                    })
         })
         .expect("the imported session's copy in the session dir");
     std::fs::read_to_string(file)

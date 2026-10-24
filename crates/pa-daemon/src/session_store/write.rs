@@ -31,6 +31,10 @@ impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
     pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
         anyhow::ensure!(
+            self.canonical_live.is_none(),
+            "canonical owner requires explicit append and adoption ACK"
+        );
+        anyhow::ensure!(
             self.child_usage_recovery.pending.is_none(),
             "confirm unresolved attribution before persisting appended rows"
         );
@@ -50,6 +54,12 @@ impl SessionFile {
     }
 
     pub fn append_entry(&mut self, type_: &str, fields: Value) -> String {
+        // This legacy nonfallible builder is not a canonical writer. If a caller
+        // uses it after attach, invalidate the owner before any local mutation;
+        // an append/rollback ABA must never certify the old source as usable.
+        if let Some(owner) = &self.canonical_live {
+            owner.invalidate();
+        }
         let parent_id = self.leaf_id.clone();
         let mut entry = SessionEntry::new(
             type_,
@@ -104,6 +114,10 @@ impl SessionFile {
     /// Returns an error when the store only holds a window, or the write,
     /// flush, sync, or rename fails; an empty path answers `Ok(())`.
     pub fn rewrite(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.canonical_live.is_none(),
+            "cannot rewrite a bound canonical journal"
+        );
         anyhow::ensure!(
             self.child_usage_recovery.pending.is_none(),
             "confirm unresolved attribution before rewriting session"
@@ -166,7 +180,7 @@ impl SessionFile {
     /// in-memory flag stays unset then, so the next open re-warns (a lost
     /// marker costs one repeated warning, never a suppressed one).
     pub fn mark_anthropic_warning_shown(&mut self) -> Result<()> {
-        self.persist_entry(
+        self.persist_owner_metadata(
             "custom",
             json!({
                 "customType": pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,
@@ -255,8 +269,30 @@ impl SessionFile {
     /// persisted under a live epoch without a step.
     pub(super) fn persist_built_entry_with_step(
         &mut self,
+        entry: SessionEntry,
+        step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
+    ) -> Result<String> {
+        anyhow::ensure!(
+            self.canonical_live.is_none(),
+            "canonical owner requires explicit append and adoption ACK"
+        );
+        self.persist_owned_entry(entry, step)
+    }
+
+    /// Sole physical writer; only the explicit live owner may call this while bound.
+    pub(super) fn persist_owned_entry(
+        &mut self,
+        entry: SessionEntry,
+        step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
+    ) -> Result<String> {
+        self.persist_granted_entry(entry, step, None)
+    }
+
+    pub(super) fn persist_granted_entry(
+        &mut self,
         mut entry: SessionEntry,
         step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
+        granted: Option<pa_core::session_engine::canonical_coordinator::CanonicalAppendGrant>,
     ) -> Result<String> {
         self.confirm_child_usage_write()?;
         // A preflight recovery can advance the leaf after the caller built its
@@ -274,7 +310,9 @@ impl SessionFile {
         let epoch = self.epoch.clone();
         // One row, one step: the worker sets this immediately before an assistant
         // row and it is consumed here, so a later row can never borrow it.
-        let mut grant = if let Some(handle) = epoch.as_ref() {
+        let mut grant = if let Some(grant) = granted {
+            Some(grant)
+        } else if let Some(handle) = epoch.as_ref() {
             let admitted = super::canonical_adapter::grant_for_row(&handle.0, &entry, step)?;
             if admitted.is_none() {
                 self.rows_written_without_epoch += 1;
@@ -392,6 +430,10 @@ impl SessionFile {
     /// Point the session at a concrete file path (after `create`), preserving entries.
     pub fn set_path(&mut self, path: PathBuf) {
         if self.path != path {
+            // An invalidated old scope is never recycled for another path.
+            if let Some(owner) = &self.canonical_live {
+                owner.invalidate();
+            }
             self.lease = None;
         }
         self.path = path;

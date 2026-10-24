@@ -270,14 +270,21 @@ fn a_failing_installer_keeps_the_previous_install() {
 fn installer_env(command: &mut Command, sandbox: &Sandbox) {
     let shims = sandbox.root.join("shims");
     std::fs::create_dir_all(&shims).expect("shims dir");
-    let python = [
-        "/usr/bin/python3",
-        "/usr/local/bin/python3",
-        "/opt/homebrew/bin/python3",
-    ]
-    .into_iter()
-    .find(|path| Path::new(path).is_file())
-    .expect("a python3 for the installer's scripting steps");
+    // Resolve the test shell's interpreter, including Nix store paths. The
+    // installer's uv shim still supplies it without any network/bootstrap.
+    let python = ["python3", "python"]
+        .into_iter()
+        .find_map(|name| {
+            let output = Command::new(name)
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+        })
+        .expect("a Python for the installer's scripting steps");
     let uv = shims.join("uv");
     std::fs::write(
         &uv,
@@ -294,9 +301,15 @@ fn installer_env(command: &mut Command, sandbox: &Sandbox) {
     make_executable(&npm);
     let tmp = sandbox.root.join("tmp");
     std::fs::create_dir_all(&tmp).expect("tmp dir");
+    // Keep only the test shell's tool paths; env_clear still excludes all
+    // other inherited state, and the offline shims remain first.
+    let tool_path = std::env::var_os("PATH").expect("test tool PATH");
+    let path =
+        std::env::join_paths(std::iter::once(shims).chain(std::env::split_paths(&tool_path)))
+            .expect("installer fixture PATH");
     command
         .env_clear()
-        .env("PATH", format!("{}:/usr/bin:/bin", shims.display()))
+        .env("PATH", path)
         .env("HOME", sandbox.root.join("home"))
         .env("TMPDIR", tmp)
         .env(ENV_PREFIX, &sandbox.prefix)
