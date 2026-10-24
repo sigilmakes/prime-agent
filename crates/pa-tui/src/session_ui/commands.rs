@@ -121,6 +121,9 @@ impl SessionUi {
             {
                 return self.send_prompt(text, behavior, view);
             }
+            if self.client.supports_plugin_commands() {
+                return self.handle_plugin_command(text, view).await;
+            }
             let candidates = registry.suggestion_candidates();
             if let Some(suggestion) =
                 pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
@@ -130,12 +133,7 @@ impl SessionUi {
                     view,
                 );
             } else {
-                let message = if self.client.supports_plugin_commands() {
-                    format!("Unknown command: /{name}")
-                } else {
-                    format!("Unknown command: /{name}. Plugin commands are not supported by this worker.")
-                };
-                self.error_row(&message, view);
+                self.error_row(&format!("Unknown command: /{name}. Plugin commands are not supported by this worker."), view);
             }
             return Ok(());
         };
