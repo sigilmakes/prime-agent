@@ -54,8 +54,8 @@ The gate uses the CI job's normal Docker isolation. It does not create nested
 namespaces or require changes to runner security policy. Private state and
 credential scrubbing remain in place. `PI_OFFLINE` and `PI_SKIP_VERSION_CHECK`
 are absent because those product flags would incorrectly disable HTTP fixtures.
-Dependency setup runs before tests; test-stage Cargo and uv use their prepared
-caches in offline mode.
+Dependency setup fetches the complete Cargo lockfile, including test-only
+crates, before tests; test-stage Cargo and uv use their prepared caches offline.
 
 The driver accepts `--target-dir` and `--cargo-home` to reuse approved build
 caches rather than creating per-lane copies. A reused Cargo home must contain

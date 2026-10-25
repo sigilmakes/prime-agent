@@ -61,8 +61,10 @@ class WorkspaceGateTests(unittest.TestCase):
             with patch.object(gate.sys, "argv", args), \
                     patch.object(gate, "prepare_kernel"), patch.object(gate, "run") as command:
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(command.call_count, 2)
-            build, checks = command.call_args_list
+            self.assertEqual(command.call_count, 3)
+            fetch, build, checks = command.call_args_list
+            self.assertEqual(fetch.args[0], ["cargo", "fetch", "--locked"])
+            self.assertNotIn("CARGO_NET_OFFLINE", fetch.kwargs["env"])
             self.assertEqual(build.args[0], ["cargo", "build", "--locked", "--workspace", "--bins"])
             self.assertEqual(checks.args[0], ["make", "workspace-check"])
             self.assertNotIn("loopback_only", checks.kwargs)

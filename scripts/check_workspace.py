@@ -192,6 +192,9 @@ def main():
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
         deadline = time.monotonic() + args.timeout
         prepare_kernel(repo, env, deadline, args.kernel_python)
+        # Fetch the complete lockfile, including test-only dependencies, before
+        # the offline all-target Clippy and test commands run in a cold CI cache.
+        run(["cargo", "fetch", "--locked"], repo=repo, env=env, deadline=deadline)
         run(["cargo", "build", "--locked", "--workspace", "--bins"],
             repo=repo, env=env, deadline=deadline)
         test_env = dict(env, CARGO_NET_OFFLINE="true", UV_OFFLINE="1")
