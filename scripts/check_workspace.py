@@ -24,6 +24,7 @@ TOOL_ENV = (
     "NIX_CFLAGS_COMPILE", "NIX_LDFLAGS", "NIX_SSL_CERT_FILE",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR",
     "LIBRARY_PATH", "LD_LIBRARY_PATH", "RUST_SRC_PATH", "PA_WORKSPACE_BOOTSTRAP_PYTHON",
+    "PA_TS_BINARY", "PA_TS_REFERENCE",
 )
 KERNEL_IMPORTS = (
     "rlm", "dill", "requests", "httpx", "yaml", "tomli", "dotenv", "pandas",
@@ -92,6 +93,16 @@ def isolated_environment(repo, state, target, cargo_home, ambient):
         "UV_PROJECT_ENVIRONMENT": str(kernel),
     })
     return env
+
+
+def require_ts_reference(env):
+    binary = Path(env.get("PA_TS_BINARY", ""))
+    if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ValueError("PA_TS_BINARY must name an existing absolute executable for required parity")
+    reference = Path(env.get("PA_TS_REFERENCE", ""))
+    catalog = reference / "packages/coding-agent/src/core/prime-inference-model-catalog.ts"
+    if not reference.is_absolute() or not catalog.is_file():
+        raise ValueError("PA_TS_REFERENCE must name the TypeScript source checkout for required parity")
 
 
 def run(command, *, repo, env, deadline, capture=False):
@@ -167,6 +178,8 @@ def main():
                         help="dedicated credential-free Cargo cache (default: target/workspace-cargo)")
     parser.add_argument("--kernel-python", type=Path,
                         help="approved test venv; source identity and kernel extras are checked")
+    parser.add_argument("--require-ts-reference", action="store_true",
+                        help="fail unless explicit TS binary and source reference are provisioned")
     parser.add_argument("--timeout", type=float, default=10800,
                         help="total deadline in seconds (default: 10800)")
     args = parser.parse_args()
@@ -188,6 +201,8 @@ def main():
     with (target / ".downstream-workspace-check.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         env = isolated_environment(repo, state, target, cargo_home, os.environ)
+        if args.require_ts_reference:
+            require_ts_reference(env)
         for key in ("HOME", "TMPDIR", "XDG_RUNTIME_DIR", "PRIME_AGENT_CODING_AGENT_DIR"):
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
         deadline = time.monotonic() + args.timeout

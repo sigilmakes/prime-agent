@@ -348,7 +348,7 @@ async fn retire_session_runtime_clears_the_live_park() {
         .await
         .expect("the park fires");
     assert!(engine.is_quota_parked());
-    engine.retire_session_runtime().await;
+    engine.retire_session_runtime().await.unwrap();
     assert!(
         !engine.is_quota_parked(),
         "the retired session's park ends with it"

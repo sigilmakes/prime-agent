@@ -871,13 +871,35 @@ impl AgentSessionEngine {
         });
     }
 
-    /// Retire the live runtime so the next demand seam rebuilds a fresh
-    /// session against the moved file. The kernel disposes first — it
-    /// must not carry the old session's namespace — and the build gate
-    /// is held across the teardown.
-    pub(crate) async fn retire_session_runtime(&self) {
+    /// Retire a proven completed runtime for cold reuse of the same file.
+    /// Refusal keeps the cached SDK, mirrors, and accepted work intact. Once
+    /// admission closes, a later-domain refusal remains closed and cached.
+    /// The build gate covers preflight, owner retirement, and kernel teardown.
+    #[cfg(test)]
+    pub(crate) async fn retire_session_runtime(&self) -> anyhow::Result<()> {
         let mut completion_state = self.session_build.lock().await;
+        let built = self.session.lock().await.clone();
+        if let Some(engine) = built {
+            engine.session.retire_completed_runtime().await?;
+        }
         *completion_state = None;
+        self.clear_retired_runtime().await;
+        Ok(())
+    }
+
+    /// Authorized cancel-and-replace already aborts and settles at the worker.
+    /// It does not grant permission to reuse the old physical owner.
+    pub(crate) async fn discard_replaced_session_runtime(&self) {
+        let mut completion_state = self.session_build.lock().await;
+        if let Some(engine) = self.session.lock().await.as_ref() {
+            engine.session.close_runtime_admission_for_replacement();
+        }
+        *completion_state = None;
+        self.clear_retired_runtime().await;
+    }
+
+    /// Callers hold `session_build` across this cache and kernel teardown.
+    async fn clear_retired_runtime(&self) {
         let built = self.session.lock().await.take();
         *self
             .prompt_context_boundary

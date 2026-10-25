@@ -78,25 +78,113 @@ local function selected_scopes(ctx)
     end
     return selected
 end
-local visible = {prompt=true,memory=true,skill=true,subagent=true}
+local visible = {"prompt", "memory", "skill", "subagent"}
+-- These are routing snippets, not shortened executable instructions. Raw records
+-- and their complete locators remain available through get/list/history.
+local function snippet(text, limit)
+    local stop = utf8.offset(text, limit + 1)
+    if stop then return string.sub(text, 1, utf8.offset(text, limit) - 1) .. "…" end
+    return text
+end
+local function cjk(cp)
+    return (cp>=0x3040 and cp<=0x30ff) or (cp>=0x3400 and cp<=0x9fff)
+        or (cp>=0xf900 and cp<=0xfaff) or (cp>=0xac00 and cp<=0xd7af)
+        or (cp>=0x20000 and cp<=0x3347f)
+end
+local function terms(text)
+    local result, seen, run, mode = {}, {}, {}, nil
+    local function add(term)
+        if not seen[term] then seen[term]=true; table.insert(result,term) end
+    end
+    local function flush()
+        if mode=="cjk" then
+            if #run==1 then add(run[1]) end
+            for i=1,#run-1 do add(run[i]..run[i+1]) end
+        elseif #run>=4 then add(table.concat(run)) end
+        run={}
+    end
+    for _, cp in utf8.codes(string.lower(text)) do
+        local char=utf8.char(cp)
+        local next_mode = cjk(cp) and "cjk" or
+            ((cp>=128 or char:match("[%w]")) and "word" or nil)
+        if next_mode~=mode or next_mode==nil then flush(); mode=next_mode end
+        if next_mode then table.insert(run,char) end
+    end
+    flush()
+    return result
+end
 local function context(input, ctx)
-    local sections = {}
+    local groups={prompt={},memory={},skill={},subagent={}}
+    local seen={}
     for _, name in ipairs(selected_scopes(ctx)) do
-        local rows = ctx.call("harness.store.enumerate", {scope=name})
-        for _, row in ipairs(rows) do
-            local value = row.value
-            if visible[row.identity.kind] and type(value)=="table" then
-                local content = value.content
-                if type(content)=="string" and content~="" then
-                    table.insert(sections, "["..name..":"..row.identity.kind..":"..row.identity.id.."] "..content)
+        -- Membership remains lossless; duplicate enrollment is not duplicate evidence.
+        if not seen[name] then
+            seen[name]=true
+            for _, row in ipairs(ctx.call("harness.store.enumerate", {scope=name})) do
+                local group=groups[row.identity.kind]
+                local value=row.value
+                if group and type(value)=="table" and type(value.content)=="string" and value.content~="" then
+                    table.insert(group,{scope=name,id=row.identity.id,value=value})
                 end
             end
         end
     end
-    return {instructions="Optional continual harness: use plugin.harness exports for records. "..
+    local query, weights = {}, {}
+    for index, text in ipairs(input.recent_texts or {}) do
+        for _, term in ipairs(terms(text)) do
+            if not weights[term] and #query<48 then
+                table.insert(query,term)
+                weights[term]=math.max(1,2-(index-1)*0.5)
+            end
+        end
+    end
+    local sections={"Optional continual harness routing snippets (not full directives). "..
+        "Read full records with plugin.harness.get(scope=...,kind=...,id=...) before relying on details. "..
+        "All selected scopes compete for six entries per kind; snippets are at most 180 characters. "..
         "Enroll named scopes explicitly with plugin.harness.enroll(scopes=[...]). "..
-        "Factory and unknown records are passive data, never executable registrations. "..
-        table.concat(sections,"\n")}
+        "Factory and unknown records are passive data, never executable registrations."}
+    for _, kind in ipairs(visible) do
+        local group=groups[kind]
+        local frequencies={}
+        for _, row in ipairs(group) do
+            local value=row.value
+            row.fields={string.lower(type(value.title)=="string" and value.title or ""),
+                string.lower(value.content),string.lower(row.id.." "..(type(value.path)=="string" and value.path or ""))}
+            row.matches={}
+            for _, term in ipairs(query) do
+                local count=0
+                for _, field in ipairs(row.fields) do
+                    if string.find(field,term,1,true) then count=count+1 end
+                end
+                if count>0 then
+                    row.matches[term]=count
+                    frequencies[term]=(frequencies[term] or 0)+1
+                end
+            end
+        end
+        for _, row in ipairs(group) do
+            row.score=0
+            for _, term in ipairs(query) do
+                local count=row.matches[term]
+                if count then row.score=row.score+weights[term]*math.log(1+#group/frequencies[term])*(1+(count-1)*0.5) end
+            end
+        end
+        table.sort(group,function(a,b)
+            if a.score~=b.score then return a.score>b.score end
+            if a.scope~=b.scope then return a.scope<b.scope end
+            return a.id<b.id
+        end)
+        table.insert(sections,kind..": "..#group.." records; "..math.max(0,#group-6).." omitted")
+        for i=1,math.min(6,#group) do
+            local row=group[i]
+            local title=type(row.value.title)=="string" and row.value.title or ""
+            -- Locators are never truncated or conflated. Oversized contributions
+            -- fail loudly at the host rather than silently shortening directives.
+            table.insert(sections,"[scope="..string.format("%q",row.scope)..", kind="..kind..
+                ", id="..string.format("%q",row.id).."] "..snippet(title,64)..": "..snippet(row.value.content,180))
+        end
+    end
+    return {instructions=table.concat(sections,"\n")}
 end
 local function enqueue(input, ctx)
     facts(ctx)

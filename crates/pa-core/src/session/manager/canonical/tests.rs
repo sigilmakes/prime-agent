@@ -887,3 +887,153 @@ fn append_generation_changes_are_allowed_only_with_verified_physical_growth() {
         .is_err());
     assert_eq!(snapshot(&m), before);
 }
+
+fn immutable_observation(
+    checkpoint: CanonicalCheckpoint,
+    visible: Option<&str>,
+) -> crate::session_engine::canonical_live::CanonicalLiveSnapshot {
+    crate::session_engine::canonical_live::CanonicalLiveSnapshot {
+        checkpoint,
+        admitted_users: HashSet::new(),
+        pending_users: VecDeque::new(),
+        pending_custom: VecDeque::new(),
+        safe_visible_leaf: visible.map(str::to_owned),
+    }
+}
+
+#[test]
+fn immutable_snapshot_installs_without_approvals_and_rejects_whole_candidate_atomically() {
+    let cp = checkpoint(vec![custom("a", None)], Some("a"));
+    let mut m = manager(&cp);
+    let raw_header = cp.header.raw().to_vec();
+    let raw_rows = match &cp.source {
+        CanonicalSource::Full(rows) => rows.clone(),
+        CanonicalSource::Window(_) => unreachable!(),
+    };
+    m.install_canonical_snapshot(0, None, immutable_observation(cp, Some("a")))
+        .unwrap();
+    assert_eq!(m.canonical_raw_header().unwrap().raw(), raw_header);
+    assert_eq!(
+        m.canonical_raw_full_rows()
+            .unwrap()
+            .iter()
+            .map(|row| row.raw())
+            .collect::<Vec<_>>(),
+        raw_rows.iter().map(|row| row.raw()).collect::<Vec<_>>()
+    );
+    assert!(m.canonical_raw.as_ref().unwrap().used_approvals.is_empty());
+    assert!(m.canonical_raw.as_ref().unwrap().seen_users.is_empty());
+    let before = snapshot(&m);
+    let binding = m.canonical_binding().unwrap().clone();
+    let bad = CanonicalCheckpoint {
+        cursor: binding.clone(),
+        header: m.canonical_raw_header().unwrap().clone(),
+        source: CanonicalSource::Full(raw_rows),
+    };
+    assert!(m
+        .install_canonical_snapshot(
+            m.canonical_local_revision(),
+            Some(&binding),
+            immutable_observation(bad, Some("absent"))
+        )
+        .is_err());
+    assert_eq!(snapshot(&m), before);
+    assert!(m.canonical_raw.as_ref().unwrap().used_approvals.is_empty());
+}
+
+#[test]
+fn immutable_snapshot_preserves_local_queue_seen_and_actual_approvals_exactly() {
+    let cp = checkpoint(vec![user("u1", None), user("u2", Some("u1"))], Some("u2"));
+    let mut m = manager(&cp);
+    let operation = CanonicalOperation::new();
+    let serving = Arc::new(());
+    let local = approved(
+        &m,
+        &operation,
+        &cp.cursor,
+        CanonicalAdmissionPolicy::Replace(vec!["u2".into(), "u1".into()]),
+        &serving,
+        None,
+    );
+    m.install_canonical_checkpoint(&operation, 0, None, cp, local)
+        .unwrap();
+    let binding = m.canonical_binding().unwrap().clone();
+    let queue = m.admitted_user_rows.clone();
+    let seen = m.canonical_raw.as_ref().unwrap().seen_users.clone();
+    let approvals = m.canonical_raw.as_ref().unwrap().used_approvals.clone();
+    let observation = crate::session_engine::canonical_live::CanonicalLiveSnapshot {
+        checkpoint: CanonicalCheckpoint {
+            cursor: binding.clone(),
+            header: m.canonical_raw_header().unwrap().clone(),
+            source: CanonicalSource::Full(m.canonical_raw_full_rows().unwrap().to_vec()),
+        },
+        admitted_users: HashSet::from(["u1".into(), "u2".into()]),
+        pending_users: VecDeque::from(["u1".into(), "u2".into()]),
+        pending_custom: VecDeque::new(),
+        safe_visible_leaf: None,
+    };
+    m.install_canonical_snapshot(m.canonical_local_revision(), Some(&binding), observation)
+        .unwrap();
+    assert_eq!(m.admitted_user_rows, queue);
+    assert_eq!(m.canonical_raw.as_ref().unwrap().seen_users, seen);
+    assert_eq!(m.canonical_raw.as_ref().unwrap().used_approvals, approvals);
+}
+
+#[test]
+fn immutable_snapshot_rejects_lost_seen_membership_without_changing_manager() {
+    let cp = checkpoint(vec![user("u", None)], Some("u"));
+    let mut m = manager(&cp);
+    let operation = CanonicalOperation::new();
+    let serving = Arc::new(());
+    let local = approved(
+        &m,
+        &operation,
+        &cp.cursor,
+        CanonicalAdmissionPolicy::Replace(vec!["u".into()]),
+        &serving,
+        None,
+    );
+    m.install_canonical_checkpoint(&operation, 0, None, cp, local)
+        .unwrap();
+    // Already consumed locally: queue validation alone must not forget seen membership.
+    m.admitted_user_rows.clear();
+    let before = snapshot(&m);
+    let binding = m.canonical_binding().unwrap().clone();
+    let observation = immutable_observation(
+        CanonicalCheckpoint {
+            cursor: binding.clone(),
+            header: m.canonical_raw_header().unwrap().clone(),
+            source: CanonicalSource::Full(m.canonical_raw_full_rows().unwrap().to_vec()),
+        },
+        Some("u"),
+    );
+    assert!(m
+        .install_canonical_snapshot(m.canonical_local_revision(), Some(&binding), observation)
+        .is_err());
+    assert_eq!(snapshot(&m), before);
+}
+
+#[test]
+fn immutable_snapshot_rejects_pending_user_missing_from_local_seen_atomically() {
+    let cp = checkpoint(vec![user("u", None)], Some("u"));
+    let mut m = manager(&cp);
+    install(&mut m, cp);
+    m.admitted_user_rows.push_back("u".into());
+    let before = snapshot(&m);
+    let binding = m.canonical_binding().unwrap().clone();
+    let observation = crate::session_engine::canonical_live::CanonicalLiveSnapshot {
+        checkpoint: CanonicalCheckpoint {
+            cursor: binding.clone(),
+            header: m.canonical_raw_header().unwrap().clone(),
+            source: CanonicalSource::Full(m.canonical_raw_full_rows().unwrap().to_vec()),
+        },
+        admitted_users: HashSet::from(["u".into()]),
+        pending_users: VecDeque::from(["u".into()]),
+        pending_custom: VecDeque::new(),
+        safe_visible_leaf: None,
+    };
+    assert!(m
+        .install_canonical_snapshot(m.canonical_local_revision(), Some(&binding), observation)
+        .is_err());
+    assert_eq!(snapshot(&m), before);
+}

@@ -199,6 +199,15 @@ impl RawCapture {
             source: CanonicalSource::Full(self.retained.clone()),
         })
     }
+    /// Refresh only the logical owner position after a locked ledger transaction.
+    /// Physical identity, bytes, graph and generation remain exactly unchanged.
+    pub(super) fn refresh_owner_position(&mut self, position: &RawPosition) {
+        debug_assert_eq!(position.owner, self.cursor.owner);
+        debug_assert_eq!(position.branch_revision, self.cursor.branch_revision);
+        debug_assert_eq!(position.selected_leaf, self.cursor.selected_leaf);
+        self.cursor.canonical_revision = position.canonical_revision;
+    }
+
     pub fn capture(path: &Path, position: RawPosition, mode: CaptureMode) -> Result<Self> {
         Self::scan(path, position, mode, None).map(|(capture, _)| capture)
     }

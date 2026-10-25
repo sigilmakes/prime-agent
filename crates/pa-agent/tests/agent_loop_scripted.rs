@@ -606,7 +606,7 @@ async fn steering_message_injects_before_next_turn() {
         async move { agent.prompt("start").await }
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
-    agent.steer(AgentMessage::user("steered"));
+    agent.steer(AgentMessage::user("steered")).unwrap();
     prompt_task.await.unwrap().unwrap();
     agent.wait_for_idle().await;
 

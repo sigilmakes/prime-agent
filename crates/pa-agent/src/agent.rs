@@ -321,7 +321,41 @@ struct ActiveRun {
     model: Model,
 }
 
+#[derive(Default)]
+struct RuntimeAdmission {
+    closed: bool,
+    queue_draining: bool,
+}
+
+struct QueueDrain<'a> {
+    admission: &'a Mutex<RuntimeAdmission>,
+    complete: bool,
+}
+impl Drop for QueueDrain<'_> {
+    fn drop(&mut self) {
+        let mut admission = self.admission.lock().unwrap();
+        admission.queue_draining = false;
+        // Cancellation can occur after accepted queues were drained but before
+        // run registration. That uncertainty is not proof of an empty runtime.
+        if !self.complete {
+            admission.closed = true;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct QueueDrainPause {
+    drained: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
 struct AgentInner {
+    admission: Mutex<RuntimeAdmission>,
+    #[cfg(test)]
+    queue_drain_pause: Mutex<Option<QueueDrainPause>>,
+    #[cfg(test)]
+    queue_reserve_pause: Mutex<Option<QueueDrainPause>>,
     /// Serializes state reduction and listener delivery without holding the
     /// state lock across callbacks that may read or restore that state.
     event_delivery: tokio::sync::Mutex<()>,
@@ -574,7 +608,11 @@ impl AgentInner {
         config
     }
 
-    async fn run_with_lifecycle<F, Fut>(self: &Arc<Self>, executor: F) -> anyhow::Result<()>
+    async fn run_with_lifecycle<F, Fut>(
+        self: &Arc<Self>,
+        queued: Option<&mut QueueDrain<'_>>,
+        executor: F,
+    ) -> anyhow::Result<()>
     where
         F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<()>>,
@@ -592,6 +630,12 @@ impl AgentInner {
                 .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
         };
         {
+            let admission = self.admission.lock().unwrap();
+            anyhow::ensure!(!admission.closed, "Agent runtime is retired");
+            anyhow::ensure!(
+                queued.is_some() || !admission.queue_draining,
+                "Agent queue admission is already pending"
+            );
             let mut run = self.run.lock().unwrap();
             if run.is_some() {
                 anyhow::bail!("Agent is already processing.");
@@ -601,6 +645,9 @@ impl AgentInner {
                 idle_tx,
                 model: run_model,
             });
+            if let Some(queued) = queued {
+                queued.complete = true;
+            }
         }
         let run_signal = controller.signal();
 
@@ -638,9 +685,15 @@ impl AgentInner {
         self: &Arc<Self>,
         messages: Vec<AgentMessage>,
         skip_initial_steering_poll: bool,
+        queued: Option<&mut QueueDrain<'_>>,
     ) -> anyhow::Result<()> {
-        self.run_prompt_messages_with_start_signal(messages, skip_initial_steering_poll, None)
-            .await
+        self.run_prompt_messages_with_start_signal(
+            messages,
+            skip_initial_steering_poll,
+            None,
+            queued,
+        )
+        .await
     }
 
     /// The same run, firing `started` once the run registers; the caller
@@ -650,9 +703,10 @@ impl AgentInner {
         messages: Vec<AgentMessage>,
         skip_initial_steering_poll: bool,
         started: Option<tokio::sync::oneshot::Sender<()>>,
+        queued: Option<&mut QueueDrain<'_>>,
     ) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
-        self.run_with_lifecycle(|signal, model_override| async move {
+        self.run_with_lifecycle(queued, |signal, model_override| async move {
             if let Some(started) = started {
                 let _ = started.send(());
             }
@@ -686,7 +740,7 @@ impl AgentInner {
 
     async fn run_continuation(self: &Arc<Self>) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
-        self.run_with_lifecycle(|signal, model_override| async move {
+        self.run_with_lifecycle(None, |signal, model_override| async move {
             let (context, config) = {
                 let shared = inner.shared.lock().await;
                 (
@@ -717,17 +771,63 @@ impl AgentInner {
     /// Drains queued steering/follow-up messages as a run. Returns whether
     /// a run was started.
     async fn run_queued_messages(self: &Arc<Self>) -> anyhow::Result<bool> {
-        let queued_steering = self.steering_queue.lock().unwrap().drain();
-        if !queued_steering.is_empty() {
-            self.run_prompt_messages(queued_steering, true).await?;
-            return Ok(true);
+        #[cfg(test)]
+        {
+            let pause = self.queue_reserve_pause.lock().unwrap().clone();
+            if let Some(pause) = pause {
+                pause.drained.notify_one();
+                pause.resume.notified().await;
+            }
         }
-        let queued_follow_ups = self.follow_up_queue.lock().unwrap().drain();
-        if !queued_follow_ups.is_empty() {
-            self.run_prompt_messages(queued_follow_ups, false).await?;
-            return Ok(true);
+        let mut drain = {
+            let mut admission = self.admission.lock().unwrap();
+            anyhow::ensure!(!admission.closed, "Agent runtime is retired");
+            anyhow::ensure!(
+                !admission.queue_draining,
+                "Agent queue admission is already pending"
+            );
+            let run = self.run.lock().unwrap();
+            anyhow::ensure!(run.is_none(), "Agent is already processing.");
+            admission.queue_draining = true;
+            QueueDrain {
+                admission: &self.admission,
+                complete: false,
+            }
+        };
+        let result = async {
+            let queued_steering = self.steering_queue.lock().unwrap().drain();
+            if !queued_steering.is_empty() {
+                #[cfg(test)]
+                {
+                    let pause = self.queue_drain_pause.lock().unwrap().clone();
+                    if let Some(pause) = pause {
+                        pause.drained.notify_one();
+                        pause.resume.notified().await;
+                    }
+                }
+                self.run_prompt_messages(queued_steering, true, Some(&mut drain))
+                    .await?;
+                return Ok(true);
+            }
+            let queued_follow_ups = self.follow_up_queue.lock().unwrap().drain();
+            if !queued_follow_ups.is_empty() {
+                #[cfg(test)]
+                {
+                    let pause = self.queue_drain_pause.lock().unwrap().clone();
+                    if let Some(pause) = pause {
+                        pause.drained.notify_one();
+                        pause.resume.notified().await;
+                    }
+                }
+                self.run_prompt_messages(queued_follow_ups, false, Some(&mut drain))
+                    .await?;
+                return Ok(true);
+            }
+            drain.complete = true;
+            Ok(false)
         }
-        Ok(false)
+        .await;
+        result
     }
 
     fn normalize_prompt_input(input: AgentPromptInput) -> Vec<AgentMessage> {
@@ -774,6 +874,11 @@ impl Agent {
                 listeners: Vec::new(),
                 next_listener_id: 0,
             }),
+            admission: Mutex::new(RuntimeAdmission::default()),
+            #[cfg(test)]
+            queue_drain_pause: Mutex::new(None),
+            #[cfg(test)]
+            queue_reserve_pause: Mutex::new(None),
             steering_queue: Mutex::new(PendingMessageQueue::new(
                 options.steering_mode.unwrap_or(QueueMode::OneAtATime),
             )),
@@ -959,28 +1064,42 @@ impl Agent {
 
     /// Queue a message batch to be injected after the current assistant turn finishes.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if runtime admission is closed.
+    ///
     /// # Panics
     ///
-    /// Panics if the `steering_queue` mutex is poisoned.
-    pub fn steer(&self, message: impl Into<AgentMessageBatch>) {
+    /// Panics if the admission or `steering_queue` mutex is poisoned.
+    pub fn steer(&self, message: impl Into<AgentMessageBatch>) -> anyhow::Result<()> {
+        let admission = self.inner.admission.lock().unwrap();
+        anyhow::ensure!(!admission.closed, "Agent runtime is retired");
         self.inner
             .steering_queue
             .lock()
             .unwrap()
             .enqueue(message.into());
+        Ok(())
     }
 
     /// Queue a message batch to run only after the agent would otherwise stop.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if runtime admission is closed.
+    ///
     /// # Panics
     ///
-    /// Panics if the `follow_up_queue` mutex is poisoned.
-    pub fn follow_up(&self, message: impl Into<AgentMessageBatch>) {
+    /// Panics if the admission or `follow_up_queue` mutex is poisoned.
+    pub fn follow_up(&self, message: impl Into<AgentMessageBatch>) -> anyhow::Result<()> {
+        let admission = self.inner.admission.lock().unwrap();
+        anyhow::ensure!(!admission.closed, "Agent runtime is retired");
         self.inner
             .follow_up_queue
             .lock()
             .unwrap()
             .enqueue(message.into());
+        Ok(())
     }
 
     /// # Panics
@@ -1059,6 +1178,40 @@ impl Agent {
     pub fn has_queued_messages(&self) -> bool {
         self.inner.steering_queue.lock().unwrap().has_items()
             || self.inner.follow_up_queue.lock().unwrap().has_items()
+    }
+
+    /// Seal a discarded runtime after its owner has authorized cancellation.
+    /// Accepted queues and active-run facts remain intact, never reclassified as completed.
+    ///
+    /// # Panics
+    /// Panics when the admission mutex is poisoned.
+    pub fn close_runtime_admission_for_replacement(&self) {
+        self.inner.admission.lock().unwrap().closed = true;
+    }
+
+    /// Permanently close a completed runtime without discarding accepted work.
+    ///
+    /// # Errors
+    /// Refuses active runs, queued batches, and queue-to-run admissions.
+    /// # Panics
+    /// Panics when an admission, run, or queue mutex is poisoned.
+    pub fn retire_completed_runtime(&self) -> anyhow::Result<()> {
+        let mut admission = self.inner.admission.lock().unwrap();
+        anyhow::ensure!(!admission.closed, "Agent runtime is retired");
+        anyhow::ensure!(
+            !admission.queue_draining,
+            "Agent queue admission is pending"
+        );
+        let run = self.inner.run.lock().unwrap();
+        let steering = self.inner.steering_queue.lock().unwrap();
+        let follow_up = self.inner.follow_up_queue.lock().unwrap();
+        anyhow::ensure!(run.is_none(), "Agent run is active");
+        anyhow::ensure!(
+            !steering.has_items() && !follow_up.has_items(),
+            "Agent has queued work"
+        );
+        admission.closed = true;
+        Ok(())
     }
 
     /// The loop's provider stream function (the side-thread clone passes the
@@ -1162,7 +1315,7 @@ impl Agent {
             );
         }
         let messages = AgentInner::normalize_prompt_input(input.into());
-        self.inner.run_prompt_messages(messages, false).await
+        self.inner.run_prompt_messages(messages, false, None).await
     }
 
     /// Admit the prompt, return once its run registers, and let the run
@@ -1190,7 +1343,7 @@ impl Agent {
         let (failed_tx, failed_rx) = tokio::sync::oneshot::channel::<anyhow::Error>();
         tokio::spawn(async move {
             let result = inner
-                .run_prompt_messages_with_start_signal(messages, false, Some(started_tx))
+                .run_prompt_messages_with_start_signal(messages, false, Some(started_tx), None)
                 .await;
             if let Err(error) = result {
                 let _ = failed_tx.send(error);
@@ -1281,6 +1434,196 @@ impl Clone for Agent {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn completed_runtime_rejects_retained_agent_admission() {
+        let agent = Agent::new(AgentOptions::default());
+        let retained = agent.clone();
+        agent.retire_completed_runtime().unwrap();
+        assert!(retained.steer(AgentMessage::user("late")).is_err());
+        assert!(retained.follow_up(AgentMessage::user("late")).is_err());
+        assert_eq!(
+            retained.prompt("late").await.unwrap_err().to_string(),
+            "Agent runtime is retired"
+        );
+        assert!(retained.continue_run().await.is_err());
+        assert!(!retained.has_queued_messages());
+    }
+
+    #[tokio::test]
+    async fn retirement_refuses_real_drained_queue_before_run_registration() {
+        let agent = Agent::new(AgentOptions::default());
+        let drained = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *agent.inner.queue_drain_pause.lock().unwrap() = Some(QueueDrainPause {
+            drained: drained.clone(),
+            resume,
+        });
+        agent.follow_up(AgentMessage::user("accepted")).unwrap();
+        let retained = agent.clone();
+        let task = tokio::spawn(async move { retained.continue_run().await });
+        drained.notified().await;
+        assert!(!agent.has_queued_messages());
+        assert!(agent.inner.run.lock().unwrap().is_none());
+        assert_eq!(
+            agent
+                .prompt("cannot steal queued handoff")
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Agent queue admission is already pending"
+        );
+        assert!(agent.retire_completed_runtime().is_err());
+        task.abort();
+        let _cancelled = task.await;
+        assert!(!agent.inner.admission.lock().unwrap().queue_draining);
+        assert!(agent.retire_completed_runtime().is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_registration_wins_without_losing_unreserved_queue() {
+        let agent = Agent::new(AgentOptions::default());
+        let reserving = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *agent.inner.queue_reserve_pause.lock().unwrap() = Some(QueueDrainPause {
+            drained: reserving.clone(),
+            resume: resume.clone(),
+        });
+        agent.follow_up(AgentMessage::user("accepted")).unwrap();
+        let retained = agent.clone();
+        let continuation = tokio::spawn(async move { retained.continue_run().await });
+        reserving.notified().await;
+        let registered = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let inner = agent.inner.clone();
+        let started = registered.clone();
+        let settled = finish.clone();
+        let direct = tokio::spawn(async move {
+            inner
+                .run_with_lifecycle(None, |_, _| async move {
+                    started.notify_one();
+                    settled.notified().await;
+                    Ok(())
+                })
+                .await
+        });
+        registered.notified().await;
+        resume.notify_one();
+        assert_eq!(
+            continuation.await.unwrap().unwrap_err().to_string(),
+            "Agent is already processing."
+        );
+        assert_eq!(agent.follow_up_previews(), vec!["accepted".to_string()]);
+        assert!(!agent.inner.admission.lock().unwrap().closed);
+        finish.notify_one();
+        direct.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_close_preserves_queued_facts_and_refuses_retained_handles() {
+        let agent = Agent::new(AgentOptions::default());
+        agent
+            .follow_up(AgentMessage::user("cancelled pending"))
+            .unwrap();
+        let retained = agent.clone();
+        agent.close_runtime_admission_for_replacement();
+        assert_eq!(
+            agent.follow_up_previews(),
+            vec!["cancelled pending".to_string()]
+        );
+        assert!(retained.steer(AgentMessage::user("late")).is_err());
+        assert!(retained.follow_up(AgentMessage::user("late")).is_err());
+        assert_eq!(
+            retained.prompt("late").await.unwrap_err().to_string(),
+            "Agent runtime is retired"
+        );
+        assert!(retained.continue_run().await.is_err());
+        assert!(agent.retire_completed_runtime().is_err());
+    }
+
+    #[tokio::test]
+    async fn second_continuation_refuses_before_draining_another_batch() {
+        let agent = Agent::new(AgentOptions::default());
+        let drained = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *agent.inner.queue_drain_pause.lock().unwrap() = Some(QueueDrainPause {
+            drained: drained.clone(),
+            resume,
+        });
+        agent.follow_up(AgentMessage::user("first")).unwrap();
+        let retained = agent.clone();
+        let first = tokio::spawn(async move { retained.continue_run().await });
+        drained.notified().await;
+        agent.follow_up(AgentMessage::user("second")).unwrap();
+        let second = agent.continue_run().await.unwrap_err();
+        assert_eq!(
+            second.to_string(),
+            "Agent queue admission is already pending"
+        );
+        assert_eq!(agent.follow_up_previews(), vec!["second".to_string()]);
+        first.abort();
+        let _cancelled = first.await;
+        assert!(agent.has_queued_messages());
+    }
+
+    #[tokio::test]
+    async fn registered_queued_provider_failure_does_not_retire_admission() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let stream_fn: crate::stream::StreamFn = Arc::new(move |_, _, _| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Err(anyhow::anyhow!("known local provider failure")) })
+        });
+        let agent = Agent::new(AgentOptions {
+            stream_fn: Some(stream_fn),
+            ..Default::default()
+        });
+        agent.follow_up(AgentMessage::user("queued")).unwrap();
+        assert_eq!(
+            agent.continue_run().await.unwrap_err().to_string(),
+            "known local provider failure"
+        );
+        assert!(!agent.inner.admission.lock().unwrap().closed);
+        assert_eq!(
+            agent.prompt("next").await.unwrap_err().to_string(),
+            "known local provider failure"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn enqueue_racing_retirement_is_explicitly_accepted_or_refused() {
+        let agent = Agent::new(AgentOptions::default());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let retained = agent.clone();
+        let start = barrier.clone();
+        let enqueue = std::thread::spawn(move || {
+            start.wait();
+            retained.steer(AgentMessage::user("racing"))
+        });
+        barrier.wait();
+        let retired = agent.retire_completed_runtime();
+        let admitted = enqueue.join().unwrap();
+        assert_ne!(retired.is_ok(), admitted.is_ok());
+        assert_eq!(agent.has_queued_messages(), admitted.is_ok());
+    }
+
+    #[test]
+    fn completed_runtime_refuses_accepted_queue_and_drain_reservation() {
+        let agent = Agent::new(AgentOptions::default());
+        agent.steer(AgentMessage::user("accepted")).unwrap();
+        assert!(agent.retire_completed_runtime().is_err());
+        assert!(agent.has_queued_messages());
+        agent.clear_steering_queue();
+        agent.inner.admission.lock().unwrap().queue_draining = true;
+        let drain = QueueDrain {
+            admission: &agent.inner.admission,
+            complete: true,
+        };
+        assert!(agent.retire_completed_runtime().is_err());
+        drop(drain);
+        agent.retire_completed_runtime().unwrap();
+    }
+
     #[test]
     fn pending_message_queue_all_mode_flattens() {
         let mut queue = PendingMessageQueue::new(QueueMode::All);
@@ -1352,7 +1695,7 @@ mod tests {
             std::time::Duration::from_secs(2),
             agent
                 .inner
-                .run_with_lifecycle(move |_signal, _override| async move {
+                .run_with_lifecycle(None, move |_signal, _override| async move {
                     inner.process_events(AgentEvent::AgentStart).await
                 }),
         )

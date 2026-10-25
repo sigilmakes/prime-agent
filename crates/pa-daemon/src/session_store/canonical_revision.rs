@@ -206,6 +206,39 @@ impl CanonicalRevision {
         Ok(())
     }
 
+    /// Preflight a ledger transaction before arming any pending receipt.
+    pub(crate) fn check_owner_state_advance(&self) -> Result<()> {
+        let state = self.shared.lock()?;
+        state.permits(None)?;
+        if state.active_attempts != 0 || state.active_io != 0 {
+            return Err(RevisionError::Busy);
+        }
+        state
+            .canonical_revision
+            .checked_add(1)
+            .ok_or(RevisionError::Overflow)?;
+        Ok(())
+    }
+
+    /// Advance an accepted owner ledger transaction, without pretending to do I/O.
+    /// Check every refusal before the caller changes its owner state under its lock.
+    pub(crate) fn advance_owner_state(
+        &self,
+        operation: Option<&CanonicalOperation>,
+    ) -> Result<RevisionSnapshot> {
+        let mut state = self.shared.lock()?;
+        state.permits(operation)?;
+        if state.active_attempts != 0 || state.active_io != 0 {
+            return Err(RevisionError::Busy);
+        }
+        let next = state
+            .canonical_revision
+            .checked_add(1)
+            .ok_or(RevisionError::Overflow)?;
+        state.canonical_revision = next;
+        Ok(self.shared.snapshot(&state))
+    }
+
     /// Explicit navigation/branch ABA changes both revisions, even without bytes.
     /// No navigation is allowed through a pending physical barrier.
     pub(crate) fn advance_branch(&self) -> Result<RevisionSnapshot> {
@@ -346,6 +379,63 @@ impl Drop for OwnedWriteAttempt {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn ledger_advance_has_no_io_and_preserves_epoch_scope() {
+        let tracker = CanonicalRevision::new();
+        let initial = tracker.snapshot().unwrap();
+        for revision in 1..=4 {
+            tracker.check_owner_state_advance().unwrap();
+            let next = tracker.advance_owner_state(None).unwrap();
+            assert_eq!(next.owner, initial.owner);
+            assert_eq!(next.branch_revision, initial.branch_revision);
+            assert_eq!(next.canonical_revision, revision);
+            assert_eq!(tracker.active_io(), Ok(0));
+        }
+        let branch = tracker.advance_branch().unwrap();
+        assert_eq!(branch.canonical_revision, 5);
+        assert_eq!(branch.branch_revision, 1);
+        let mut write = tracker.admit_write(None).unwrap();
+        write.begin_io().unwrap();
+        let written = write.finish_success().unwrap();
+        assert_eq!(written.canonical_revision, 6);
+        assert_eq!(written.branch_revision, 1);
+    }
+
+    #[test]
+    fn ledger_advance_refuses_active_io_barrier_overflow_and_poison_before_effects() {
+        let tracker = CanonicalRevision::new();
+        let initial = tracker.snapshot().unwrap();
+        let operation = CanonicalOperation::new();
+        let ticket = tracker.set_barrier(&operation).unwrap();
+        assert_eq!(
+            tracker.advance_owner_state(None),
+            Err(RevisionError::BarrierMismatch)
+        );
+        assert_eq!(tracker.snapshot(), Ok(initial.clone()));
+        tracker.clear_barrier(&operation, &ticket).unwrap();
+        let mut attempt = tracker.admit_write(None).unwrap();
+        assert_eq!(tracker.advance_owner_state(None), Err(RevisionError::Busy));
+        attempt.begin_io().unwrap();
+        assert_eq!(tracker.advance_owner_state(None), Err(RevisionError::Busy));
+        drop(attempt);
+        assert_eq!(
+            tracker.advance_owner_state(None),
+            Err(RevisionError::Poisoned)
+        );
+        let tracker = CanonicalRevision::new();
+        tracker.shared.lock().unwrap().canonical_revision = u64::MAX;
+        let before = tracker.snapshot().unwrap();
+        assert_eq!(
+            tracker.check_owner_state_advance(),
+            Err(RevisionError::Overflow)
+        );
+        assert_eq!(
+            tracker.advance_owner_state(None),
+            Err(RevisionError::Overflow)
+        );
+        assert_eq!(tracker.snapshot(), Ok(before));
+    }
 
     #[test]
     fn successful_write_advances_exactly_once_without_branch_change() {

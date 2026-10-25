@@ -53,6 +53,57 @@ class WorkspaceGateTests(unittest.TestCase):
         self.assertEqual(env["PRIME_AGENT_CODING_AGENT_DIR"], "/private/state/agent")
         self.assertEqual(env["PRIME_AGENT_DAEMON_SOCKET"], "/private/state/run/daemon.sock")
 
+    def test_explicit_parity_paths_survive_without_ambient_credentials_or_path_changes(self):
+        root = Path("/private")
+        env = gate.isolated_environment(root / "repo", root / "state", root / "target",
+                                        root / "cargo", {
+            "PATH": "/pinned/bin",
+            "PA_TS_BINARY": "/nix/store/pinned-ts/bin/prime-agent",
+            "PA_TS_REFERENCE": "/workspace/ts-reference",
+            "OPENAI_API_KEY": "secret", "NODE_OPTIONS": "--require=/untrusted.js",
+            "PRIME_AGENT_MANAGED_BY": "ambient-manager",
+        })
+        self.assertEqual(env["PA_TS_BINARY"], "/nix/store/pinned-ts/bin/prime-agent")
+        self.assertEqual(env["PA_TS_REFERENCE"], "/workspace/ts-reference")
+        self.assertEqual(env["PATH"], "/pinned/bin")
+        for key in ("OPENAI_API_KEY", "NODE_OPTIONS", "PRIME_AGENT_MANAGED_BY"):
+            self.assertNotIn(key, env)
+
+    def test_required_parity_rejects_missing_relative_and_nonexecutable_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "prime-agent"
+            binary.write_text("fixture; never executed")
+            reference = root / "ts-reference"
+            catalog = reference / "packages/coding-agent/src/core/prime-inference-model-catalog.ts"
+            catalog.parent.mkdir(parents=True)
+            catalog.write_text("fixture")
+            valid = {"PA_TS_BINARY": str(binary), "PA_TS_REFERENCE": str(reference)}
+            for declared in ({}, valid, dict(valid, PA_TS_BINARY="prime-agent"),
+                             dict(valid, PA_TS_BINARY=str(root / "absent"))):
+                with self.assertRaisesRegex(ValueError, "PA_TS_BINARY"):
+                    gate.require_ts_reference(declared)
+            binary.chmod(0o755)
+            for declared in (dict(valid, PA_TS_REFERENCE="ts-reference"),
+                             dict(valid, PA_TS_REFERENCE=str(root / "absent"))):
+                with self.assertRaisesRegex(ValueError, "PA_TS_REFERENCE"):
+                    gate.require_ts_reference(declared)
+            gate.require_ts_reference(valid)
+
+    def test_required_parity_fails_before_kernel_or_cargo_when_not_provisioned(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = ["check_workspace.py", "--state-root", str(root / "state"),
+                    "--target-dir", str(root / "target"), "--require-ts-reference"]
+            with patch.object(gate.sys, "argv", args), \
+                    patch.dict(gate.os.environ, {}, clear=True), \
+                    patch.object(gate, "prepare_kernel") as kernel, \
+                    patch.object(gate, "run") as command:
+                with self.assertRaisesRegex(ValueError, "PA_TS_BINARY"):
+                    gate.main()
+            kernel.assert_not_called()
+            command.assert_not_called()
+
     def test_workspace_gate_runs_full_checks_without_nested_namespace(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

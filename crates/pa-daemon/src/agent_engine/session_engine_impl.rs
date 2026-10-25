@@ -213,12 +213,12 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     /// The replacement teardown (see
-    /// [`Self::retire_session_runtime`]): the moved-to session rebuilds cold.
+    /// [`Self::discard_replaced_session_runtime`]): the moved-to session rebuilds cold.
     fn teardown_for_replacement(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            self.retire_session_runtime().await;
+            self.discard_replaced_session_runtime().await;
         })
     }
 

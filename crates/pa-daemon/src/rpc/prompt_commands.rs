@@ -222,9 +222,9 @@ pub async fn steer_or_follow_up(
     let agent = engine.session.agent();
     let batch = user_prompt_message(message, &images);
     if name == "steer" {
-        agent.steer(batch);
+        agent.steer(batch).map_err(|error| error.to_string())?;
     } else {
-        agent.follow_up(batch);
+        agent.follow_up(batch).map_err(|error| error.to_string())?;
     }
     // A steer/follow-up command is a TS pump-resume site: queued input
     // (including the one just queued) delivers when the session idles.

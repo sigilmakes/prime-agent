@@ -96,9 +96,11 @@ fn owner_scope_starts_only_at_lease_attach_and_survives_clones() {
         .prepare_canonical(request(CanonicalPrepareMode::Observe))
         .is_err());
     drop(prepared);
-    assert!(store
+    let error = store
         .prepare_canonical(request(CanonicalPrepareMode::Observe))
-        .is_err());
+        .err()
+        .expect("abandoned caller must refuse preparation");
+    assert_eq!(error.detail, "canonical owner adoption abandoned");
 }
 
 #[test]
@@ -141,9 +143,14 @@ fn exact_metadata_suffix_blocks_all_writes_until_core_adoption_ack() {
         .persist_entry("custom", json!({"customType":"bypass"}))
         .is_err());
     assert!(store.rewrite().is_err());
-    assert!(store
+    let error = store
         .prepare_canonical(request(CanonicalPrepareMode::Observe))
-        .is_err());
+        .err()
+        .expect("pending adoption must refuse preparation");
+    assert_eq!(
+        error.detail,
+        "canonical owner awaiting adoption acknowledgement"
+    );
     let cursor = receipt.to.clone();
     let certificate = manager
         .apply_canonical_suffix(
@@ -191,7 +198,7 @@ fn accepted_user_is_durable_once_and_replayed_only_by_fifo_with_original_timesta
         .is_err());
     let delivered = store
         .admit_canonical_user(CanonicalLiveUserRequest {
-            expected: Some(initial),
+            expected: Some(store.canonical_snapshot().unwrap().checkpoint.cursor),
             source: CanonicalSourceRequest::Full,
             message: serde_json::from_value(json!({"content":"same body","timestamp":99})).unwrap(),
         })
@@ -420,6 +427,7 @@ fn ack_visibility_is_capped_by_both_actual_delivery_ledgers() {
         .unwrap();
     assert_eq!(delivered.admitted_entry_id, user);
     let prepared = delivered.prepared;
+    let cursor = prepared.checkpoint.cursor.clone();
     let binding = manager.canonical_binding().cloned();
     let certificate = manager
         .install_canonical_checkpoint(
@@ -504,4 +512,420 @@ fn prepared_ack_then_explicit_prepared_only_abandon_does_not_require_pending_rec
         .prepare_canonical(request(CanonicalPrepareMode::Observe))
         .is_ok());
     assert_eq!(std::fs::read(&store.path).unwrap(), before);
+}
+
+#[test]
+fn exact_unwritten_observation_can_be_abandoned_after_caller_drop() {
+    let (_dir, mut store) = fixture();
+    let before = std::fs::read(&store.path).unwrap();
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .unwrap();
+    let ack = CanonicalAcknowledgement {
+        operation: prepared.operation.clone(),
+        cursor: prepared.checkpoint.cursor.clone(),
+        phase: CanonicalAckPhase::AbandonPreparedOnly,
+        adoption: None,
+    };
+    let wrong = CanonicalAcknowledgement {
+        operation: CanonicalOperation::new(),
+        cursor: ack.cursor.clone(),
+        phase: ack.phase,
+        adoption: None,
+    };
+    assert!(store.acknowledge_canonical(wrong).is_err());
+    drop(prepared);
+    store.acknowledge_canonical(ack).unwrap();
+    assert_eq!(std::fs::read(&store.path).unwrap(), before);
+    let next = store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .unwrap();
+    assert_eq!(next.checkpoint.cursor.frontier.bytes, before.len() as u64);
+}
+
+#[test]
+fn pending_mutation_cannot_use_observation_abandon() {
+    let (_dir, mut store) = fixture();
+    let before = std::fs::read(&store.path).unwrap();
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Mutation(
+            CanonicalMutationKind::OwnerMetadata,
+        )))
+        .unwrap();
+    assert!(store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation: prepared.operation.clone(),
+            cursor: prepared.checkpoint.cursor.clone(),
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .is_err());
+    drop(prepared);
+    assert!(store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), before);
+}
+
+#[test]
+fn durable_user_pending_cannot_be_abandoned_as_unwritten_observation() {
+    let (_dir, mut store) = fixture();
+    let delivered = store
+        .admit_canonical_user(CanonicalLiveUserRequest {
+            expected: None,
+            source: CanonicalSourceRequest::Full,
+            message: serde_json::from_value(json!({"content":"durable","timestamp":7})).unwrap(),
+        })
+        .unwrap();
+    let bytes = std::fs::read(&store.path).unwrap();
+    let id = delivered.admitted_entry_id.clone();
+    assert!(store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation: delivered.prepared.operation.clone(),
+            cursor: delivered.prepared.checkpoint.cursor.clone(),
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .is_err());
+    drop(delivered);
+    assert!(store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+    assert_eq!(SessionFile::open(&store.path).unwrap().entries()[0].id, id);
+}
+
+#[test]
+fn staged_observation_with_admission_cannot_be_abandoned() {
+    let (_dir, mut store) = fixture();
+    store.attach_canonical_owner().unwrap();
+    let id = store
+        .persist_delivered_user(json!({"role":"user","content":"staged","timestamp":7}))
+        .unwrap();
+    let prepared = store
+        .prepare_canonical(CanonicalLivePrepareRequest {
+            expected: None,
+            source: CanonicalSourceRequest::Full,
+            mode: CanonicalPrepareMode::Observe,
+            admission: CanonicalAdmissionPolicy::Append(vec![id]),
+        })
+        .unwrap();
+    let bytes = std::fs::read(&store.path).unwrap();
+    assert!(store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation: prepared.operation.clone(),
+            cursor: prepared.checkpoint.cursor.clone(),
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .is_err());
+    drop(prepared);
+    assert!(store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+}
+
+#[test]
+fn unwritten_observation_abandon_refuses_external_source_change() {
+    use std::io::Write;
+    let (_dir, mut store) = fixture();
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&store.path)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let changed = std::fs::read(&store.path).unwrap();
+    assert!(store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation: prepared.operation.clone(),
+            cursor: prepared.checkpoint.cursor.clone(),
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .is_err());
+    drop(prepared);
+    assert!(store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), changed);
+}
+
+#[test]
+fn immutable_snapshot_drop_and_rejection_leave_writer_usable_and_bytes_exact() {
+    let (_dir, mut store) = fixture();
+    let before = store.attach_canonical_owner().unwrap();
+    let bytes = std::fs::read(&store.path).unwrap();
+    for _ in 0..3 {
+        let snapshot = store.canonical_snapshot().unwrap();
+        assert_eq!(snapshot.checkpoint.cursor, before);
+        assert!(snapshot.pending_users.is_empty());
+        assert!(snapshot.pending_custom.is_empty());
+        assert!(snapshot.admitted_users.is_empty());
+        drop(snapshot);
+    }
+    assert!(!store.canonical_source_uncertain());
+    let id = store
+        .persist_owner_metadata(
+            "custom",
+            json!({"customType":"snapshot-drop","data":{"unknown":[1,true]}}),
+        )
+        .unwrap();
+    let snapshot = store.canonical_snapshot().unwrap();
+    assert_eq!(
+        snapshot.checkpoint.cursor.canonical_revision,
+        before.canonical_revision + 1
+    );
+    assert_eq!(snapshot.safe_visible_leaf, Some(id));
+    assert!(std::fs::read(&store.path).unwrap().starts_with(&bytes));
+    drop(snapshot);
+    assert!(!store.canonical_source_uncertain());
+}
+
+#[test]
+fn completed_stages_allow_snapshots_but_pending_fifos_cap_visibility_and_navigation() {
+    let (_dir, mut store) = fixture();
+    let before = store.attach_canonical_owner().unwrap();
+    let user = store
+        .persist_delivered_user(json!({"role":"user","content":"accepted","timestamp":7}))
+        .unwrap();
+    let custom = store
+        .persist_delivered_custom(json!({"customType":"queued","content":"note","display":true}))
+        .unwrap();
+    let snapshot = store.canonical_snapshot().unwrap();
+    assert_eq!(
+        snapshot.pending_users,
+        std::collections::VecDeque::from([user.clone()])
+    );
+    assert_eq!(
+        snapshot.pending_custom,
+        std::collections::VecDeque::from([custom])
+    );
+    assert_eq!(snapshot.safe_visible_leaf, None);
+    assert_eq!(
+        snapshot.checkpoint.cursor.canonical_revision,
+        before.canonical_revision + 2
+    );
+    let bytes = std::fs::read(&store.path).unwrap();
+    assert!(store.advance_canonical_branch(None).is_err());
+    let delivered = store
+        .admit_canonical_user(CanonicalLiveUserRequest {
+            expected: Some(snapshot.checkpoint.cursor.clone()),
+            source: CanonicalSourceRequest::Full,
+            message: serde_json::from_value(json!({"content":"accepted","timestamp":99})).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(delivered.admitted_entry_id, user);
+    assert_eq!(
+        delivered.prepared.checkpoint.cursor.canonical_revision,
+        snapshot.checkpoint.cursor.canonical_revision + 1
+    );
+    assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+    // Actual admission reply debt remains guarded, unlike an immutable snapshot.
+    assert!(store.canonical_snapshot().is_err());
+    drop(delivered);
+    assert!(store.canonical_snapshot().is_err());
+}
+
+#[test]
+fn newly_written_user_admission_advances_once_not_twice() {
+    let (_dir, mut store) = fixture();
+    let before = store.attach_canonical_owner().unwrap();
+    let delivered = store
+        .admit_canonical_user(CanonicalLiveUserRequest {
+            expected: Some(before.clone()),
+            source: CanonicalSourceRequest::Full,
+            message: serde_json::from_value(json!({"content":"new","timestamp":7})).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(
+        delivered.prepared.checkpoint.cursor.canonical_revision,
+        before.canonical_revision + 1
+    );
+    let pa_core::session::canonical::CanonicalSource::Full(rows) =
+        &delivered.prepared.checkpoint.source
+    else {
+        panic!("full")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].entry().id(),
+        Some(delivered.admitted_entry_id.as_str())
+    );
+}
+
+#[test]
+fn initial_sdk_bootstrap_allows_attached_staging_but_not_admission_transfer() {
+    let (_dir, mut store) = fixture();
+    store.attach_canonical_owner().unwrap();
+    store
+        .persist_delivered_user(json!({"role":"user","content":"initial","timestamp":7}))
+        .unwrap();
+    store.validate_initial_canonical_sdk().unwrap();
+    let snapshot = store.canonical_snapshot().unwrap();
+    let prepared = store
+        .prepare_canonical(CanonicalLivePrepareRequest {
+            expected: Some(snapshot.checkpoint.cursor),
+            source: CanonicalSourceRequest::Full,
+            mode: CanonicalPrepareMode::Observe,
+            admission: CanonicalAdmissionPolicy::Replace(
+                snapshot.pending_users.into_iter().collect(),
+            ),
+        })
+        .unwrap();
+    assert!(store.validate_initial_canonical_sdk().is_err());
+    drop(prepared);
+    assert!(store.validate_initial_canonical_sdk().is_err());
+}
+
+#[test]
+fn custom_fifo_exact_adoption_keeps_original_row_and_next_snapshot() {
+    use pa_core::session_engine::canonical_live::CanonicalLiveCustomRequest;
+    let (_dir, mut store) = fixture();
+    let mut manager = mirror(&store);
+    store.attach_canonical_owner().unwrap();
+    let fields = json!({"customType":"queued", "content":[{"type":"text","text":"note"}],
+        "display":true, "details":{"opaque":"AA=="}, "futureField":{"ordered":[3,1,2]}});
+    let first = store.persist_delivered_custom(fields.clone()).unwrap();
+    let second = store.persist_delivered_custom(fields.clone()).unwrap();
+    let before = store.canonical_snapshot().unwrap();
+    let bytes = std::fs::read(&store.path).unwrap();
+    let delivered = store
+        .admit_canonical_custom(CanonicalLiveCustomRequest {
+            expected: Some(before.checkpoint.cursor.clone()),
+            source: CanonicalSourceRequest::Full,
+            message: serde_json::from_value({
+                let mut message = fields;
+                message["timestamp"] = json!(999);
+                message
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    assert_eq!(delivered.admitted_entry_id, first);
+    assert_eq!(
+        delivered.prepared.checkpoint.cursor.canonical_revision,
+        before.checkpoint.cursor.canonical_revision + 1
+    );
+    let pa_core::session::canonical::CanonicalSource::Full(original) = &before.checkpoint.source
+    else {
+        panic!("full");
+    };
+    let pa_core::session::canonical::CanonicalSource::Full(prepared_rows) =
+        &delivered.prepared.checkpoint.source
+    else {
+        panic!("full");
+    };
+    assert_eq!(
+        prepared_rows
+            .iter()
+            .map(|row| row.raw())
+            .collect::<Vec<_>>(),
+        original.iter().map(|row| row.raw()).collect::<Vec<_>>()
+    );
+    assert!(store.canonical_snapshot().is_err());
+    adopt_prepared(&mut store, &mut manager, delivered.prepared).complete();
+    let after = store.canonical_snapshot().unwrap();
+    assert_eq!(
+        after.pending_custom,
+        std::collections::VecDeque::from([second])
+    );
+    assert_eq!(after.safe_visible_leaf, Some(first));
+    let pa_core::session::canonical::CanonicalSource::Full(after_rows) = &after.checkpoint.source
+    else {
+        panic!("full");
+    };
+    assert_eq!(
+        after_rows.iter().map(|row| row.raw()).collect::<Vec<_>>(),
+        original.iter().map(|row| row.raw()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        after.checkpoint.cursor.canonical_revision,
+        before.checkpoint.cursor.canonical_revision + 1
+    );
+    assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+}
+
+#[test]
+fn successful_stage_write_with_failed_capture_keeps_debt_and_exact_bytes() {
+    let (_dir, mut store) = fixture();
+    store.attach_canonical_owner().unwrap();
+    let prefix = std::fs::read(&store.path).unwrap();
+    store.fail_next_stage_capture();
+    assert!(store
+        .persist_delivered_custom(json!({
+            "customType":"capture-failure", "content":"once", "display":true
+        }))
+        .is_err());
+    let written = std::fs::read(&store.path).unwrap();
+    assert!(written.starts_with(&prefix));
+    let reopened = SessionFile::open(&store.path).unwrap();
+    assert_eq!(reopened.entries().len(), 1);
+    assert!(store.canonical_snapshot().is_err());
+    assert!(store
+        .persist_delivered_custom(json!({
+            "customType":"capture-failure", "content":"once", "display":true
+        }))
+        .is_err());
+    assert!(store
+        .persist_owner_metadata("custom", json!({"customType":"blocked"}))
+        .is_err());
+    assert!(store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), written);
+}
+
+#[test]
+fn completed_owner_retirement_preserves_native_fifos_and_retires_old_scope() {
+    let (_dir, mut store) = fixture();
+    store.attach_canonical_owner().unwrap();
+    let user = store
+        .persist_delivered_user(json!({"role":"user","content":"pending","timestamp":7}))
+        .unwrap();
+    let custom = store.persist_delivered_custom(json!({"customType":"pending", "content":"note", "display":true, "unknown":{"raw":[3,1]}})).unwrap();
+    let snapshot = store.canonical_snapshot().unwrap();
+    let mut old = store.clone();
+    let bytes = std::fs::read(&store.path).unwrap();
+    store
+        .retire_completed_canonical_runtime(&snapshot.checkpoint.cursor)
+        .unwrap();
+    assert!(old.canonical_snapshot().is_err());
+    assert!(old
+        .persist_delivered_user(json!({"role":"user","content":"late","timestamp":8}))
+        .is_err());
+    let fresh = store.attach_canonical_owner().unwrap();
+    assert_ne!(fresh.owner, snapshot.checkpoint.cursor.owner);
+    store.validate_initial_canonical_sdk().unwrap();
+    let after = store.canonical_snapshot().unwrap();
+    assert_eq!(after.pending_users, snapshot.pending_users);
+    assert_eq!(after.pending_custom, snapshot.pending_custom);
+    assert_eq!(
+        after.pending_users.into_iter().collect::<Vec<_>>(),
+        vec![user]
+    );
+    assert_eq!(
+        after.pending_custom.into_iter().collect::<Vec<_>>(),
+        vec![custom]
+    );
+    assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+}
+
+#[test]
+fn completed_owner_retirement_refuses_unacknowledged_mutation() {
+    let (_dir, mut store) = fixture();
+    let cursor = store.attach_canonical_owner().unwrap();
+    let pending = store
+        .prepare_canonical(request(CanonicalPrepareMode::Mutation(
+            CanonicalMutationKind::OwnerMetadata,
+        )))
+        .unwrap();
+    assert!(store.retire_completed_canonical_runtime(&cursor).is_err());
+    drop(pending);
+    assert!(store.retire_completed_canonical_runtime(&cursor).is_err());
+    assert!(store.attach_canonical_owner().is_err());
 }

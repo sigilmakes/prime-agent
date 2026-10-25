@@ -299,7 +299,6 @@ pub fn stream_once_with_native(
         signal,
         result: None,
         model: json_round_trip(model).ok_or_else(|| anyhow::anyhow!("invalid provider model"))?,
-        aborted_delivered: false,
     }))
 }
 
@@ -423,7 +422,8 @@ pub fn convert_stream_event(
 }
 
 /// Bounded native adapter. Both request cancellation sources fence already queued
-/// updates and terminal messages. Drop aborts the producer instead of detaching it.
+/// updates and undelivered terminal messages. A delivered terminal is final.
+/// Drop aborts the producer instead of detaching it.
 struct PumpedStream {
     forwarder: tokio::task::JoinHandle<()>,
     receiver: tokio::sync::mpsc::Receiver<pa_agent::stream::AssistantMessageEvent>,
@@ -431,7 +431,6 @@ struct PumpedStream {
     signal: pa_agent::abort::AbortSignal,
     result: Option<pa_agent::types::AssistantMessage>,
     model: AgentModel,
-    aborted_delivered: bool,
 }
 
 impl PumpedStream {
@@ -476,16 +475,17 @@ impl ModelStream for PumpedStream {
         &mut self,
     ) -> pa_agent::BoxFut<'_, Option<pa_agent::stream::AssistantMessageEvent>> {
         Box::pin(async move {
+            // Once observed, a terminal remains authoritative even if the caller
+            // later closes the transport or aborts the request.
+            if self.result.is_some() {
+                return None;
+            }
             let event = tokio::select! { biased;
                 () = self.cancel.cancelled() => None,
                 () = self.signal.aborted() => { self.cancel.cancel(); None },
                 event = self.receiver.recv() => event,
             };
             if self.cancel.is_cancelled() || self.signal.is_aborted() {
-                if self.aborted_delivered {
-                    return None;
-                }
-                self.aborted_delivered = true;
                 let message = self.aborted_message();
                 self.result = Some(message.clone());
                 return Some(pa_agent::stream::AssistantMessageEvent::Error {
@@ -512,9 +512,6 @@ impl ModelStream for PumpedStream {
                     break;
                 }
             }
-            if self.cancel.is_cancelled() || self.signal.is_aborted() {
-                return Ok(self.aborted_message());
-            }
             self.result
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("provider stream ended without terminal event"))
@@ -536,6 +533,67 @@ mod tests {
     //! provider with a system prompt only.
 
     use super::*;
+
+    #[tokio::test]
+    async fn delivered_terminal_survives_close_and_abort() {
+        for reason in [
+            pa_types::ai::StopReason::Stop,
+            pa_types::ai::StopReason::Error,
+        ] {
+            for abort_signal in [false, true] {
+                let registration =
+                    pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                        api: Some(format!("delivered-terminal-{reason:?}-{abort_signal}")),
+                        ..Default::default()
+                    });
+                let message = pa_ai::faux::faux_assistant_text_message(
+                    "exact terminal text",
+                    pa_ai::faux::FauxAssistantMessageOptions {
+                        stop_reason: Some(reason),
+                        error_message: (reason == pa_types::ai::StopReason::Error)
+                            .then(|| "provider failure".into()),
+                        timestamp: Some(123),
+                        ..Default::default()
+                    },
+                );
+                registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(message)]);
+                let controller = pa_agent::abort::AbortController::new();
+                let mut stream = stream_once(
+                    &registration.get_model(),
+                    None,
+                    None,
+                    None,
+                    LlmContext::default(),
+                    StreamRequestOptions {
+                        signal: controller.signal(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let delivered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let event = stream.next_event().await.expect("terminal event");
+                        if let Some(message) = event.terminal_message() {
+                            return message.clone();
+                        }
+                    }
+                })
+                .await
+                .expect("fake provider completes");
+                assert_eq!(delivered.stop_reason, json_round_trip(&reason).unwrap());
+                assert!(delivered.usage.total_tokens > 0);
+                if abort_signal {
+                    controller.abort();
+                } else {
+                    stream.close();
+                }
+                assert_eq!(stream.result().await.unwrap(), delivered);
+                assert!(stream.next_event().await.is_none());
+                assert_eq!(stream.result().await.unwrap(), delivered);
+                registration.unregister();
+            }
+        }
+    }
 
     #[tokio::test]
     async fn live_target_service_tier_reaches_provider_and_reset() {

@@ -483,7 +483,7 @@ fn deliver_row(node: &Arc<InlineSessionNode>, row: Value) -> anyhow::Result<()> 
         .ok_or_else(|| anyhow::anyhow!("the target session is not running"))?;
     let loop_row = custom_message_to_loop_row(&custom)
         .ok_or_else(|| anyhow::anyhow!("the delivered row failed its loop conversion"))?;
-    engine.session.agent().steer(loop_row);
+    engine.session.agent().steer(loop_row)?;
     node.activity.notify_waiters();
     Ok(())
 }

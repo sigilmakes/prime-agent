@@ -267,6 +267,161 @@ impl SessionManager {
         self.commit_candidate(operation, header, rows, cursor, coverage, window, candidate)
     }
 
+    /// Install an immutable observation without execution or mutation authority.
+    pub(crate) fn install_canonical_snapshot(
+        &mut self,
+        expected_local_revision: u64,
+        expected_binding: Option<&CanonicalCursor>,
+        snapshot: crate::session_engine::canonical_live::CanonicalLiveSnapshot,
+    ) -> anyhow::Result<()> {
+        self.validate_cas(expected_local_revision, expected_binding)?;
+        let crate::session_engine::canonical_live::CanonicalLiveSnapshot {
+            checkpoint,
+            admitted_users,
+            pending_users,
+            pending_custom,
+            safe_visible_leaf,
+        } = snapshot;
+        let CanonicalCheckpoint {
+            cursor,
+            header,
+            source,
+        } = checkpoint;
+        validate_header(&header, &cursor)?;
+        let CanonicalSource::Full(rows) = source else {
+            anyhow::bail!("immutable snapshot requires full exact raw coverage")
+        };
+        validate_rows(&header, &rows, &cursor, CanonicalRawCoverage::Full)?;
+        if let Some(old) = &self.canonical_raw {
+            validate_refresh_cursor(&old.cursor, &cursor)?;
+            ensure!(
+                old.cursor.branch_revision == cursor.branch_revision,
+                "snapshot cannot navigate branches"
+            );
+            ensure!(
+                old.header.raw() == header.raw(),
+                "canonical raw header changed"
+            );
+            validate_overlap(old, &rows, &cursor, CanonicalRawCoverage::Full)?;
+            validate_descendant_selection(&old.cursor, &cursor, &rows)?;
+        } else {
+            ensure!(
+                !self.persist && self.session_file.is_none(),
+                "canonical mirror owns journal I/O"
+            );
+            ensure!(
+                self.file_entries.first() == Some(header.entry()),
+                "first canonical header differs"
+            );
+            ensure!(
+                self.admitted_user_rows.is_empty() && admitted_users.is_empty(),
+                "fresh SDK requires explicit guarded bootstrap, not owner membership transfer"
+            );
+        }
+        for id in &admitted_users {
+            validate_user(&rows, id)?;
+        }
+        if let Some(old) = &self.canonical_raw {
+            for id in &old.seen_users {
+                validate_user(&rows, id)?;
+                ensure!(
+                    admitted_users.contains(id),
+                    "local seen User not admitted by owner"
+                );
+            }
+        }
+        for id in &self.admitted_user_rows {
+            validate_user(&rows, id)?;
+            ensure!(
+                admitted_users.contains(id),
+                "local pending User not admitted by owner"
+            );
+            ensure!(
+                self.canonical_raw
+                    .as_ref()
+                    .is_some_and(|raw| raw.seen_users.contains(id)),
+                "local pending User missing from local seen ledger"
+            );
+        }
+        let mut queued = HashSet::new();
+        for id in &pending_users {
+            validate_user(&rows, id)?;
+            ensure!(queued.insert(id.as_str()), "duplicate pending delivery");
+        }
+        for id in &pending_custom {
+            ensure!(
+                rows.iter().any(|row| row.entry().id() == Some(id.as_str())
+                    && matches!(row.entry(), FileEntry::CustomMessage { .. })),
+                "pending Custom has another kind"
+            );
+            ensure!(queued.insert(id.as_str()), "duplicate pending delivery");
+        }
+        let mut ancestry = Vec::new();
+        let mut walk = cursor.selected_leaf.as_deref();
+        while let Some(id) = walk {
+            let entry = rows
+                .iter()
+                .find(|row| row.entry().id() == Some(id))
+                .context("snapshot selected ancestry missing")?
+                .entry();
+            ancestry.push(entry);
+            walk = entry.parent_id();
+        }
+        ancestry.reverse();
+        ensure!(
+            queued
+                .iter()
+                .all(|id| ancestry.iter().any(|entry| entry.id() == Some(*id))),
+            "pending delivery is off selected branch"
+        );
+        let safe = ancestry
+            .iter()
+            .find(|entry| entry.id().is_some_and(|id| queued.contains(id)))
+            .map_or_else(
+                || cursor.selected_leaf.clone(),
+                |entry| entry.parent_id().map(str::to_owned),
+            );
+        ensure!(
+            safe == safe_visible_leaf,
+            "snapshot visibility exceeds pending delivery prefix"
+        );
+        if let Some(visible) = safe.as_deref() {
+            for entry in &ancestry {
+                ensure!(
+                    !self
+                        .admitted_user_rows
+                        .iter()
+                        .any(|id| entry.id() == Some(id.as_str())),
+                    "snapshot visibility includes a local pending User"
+                );
+                if entry.id() == Some(visible) {
+                    break;
+                }
+            }
+        }
+        let local = LocalCandidate {
+            visible: safe_visible_leaf,
+            queue: self.admitted_user_rows.clone(),
+            seen: self
+                .canonical_raw
+                .as_ref()
+                .map_or_else(HashSet::new, |raw| raw.seen_users.clone()),
+            approvals: self
+                .canonical_raw
+                .as_ref()
+                .map_or_else(HashSet::new, |raw| raw.used_approvals.clone()),
+            fingerprint: [0; 32],
+        };
+        self.swap_canonical_candidate(
+            header,
+            rows,
+            cursor,
+            CanonicalRawCoverage::Full,
+            None,
+            local,
+        )
+    }
+
     /// Apply the complete contiguous physical suffix, with an owner replacement
     /// when sparse derived state cannot be advanced safely. No I/O occurs.
     /// # Errors
@@ -500,9 +655,33 @@ impl SessionManager {
         rows: Vec<CanonicalJournalRow>,
         cursor: CanonicalCursor,
         coverage: CanonicalRawCoverage,
-        mut window: Option<WindowedSessionStore>,
+        window: Option<WindowedSessionStore>,
         local: LocalCandidate,
     ) -> anyhow::Result<CanonicalAdoptionCertificate> {
+        let revision = self
+            .canonical_local_revision
+            .checked_add(1)
+            .context("canonical local revision overflow")?;
+        let certificate = CanonicalAdoptionCertificate {
+            operation: operation.clone(),
+            cursor: cursor.clone(),
+            local_revision: revision,
+            admission_fingerprint: local.fingerprint,
+        };
+        self.swap_canonical_candidate(header, rows, cursor, coverage, window, local)?;
+        Ok(certificate)
+    }
+
+    #[allow(clippy::too_many_arguments)] // One atomic canonical field swap shared by observations and receipts.
+    fn swap_canonical_candidate(
+        &mut self,
+        header: CanonicalJournalRow,
+        rows: Vec<CanonicalJournalRow>,
+        cursor: CanonicalCursor,
+        coverage: CanonicalRawCoverage,
+        mut window: Option<WindowedSessionStore>,
+        local: LocalCandidate,
+    ) -> anyhow::Result<()> {
         let revision = self
             .canonical_local_revision
             .checked_add(1)
@@ -541,12 +720,6 @@ impl SessionManager {
                 }
             )
         });
-        let certificate = CanonicalAdoptionCertificate {
-            operation: operation.clone(),
-            cursor: cursor.clone(),
-            local_revision: revision,
-            admission_fingerprint: local.fingerprint,
-        };
         // All fallible checks and all candidate construction precede the first mutation.
         self.file_entries = entries;
         self.by_id = by_id;
@@ -567,7 +740,7 @@ impl SessionManager {
             seen_users: local.seen,
             used_approvals: local.approvals,
         });
-        Ok(certificate)
+        Ok(())
     }
 }
 

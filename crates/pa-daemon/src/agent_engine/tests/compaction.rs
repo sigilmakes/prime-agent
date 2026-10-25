@@ -163,7 +163,10 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
             .ensure_ready()
             .unwrap();
     }
-    engine.runtime.block_on(engine.retire_session_runtime());
+    engine
+        .runtime
+        .block_on(engine.retire_session_runtime())
+        .unwrap();
     drop(engine);
     drop(owner);
     let reopened = crate::session_store::SessionFile::open(&path).unwrap();
@@ -714,7 +717,8 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
     write_settings("drift", "drift-1");
     engine
         .runtime
-        .block_on(async { engine.retire_session_runtime().await });
+        .block_on(async { engine.retire_session_runtime().await })
+        .unwrap();
     assert!(engine
         .runtime
         .block_on(async { engine.session.lock().await.is_none() }));

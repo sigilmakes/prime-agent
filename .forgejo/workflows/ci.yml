@@ -49,5 +49,16 @@ jobs:
               uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
               with:
                   persist-credentials: false
+            - name: Checkout pinned TypeScript parity reference
+              uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+              with:
+                  ref: 239dbe344fcaf671af9898906ff952be73995614
+                  path: ts-reference
+                  persist-credentials: false
+            - name: Build pinned TypeScript parity reference
+              run: nix build ./ts-reference#prime-agent --no-update-lock-file --out-link "$RUNNER_TEMP/pa-ts-reference"
             - name: Full workspace gates with private state and a real kernel
-              run: nix develop --no-update-lock-file --command python3 -B scripts/check_workspace.py --timeout 10800
+              run: |
+                  export PA_TS_BINARY="$RUNNER_TEMP/pa-ts-reference/bin/prime-agent"
+                  export PA_TS_REFERENCE="$GITHUB_WORKSPACE/ts-reference"
+                  nix develop --no-update-lock-file --command python3 -B scripts/check_workspace.py --require-ts-reference --timeout 10800

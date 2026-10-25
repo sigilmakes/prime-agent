@@ -337,12 +337,7 @@ fn run(binary: &Path, args: &[&str], sandbox: &Path) -> InvocationOutput {
         // TS daemon census escapes into the box's ambient daemons and
         // `shutdown --force` kills unrelated sockets (containment contract).
         .env("TMPDIR", sandbox.join("tmp"))
-        // Isolate the socket dir the same way: daemon discovery (status,
-        // doctor, shutdown) must never see this box's real sockets, and
-        // `shutdown --force` on the TS binary has no containment guard.
-        .env("TMPDIR", sandbox.join("tmp"))
         .env("PI_OFFLINE", "1")
-        .current_dir(sandbox.join("cwd"))
         .current_dir(sandbox.join("cwd"))
         .output()
         .expect("failed to spawn binary under test");
@@ -452,8 +447,8 @@ fn sandbox(prefix: &str) -> PathBuf {
 // behavior is documented in docs/legacy-upgrade-contract.md. args.rs tests pin
 // bounded u32 and unknown-option validation; model list declares only [search],
 // not a --json option. ACP shares the native non-interactive @file rejection.
-// Installed TS registry: prime-agent 0.9.8; main.js SHA256
-// e917d025aa3ab1d3d250842b56d0cd8bdf9503de19475e134d8f64505a600192.
+// TypeScript reference: archive/typescript-2026-10-18, commit
+// 239dbe344fcaf671af9898906ff952be73995614.
 fn declared_output_matches(
     output: &InvocationOutput,
     exit: i32,
@@ -483,61 +478,61 @@ fn declared_output_matches(
 
 fn declared_native_contract(
     case: &[&str],
-    ts: &InvocationOutput,
+    ts: Option<&InvocationOutput>,
     native: &InvocationOutput,
     roots: &[&Path],
 ) -> Option<bool> {
     match case {
         ["--help" | "-h"] => Some(
-            declared_output_matches(ts, 0, "", include_str!("fixtures/native-cli-contract/ts-help.txt"), roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 0, "", include_str!("fixtures/native-cli-contract/ts-help.txt"), roots))
                 && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-help.txt"), "", roots),
         ),
         ["help"] => Some(
-            declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-help.txt"), "", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-help.txt"), "", roots))
                 && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-help.txt"), "", roots),
         ),
         ["help", "package"] => Some(
-            declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-package-help.txt"), "", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-package-help.txt"), "", roots))
                 && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-package-help.txt"), "", roots),
         ),
         ["help", "update"] => Some(
-            declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-update-help.txt"), "", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-update-help.txt"), "", roots))
                 && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-update-help.txt"), "", roots),
         ),
         ["--autonomous-max-turns", "0" | "abc"] => Some(
-            declared_output_matches(ts, 1, "", "Error: --autonomous-max-turns must be a positive integer\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: --autonomous-max-turns must be a positive integer\n", roots))
                 && declared_output_matches(native, 1, "", "Error: --autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)\n", roots),
         ),
         ["--mode", "rpc" | "daemon", "@file.txt"] => Some(
-            declared_output_matches(ts, 1, "", "Error: @file arguments are not supported in RPC or daemon mode\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: @file arguments are not supported in RPC or daemon mode\n", roots))
                 && declared_output_matches(native, 1, "", "Error: @file arguments are not supported in RPC, daemon, or ACP mode\n", roots),
         ),
         ["model", "list", "--json"] => Some(
-            declared_output_matches(ts, 0, "", "No models available. Use /login to log into a provider via OAuth or API key. See:\n  <PACKAGE_DOCS>/docs/providers.md\n  <PACKAGE_DOCS>/docs/models.md\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 0, "", "No models available. Use /login to log into a provider via OAuth or API key. See:\n  <PACKAGE_DOCS>/docs/providers.md\n  <PACKAGE_DOCS>/docs/models.md\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Unknown option: --json\n", roots),
         ),
         ["update", "--self"] | ["update", "--force", "--self"] => Some(
-            declared_output_matches(ts, 1, "", "Error: An update target is no longer needed.\nUse \"prime-agent update [--force]\".\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: An update target is no longer needed.\nUse \"prime-agent update [--force]\".\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Unknown option for update: --self\nRun \"prime-agent help update\" for usage.\n", roots),
         ),
         ["update", "package"] => Some(
-            declared_output_matches(ts, 1, "", "Error: Package updates moved to the package command.\nUse \"prime-agent package update [source]\".\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: Package updates moved to the package command.\nUse \"prime-agent package update [source]\".\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Unknown option for update: package\nRun \"prime-agent help update\" for usage.\n", roots),
         ),
         ["update", "--extensions"] => Some(
-            declared_output_matches(ts, 1, "", "Error: Package updates moved to the package command.\nUse \"prime-agent package update [source]\".\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: Package updates moved to the package command.\nUse \"prime-agent package update [source]\".\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Unknown option for update: --extensions\nRun \"prime-agent help update\" for usage.\n", roots),
         ),
         ["update", "--self", "package"] => Some(
-            declared_output_matches(ts, 1, "", "Error: Prime Agent and package updates are now separate.\nRun \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: Prime Agent and package updates are now separate.\nRun \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Unknown option for update: --self\nRun \"prime-agent help update\" for usage.\n", roots),
         ),
         ["update", "self", "pkg"] => Some(
-            declared_output_matches(ts, 1, "", "Error: Prime Agent and package updates are now separate.\nRun \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: Prime Agent and package updates are now separate.\nRun \"prime-agent update [--force]\" and \"prime-agent package update [source]\" separately.\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Unknown option for update: self\nRun \"prime-agent help update\" for usage.\n", roots),
         ),
         ["package", "update", "--self" | "--force"] | ["package", "update", "--extension", "x", "--self" | "y"] | ["package", "update", "--extensions", "--rollback"] => Some(
-            declared_output_matches(ts, 1, "", "Error: Package updates accept only an optional source. Use \"prime-agent update --force\" to update Prime Agent.\n", roots)
+            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: Package updates accept only an optional source. Use \"prime-agent update --force\" to update Prime Agent.\n", roots))
                 && declared_output_matches(native, 1, "", "Error: Package updates accept only an optional source. Use \"prime-agent update\" to update Prime Agent.\n", roots),
         ),
         _ => None,
@@ -560,6 +555,47 @@ fn declared_late_console_case(case: &[&str]) -> bool {
     )
 }
 
+// These declared divergences are also native contracts when no TS reference is
+// installed. None disables only the TS expectation, never the native assertion.
+#[test]
+fn native_cli_contract_fixtures() {
+    let rust = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let sandbox = sandbox("native-contract");
+    for case in [
+        &["--help"][..],
+        &["-h"],
+        &["help"],
+        &["help", "package"],
+        &["help", "update"],
+        &["--autonomous-max-turns", "0"],
+        &["--autonomous-max-turns", "abc"],
+        &["--mode", "rpc", "@file.txt"],
+        &["--mode", "daemon", "@file.txt"],
+        &["model", "list", "--json"],
+        &["update", "--self"],
+        &["update", "--force", "--self"],
+        &["update", "package"],
+        &["update", "--extensions"],
+        &["update", "--self", "package"],
+        &["update", "self", "pkg"],
+        &["package", "update", "--self"],
+        &["package", "update", "--force"],
+        &["package", "update", "--extension", "x", "--self"],
+        &["package", "update", "--extension", "x", "y"],
+        &["package", "update", "--extensions", "--rollback"],
+    ] {
+        let output = run(&rust, case, &sandbox);
+        assert_eq!(
+            declared_native_contract(case, None, &output, &[&sandbox]),
+            Some(true),
+            "native contract {case:?}: exit {:?}, stdout {:?}, stderr {:?}",
+            output.exit_code,
+            output.stdout,
+            output.stderr,
+        );
+    }
+}
+
 #[test]
 fn differential_corpus_matches_ts_binary() {
     let Some(ts) = ts_binary() else {
@@ -576,7 +612,7 @@ fn differential_corpus_matches_ts_binary() {
         let ts_out = run(&ts, case, &ts_sandbox);
         let rs_out = run(&rust, case, &rs_sandbox);
         let ok = if let Some(matches) =
-            declared_native_contract(case, &ts_out, &rs_out, &sandbox_roots)
+            declared_native_contract(case, Some(&ts_out), &rs_out, &sandbox_roots)
         {
             matches
         } else if declared_late_console_case(case) {
@@ -626,6 +662,8 @@ fn run_with_env(
         .arg("20")
         .arg(binary)
         .args(args)
+        .env("HOME", sandbox.join("home"))
+        .env("TMPDIR", sandbox.join("tmp"))
         .env("PRIME_AGENT_CODING_AGENT_DIR", sandbox.join("agent"))
         .env("PI_OFFLINE", "1")
         .current_dir(sandbox.join("cwd"));

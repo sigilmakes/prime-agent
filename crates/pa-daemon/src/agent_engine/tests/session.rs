@@ -88,6 +88,66 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
 }
 
 #[tokio::test]
+async fn refused_completed_retirement_keeps_cached_runtime_and_accepted_queue() {
+    let (engine, _events) = tokio::task::spawn_blocking(|| {
+        run_prompts(
+            &json!({"engine":"faux", "responses":[{"text":"first"}]}),
+            &["hello"],
+        )
+    })
+    .await
+    .expect("prompt join");
+    let before = engine.session.lock().await.clone().unwrap();
+    before
+        .session
+        .agent()
+        .follow_up(pa_agent::types::AgentMessage::user("accepted"))
+        .unwrap();
+    assert!(engine.retire_session_runtime().await.is_err());
+    let after = engine.session.lock().await.clone().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&before, &after));
+    assert_eq!(
+        after.session.agent().follow_up_previews(),
+        vec!["accepted".to_string()]
+    );
+    after
+        .session
+        .agent()
+        .steer(pa_agent::types::AgentMessage::user("still runnable"))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn replacement_discard_seals_retained_runtime_without_claiming_empty_queue() {
+    let (engine, _events) = tokio::task::spawn_blocking(|| {
+        run_prompts(
+            &json!({"engine":"faux", "responses":[{"text":"first"}]}),
+            &["hello"],
+        )
+    })
+    .await
+    .expect("prompt join");
+    let retained = engine.session.lock().await.clone().unwrap();
+    retained
+        .session
+        .agent()
+        .follow_up(pa_agent::types::AgentMessage::user("cancelled pending"))
+        .unwrap();
+    engine.discard_replaced_session_runtime().await;
+    assert!(engine.session.lock().await.is_none());
+    assert_eq!(
+        retained.session.agent().follow_up_previews(),
+        vec!["cancelled pending".to_string()]
+    );
+    assert!(retained
+        .session
+        .agent()
+        .steer(pa_agent::types::AgentMessage::user("late"))
+        .is_err());
+    assert!(retained.session.agent().prompt("late").await.is_err());
+}
+
+#[tokio::test]
 async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_branch() {
     let engine = {
         let (engine, _events) = tokio::task::spawn_blocking(|| {
@@ -103,7 +163,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     assert!(engine.session.lock().await.is_some());
 
     // Retire: the built session drops with its mirrored goal handles.
-    engine.retire_session_runtime().await;
+    engine.retire_session_runtime().await.unwrap();
     assert!(engine.session.lock().await.is_none());
     assert!(engine
         .goal_runtime

@@ -1,7 +1,6 @@
 //! Live owner-initiated canonical receipts. The owner alone admits work and writes bytes.
 //! Core adopts exact raw checkpoints/suffixes without I/O, then ACKs before continuing.
 
-#[cfg(test)]
 use crate::session::canonical::CanonicalCheckpoint;
 use crate::session::canonical::{
     CanonicalAckPhase, CanonicalAcknowledgement, CanonicalAdmissionPolicy, CanonicalCallerGuard,
@@ -16,6 +15,16 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+/// Immutable owner-certified observation. This carries no execution or write authority.
+/// Membership is not replay order. Only the local SDK owns its execution queue.
+pub struct CanonicalLiveSnapshot {
+    pub checkpoint: CanonicalCheckpoint,
+    pub admitted_users: std::collections::HashSet<String>,
+    pub pending_users: std::collections::VecDeque<String>,
+    pub pending_custom: std::collections::VecDeque<String>,
+    pub safe_visible_leaf: Option<String>,
+}
 
 /// Owner-side preparation; admission and write leases remain with the actual owner.
 pub struct CanonicalLivePrepareRequest {
@@ -174,6 +183,17 @@ pub trait CanonicalLiveOwner: Send + Sync {
         false
     }
 
+    /// Retire this completed actual runtime scope without deleting its journal.
+    fn retire_completed_runtime(&self, _expected: CanonicalCursor) -> CanonicalFuture<()> {
+        Box::pin(async {
+            Err(failure(
+                "owner does not support runtime retirement",
+                CanonicalRequestedWrite::NotRequested,
+            ))
+        })
+    }
+
+    fn snapshot(&self) -> CanonicalFuture<CanonicalLiveSnapshot>;
     fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<()>;
     fn prepare(&self, request: CanonicalLivePrepareRequest) -> CanonicalFuture<CanonicalPrepared>;
     fn append(
@@ -383,6 +403,14 @@ impl CanonicalLiveSession {
                 CanonicalRequestedWrite::NotRequested,
             ));
         }
+        // Retirement may have closed admission between the first check and CAS.
+        if self.blocked.load(Ordering::Acquire) {
+            self.busy.store(false, Ordering::Release);
+            return Err(failure(
+                "canonical view is retired or blocked",
+                CanonicalRequestedWrite::NotRequested,
+            ));
+        }
         Ok(Flight {
             live: self,
             complete: false,
@@ -429,6 +457,46 @@ impl CanonicalLiveSession {
         Ok(())
     }
 
+    /// Permanently close this view, then retire its completed physical owner.
+    /// No local guard survives the owner call. Failures never reopen admission.
+    pub(super) async fn retire_completed_runtime(&self) -> Result<(), CanonicalStoreError> {
+        let mut flight = self.enter()?;
+        self.blocked.store(true, Ordering::Release);
+        if self
+            .run
+            .lock()
+            .map_err(|_| {
+                failure(
+                    "canonical run lock poisoned",
+                    CanonicalRequestedWrite::NotRequested,
+                )
+            })?
+            .is_some()
+        {
+            return Err(failure(
+                "canonical run is active",
+                CanonicalRequestedWrite::NotRequested,
+            ));
+        }
+        let expected = {
+            let session = self.session.lock().await;
+            if !session.canonical_pending_admitted_users().is_empty() {
+                return Err(failure(
+                    "Core still has admitted execution work",
+                    CanonicalRequestedWrite::NotRequested,
+                ));
+            }
+            session.canonical_binding().cloned().ok_or_else(|| {
+                failure(
+                    "canonical view is unbound",
+                    CanonicalRequestedWrite::NotRequested,
+                )
+            })?
+        };
+        flight.complete = true;
+        self.owner.retire_completed_runtime(expected).await
+    }
+
     async fn install(
         &self,
         prepared: CanonicalPrepared,
@@ -453,18 +521,40 @@ impl CanonicalLiveSession {
         let cursor = checkpoint.cursor.clone();
         let certificate = {
             let mut session = self.session.lock().await;
-            session
-                .install_canonical_live_checkpoint(
-                    &operation,
-                    revision,
-                    binding.as_ref(),
-                    checkpoint,
-                    admission,
-                    &self.serving,
-                )
-                .map_err(|error| {
-                    failure(error.to_string(), CanonicalRequestedWrite::NotRequested)
-                })?
+            session.install_canonical_live_checkpoint(
+                &operation,
+                revision,
+                binding.as_ref(),
+                checkpoint,
+                admission,
+                &self.serving,
+            )
+        };
+        let certificate = match certificate {
+            Ok(certificate) => certificate,
+            Err(error) => {
+                // Only the owner can prove this prepare wrote/admitted nothing.
+                // Keep the caller alive through the exact abandon attempt. A lost
+                // reply still leaves Flight blocked; it is not lifecycle recovery.
+                if let Ok(acknowledged) = self
+                    .owner
+                    .acknowledge(CanonicalAcknowledgement {
+                        operation: operation.clone(),
+                        cursor: cursor.clone(),
+                        phase: CanonicalAckPhase::AbandonPreparedOnly,
+                        adoption: None,
+                    })
+                    .await
+                {
+                    if check_ack(&operation, &cursor, &acknowledged).is_ok() {
+                        caller.complete();
+                    }
+                }
+                return Err(failure(
+                    error.to_string(),
+                    CanonicalRequestedWrite::NotRequested,
+                ));
+            }
         };
         let local_revision = certificate.local_revision();
         let acknowledged = self
@@ -511,6 +601,8 @@ impl CanonicalLiveSession {
     /// Refuses changed authority, invalid source/adoption, or incomplete owner ACK.
     pub async fn observe(&self) -> Result<(), CanonicalStoreError> {
         let mut flight = self.enter()?;
+        // Reads own only the busy slot. Cancellation/local rejection is not lost I/O.
+        flight.complete = true;
         let (revision, binding, admission) = {
             let session = self.session.lock().await;
             (
@@ -525,6 +617,22 @@ impl CanonicalLiveSession {
                 },
             )
         };
+        let bootstrap = binding.is_none()
+            && matches!(&admission,
+            CanonicalAdmissionPolicy::Replace(ids) if !ids.is_empty());
+        if !bootstrap {
+            let snapshot = self.owner.snapshot().await?;
+            self.session
+                .lock()
+                .await
+                .install_canonical_snapshot(revision, binding.as_ref(), snapshot)
+                .map_err(|error| {
+                    failure(error.to_string(), CanonicalRequestedWrite::NotRequested)
+                })?;
+            return Ok(());
+        }
+        // Nonempty bootstrap changes owner admission and retains lost-reply debt.
+        flight.complete = false;
         let prepared = self
             .owner
             .prepare(CanonicalLivePrepareRequest {
@@ -551,6 +659,7 @@ impl CanonicalLiveSession {
         &self,
         kind: CanonicalMutationKind,
     ) -> Result<CanonicalLiveMutation<'_>, CanonicalStoreError> {
+        self.observe().await?;
         let flight = self.enter()?;
         let (revision, binding, admission) = {
             let session = self.session.lock().await;
@@ -674,6 +783,7 @@ impl CanonicalLiveSession {
         &self,
         message: pa_types::ai::UserMessage,
     ) -> Result<pa_types::ai::UserMessage, CanonicalStoreError> {
+        self.observe().await?;
         let mut flight = self.enter()?;
         let (revision, binding) = {
             let session = self.session.lock().await;
@@ -804,6 +914,7 @@ impl CanonicalLiveSession {
         &self,
         message: pa_types::session::CustomMessage,
     ) -> Result<pa_types::session::CustomMessage, CanonicalStoreError> {
+        self.observe().await?;
         let mut flight = self.enter()?;
         let (revision, binding) = {
             let session = self.session.lock().await;

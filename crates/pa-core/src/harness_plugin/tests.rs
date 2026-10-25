@@ -860,3 +860,177 @@ async fn overflow_settle_never_schedules_a_review() {
         "the compaction arm owns the settle, so no auxiliary request ran"
     );
 }
+
+#[tokio::test]
+async fn bounded_harness_context_ranks_across_scopes_without_changing_raw_records() {
+    let f = Fixture::new(settings(true), LEGACY).await;
+    let content = format!("東京 quantum {}", "界".repeat(16_000));
+    for scope in ["first", "second"] {
+        f.call(
+            "create",
+            json!({"scope":scope,"kind":"memory","id":"same",
+            "value":{"title":"old relevant entry", "content":content,"unknown":null}}),
+        )
+        .await
+        .unwrap();
+    }
+    for id in ["a", "b", "c", "d", "e", "f", "g"] {
+        f.call(
+            "create",
+            json!({"scope":"first","kind":"memory","id":id,
+            "content":"unrelated newer record"}),
+        )
+        .await
+        .unwrap();
+    }
+    f.call("enroll", json!({"scopes":["first","first","second"]}))
+        .await
+        .unwrap();
+    let path = f.agent.join("plugins/harness/store.json");
+    let before = std::fs::read(&path).unwrap();
+    f.provider.push_text_turn("done");
+    f.engine
+        .prompt(
+            "東京 quantum",
+            crate::session_engine::PromptOptions::default(),
+        )
+        .await
+        .unwrap();
+    let calls = f.provider.calls();
+    let prompt = calls.last().unwrap().system_prompt.as_ref().unwrap();
+    assert!(prompt.contains("東京 quantum"));
+    assert!(prompt.contains("scope=\"first\", kind=memory, id=\"same\""));
+    assert!(prompt.contains("scope=\"second\", kind=memory, id=\"same\""));
+    assert_eq!(
+        prompt
+            .matches("scope=\"first\", kind=memory, id=\"same\"")
+            .count(),
+        1
+    );
+    assert!(!prompt.contains(&"界".repeat(181)));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert_eq!(
+        f.call("get", json!({"scope":"first","kind":"memory","id":"same"}))
+            .await
+            .unwrap()["value"],
+        json!({"title":"old relevant entry","content":content,"unknown":null})
+    );
+}
+
+#[tokio::test]
+async fn oversized_harness_locator_fails_before_provider_without_truncation() {
+    let f = Fixture::new(settings(true), LEGACY).await;
+    let id = "界".repeat(12_000);
+    f.call(
+        "create",
+        json!({"kind":"memory","id":id,"content":"important directive"}),
+    )
+    .await
+    .unwrap();
+    let before = std::fs::read(f.agent.join("plugins/harness/store.json")).unwrap();
+    let error = f
+        .engine
+        .prompt("hello", crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("32768"), "{error:#}");
+    assert!(f.provider.calls().is_empty());
+    assert_eq!(
+        std::fs::read(f.agent.join("plugins/harness/store.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        f.call("get", json!({"kind":"memory","id":id}))
+            .await
+            .unwrap()["value"]["content"],
+        "important directive"
+    );
+}
+
+#[tokio::test]
+async fn generic_context_byte_limits_are_exact_and_aggregate_before_provider() {
+    // 8192 four-byte codepoints exactly fill a contribution; separators count
+    // toward the aggregate. The base prompt is deliberately outside this budget.
+    for (plugins, chars, padding, succeeds) in [
+        (1, 8192, 0, true),
+        (1, 8192, 1, false),
+        (1, 8193, 0, false),
+        (4, 8191, 2, true),
+        (4, 8191, 3, false),
+    ] {
+        let mut config = settings(false);
+        let mut entries = serde_json::Map::new();
+        for index in 0..plugins {
+            entries.insert(
+                format!("budget{index}"),
+                json!({"enabled":true,"path":"provider.lua","config":{"chars":chars,"padding":padding}}),
+            );
+        }
+        config["plugins"] = Value::Object(entries);
+        config["testProvider"] = json!(
+            r#"return {hooks={{name='context_contribution',run=function()
+            return {instructions=string.rep('😀',config.chars)..string.rep('x',config.padding)}
+        end}}}"#
+        );
+        let f = Fixture::new(config, LEGACY).await;
+        f.provider.push_text_turn("done");
+        let result = f
+            .engine
+            .prompt("hello", crate::session_engine::PromptOptions::default())
+            .await;
+        if succeeds {
+            result.unwrap();
+            let calls = f.provider.calls();
+            let prompt = calls.last().unwrap().system_prompt.as_ref().unwrap();
+            assert_eq!(prompt.matches('😀').count(), plugins * chars);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("refusing to truncate instructions"),
+                "{error:#}"
+            );
+            assert!(f.provider.calls().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn bounded_harness_context_large_corpus_crosses_actual_lua_vm() {
+    let f = Fixture::new(settings(true), LEGACY).await;
+    // Exercise the real 16 MiB Lua VM, not just the standalone Lua formatter.
+    // Both 16K ASCII bytes and 16K multibyte codepoints must remain readable.
+    for index in 0..100 {
+        let content = if index % 2 == 0 {
+            format!("quantum {}", "界".repeat(16_000))
+        } else {
+            format!("quantum {}", "a".repeat(16_000))
+        };
+        f.call(
+            "create",
+            json!({"kind":"memory","id":format!("record-{index:03}"),
+            "value":{"content":content,"unknown":null}}),
+        )
+        .await
+        .unwrap();
+    }
+    let path = f.agent.join("plugins/harness/store.json");
+    let before = std::fs::read(&path).unwrap();
+    f.provider.push_text_turn("done");
+    f.engine
+        .prompt("quantum", crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    let calls = f.provider.calls();
+    let prompt = calls.last().unwrap().system_prompt.as_ref().unwrap();
+    assert!(prompt.contains("memory: 100 records; 94 omitted"));
+    assert_eq!(prompt.matches("kind=memory, id=\"record-").count(), 6);
+    assert!(!prompt.contains(&"界".repeat(181)));
+    assert!(!prompt.contains(&"a".repeat(181)));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert_eq!(
+        f.call("get", json!({"kind":"memory","id":"record-000"}))
+            .await
+            .unwrap()["value"]["content"],
+        format!("quantum {}", "界".repeat(16_000))
+    );
+}

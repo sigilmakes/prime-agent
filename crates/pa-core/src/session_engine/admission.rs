@@ -110,8 +110,8 @@ impl AgentSession {
         if busy {
             let message = user_prompt_message(&normalized, &images);
             match options.streaming_behavior {
-                Some(StreamingBehavior::Steer) => self.agent.steer(message),
-                Some(StreamingBehavior::FollowUp) => self.agent.follow_up(message),
+                Some(StreamingBehavior::Steer) => self.agent.steer(message)?,
+                Some(StreamingBehavior::FollowUp) => self.agent.follow_up(message)?,
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {

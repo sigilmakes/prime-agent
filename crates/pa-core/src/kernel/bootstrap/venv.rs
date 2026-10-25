@@ -60,7 +60,6 @@ use version::{recorded_skills_cover, BOOTSTRAP_SCHEMA};
 const PYTHON_VERSION: &str = "3.11";
 pub(crate) const BOOTSTRAP_LOCK_NAME: &str = ".bootstrap.lock";
 pub(crate) const BOOTSTRAP_LOCK_RETRY_MS: u64 = 100;
-pub(crate) const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS: u64 = 30_000;
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BootstrapVersion {

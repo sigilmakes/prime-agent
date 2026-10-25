@@ -17,6 +17,8 @@ struct State {
     acks: Vec<CanonicalAckPhase>,
     appends: usize,
     fail_applied_ack: bool,
+    fail_abandon_ack: bool,
+    mismatch_abandon_ack: bool,
     catchup: bool,
     delivered_users: std::collections::VecDeque<String>,
     delivered_custom: std::collections::VecDeque<String>,
@@ -24,6 +26,9 @@ struct State {
     tool_admissions: usize,
     bootstrap_preserves_owner_admission: bool,
     preparation_admissions: Vec<CanonicalAdmissionPolicy>,
+    admitted_users: std::collections::HashSet<String>,
+    snapshot_gate: Option<Arc<tokio::sync::Notify>>,
+    snapshot_started: Arc<tokio::sync::Notify>,
 }
 struct Owner(Arc<Mutex<State>>);
 impl Owner {
@@ -55,6 +60,8 @@ impl Owner {
             acks: Vec::new(),
             appends: 0,
             fail_applied_ack: false,
+            fail_abandon_ack: false,
+            mismatch_abandon_ack: false,
             catchup: false,
             delivered_users: std::collections::VecDeque::default(),
             delivered_custom: std::collections::VecDeque::default(),
@@ -62,6 +69,9 @@ impl Owner {
             tool_admissions: 0,
             bootstrap_preserves_owner_admission: false,
             preparation_admissions: Vec::new(),
+            admitted_users: std::collections::HashSet::new(),
+            snapshot_gate: None,
+            snapshot_started: Arc::new(tokio::sync::Notify::new()),
         }))))
     }
     fn seed(&self, mut value: serde_json::Value) -> String {
@@ -105,6 +115,39 @@ impl CanonicalLiveOwner for Owner {
     fn bootstrap_preserves_owner_admission(&self) -> bool {
         self.0.lock().unwrap().bootstrap_preserves_owner_admission
     }
+    fn snapshot(&self) -> CanonicalFuture<CanonicalLiveSnapshot> {
+        let state = self.0.lock().unwrap();
+        let pending: std::collections::HashSet<_> = state
+            .delivered_users
+            .iter()
+            .chain(state.delivered_custom.iter())
+            .cloned()
+            .collect();
+        let safe_visible_leaf = state
+            .rows
+            .iter()
+            .find(|row| row.entry().id().is_some_and(|id| pending.contains(id)))
+            .map_or_else(
+                || state.cursor.selected_leaf.clone(),
+                |row| row.entry().parent_id().map(str::to_owned),
+            );
+        let snapshot = CanonicalLiveSnapshot {
+            checkpoint: Self::checkpoint(&state),
+            admitted_users: state.admitted_users.clone(),
+            pending_users: state.delivered_users.clone(),
+            pending_custom: state.delivered_custom.clone(),
+            safe_visible_leaf,
+        };
+        let gate = state.snapshot_gate.clone();
+        let started = state.snapshot_started.clone();
+        Box::pin(async move {
+            started.notify_one();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            Ok(snapshot)
+        })
+    }
     fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<()> {
         assert_eq!(request.expected, self.0.lock().unwrap().cursor);
         Box::pin(async { Ok(()) })
@@ -112,6 +155,12 @@ impl CanonicalLiveOwner for Owner {
     fn prepare(&self, request: CanonicalLivePrepareRequest) -> CanonicalFuture<CanonicalPrepared> {
         let mut state = self.0.lock().unwrap();
         state.preparation_admissions.push(request.admission.clone());
+        match &request.admission {
+            CanonicalAdmissionPolicy::Append(ids) | CanonicalAdmissionPolicy::Replace(ids) => {
+                state.admitted_users.extend(ids.iter().cloned())
+            }
+            CanonicalAdmissionPolicy::Preserve => {}
+        }
         if let Some(expected) = request.expected {
             assert_eq!(expected.owner, state.cursor.owner);
             assert_eq!(expected.branch_revision, state.cursor.branch_revision);
@@ -191,7 +240,10 @@ impl CanonicalLiveOwner for Owner {
             assert_eq!(adoption.operation(), &request.operation);
             assert_eq!(adoption.cursor(), &request.cursor);
         }
-        let fail = state.fail_applied_ack && request.phase == CanonicalAckPhase::AppliedReady;
+        let fail = (state.fail_applied_ack && request.phase == CanonicalAckPhase::AppliedReady)
+            || (state.fail_abandon_ack && request.phase == CanonicalAckPhase::AbandonPreparedOnly);
+        let mismatch =
+            state.mismatch_abandon_ack && request.phase == CanonicalAckPhase::AbandonPreparedOnly;
         let pending: std::collections::HashSet<_> = state
             .delivered_users
             .iter()
@@ -212,7 +264,11 @@ impl CanonicalLiveOwner for Owner {
             current = row.entry().parent_id();
         }
         let proof = CanonicalLiveAcknowledged {
-            operation: request.operation,
+            operation: if mismatch {
+                CanonicalOperation::new()
+            } else {
+                request.operation
+            },
             cursor: request.cursor,
             visible_leaf,
         };
@@ -236,6 +292,7 @@ impl CanonicalLiveOwner for Owner {
             .delivered_users
             .pop_front()
             .expect("explicit delivered FIFO");
+        state.admitted_users.insert(id.clone());
         let checkpoint = Self::checkpoint(&state);
         Box::pin(async move {
             Ok(CanonicalLiveUserPrepared {
@@ -351,11 +408,7 @@ async fn live_receipt_adopts_exact_owner_id_and_raw_bytes_before_ready() {
     let phases = owner.0.lock().unwrap().acks.clone();
     assert_eq!(
         phases,
-        vec![
-            CanonicalAckPhase::Prepared,
-            CanonicalAckPhase::Prepared,
-            CanonicalAckPhase::AppliedReady
-        ]
+        vec![CanonicalAckPhase::Prepared, CanonicalAckPhase::AppliedReady]
     );
 }
 #[tokio::test]
@@ -564,7 +617,7 @@ async fn receipt_adoption_uses_captured_revision_not_the_current_revision() {
         .is_none());
     assert_eq!(
         owner.0.lock().unwrap().acks,
-        vec![CanonicalAckPhase::Prepared, CanonicalAckPhase::Prepared]
+        vec![CanonicalAckPhase::Prepared]
     );
 }
 fn model() -> pa_agent::types::Model {
@@ -1139,11 +1192,9 @@ async fn actual_run_git_boundary_commits_once_and_dedupes_at_end() {
         state.acks,
         vec![
             CanonicalAckPhase::Prepared,            // initial raw bootstrap
-            CanonicalAckPhase::Prepared,            // actual AgentStart source observation
             CanonicalAckPhase::Prepared,            // GitState preparation
             CanonicalAckPhase::AppliedReady,        // durable GitState adoption
             CanonicalAckPhase::Prepared,            // named User delivery (not a second append)
-            CanonicalAckPhase::Prepared,            // actual transform source observation
             CanonicalAckPhase::Prepared,            // actual terminal preparation
             CanonicalAckPhase::AppliedReady,        // durable Assistant adoption
             CanonicalAckPhase::Prepared,            // AgentEnd GitState preparation
@@ -1153,34 +1204,36 @@ async fn actual_run_git_boundary_commits_once_and_dedupes_at_end() {
 }
 
 #[tokio::test]
-async fn rebuilt_sdk_bootstrap_preserves_existing_owner_admissions() {
+async fn repeated_immutable_observation_never_prepares_or_acknowledges() {
     let owner = Owner::new();
-    let first = CanonicalLiveSession::new(owner.clone(), manager(&owner));
-    first.observe().await.unwrap();
-    assert_eq!(
-        owner.0.lock().unwrap().preparation_admissions,
-        vec![CanonicalAdmissionPolicy::Replace(Vec::new())]
-    );
-    owner.0.lock().unwrap().bootstrap_preserves_owner_admission = true;
-    let rebuilt_manager = manager(&owner);
-    assert!(rebuilt_manager.lock().await.canonical_binding().is_none());
-    let rebuilt = CanonicalLiveSession::new(owner.clone(), rebuilt_manager);
-    rebuilt.observe().await.unwrap();
-    assert_eq!(
-        owner.0.lock().unwrap().preparation_admissions.last(),
-        Some(&CanonicalAdmissionPolicy::Preserve)
-    );
-    // A public mutation can be the first operation on another unbound mirror.
-    let mutation_first = CanonicalLiveSession::new(owner.clone(), manager(&owner));
-    let ticket = mutation_first
-        .prepare_mutation(CanonicalMutationKind::OwnerMetadata)
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    for _ in 0..3 {
+        live.observe().await.unwrap();
+    }
+    live.ensure_ready().unwrap();
+    assert!(owner.0.lock().unwrap().preparation_admissions.is_empty());
+    assert!(owner.0.lock().unwrap().acks.is_empty());
+    assert_eq!(owner.0.lock().unwrap().appends, 0);
+    assert!(session
+        .lock()
+        .await
+        .canonical_pending_admitted_users()
+        .is_empty());
+    // Actual mutation still owns a real preparation and an explicit abandon.
+    live.prepare_mutation(CanonicalMutationKind::OwnerMetadata)
+        .await
+        .unwrap()
+        .abandon()
         .await
         .unwrap();
     assert_eq!(
-        owner.0.lock().unwrap().preparation_admissions.last(),
-        Some(&CanonicalAdmissionPolicy::Preserve)
+        owner.0.lock().unwrap().acks,
+        vec![
+            CanonicalAckPhase::Prepared,
+            CanonicalAckPhase::AbandonPreparedOnly
+        ]
     );
-    ticket.abandon().await.unwrap();
 }
 
 #[tokio::test]
@@ -1393,4 +1446,291 @@ async fn failed_post_commit_work_stops_agent_delivery_and_blocks_projection() {
     assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
     assert!(live.ensure_ready().is_err());
     subscription.unsubscribe().await;
+}
+
+#[tokio::test]
+async fn failed_local_install_attempts_exact_abandon_but_flight_stays_blocked() {
+    use crate::session::canonical::CanonicalCallerState;
+    for (fail, mismatch, expected_state) in [
+        (false, false, CanonicalCallerState::Completed),
+        (true, false, CanonicalCallerState::Abandoned),
+        (false, true, CanonicalCallerState::Abandoned),
+    ] {
+        let owner = Owner::new();
+        {
+            let mut state = owner.0.lock().unwrap();
+            state.fail_abandon_ack = fail;
+            state.mismatch_abandon_ack = mismatch;
+        }
+        let session = manager(&owner);
+        let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+        let flight = live.enter().unwrap();
+        let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+        let prepared = CanonicalPrepared {
+            caller,
+            operation: CanonicalOperation::new(),
+            checkpoint: Owner::checkpoint(&owner.0.lock().unwrap()),
+        };
+        let revision = session.lock().await.canonical_local_revision();
+        let error = match live
+            .install(
+                prepared,
+                revision + 1,
+                None,
+                CanonicalAdmissionPolicy::Preserve,
+            )
+            .await
+        {
+            Ok(_) => panic!("injected revision mismatch must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.detail, "canonical SDK local revision conflict");
+        assert_eq!(error.requested, CanonicalRequestedWrite::NotRequested);
+        assert_eq!(signal.state(), expected_state);
+        assert_eq!(
+            owner.0.lock().unwrap().acks,
+            vec![CanonicalAckPhase::AbandonPreparedOnly]
+        );
+        assert!(session.lock().await.canonical_binding().is_none());
+        drop(flight);
+        assert!(live.observe().await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn rejected_immutable_snapshot_releases_busy_without_owner_ack_or_poison() {
+    let owner = Owner::new();
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    live.observe().await.unwrap();
+    let cursor = owner.0.lock().unwrap().cursor.clone();
+    owner.0.lock().unwrap().cursor.branch_revision += 1;
+    assert!(live.observe().await.is_err());
+    live.ensure_ready().unwrap();
+    assert!(owner.0.lock().unwrap().acks.is_empty());
+    assert!(owner.0.lock().unwrap().preparation_admissions.is_empty());
+    owner.0.lock().unwrap().cursor = cursor;
+    live.observe().await.unwrap();
+    live.append(CanonicalMutationKind::OwnerMetadata, metadata())
+        .await
+        .unwrap();
+    assert_eq!(owner.0.lock().unwrap().appends, 1);
+}
+
+#[tokio::test]
+async fn cancelling_immutable_read_releases_busy_without_caller_or_ack_debt() {
+    let owner = Owner::new();
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session);
+    let started = {
+        let mut state = owner.0.lock().unwrap();
+        state.snapshot_gate = Some(Arc::new(tokio::sync::Notify::new()));
+        state.snapshot_started.clone()
+    };
+    let observing = live.clone();
+    let task = tokio::spawn(async move { observing.observe().await });
+    started.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    live.ensure_ready().unwrap();
+    {
+        let mut state = owner.0.lock().unwrap();
+        assert!(state.acks.is_empty());
+        assert!(state.preparation_admissions.is_empty());
+        assert_eq!(state.appends, 0);
+        state.snapshot_gate = None;
+    }
+    live.append(CanonicalMutationKind::OwnerMetadata, metadata())
+        .await
+        .unwrap();
+    assert_eq!(owner.0.lock().unwrap().appends, 1);
+}
+
+#[tokio::test]
+async fn metadata_from_rejects_original_ledger_cursor_after_snapshot_refresh_before_io() {
+    let owner = Owner::new();
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    live.observe().await.unwrap();
+    let expected = session.lock().await.canonical_binding().unwrap().clone();
+    // Logical owner ledger changes without changing the physical file/frontier.
+    owner.0.lock().unwrap().cursor.canonical_revision += 1;
+    let error =
+        match CanonicalMetadataWriter::append_metadata_from(live.clone(), metadata(), expected)
+            .await
+        {
+            Ok(_) => panic!("original metadata cursor must remain exact"),
+            Err(error) => error,
+        };
+    assert_eq!(error.requested, CanonicalRequestedWrite::NotWritten);
+    assert_eq!(owner.0.lock().unwrap().appends, 0);
+    assert_eq!(
+        owner.0.lock().unwrap().acks,
+        vec![
+            CanonicalAckPhase::Prepared,
+            CanonicalAckPhase::AbandonPreparedOnly
+        ]
+    );
+    live.ensure_ready().unwrap();
+}
+
+#[tokio::test]
+async fn lazy_accepted_input_observes_without_preseeding_then_named_delivery_admits_once() {
+    let owner = Owner::new();
+    let id = owner.seed(serde_json::json!({"type":"message","message":{"role":"user","content":"lazy accepted","timestamp":7}}));
+    owner
+        .0
+        .lock()
+        .unwrap()
+        .delivered_users
+        .push_back(id.clone());
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    // Startup projection proof IDs are not an SDK execution queue.
+    assert!(session
+        .lock()
+        .await
+        .canonical_pending_admitted_users()
+        .is_empty());
+    live.observe().await.unwrap();
+    assert!(session
+        .lock()
+        .await
+        .canonical_pending_admitted_users()
+        .is_empty());
+    assert_eq!(session.lock().await.canonical_visible_leaf(), None);
+    {
+        let state = owner.0.lock().unwrap();
+        assert!(state.admitted_users.is_empty());
+        assert_eq!(state.delivered_users.front(), Some(&id));
+        assert!(state.acks.is_empty());
+        assert!(state.preparation_admissions.is_empty());
+    }
+    let canonical = live
+        .admit_user(
+            serde_json::from_value(serde_json::json!({"content":"lazy accepted","timestamp":99}))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(canonical.timestamp, 7);
+    assert!(session
+        .lock()
+        .await
+        .canonical_pending_admitted_users()
+        .is_empty());
+    assert_eq!(
+        session.lock().await.canonical_visible_leaf(),
+        Some(id.as_str())
+    );
+    let state = owner.0.lock().unwrap();
+    assert_eq!(state.admitted_users, std::collections::HashSet::from([id]));
+    assert!(state.delivered_users.is_empty());
+    assert_eq!(state.acks, vec![CanonicalAckPhase::Prepared]);
+    assert_eq!(state.appends, 0);
+}
+
+async fn install_pending_user_for_retirement(
+    owner: &Arc<Owner>,
+    live: &CanonicalLiveSession,
+    message: pa_types::ai::UserMessage,
+) {
+    live.observe().await.unwrap();
+    let (revision, binding) = {
+        let session = live.session.lock().await;
+        (
+            session.canonical_local_revision(),
+            session.canonical_binding().cloned(),
+        )
+    };
+    let delivered = owner
+        .admit_user(CanonicalLiveUserRequest {
+            expected: binding.clone(),
+            source: CanonicalSourceRequest::Full,
+            message,
+        })
+        .await
+        .unwrap();
+    let (caller, _, _, _, _) = live
+        .install(
+            delivered.prepared,
+            revision,
+            binding,
+            CanonicalAdmissionPolicy::Append(vec![delivered.admitted_entry_id]),
+        )
+        .await
+        .unwrap();
+    caller.complete();
+}
+
+#[tokio::test]
+async fn completed_view_retirement_refuses_unconsumed_core_admission_and_stays_closed() {
+    let owner = Owner::new();
+    let accepted = owner.seed(serde_json::json!({"type":"message", "message":{"role":"user", "content":"unfinished", "timestamp":7}}));
+    owner.0.lock().unwrap().delivered_users.push_back(accepted);
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    install_pending_user_for_retirement(
+        &owner,
+        &live,
+        tagged_user_intent(
+            serde_json::json!({"role":"user", "content":"unfinished", "timestamp":7}),
+        )
+        .unwrap(),
+    )
+    .await;
+    assert!(!session
+        .lock()
+        .await
+        .canonical_pending_admitted_users()
+        .is_empty());
+    let error = live.retire_completed_runtime().await.unwrap_err();
+    assert!(error
+        .detail
+        .contains("Core still has admitted execution work"));
+    assert!(live.observe().await.is_err());
+    assert!(live
+        .append(CanonicalMutationKind::OwnerMetadata, metadata())
+        .await
+        .is_err());
+    assert!(!session
+        .lock()
+        .await
+        .canonical_pending_admitted_users()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn replacement_closed_view_refuses_admission_without_resetting_pending_facts() {
+    let owner = Owner::new();
+    let accepted = owner.seed(serde_json::json!({"type":"message", "message":{"role":"user", "content":"cancelled pending", "timestamp":7}}));
+    owner.0.lock().unwrap().delivered_users.push_back(accepted);
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    install_pending_user_for_retirement(
+        &owner,
+        &live,
+        tagged_user_intent(
+            serde_json::json!({"role":"user", "content":"cancelled pending", "timestamp":7}),
+        )
+        .unwrap(),
+    )
+    .await;
+    let pending = session.lock().await.canonical_pending_admitted_users();
+    let cursor = owner.0.lock().unwrap().cursor.clone();
+    live.block_projection();
+    assert!(live.observe().await.is_err());
+    assert!(live
+        .persist_message(
+            tagged_user_intent(serde_json::json!({"role":"user", "content":"late", "timestamp":8}))
+                .map(AgentMessage::User)
+                .unwrap()
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        session.lock().await.canonical_pending_admitted_users(),
+        pending
+    );
+    assert_eq!(owner.0.lock().unwrap().cursor, cursor);
 }

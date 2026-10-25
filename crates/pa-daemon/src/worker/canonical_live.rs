@@ -10,8 +10,8 @@ use pa_core::session::canonical::{
 use pa_core::session_engine::canonical_live::{
     CanonicalLiveAcknowledged, CanonicalLiveAppendRequest, CanonicalLiveCustomPrepared,
     CanonicalLiveCustomRequest, CanonicalLiveOwner, CanonicalLivePrepareRequest,
-    CanonicalLiveProviderStepRequest, CanonicalLiveRunRequest, CanonicalLiveToolRequest,
-    CanonicalLiveUserPrepared, CanonicalLiveUserRequest,
+    CanonicalLiveProviderStepRequest, CanonicalLiveRunRequest, CanonicalLiveSnapshot,
+    CanonicalLiveToolRequest, CanonicalLiveUserPrepared, CanonicalLiveUserRequest,
 };
 
 use crate::agent_engine::{canonical_mirror_header, ContextSelectionSource};
@@ -22,6 +22,7 @@ use super::SessionCore;
 pub(super) struct CoreCanonicalLiveOwner {
     pub(super) core: Arc<Mutex<SessionCore>>,
     pub(super) source: ContextSelectionSource,
+    pub(super) owner_scope: Option<pa_core::session::canonical::CanonicalOwnerScope>,
     // Captured anew for this SDK adapter, before any attach. An invalid
     // capture remains a refusing live adapter, never standalone fallback.
     pub(super) bootstrap_admission: Result<bool, String>,
@@ -76,6 +77,7 @@ impl CoreCanonicalLiveOwner {
     ) -> CanonicalFuture<T> {
         let core = Arc::clone(&self.core);
         let source = self.source.clone();
+        let owner_scope = self.owner_scope.clone();
         let capture_error = self.bootstrap_admission.as_ref().err().cloned();
         Box::pin(async move {
             if let Some(error) = capture_error {
@@ -84,6 +86,15 @@ impl CoreCanonicalLiveOwner {
             tokio::task::spawn_blocking(move || {
                 let mut core = core.lock().map_err(refused)?;
                 validate(&core, &source)?;
+                let store = core.store.as_ref().expect("validated store");
+                if !owner_scope
+                    .as_ref()
+                    .map(|scope| store.has_canonical_owner_scope(scope))
+                    .transpose()?
+                    .unwrap_or(false)
+                {
+                    return Err(refused("canonical owner scope was retired"));
+                }
                 action(&mut core)
             })
             .await
@@ -97,6 +108,25 @@ impl CanonicalLiveOwner for CoreCanonicalLiveOwner {
         self.bootstrap_admission
             .as_ref()
             .is_ok_and(|preserve| *preserve)
+    }
+
+    fn retire_completed_runtime(
+        &self,
+        expected: pa_core::session::canonical::CanonicalCursor,
+    ) -> CanonicalFuture<()> {
+        self.call(move |core| {
+            core.store
+                .as_mut()
+                .expect("validated store")
+                .retire_completed_canonical_runtime(&expected)
+        })
+    }
+
+    fn snapshot(&self) -> CanonicalFuture<CanonicalLiveSnapshot> {
+        self.call(move |core| {
+            let store = core.store.as_mut().expect("validated store");
+            store.canonical_snapshot()
+        })
     }
 
     fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<()> {

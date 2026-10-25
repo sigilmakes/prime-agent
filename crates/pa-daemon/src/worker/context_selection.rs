@@ -100,7 +100,7 @@ fn commit_with(
 }
 
 fn write_selection(store: &mut SessionFile, selection: &ContextSelection) -> Result<()> {
-    store.persist_entry(
+    store.persist_owner_metadata(
         "custom",
         json!({"customType": CONTEXT_SELECTION_CUSTOM_TYPE, "data": selection}),
     )?;
@@ -112,23 +112,32 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         &self,
         source: ContextSelectionSource,
     ) -> Option<Arc<dyn pa_core::session_engine::canonical_live::CanonicalLiveOwner>> {
-        // The factory survives SDK rebuilds, but this adapter does not. Read
-        // the actual validated owner state anew, without attaching/resetting it.
-        let bootstrap_admission = (|| -> Result<bool> {
-            let core = self
+        // First/lazy startup may already have an attached owner and staged
+        // deliveries. Actual AgentStart/serving records, not attachment or a
+        // membership set, distinguish it from an unsupported fresh-SDK handoff.
+        // Same-owner refresh retains its SDK; replacement installs a new owner.
+        let binding = (|| -> Result<_> {
+            let mut core = self
                 .0
                 .lock()
                 .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
             validate_source(&core, &source)?;
-            let store = core.store.as_ref().expect("validated canonical store");
+            let store = core.store.as_mut().expect("validated canonical store");
+            store.validate_initial_canonical_sdk()?;
+            let cursor = store.attach_canonical_owner()?;
             let lease = store.lease.as_ref().expect("validated canonical lease");
-            lease.with_owned_mutation(&store.path, || Ok(store.is_canonical_bound()))
+            lease.with_owned_mutation(&store.path, || {
+                // Only an actual existing Core execution queue can request Replace.
+                // Startup projection exclusion IDs do not populate that queue.
+                Ok(cursor.owner)
+            })
         })()
         .map_err(|error| error.to_string());
         Some(Arc::new(super::canonical_live::CoreCanonicalLiveOwner {
             core: Arc::clone(&self.0),
             source,
-            bootstrap_admission,
+            owner_scope: binding.clone().ok(),
+            bootstrap_admission: binding.map(|_| false),
         }))
     }
 
@@ -332,6 +341,96 @@ mod tests {
             reopened.latest_context_selection().unwrap(),
             Some(choice("policy/a"))
         );
+    }
+
+    #[tokio::test]
+    async fn initial_selection_commits_through_already_attached_actual_owner() {
+        let (_dir, core, source) = fixture();
+        let factory = CoreInitialContextSelectionStore(Arc::clone(&core));
+        let owner = factory.live_owner(source.clone()).unwrap();
+        let before = owner.snapshot().await.unwrap();
+        factory
+            .commit(source.clone(), choice("policy/a"))
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&source.path).unwrap();
+        factory
+            .commit(source.clone(), choice("policy/a"))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
+        assert_eq!(choices(&source.path).len(), 1);
+        let after = owner.snapshot().await.unwrap();
+        assert_eq!(
+            after.checkpoint.cursor.owner,
+            before.checkpoint.cursor.owner
+        );
+        assert_ne!(after.checkpoint.cursor, before.checkpoint.cursor);
+    }
+
+    #[tokio::test]
+    async fn actual_live_adapter_can_ack_pending_prepare_and_abandon() {
+        let (_dir, core, source) = fixture();
+        let factory = CoreInitialContextSelectionStore(Arc::clone(&core));
+        let owner = factory.live_owner(source).unwrap();
+        let header = core.lock().unwrap().store.as_ref().unwrap().header.clone();
+        let manager = pa_core::session::manager::SessionManager::in_memory_from_header(
+            std::path::Path::new("/isolated"),
+            std::path::Path::new("/isolated/artifacts"),
+            header,
+        )
+        .unwrap();
+        let live = pa_core::session_engine::canonical_live::CanonicalLiveSession::new(
+            owner.clone(),
+            Arc::new(tokio::sync::Mutex::new(manager)),
+        );
+        live.observe().await.unwrap();
+        let pending = live
+            .prepare_mutation(pa_core::session::canonical::CanonicalMutationKind::OwnerMetadata)
+            .await
+            .unwrap();
+        pending.abandon().await.unwrap();
+        live.ensure_ready().unwrap();
+        owner.snapshot().await.unwrap();
+        live.persist_message(
+            serde_json::from_value(
+                json!({"role":"user", "content":"actual pending admission", "timestamp":7}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        live.ensure_ready().unwrap();
+        owner.snapshot().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retired_live_adapter_cannot_refresh_into_successor_owner() {
+        let (_dir, core, source) = fixture();
+        let factory = CoreInitialContextSelectionStore(Arc::clone(&core));
+        let old = factory.live_owner(source.clone()).unwrap();
+        let before = old.snapshot().await.unwrap();
+        old.retire_completed_runtime(before.checkpoint.cursor.clone())
+            .await
+            .unwrap();
+        let fresh = factory.live_owner(source).unwrap();
+        let after = fresh.snapshot().await.unwrap();
+        assert_ne!(
+            before.checkpoint.cursor.owner,
+            after.checkpoint.cursor.owner
+        );
+        assert!(old.snapshot().await.is_err());
+        assert!(old
+            .prepare(
+                pa_core::session_engine::canonical_live::CanonicalLivePrepareRequest {
+                    expected: Some(after.checkpoint.cursor),
+                    source: pa_core::session::canonical::CanonicalSourceRequest::Full,
+                    mode: pa_core::session::canonical::CanonicalPrepareMode::Observe,
+                    admission: pa_core::session::canonical::CanonicalAdmissionPolicy::Preserve,
+                }
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]

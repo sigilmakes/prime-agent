@@ -342,6 +342,28 @@ impl AgentSession {
         self.canonical_live.clone()
     }
 
+    /// Seal a cancelled replacement's retained execution handles without retiring
+    /// its physical owner or clearing any pending canonical facts.
+    pub fn close_runtime_admission_for_replacement(&self) {
+        self.agent.close_runtime_admission_for_replacement();
+        if let Some(live) = &self.canonical_live {
+            live.block_projection();
+        }
+    }
+
+    /// Permanently dispose completed execution admission before retiring its writer scope.
+    ///
+    /// # Errors
+    /// Refuses queued/active work or unresolved canonical effects. A closed runtime
+    /// remains closed if a later domain refuses retirement.
+    pub async fn retire_completed_runtime(&self) -> anyhow::Result<()> {
+        self.agent.retire_completed_runtime()?;
+        if let Some(live) = &self.canonical_live {
+            live.retire_completed_runtime().await?;
+        }
+        Ok(())
+    }
+
     /// Adopt an owner-prepared exact branch successor and its ACK-approved view.
     ///
     /// # Errors
