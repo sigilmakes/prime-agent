@@ -120,9 +120,36 @@ struct Fixtures {
     initial_main: String,
 }
 
+fn fixture_shell() -> PathBuf {
+    let shell = if cfg!(windows) { "bash.exe" } else { "bash" };
+    std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH is set"))
+        .map(|directory| directory.join(shell))
+        .find(|path| path.is_file())
+        .expect("fixture bash is available on PATH")
+}
+
 fn write_executable(path: &Path, content: &str) {
+    let content = if let Some(body) = content.strip_prefix("#!/usr/bin/env bash\n") {
+        format!("#!{}\n{body}", fixture_shell().display())
+    } else {
+        content.to_owned()
+    };
     std::fs::write(path, content).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn generated_shell_shims_use_a_direct_interpreter() {
+    let root = tempfile::tempdir().unwrap();
+    let shim = root.path().join("shim");
+    write_executable(&shim, "#!/usr/bin/env bash\nexit 0\n");
+    let source = std::fs::read_to_string(&shim).unwrap();
+    let interpreter = source.lines().next().unwrap().strip_prefix("#!").unwrap();
+    assert!(
+        Path::new(interpreter).is_absolute() && Path::new(interpreter).is_file(),
+        "shim requires a direct executable interpreter"
+    );
+    assert!(Command::new(&shim).status().unwrap().success());
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
