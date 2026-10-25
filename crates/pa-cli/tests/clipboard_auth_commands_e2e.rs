@@ -53,13 +53,23 @@ fn kill_worker(pid: u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let rest = stat
-            .rsplit_once(')')
-            .map(|(_, rest)| rest)
-            .unwrap_or_default();
-        !rest.starts_with('Z')
-    })
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| process_stat_alive(&stat))
+}
+
+fn process_stat_alive(stat: &str) -> bool {
+    let rest = stat
+        .rsplit_once(')')
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    !rest.trim_start().starts_with('Z')
+}
+
+#[test]
+fn process_stat_parser_distinguishes_zombies_from_live_workers() {
+    assert!(!process_stat_alive("123 (test worker) Z 1 2 3"));
+    assert!(!process_stat_alive("123 (test worker)\tZ 1 2 3"));
+    assert!(process_stat_alive("123 (test worker) S 1 2 3"));
+    assert!(process_stat_alive("123 (test worker) R 1 2 3"));
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {
