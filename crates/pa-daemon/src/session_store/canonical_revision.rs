@@ -412,7 +412,7 @@ mod tests {
             tracker.advance_owner_state(None),
             Err(RevisionError::BarrierMismatch)
         );
-        assert_eq!(tracker.snapshot(), Ok(initial.clone()));
+        assert_eq!(tracker.snapshot(), Ok(initial));
         tracker.clear_barrier(&operation, &ticket).unwrap();
         let mut attempt = tracker.admit_write(None).unwrap();
         assert_eq!(tracker.advance_owner_state(None), Err(RevisionError::Busy));

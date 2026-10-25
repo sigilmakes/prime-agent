@@ -917,9 +917,12 @@ fn immutable_snapshot_installs_without_approvals_and_rejects_whole_candidate_ato
         m.canonical_raw_full_rows()
             .unwrap()
             .iter()
-            .map(|row| row.raw())
+            .map(crate::session::canonical::CanonicalJournalRow::raw)
             .collect::<Vec<_>>(),
-        raw_rows.iter().map(|row| row.raw()).collect::<Vec<_>>()
+        raw_rows
+            .iter()
+            .map(crate::session::canonical::CanonicalJournalRow::raw)
+            .collect::<Vec<_>>()
     );
     assert!(m.canonical_raw.as_ref().unwrap().used_approvals.is_empty());
     assert!(m.canonical_raw.as_ref().unwrap().seen_users.is_empty());

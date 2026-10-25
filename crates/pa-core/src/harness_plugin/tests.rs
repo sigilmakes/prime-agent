@@ -968,9 +968,9 @@ async fn generic_context_byte_limits_are_exact_and_aggregate_before_provider() {
         }
         config["plugins"] = Value::Object(entries);
         config["testProvider"] = json!(
-            r#"return {hooks={{name='context_contribution',run=function()
+            r"return {hooks={{name='context_contribution',run=function()
             return {instructions=string.rep('😀',config.chars)..string.rep('x',config.padding)}
-        end}}}"#
+        end}}}"
         );
         let f = Fixture::new(config, LEGACY).await;
         f.provider.push_text_turn("done");

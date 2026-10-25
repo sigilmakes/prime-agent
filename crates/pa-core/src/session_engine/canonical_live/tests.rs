@@ -10,6 +10,8 @@ struct Notify;
 impl CanonicalCallerNotifier for Notify {
     fn changed(&self) {}
 }
+// Independent fault-injection switches model distinct owner failures.
+#[allow(clippy::struct_excessive_bools)]
 struct State {
     header: CanonicalJournalRow,
     rows: Vec<CanonicalJournalRow>,
@@ -157,7 +159,7 @@ impl CanonicalLiveOwner for Owner {
         state.preparation_admissions.push(request.admission.clone());
         match &request.admission {
             CanonicalAdmissionPolicy::Append(ids) | CanonicalAdmissionPolicy::Replace(ids) => {
-                state.admitted_users.extend(ids.iter().cloned())
+                state.admitted_users.extend(ids.iter().cloned());
             }
             CanonicalAdmissionPolicy::Preserve => {}
         }
@@ -1472,7 +1474,7 @@ async fn failed_local_install_attempts_exact_abandon_but_flight_stays_blocked() 
             checkpoint: Owner::checkpoint(&owner.0.lock().unwrap()),
         };
         let revision = session.lock().await.canonical_local_revision();
-        let error = match live
+        let Err(error) = live
             .install(
                 prepared,
                 revision + 1,
@@ -1480,9 +1482,8 @@ async fn failed_local_install_attempts_exact_abandon_but_flight_stays_blocked() 
                 CanonicalAdmissionPolicy::Preserve,
             )
             .await
-        {
-            Ok(_) => panic!("injected revision mismatch must fail"),
-            Err(error) => error,
+        else {
+            panic!("injected revision mismatch must fail");
         };
         assert_eq!(error.detail, "canonical SDK local revision conflict");
         assert_eq!(error.requested, CanonicalRequestedWrite::NotRequested);
@@ -1555,13 +1556,11 @@ async fn metadata_from_rejects_original_ledger_cursor_after_snapshot_refresh_bef
     let expected = session.lock().await.canonical_binding().unwrap().clone();
     // Logical owner ledger changes without changing the physical file/frontier.
     owner.0.lock().unwrap().cursor.canonical_revision += 1;
-    let error =
-        match CanonicalMetadataWriter::append_metadata_from(live.clone(), metadata(), expected)
-            .await
-        {
-            Ok(_) => panic!("original metadata cursor must remain exact"),
-            Err(error) => error,
-        };
+    let Err(error) =
+        CanonicalMetadataWriter::append_metadata_from(live.clone(), metadata(), expected).await
+    else {
+        panic!("original metadata cursor must remain exact");
+    };
     assert_eq!(error.requested, CanonicalRequestedWrite::NotWritten);
     assert_eq!(owner.0.lock().unwrap().appends, 0);
     assert_eq!(

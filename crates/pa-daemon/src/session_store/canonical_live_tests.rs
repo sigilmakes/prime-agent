@@ -190,7 +190,7 @@ fn accepted_user_is_durable_once_and_replayed_only_by_fifo_with_original_timesta
         .unwrap();
     assert!(store
         .prepare_canonical(CanonicalLivePrepareRequest {
-            expected: Some(initial.clone()),
+            expected: Some(initial),
             source: CanonicalSourceRequest::Full,
             mode: CanonicalPrepareMode::Observe,
             admission: CanonicalAdmissionPolicy::Append(vec!["not-delivered".into()])
@@ -420,7 +420,7 @@ fn ack_visibility_is_capped_by_both_actual_delivery_ledgers() {
     prepared.caller.complete();
     let delivered = store
         .admit_canonical_user(CanonicalLiveUserRequest {
-            expected: Some(cursor.clone()),
+            expected: Some(cursor),
             source: CanonicalSourceRequest::Full,
             message: serde_json::from_value(json!({"content":"accepted","timestamp":999})).unwrap(),
         })
@@ -823,9 +823,12 @@ fn custom_fifo_exact_adoption_keeps_original_row_and_next_snapshot() {
     assert_eq!(
         prepared_rows
             .iter()
-            .map(|row| row.raw())
+            .map(pa_core::session::canonical::CanonicalJournalRow::raw)
             .collect::<Vec<_>>(),
-        original.iter().map(|row| row.raw()).collect::<Vec<_>>()
+        original
+            .iter()
+            .map(pa_core::session::canonical::CanonicalJournalRow::raw)
+            .collect::<Vec<_>>()
     );
     assert!(store.canonical_snapshot().is_err());
     adopt_prepared(&mut store, &mut manager, delivered.prepared).complete();
@@ -840,8 +843,14 @@ fn custom_fifo_exact_adoption_keeps_original_row_and_next_snapshot() {
         panic!("full");
     };
     assert_eq!(
-        after_rows.iter().map(|row| row.raw()).collect::<Vec<_>>(),
-        original.iter().map(|row| row.raw()).collect::<Vec<_>>()
+        after_rows
+            .iter()
+            .map(pa_core::session::canonical::CanonicalJournalRow::raw)
+            .collect::<Vec<_>>(),
+        original
+            .iter()
+            .map(pa_core::session::canonical::CanonicalJournalRow::raw)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         after.checkpoint.cursor.canonical_revision,
