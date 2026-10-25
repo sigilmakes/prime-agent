@@ -60,13 +60,22 @@ fn make_executable(path: &Path) {
 /// The fixture verifier: passes once the run has made at least one more
 /// attempt after the first failing check (the counter file records
 /// consults). Hermetic: only the fixture directory is touched.
+fn fixture_shell() -> PathBuf {
+    let shell = if cfg!(windows) { "bash.exe" } else { "bash" };
+    std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH is set"))
+        .map(|directory| directory.join(shell))
+        .find(|path| path.is_file())
+        .expect("fixture bash is available on PATH")
+}
+
 fn pass_on_second_consult_verifier(home: &Path) -> PathBuf {
     let script = home.join("verify.sh");
     let counter = home.join("verify-count").display().to_string();
+    let shell = fixture_shell().display().to_string();
     std::fs::write(
         &script,
         format!(
-            "#!/usr/bin/env bash\n\
+            "#!{shell}\n\
              n=$(cat \"{counter}\" 2>/dev/null || echo 0)\n\
              echo $((n+1)) > \"{counter}\"\n\
              if [ \"$n\" -ge 1 ]; then\n\
@@ -87,16 +96,33 @@ fn pass_on_second_consult_verifier(home: &Path) -> PathBuf {
 /// complete.
 fn always_failing_verifier(home: &Path) -> PathBuf {
     let script = home.join("verify-fail.sh");
+    let shell = fixture_shell().display().to_string();
     std::fs::write(
         &script,
-        "#!/usr/bin/env bash\n\
-         echo \"solution.txt missing\" >&2\n\
-         exit 1\n",
+        format!(
+            "#!{shell}\n\
+             echo \"solution.txt missing\" >&2\n\
+             exit 1\n"
+        ),
     )
     .unwrap();
     #[cfg(unix)]
     make_executable(&script);
     script
+}
+
+#[test]
+fn verifier_fixture_uses_an_existing_direct_interpreter() {
+    let home = isolated_home();
+    let verifier = pass_on_second_consult_verifier(home.path());
+    let script = std::fs::read_to_string(&verifier).unwrap();
+    let interpreter = script.lines().next().unwrap().strip_prefix("#!").unwrap();
+    assert!(
+        Path::new(interpreter).is_file(),
+        "fixture interpreter must be a direct executable path"
+    );
+    assert_eq!(Command::new(&verifier).status().unwrap().code(), Some(1));
+    assert!(Command::new(&verifier).status().unwrap().success());
 }
 
 fn session_files(home: &Path) -> Vec<PathBuf> {
