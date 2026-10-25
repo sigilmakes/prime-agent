@@ -743,6 +743,277 @@ async fn canonical_context_notice_keeps_accepted_custom_identity_and_raw_order()
 }
 
 #[tokio::test]
+async fn certified_model_view_omits_only_typed_legacy_harness_rows() {
+    // Controlled TS-shaped payloads, not a captured producer transcript. The
+    // owner supplies every canonical ID, parent, timestamp and raw certificate.
+    let owner = Owner::new();
+    for kind in ["harness_digest", "refinement_notice", "refinement_outcome"] {
+        owner.seed(serde_json::json!({
+            "type":"custom_message", "customType":kind, "content":"shared controlled text",
+            "display":false, "details":{"digest":"controlled", "stateFingerprint":"controlled"},
+            "opaque":{"preserve":[null, true, 3]},
+        }));
+    }
+    let ordinary = [
+        serde_json::json!({"role":"user", "content":[{"type":"text", "text":"source user"}], "timestamp":11}),
+        serde_json::json!({"role":"assistant", "content":[{"type":"toolCall", "id":"fixture-tool-call", "name":"python_repl", "arguments":{"code":"pass"}}], "api":"openai-completions", "provider":"test", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"toolUse", "timestamp":12, "responseId":"fixture-tool-response"}),
+        serde_json::json!({"role":"toolResult", "toolCallId":"fixture-tool-call", "toolName":"python_repl", "content":[{"type":"text", "text":"controlled result"}], "details":{"opaque":[null,true]}, "isError":false, "timestamp":13}),
+        serde_json::json!({"role":"assistant", "content":[{"type":"text", "text":"source assistant"}], "api":"openai-completions", "provider":"test", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"stop", "timestamp":14, "responseId":"fixture-final-response"}),
+        serde_json::json!({"role":"user", "content":[{"type":"text", "text":"[harness-digest] shared controlled text [refinement-notice]"}], "timestamp":15}),
+    ];
+    for message in &ordinary {
+        owner.seed(serde_json::json!({"type":"message", "message":message, "opaque":{"preserve":"ordinary"}}));
+    }
+    let plugin_id = owner.seed(serde_json::json!({
+        "type":"custom_message", "customType":"plugin.harness.context", "content":"shared controlled text",
+        "display":false, "details":{"explicit":true}, "opaque":{"preserve":"plugin"},
+    }));
+    let continuation = serde_json::json!({"role":"user", "content":[{"type":"text", "text":"continue controlled history"}], "timestamp":16});
+    let accepted = owner.seed(serde_json::json!({"type":"message", "message":continuation}));
+    owner.0.lock().unwrap().delivered_users.push_back(accepted);
+    let original = owner
+        .0
+        .lock()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.raw().to_vec())
+        .collect::<Vec<_>>();
+    let (session, provider) = actual_loop(owner.clone(), None).await;
+    session
+        .prompt(
+            "continue controlled history",
+            super::super::PromptOptions::default(),
+        )
+        .await
+        .unwrap();
+    session
+        .canonical_live_session()
+        .unwrap()
+        .ensure_ready()
+        .unwrap();
+    let calls = provider.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "typed model-view exclusions must not reject a certified continuation"
+    );
+    let mut expected = ordinary
+        .iter()
+        .cloned()
+        .map(|message| serde_json::from_value::<pa_agent::types::Message>(message).unwrap())
+        .collect::<Vec<_>>();
+    let plugin_timestamp = {
+        let state = owner.0.lock().unwrap();
+        let row = state
+            .rows
+            .iter()
+            .find(|row| row.entry().id() == Some(plugin_id.as_str()))
+            .unwrap();
+        crate::session::timestamp_to_millis(row.entry().timestamp()) as i64
+    };
+    expected.push(pa_agent::types::Message::User(
+        pa_agent::types::UserMessage {
+            content: pa_agent::types::UserContent::Parts(vec![pa_agent::types::UserPart::Text(
+                pa_agent::types::TextContent {
+                    text: "shared controlled text".into(),
+                    text_signature: None,
+                },
+            )]),
+            timestamp: plugin_timestamp,
+        },
+    ));
+    expected.push(serde_json::from_value(continuation).unwrap());
+    assert_eq!(
+        calls[0].messages, expected,
+        "ordinary history, user quotes and new plugin context retain exact model order"
+    );
+    let (physical, leaf, count) = {
+        let state = owner.0.lock().unwrap();
+        assert_eq!(state.steps, 1);
+        assert_eq!(
+            state.appends, 1,
+            "only the continuation Assistant may append"
+        );
+        assert_eq!(state.rows.len(), original.len() + 1);
+        for (row, before) in state.rows.iter().zip(&original) {
+            assert_eq!(
+                row.raw(),
+                before,
+                "every source byte and envelope remains unchanged"
+            );
+        }
+        for (row, kind) in state.rows[..3].iter().zip([
+            "harness_digest",
+            "refinement_notice",
+            "refinement_outcome",
+        ]) {
+            assert!(
+                matches!(row.entry(), FileEntry::CustomMessage { payload, .. } if payload.custom_type == kind)
+            );
+        }
+        let mut physical = state.header.raw().to_vec();
+        for row in &state.rows {
+            physical.extend_from_slice(row.raw());
+        }
+        (
+            physical,
+            state.cursor.selected_leaf.clone(),
+            state.rows.len(),
+        )
+    };
+    let persistence = session.shared_persistence();
+    let manager = persistence.lock().await;
+    assert_eq!(manager.canonical_binding().unwrap().selected_leaf, leaf);
+    let visible = manager.canonical_visible_context();
+    let legacy = visible
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Custom(custom)
+                if matches!(
+                    custom.custom_type.as_str(),
+                    "harness_digest" | "refinement_notice" | "refinement_outcome"
+                ) =>
+            {
+                Some(custom.custom_type.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        legacy,
+        vec!["harness_digest", "refinement_notice", "refinement_outcome"],
+        "the policy must not hide legacy rows by altering canonical context assembly"
+    );
+    let rows = manager.canonical_raw_full_rows().unwrap();
+    assert_eq!(rows.len(), count);
+    let mut certified = manager.canonical_raw_header().unwrap().raw().to_vec();
+    for row in rows {
+        certified.extend_from_slice(row.raw());
+    }
+    assert_eq!(
+        certified, physical,
+        "model-only suppression must retain the complete certified raw history"
+    );
+}
+
+#[tokio::test]
+async fn certified_compaction_summary_scrubs_only_model_view_harness_fields() {
+    let owner = Owner::new();
+    let kept = owner.seed(serde_json::json!({"type":"message","message":{
+        "role":"user","content":[{"type":"text","text":"kept controlled user"}],"timestamp":21,
+    }}));
+    owner.seed(serde_json::json!({"type":"compaction","summary":"controlled summary",
+        "firstKeptEntryId":kept,"tokensBefore":40,"customInstructions":"controlled instructions",
+        "harnessDigest":"controlled saved memory","harnessStateFingerprint":"controlled fingerprint",
+        "opaque":{"preserve":[null,true,3]},
+    }));
+    let accepted = owner.seed(serde_json::json!({"type":"message","message":{
+        "role":"user","content":[{"type":"text","text":"continue controlled summary"}],"timestamp":22,
+    }}));
+    owner.0.lock().unwrap().delivered_users.push_back(accepted);
+    let original = owner
+        .0
+        .lock()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.raw().to_vec())
+        .collect::<Vec<_>>();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let capture = observed.clone();
+    let convert = super::super::refinement_gate::convert_to_llm();
+    let conversion: pa_agent::agent_loop::ConvertToLlmFn = Arc::new(move |messages| {
+        let capture = capture.clone();
+        let convert = convert.clone();
+        Box::pin(async move {
+            *capture.lock().unwrap() = messages.clone();
+            convert(messages).await
+        })
+    });
+    let (session, provider) = actual_loop(owner.clone(), Some(conversion)).await;
+    let summary = {
+        let manager = session.session_handle().lock().await;
+        manager
+            .canonical_visible_context()
+            .messages
+            .into_iter()
+            .find_map(|message| match message {
+                AgentMessage::CompactionSummary(summary) => Some(summary),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        summary.harness_digest.as_deref(),
+        Some("controlled saved memory")
+    );
+    assert_eq!(
+        summary.harness_state_fingerprint.as_deref(),
+        Some("controlled fingerprint")
+    );
+    let mut expected = summary.clone();
+    expected.harness_digest = None;
+    expected.harness_state_fingerprint = None;
+    session
+        .prompt(
+            "continue controlled summary",
+            super::super::PromptOptions::default(),
+        )
+        .await
+        .unwrap();
+    session
+        .canonical_live_session()
+        .unwrap()
+        .ensure_ready()
+        .unwrap();
+    assert_eq!(provider.calls().len(), 1);
+    let summaries = {
+        let observed = observed.lock().unwrap();
+        observed
+            .iter()
+            .filter_map(|message| {
+                match serde_json::from_value::<AgentMessage>(serde_json::to_value(message).unwrap())
+                    .unwrap()
+                {
+                    AgentMessage::CompactionSummary(summary) => Some(summary),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        summaries,
+        vec![expected],
+        "only the two legacy harness fields may be scrubbed in the model view"
+    );
+    {
+        let state = owner.0.lock().unwrap();
+        assert_eq!(state.steps, 1);
+        assert_eq!(state.appends, 1);
+        assert_eq!(state.rows.len(), original.len() + 1);
+        for (row, before) in state.rows.iter().zip(&original) {
+            assert_eq!(row.raw(), before);
+        }
+    }
+    let manager = session.session_handle().lock().await;
+    let unchanged = manager
+        .canonical_visible_context()
+        .messages
+        .into_iter()
+        .find_map(|message| match message {
+            AgentMessage::CompactionSummary(summary) => Some(summary),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        unchanged, summary,
+        "canonical summary metadata must remain untouched"
+    );
+}
+
+#[tokio::test]
 async fn actual_loop_transform_uses_owner_timestamp_before_conversion() {
     let owner = Owner::new();
     let id = owner.seed(serde_json::json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"canonical user"}],"timestamp":7}}));

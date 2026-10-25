@@ -622,10 +622,10 @@ impl CanonicalLiveSession {
     ) -> Result<AgentMessage, CanonicalStoreError> {
         let message = match message {
             AgentMessage::User(message) => {
-                return self.admit_user(message).await.map(AgentMessage::User)
+                return self.admit_user(message).await.map(AgentMessage::User);
             }
             AgentMessage::Custom(message) => {
-                return self.admit_custom(message).await.map(AgentMessage::Custom)
+                return self.admit_custom(message).await.map(AgentMessage::Custom);
             }
             other => other,
         };
@@ -711,14 +711,14 @@ impl CanonicalLiveSession {
                     return Err(failure(
                         "owner-delivered User differs from exact requested intent",
                         CanonicalRequestedWrite::NotRequested,
-                    ))
+                    ));
                 }
             },
             _ => {
                 return Err(failure(
                     "owner-delivered User identity is missing or duplicated",
                     CanonicalRequestedWrite::NotRequested,
-                ))
+                ));
             }
         };
         let admission = {
@@ -859,7 +859,7 @@ impl CanonicalLiveSession {
                 return Err(failure(
                     "owner-delivered Custom identity has another kind",
                     CanonicalRequestedWrite::NotRequested,
-                ))
+                ));
             }
         };
         let (caller, operation, cursor, local_revision, acknowledged) = self
@@ -1062,8 +1062,11 @@ impl CanonicalLiveSession {
                 session.canonical_local_revision(),
             )
         };
-        let messages = context
-            .messages
+        // Typed legacy harness exclusions are model-view policy, not conversion
+        // failures. Keep the certified context and physical history untouched,
+        // then retain strict conversion for every row left in the model view.
+        let model_messages = super::refinement_gate::without_refinements(context.messages);
+        let messages = model_messages
             .iter()
             .map(|message| {
                 super::session_message_to_loop(message).ok_or_else(|| {

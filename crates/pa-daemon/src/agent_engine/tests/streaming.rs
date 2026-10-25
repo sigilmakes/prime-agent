@@ -417,6 +417,376 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
     }
 }
 
+#[test]
+fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_view() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let base = format!("http://{}/v1", socket.local_addr().unwrap());
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({"providers":{"openai":{
+            "api":"openai-completions", "baseUrl":base, "apiKey":"none",
+            "models":[{"id":"test", "name":"Controlled legacy context", "reasoning":false,
+                "contextWindow":128_000, "maxTokens":4096}]
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({
+            "harnessRefinements":false, "enableBuiltinSkills":false, "prewarmIpythonKernel":false
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut producer =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    producer.set_path(path.clone());
+    producer
+        .header
+        .rest
+        .insert("opaqueHeader".into(), json!({"preserve":[null,true,3]}));
+    producer.rewrite().unwrap();
+    // Synthetic supported TS-shaped payloads. SessionFile supplies all journal
+    // identities and envelopes; this is not claimed to be TS-producer evidence.
+    for (kind, payload) in [
+        (
+            "model_change",
+            json!({"provider":"openai", "modelId":"test"}),
+        ),
+        ("thinking_level_change", json!({"thinkingLevel":"off"})),
+        ("service_tier_change", json!({"serviceTier":"default"})),
+        (
+            "custom",
+            json!({"customType":pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE,
+            "data":{"version":1,"strategy":"default_context/rolling"}}),
+        ),
+    ] {
+        producer.persist_entry(kind, payload).unwrap();
+    }
+    for kind in ["harness_digest", "refinement_notice", "refinement_outcome"] {
+        producer
+            .persist_entry(
+                "custom_message",
+                json!({
+                    "customType":kind, "content":"shared controlled text", "display":false,
+                    "details":{"digest":"controlled", "stateFingerprint":"controlled"},
+                    "opaque":{"preserve":[null,true,3]},
+                }),
+            )
+            .unwrap();
+    }
+    let ordinary = [
+        json!({"role":"user", "content":[{"type":"text", "text":"source user"}], "timestamp":11}),
+        json!({"role":"assistant", "content":[{"type":"toolCall", "id":"fixture-tool-call", "name":"python_repl", "arguments":{"code":"pass"}}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"toolUse", "timestamp":12, "responseId":"fixture-tool-response"}),
+        json!({"role":"toolResult", "toolCallId":"fixture-tool-call", "toolName":"python_repl", "content":[{"type":"text", "text":"controlled result"}], "details":{"opaque":[null,true]}, "isError":false, "timestamp":13}),
+        json!({"role":"assistant", "content":[{"type":"text", "text":"source assistant"}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"stop", "timestamp":14, "responseId":"fixture-final-response"}),
+        json!({"role":"user", "content":[{"type":"text", "text":"[harness-digest] shared controlled text [refinement-notice]"}], "timestamp":15}),
+    ];
+    for message in &ordinary {
+        producer
+            .persist_entry(
+                "message",
+                json!({"message":message,"opaque":{"preserve":"ordinary"}}),
+            )
+            .unwrap();
+    }
+    producer.persist_entry("custom_message", json!({
+        "customType":"plugin.harness.context", "content":"shared controlled text", "display":false,
+        "details":{"explicit":true}, "opaque":{"preserve":"plugin"},
+    })).unwrap();
+    let source_leaf = producer.leaf_id().unwrap().to_owned();
+    let source_entry_count = producer.entries().len();
+    let source = std::fs::read(&path).unwrap();
+    let source_values: Vec<Value> = std::str::from_utf8(&source)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    drop(producer);
+    let reopened = crate::session_store::SessionFile::open(&path).unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir,
+        provider: Some("openai".into()),
+        model: Some("test".into()),
+        api_key: Some("none".into()),
+        thinking: None,
+        session_dir: None,
+        session_file: Some(path.clone()),
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let owner = own_canonical_store(&engine, reopened);
+    let model = engine.resolve_model().unwrap();
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        source,
+        "cold build must not alter or append to the fully initialized source"
+    );
+    let listener = engine
+        .runtime
+        .block_on(async { tokio::net::TcpListener::from_std(socket).unwrap() });
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = requests.clone();
+    let server = tokio_util::task::AbortOnDropHandle::new(engine.runtime.spawn(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let (body_offset, body_length) = loop {
+                let mut chunk = [0;4096];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0, "provider request must have its complete body");
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers.lines().find_map(|line| line.to_ascii_lowercase()
+                        .strip_prefix("content-length:").and_then(|length| length.trim().parse::<usize>().ok())).unwrap();
+                    if bytes.len() >= end + 4 + length { break (end + 4, length); }
+                }
+            };
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let request: Value = serde_json::from_slice(&bytes[body_offset..body_offset+body_length]).unwrap();
+            let chunk = json!({"id":"fixture-live-response", "object":"chat.completion.chunk", "created":1,
+                "model":"test", "choices":[{"index":0,"delta":{"role":"assistant","content":"continued"},"finish_reason":null}]});
+            let done = json!({"id":"fixture-live-response", "object":"chat.completion.chunk", "created":1,
+                "model":"test", "choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}});
+            let response = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).as_bytes()).await.unwrap();
+            request
+        }).await.unwrap()
+    }));
+    let mut accepted_message = None;
+    let mut published_assistant = None;
+    let mut result = None;
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: "continue controlled history".into(),
+            source: "user".into(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            match event {
+                EngineEvent::UserMessage(message) => {
+                    owner
+                        .lock()
+                        .unwrap()
+                        .store
+                        .as_mut()
+                        .unwrap()
+                        .persist_delivered_user(message.clone())
+                        .unwrap();
+                    accepted_message = Some(message);
+                }
+                EngineEvent::AssistantMessage(message) => published_assistant = Some(message),
+                EngineEvent::Done(done) => result = Some(done),
+                _ => {}
+            }
+            true
+        },
+    );
+    engine.on_turn_done();
+    let physical = std::fs::read(&path).unwrap();
+    assert!(
+        physical.starts_with(&source),
+        "the entire original physical prefix must survive even a refused continuation"
+    );
+    if result != Some(Ok(())) {
+        let count = requests.load(std::sync::atomic::Ordering::SeqCst);
+        let evidence = dir.keep();
+        panic!(
+            "certified legacy continuation refused; provider requests {count}; retained private fixture {}",
+            evidence.display()
+        );
+    }
+    let request = engine.runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(6), server)
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let model_messages = request["messages"].as_array().unwrap();
+    assert_eq!(
+        model_messages.len(),
+        8,
+        "one system row plus the exact seven ordinary/plugin/continuation model rows"
+    );
+    assert_eq!(model_messages[0]["role"], "system");
+    assert_eq!(
+        &model_messages[1..],
+        &[
+            json!({"role":"user", "content":[{"type":"text","text":"source user"}]}),
+            json!({"role":"assistant", "content":null, "tool_calls":[{"id":"fixture-tool-call","type":"function","function":{"name":"python_repl","arguments":"{\"code\":\"pass\"}"}}]}),
+            json!({"role":"tool","tool_call_id":"fixture-tool-call","content":"controlled result"}),
+            json!({"role":"assistant","content":"source assistant"}),
+            json!({"role":"user","content":[{"type":"text","text":"[harness-digest] shared controlled text [refinement-notice]"}]}),
+            json!({"role":"user","content":[{"type":"text","text":"shared controlled text"}]}),
+            json!({"role":"user","content":[{"type":"text","text":"continue controlled history"}]}),
+        ]
+    );
+    let suffix: Vec<Value> = std::str::from_utf8(&physical[source.len()..])
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let [user, assistant] = suffix.as_slice() else {
+        panic!("only the accepted User and ACKed Assistant may append")
+    };
+    assert_eq!(user["type"], "message");
+    assert_eq!(user["message"], accepted_message.unwrap());
+    assert_eq!(user["parentId"], source_leaf);
+    assert_eq!(assistant["type"], "message");
+    assert_eq!(assistant["message"], published_assistant.unwrap());
+    assert_eq!(assistant["parentId"], user["id"]);
+    let mut seen: std::collections::HashSet<String> = source_values
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(seen.len(), source_values.len());
+    for row in &suffix {
+        let id = row["id"].as_str().unwrap();
+        assert!(!id.is_empty() && seen.insert(id.to_owned()));
+        let timestamp = row["timestamp"].as_str().unwrap();
+        let millis = crate::util::iso_to_unix_ms(timestamp).unwrap();
+        assert_eq!(crate::util::iso_from_unix_ms(millis), timestamp);
+        assert_eq!(
+            row.as_object().unwrap().len(),
+            5,
+            "exact native message envelope and payload"
+        );
+    }
+    let (owner_rows, owner_leaf) = {
+        let core = owner.lock().unwrap();
+        let store = core.store.as_ref().unwrap();
+        assert_eq!(store.entries().len(), source_entry_count + 2);
+        (
+            store
+                .entries()
+                .iter()
+                .map(|row| serde_json::to_value(row).unwrap())
+                .collect::<Vec<_>>(),
+            store.leaf_id().map(str::to_owned),
+        )
+    };
+    assert_eq!(owner_leaf.as_deref(), assistant["id"].as_str());
+    let core = engine.session.blocking_lock().clone().unwrap();
+    core.session
+        .canonical_live_session()
+        .unwrap()
+        .ensure_ready()
+        .unwrap();
+    engine.runtime.block_on(async {
+        let persistence = core.session.shared_persistence();
+        let manager = persistence.lock().await;
+        let rows = manager.canonical_raw_full_rows().unwrap();
+        let mut certified = manager.canonical_raw_header().unwrap().raw().to_vec();
+        assert_eq!(rows.len(), owner_rows.len());
+        for (row, actual) in rows.iter().zip(&owner_rows) {
+            certified.extend_from_slice(row.raw());
+            let value: Value = serde_json::from_slice(row.raw()).unwrap();
+            assert_eq!(
+                &value, actual,
+                "every raw owner row and unknown field stays exact and ordered"
+            );
+        }
+        assert_eq!(certified, physical);
+        assert_eq!(
+            manager.canonical_binding().unwrap().selected_leaf,
+            owner_leaf
+        );
+        let visible = manager.canonical_visible_context();
+        let legacy = visible
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                pa_types::session::AgentMessage::Custom(custom)
+                    if matches!(
+                        custom.custom_type.as_str(),
+                        "harness_digest" | "refinement_notice" | "refinement_outcome"
+                    ) =>
+                {
+                    Some(custom.custom_type.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            legacy,
+            vec!["harness_digest", "refinement_notice", "refinement_outcome"],
+            "only the model view excludes legacy rows, never canonical context or physical history"
+        );
+    });
+    assert_eq!(std::fs::read(&path).unwrap(), physical);
+}
+
+#[test]
+fn malformed_typed_legacy_payload_is_rejected_by_the_real_owner_before_projection() {
+    use pa_core::session::canonical::{
+        CanonicalFailureKind, CanonicalRequestedWrite, CanonicalSourceDisposition,
+    };
+
+    for kind in ["harness_digest", "refinement_notice", "refinement_outcome"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store =
+            crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+        store.set_path(path.clone());
+        store.rewrite().unwrap();
+        store
+            .persist_entry(
+                "custom_message",
+                json!({"customType":kind,"content":17,"display":false}),
+            )
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let engine = bare_engine(dir.path());
+        let owner = own_canonical_store(&engine, store);
+        let error = owner
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .unwrap()
+            .attach_canonical_owner()
+            .unwrap_err();
+        assert_eq!(error.kind, CanonicalFailureKind::InvalidRequest);
+        assert_eq!(error.requested, CanonicalRequestedWrite::NotWritten);
+        assert_eq!(error.source, CanonicalSourceDisposition::Unchanged);
+        assert_eq!(
+            error.detail,
+            "Malformed: malformed known payload: custom_message"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "typed model-view policy cannot forgive malformed physical payloads"
+        );
+        assert!(engine.session.blocking_lock().is_none());
+    }
+}
+
 /// The helper poll proves the existing gate contract even with a cached SDK.
 /// The real prompt below still persists through the actual canonical owner.
 #[test]
