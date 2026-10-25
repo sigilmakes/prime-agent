@@ -5,14 +5,12 @@ Enter `nix develop --no-update-lock-file` first. Dependency downloads are allowe
 provider/MCP credentials are not. One target/cache is reused, never per-lane copies.
 """
 import argparse
-import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -96,43 +94,7 @@ def isolated_environment(repo, state, target, cargo_home, ambient):
     return env
 
 
-def loopback_command(command):
-    """Keep real HTTP semantics while blocking all external test egress."""
-    return ["unshare", "--user", "--map-current-user", "--net", "--keep-caps", "--",
-            sys.executable, str(Path(__file__).resolve()), "--loopback-exec", *command]
-
-
-def exec_loopback(command):
-    if not command or {name for _, name in socket.if_nameindex()} != {"lo"}:
-        raise ValueError("workspace gate requires a fresh loopback-only network namespace")
-    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
-    # Verify readiness, not elapsed time. No test starts with a down loopback.
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        with socket.create_connection(listener.getsockname(), timeout=2) as client:
-            peer, _ = listener.accept()
-            with peer:
-                peer.sendall(b"ok")
-                if client.recv(2) != b"ok":
-                    raise ValueError("loopback fixture transport is not ready")
-    with socket.socket() as external:
-        external.settimeout(2)
-        try:
-            external.connect(("192.0.2.1", 9))  # RFC 5737 documentation address.
-        except OSError as error:
-            if error.errno != errno.ENETUNREACH:
-                raise ValueError("external egress is not proven unreachable") from error
-        else:
-            raise ValueError("external egress unexpectedly available")
-    print(f"Loopback-only test network verified: {os.readlink('/proc/self/ns/net')}",
-          file=sys.stderr, flush=True)
-    os.execvpe(command[0], command, os.environ)
-
-
-def run(command, *, repo, env, deadline, capture=False, loopback_only=False):
-    if loopback_only:
-        command = loopback_command(command)
+def run(command, *, repo, env, deadline, capture=False):
     print("+ " + " ".join(map(str, command)), flush=True)
     child = subprocess.Popen(command, cwd=repo, env=env, start_new_session=True,
                              stdout=subprocess.PIPE if capture else None,
@@ -233,16 +195,13 @@ def main():
         run(["cargo", "build", "--locked", "--workspace", "--bins"],
             repo=repo, env=env, deadline=deadline)
         test_env = dict(env, CARGO_NET_OFFLINE="true", UV_OFFLINE="1")
-        run(["make", "workspace-check"], repo=repo, env=test_env, deadline=deadline,
-            loopback_only=True)
+        run(["make", "workspace-check"], repo=repo, env=test_env, deadline=deadline)
     print("Full workspace gate passed", flush=True)
     return 0
 
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:2] == ["--loopback-exec"]:
-            exec_loopback(sys.argv[2:])
         raise SystemExit(main())
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"Workspace gate failed: {error}", file=sys.stderr)

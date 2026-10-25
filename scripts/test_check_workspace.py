@@ -53,18 +53,31 @@ class WorkspaceGateTests(unittest.TestCase):
         self.assertEqual(env["PRIME_AGENT_CODING_AGENT_DIR"], "/private/state/agent")
         self.assertEqual(env["PRIME_AGENT_DAEMON_SOCKET"], "/private/state/run/daemon.sock")
 
-    def test_network_wrapper_preserves_uid_and_requires_a_new_network_namespace(self):
-        command = gate.loopback_command(["cargo", "test", "--workspace"])
-        self.assertEqual(command[:7], ["unshare", "--user", "--map-current-user", "--net",
-                                       "--keep-caps", "--", gate.sys.executable])
-        self.assertEqual(command[-4:], ["--loopback-exec", "cargo", "test", "--workspace"])
+    def test_workspace_gate_runs_full_checks_without_nested_namespace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = ["check_workspace.py", "--state-root", str(root / "state"),
+                    "--target-dir", str(root / "target"), "--cargo-home", str(root / "cargo")]
+            with patch.object(gate.sys, "argv", args), \
+                    patch.object(gate, "prepare_kernel"), patch.object(gate, "run") as command:
+                self.assertEqual(gate.main(), 0)
+            self.assertEqual(command.call_count, 2)
+            build, checks = command.call_args_list
+            self.assertEqual(build.args[0], ["cargo", "build", "--locked", "--workspace", "--bins"])
+            self.assertEqual(checks.args[0], ["make", "workspace-check"])
+            self.assertNotIn("loopback_only", checks.kwargs)
+            self.assertEqual(checks.kwargs["env"]["CARGO_NET_OFFLINE"], "true")
+            self.assertEqual(checks.kwargs["env"]["UV_OFFLINE"], "1")
+            self.assertEqual(checks.kwargs["env"]["HOME"], str(root / "state/home"))
 
-    def test_loopback_exec_rejects_host_network_before_any_interface_mutation(self):
-        with patch.object(gate.socket, "if_nameindex", return_value=[(1, "lo"), (2, "eth0")]), \
-                patch.object(gate.subprocess, "run") as setup:
-            with self.assertRaisesRegex(ValueError, "fresh loopback-only"):
-                gate.exec_loopback(["cargo", "test"])
-        setup.assert_not_called()
+    def test_run_executes_the_requested_command_directly(self):
+        with patch.object(gate.subprocess, "Popen") as launch:
+            launch.return_value.communicate.return_value = (None, None)
+            launch.return_value.returncode = 0
+            gate.run(["make", "workspace-check"], repo=Path("/fixture"),
+                     env={"HOME": "/private"}, deadline=time.monotonic() + 10)
+        self.assertEqual(launch.call_args.args[0], ["make", "workspace-check"])
+        self.assertEqual(launch.call_args.kwargs["env"], {"HOME": "/private"})
 
     def test_runtime_identity_tracks_lock_sources_and_machine_data_not_cache(self):
         with tempfile.TemporaryDirectory() as temporary:

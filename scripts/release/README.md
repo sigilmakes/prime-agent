@@ -50,12 +50,12 @@ compilation uses two jobs, no incremental cache, and no dev/test debug
 information. It prepares workspace binaries and a real locked Python kernel
 before running the tests, including tests that discover the legacy kernel path
 under the private home. It does not read or change an installed user's kernel.
-The gate uses a fresh Linux user/network namespace with only loopback enabled.
-It verifies local fixture transport and unreachable external egress before tests.
-`PI_OFFLINE` and `PI_SKIP_VERSION_CHECK` are absent: those product flags would
-incorrectly disable the HTTP fixtures. Dependency setup runs before the network
-sandbox; test-stage Cargo and uv use their prepared caches. Missing namespace
-support fails closed, with no proxy-only fallback.
+The gate uses the CI job's normal Docker isolation. It does not create nested
+namespaces or require changes to runner security policy. Private state and
+credential scrubbing remain in place. `PI_OFFLINE` and `PI_SKIP_VERSION_CHECK`
+are absent because those product flags would incorrectly disable HTTP fixtures.
+Dependency setup runs before tests; test-stage Cargo and uv use their prepared
+caches in offline mode.
 
 The driver accepts `--target-dir` and `--cargo-home` to reuse approved build
 caches rather than creating per-lane copies. A reused Cargo home must contain
