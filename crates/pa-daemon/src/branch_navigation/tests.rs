@@ -327,6 +327,7 @@ async fn summarized_navigation_commits_retained_output_once_on_exact_new_branch(
 #[tokio::test]
 async fn concurrent_owner_source_advance_never_retries_paid_callback_or_commits_summary() {
     let fixture = fixture(SummarySource::AdvanceDuringCallback).await;
+    let prefix = std::fs::read(&fixture.path).unwrap();
     let before = fixture
         .manager
         .lock()
@@ -349,15 +350,38 @@ async fn concurrent_owner_source_advance_never_retries_paid_callback_or_commits_
         fixture.manager.lock().await.canonical_binding(),
         Some(&before)
     );
-    assert!(fixture.live.ensure_ready().is_err());
-    let core = fixture.worker.core.lock().unwrap();
-    assert!(!core
-        .store
-        .as_ref()
-        .unwrap()
-        .entries()
-        .iter()
-        .any(|entry| entry.type_ == "branch_summary"));
+    fixture.live.ensure_ready().unwrap();
+    {
+        let core = fixture.worker.core.lock().unwrap();
+        assert!(!core
+            .store
+            .as_ref()
+            .unwrap()
+            .entries()
+            .iter()
+            .any(|entry| entry.type_ == "branch_summary"));
+    }
+    let advanced = std::fs::read(&fixture.path).unwrap();
+    assert!(advanced.starts_with(&prefix));
+    let metadata: FileEntry = serde_json::from_slice(&advanced[prefix.len()..]).unwrap();
+    let metadata_json = serde_json::to_value(&metadata).unwrap();
+    assert_eq!(metadata_json["type"], json!("custom"));
+    assert_eq!(
+        metadata_json["customType"],
+        json!("concurrent-owner-metadata")
+    );
+    assert_eq!(metadata_json["data"], json!({"exact":"AA=="}));
+
+    fixture.live.observe().await.unwrap();
+    fixture.live.ensure_ready().unwrap();
+    let manager = fixture.manager.lock().await;
+    let after = manager.canonical_binding().unwrap();
+    assert_eq!(after.owner, before.owner);
+    assert_eq!(after.branch_revision, before.branch_revision);
+    assert_eq!(after.canonical_revision, before.canonical_revision + 1);
+    assert!(manager.get_entries().contains(&metadata));
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read(&fixture.path).unwrap(), advanced);
 }
 
 #[tokio::test]
