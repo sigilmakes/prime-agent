@@ -151,7 +151,8 @@ struct WorkerClient {
 
 impl WorkerClient {
     fn connect(socket: &Path) -> (Self, Value) {
-        let stream = UnixStream::connect(socket).expect("connect worker socket");
+        let stream = UnixStream::connect(socket)
+            .unwrap_or_else(|error| panic!("connect worker socket {}: {error}", socket.display()));
         stream
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");

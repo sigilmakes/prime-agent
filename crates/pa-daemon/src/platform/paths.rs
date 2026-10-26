@@ -13,13 +13,14 @@ pub fn socket_dir() -> PathBuf {
     socket_dir_for(&tmp, uid)
 }
 
-/// Reserve the longest generated endpoint before selecting a directory. Linux
-/// can re-anchor deep paths through /proc; other Unix platforms need a short path.
+/// Reserve the longest generated endpoint before selecting a directory: a socket path the
+/// kernel cannot address is useless to every client that does not re-anchor through /proc,
+/// which includes the tests and any non-Rust reader of the descriptor. Only `/proc`-relative
+/// `bind`/`connect` survives a deep `TMPDIR`, so the directory moves to `/tmp` instead.
 #[cfg(unix)]
 fn socket_dir_for(tmp: &Path, uid: u32) -> PathBuf {
     let name = format!("prime-agent-rust-{uid}");
     let dir = tmp.join(&name);
-    #[cfg(not(target_os = "linux"))]
     if std::os::unix::net::SocketAddr::from_pathname(
         dir.join("worker-000000000000-000000000000.sock"),
     )
@@ -109,7 +110,7 @@ mod tests {
         assert_ne!(worker, ts_dir.join(worker_name));
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(unix)]
     #[test]
     fn generated_endpoints_fit_even_when_tmpdir_is_deep() {
         use std::os::unix::net::SocketAddr;
@@ -127,11 +128,17 @@ mod tests {
         }
     }
 
+    /// `/proc/self/fd` re-anchoring only helps a caller that holds the parent descriptor;
+    /// a client that connects by the descriptor's path string cannot address a deep socket,
+    /// so a deep `TMPDIR` loses to a connectable directory on every Unix.
     #[cfg(target_os = "linux")]
     #[test]
-    fn deep_tmpdir_is_preserved_for_linux_proc_reanchoring() {
+    fn deep_tmpdir_yields_to_a_connectable_directory() {
         let tmp = PathBuf::from(format!("/{}", "d".repeat(120)));
-        assert_eq!(socket_dir_for(&tmp, 501), tmp.join("prime-agent-rust-501"));
+        assert_eq!(
+            socket_dir_for(&tmp, 501),
+            Path::new("/tmp/prime-agent-rust-501")
+        );
     }
 
     #[cfg(unix)]
