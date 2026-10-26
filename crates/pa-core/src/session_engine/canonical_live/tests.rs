@@ -35,6 +35,8 @@ struct State {
     admitted_users: std::collections::HashSet<String>,
     snapshot_gate: Option<Arc<tokio::sync::Notify>>,
     snapshot_started: Arc<tokio::sync::Notify>,
+    opening_run: Option<(CanonicalOperation, Arc<CanonicalLiveRun>)>,
+    registered_run: Option<Arc<CanonicalLiveRun>>,
 }
 struct Owner(Arc<Mutex<State>>);
 impl Owner {
@@ -79,6 +81,8 @@ impl Owner {
             admitted_users: std::collections::HashSet::new(),
             snapshot_gate: None,
             snapshot_started: Arc::new(tokio::sync::Notify::new()),
+            opening_run: None,
+            registered_run: None,
         }))))
     }
     fn seed(&self, mut value: serde_json::Value) -> String {
@@ -155,9 +159,20 @@ impl CanonicalLiveOwner for Owner {
             Ok(snapshot)
         })
     }
-    fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<()> {
+    fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<CanonicalPrepared> {
         assert_eq!(request.expected, self.0.lock().unwrap().cursor);
-        Box::pin(async { Ok(()) })
+        let prepared = self.prepare(CanonicalLivePrepareRequest {
+            expected: Some(request.expected),
+            source: CanonicalSourceRequest::Full,
+            admission: CanonicalAdmissionPolicy::Preserve,
+            mode: CanonicalPrepareMode::Observe,
+        });
+        let state = self.0.clone();
+        Box::pin(async move {
+            let prepared = prepared.await?;
+            state.lock().unwrap().opening_run = Some((prepared.operation.clone(), request.run));
+            Ok(prepared)
+        })
     }
     fn prepare(&self, request: CanonicalLivePrepareRequest) -> CanonicalFuture<CanonicalPrepared> {
         let mut state = self.0.lock().unwrap();
@@ -257,9 +272,20 @@ impl CanonicalLiveOwner for Owner {
         let mut state = self.0.lock().unwrap();
         state.acks.push(request.phase);
         assert_eq!(request.cursor, state.cursor);
+        let has_adoption = request.adoption.is_some();
         if let Some(adoption) = request.adoption {
             assert_eq!(adoption.operation(), &request.operation);
             assert_eq!(adoption.cursor(), &request.cursor);
+        }
+        if state
+            .opening_run
+            .as_ref()
+            .is_some_and(|(operation, _)| operation == &request.operation)
+        {
+            assert_eq!(request.phase, CanonicalAckPhase::Prepared);
+            assert!(has_adoption);
+            let (_, run) = state.opening_run.take().unwrap();
+            state.registered_run = Some(run);
         }
         let fail = (state.fail_applied_ack && request.phase == CanonicalAckPhase::AppliedReady)
             || (state.fail_abandon_ack && request.phase == CanonicalAckPhase::AbandonPreparedOnly);
@@ -380,6 +406,10 @@ impl CanonicalLiveOwner for Owner {
         request: CanonicalLiveProviderStepRequest,
     ) -> CanonicalFuture<()> {
         let mut state = self.0.lock().unwrap();
+        assert!(state
+            .registered_run
+            .as_ref()
+            .is_some_and(|run| Arc::ptr_eq(run, &request.run)));
         if std::mem::take(&mut state.cancel_next_provider) {
             return Box::pin(async {
                 Err(CanonicalStoreError {
@@ -1253,6 +1283,7 @@ async fn actual_run_git_boundary_commits_once_and_dedupes_at_end() {
         state.acks,
         vec![
             CanonicalAckPhase::Prepared,            // initial raw bootstrap
+            CanonicalAckPhase::Prepared,            // exact run-opening adoption
             CanonicalAckPhase::Prepared,            // GitState preparation
             CanonicalAckPhase::AppliedReady,        // durable GitState adoption
             CanonicalAckPhase::Prepared,            // named User delivery (not a second append)
@@ -1620,7 +1651,11 @@ async fn metadata_from_rejects_original_ledger_cursor_after_snapshot_refresh_bef
     else {
         panic!("original metadata cursor must remain exact");
     };
-    assert_eq!(error.requested, CanonicalRequestedWrite::NotWritten);
+    assert_eq!(error.requested, CanonicalRequestedWrite::NotRequested);
+    assert_eq!(
+        error.source,
+        CanonicalSourceDisposition::ReadyForObservation
+    );
     assert_eq!(owner.0.lock().unwrap().appends, 0);
     assert_eq!(
         owner.0.lock().unwrap().acks,
@@ -1837,6 +1872,10 @@ async fn admitted_assistant_cost_survives_exact_physical_json_receipt_adoption()
     assert_eq!(row.raw(), state.rows[0].raw());
     assert_eq!(
         state.acks,
-        vec![CanonicalAckPhase::Prepared, CanonicalAckPhase::AppliedReady]
+        vec![
+            CanonicalAckPhase::Prepared,
+            CanonicalAckPhase::Prepared,
+            CanonicalAckPhase::AppliedReady
+        ]
     );
 }

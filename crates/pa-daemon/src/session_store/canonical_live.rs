@@ -102,6 +102,13 @@ fn unresolved(detail: impl std::fmt::Display) -> CanonicalStoreError {
         detail if detail.starts_with("delivery admission: ") => "delivery_admission",
         detail if detail.starts_with("delivery write start: ") => "delivery_write_start",
         detail if detail.starts_with("delivery finish: ") => "delivery_finish",
+        "canonical source advanced outside owner" => "unowned_source_advance",
+        "actual AgentStart belongs to another certified source" => "actual_run_source_mismatch",
+        "actual AgentStart source changed outside owner" => "actual_run_external_source_change",
+        "actual run was already registered" => "actual_run_duplicate_registration",
+        "previous actual run has no acknowledged native terminal row" => {
+            "actual_run_terminal_unacknowledged"
+        }
         _ => "unclassified_owner_error",
     };
     eprintln!("pa-daemon: canonical refusal phase=owner reason={reason}");
@@ -134,6 +141,7 @@ struct Pending {
     signal: Option<CanonicalCallerSignal>,
     staged: bool,
     from: CanonicalCursor,
+    opening_run: Option<Arc<CanonicalLiveRun>>,
 }
 
 struct RegisteredRun {
@@ -200,7 +208,20 @@ impl State {
         expected: &pa_core::session::canonical::CanonicalCursor,
         detail: &str,
     ) -> CanonicalStoreError {
-        if self.available().is_ok()
+        if self.certifies_unstarted_source(expected) {
+            CanonicalStoreError {
+                kind: CanonicalFailureKind::SourceChanged,
+                requested: CanonicalRequestedWrite::NotRequested,
+                source: CanonicalSourceDisposition::ReadyForObservation,
+                detail: detail.to_owned(),
+            }
+        } else {
+            unresolved(detail)
+        }
+    }
+
+    fn certifies_unstarted_source(&self, expected: &CanonicalCursor) -> bool {
+        self.available().is_ok()
             && self.prepared.is_empty()
             && self.tools.is_empty()
             && self.callers.iter().all(|signal| {
@@ -212,16 +233,6 @@ impl State {
             && expected.header_certificate == self.raw.cursor.header_certificate
             && expected.branch_revision == self.raw.cursor.branch_revision
             && expected.canonical_revision <= self.raw.cursor.canonical_revision
-        {
-            CanonicalStoreError {
-                kind: CanonicalFailureKind::SourceChanged,
-                requested: CanonicalRequestedWrite::NotRequested,
-                source: CanonicalSourceDisposition::ReadyForObservation,
-                detail: detail.to_owned(),
-            }
-        } else {
-            unresolved(detail)
-        }
     }
 
     fn position(&self, leaf: Option<String>) -> Result<RawPosition> {
@@ -751,6 +762,7 @@ impl SessionFile {
                             signal: Some(signal),
                             staged: false,
                             from: checkpoint.cursor.clone(),
+                            opening_run: None,
                         });
                         Ok(Some(CanonicalPrepared {
                             caller,
@@ -841,6 +853,7 @@ impl SessionFile {
                     operation: operation.clone(), cursor: raw.cursor.clone(), barrier: barrier.clone(),
                     prepared: true, mutation: matches!(request.mode, CanonicalPrepareMode::Mutation(_)),
                     signal: None, staged: false, from: raw.cursor,
+                    opening_run: None,
                 });
                 // A nonempty explicit bootstrap admission is a guarded mutation.
                 let ids = match &request.admission {
@@ -882,6 +895,7 @@ impl SessionFile {
                     signal: Some(signal),
                     staged: false,
                     from,
+                    opening_run: None,
                 });
                 Ok(CanonicalPrepared {
                     caller,
@@ -909,7 +923,7 @@ impl SessionFile {
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
         let lease = state.verify(self)?;
         lease
-            .with_owned_mutation(&self.path, || {
+            .with_owned_mutation(&self.path.clone(), || {
                 if request.phase == CanonicalAckPhase::AbandonPreparedOnly
                     && state.pending.is_none()
                 {
@@ -1022,9 +1036,24 @@ impl SessionFile {
                         == pa_core::session::canonical::CanonicalCallerState::Abandoned),
                     "canonical operation caller abandoned before ACK"
                 );
+                let opening_run = pending.opening_run.clone();
+                let barrier = pending.barrier.clone();
+                if let Some(identity) = opening_run {
+                    let retired = self.retire_canonical_source(&mut state)?;
+                    state.authority = CanonicalOwnerEpoch::successor(&state.raw.cursor, retired)?;
+                    let abort = state.authority.register_run(identity.clone())?;
+                    state.registered_run = Some(RegisteredRun {
+                        identity,
+                        abort: Some(abort),
+                        ever_provider_admitted: false,
+                        terminal_acked: false,
+                    });
+                    state.provider = None;
+                    state.serving_run = None;
+                }
                 state
                     .revision
-                    .clear_barrier(&request.operation, &pending.barrier)
+                    .clear_barrier(&request.operation, &barrier)
                     .map_err(|e| unresolved(format!("ACK barrier: {e:?}")))?;
                 let pending = state
                     .pending
@@ -1162,74 +1191,116 @@ impl SessionFile {
             fields: value,
         };
         let mut io_started = false;
-        lease.with_owned_mutation(&self.path.clone(), || {
-            let current = state.current(self)?;
-            anyhow::ensure!(current.cursor == state.raw.cursor && current.cursor == request.expected,
-                "canonical append source/branch/frontier/leaf CAS conflict; requested row not written");
-            // Validate sparse support before any requested mutation, never after writing.
-            current.checkpoint(request.source)?;
-            let mut admit = || -> anyhow::Result<_> {
-                // A selected context capability must remain current through the
-                // actual RequestedMutation grant/enter_io and physical admission.
-                let grant = state.grant(self, &request.draft)?;
-                let barrier = state.revision.set_barrier(&request.operation)
-                    .map_err(|e| failure(format!("commit barrier: {e:?}")))?;
-                state.pending = Some(Pending {
-                            provenance: PendingProvenance::Retained,
-                    operation: request.operation.clone(), cursor: current.cursor.clone(), barrier,
-                    prepared: false, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
-                });
-                let mut attempt = state.revision.admit_write(Some(&request.operation))
-                    .map_err(|e| unresolved(format!("commit admission: {e:?}")))?;
-                attempt.begin_io().map_err(|e| unresolved(format!("commit start: {e:?}")))?;
-                Ok((grant, attempt))
-            };
-            let (grant, attempt) = match request.context_admission.as_ref() {
-                Some(capability) => capability.with_admission(&request.draft, admit)?,
-                None => admit()?,
-            };
-            // Registration/host guards are gone. The admitted writer alone owns
-            // classification and completion; no plugin lock crosses disk I/O.
-            io_started = true;
-            let id = match self.persist_granted_entry(entry, None, Some(grant)) {
-                Ok(id) => id,
-                Err(error) => {
-                    state.blocked = true;
-                    return Err(error);
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                let current = state.current(self)?;
+                anyhow::ensure!(
+                    current.cursor == state.raw.cursor,
+                    "canonical append source changed outside owner; requested row not written"
+                );
+                if current.cursor != request.expected {
+                    return Err(CanonicalStoreError {
+                        kind: CanonicalFailureKind::SourceChanged,
+                        requested: CanonicalRequestedWrite::NotWritten,
+                        source: CanonicalSourceDisposition::Unchanged,
+                        detail: "canonical append source advanced; prepared operation not written"
+                            .into(),
+                    }
+                    .into());
                 }
-            };
-            attempt.finish_success().map_err(|e| unresolved(format!("commit finish: {e:?}")))?;
-            let position = state.position(self.leaf_id.clone())?;
-            let appended = match RawCapture::append_from(&state.raw, &request.expected, position, CaptureMode::Full) {
-                Ok(appended) => appended,
-                Err(error) => {
-                    state.blocked = true;
-                    return Err(error.into());
+                // Validate sparse support before any requested mutation, never after writing.
+                current.checkpoint(request.source)?;
+                let mut admit = || -> anyhow::Result<_> {
+                    // A selected context capability must remain current through the
+                    // actual RequestedMutation grant/enter_io and physical admission.
+                    let grant = state.grant(self, &request.draft)?;
+                    let barrier = state
+                        .revision
+                        .set_barrier(&request.operation)
+                        .map_err(|e| failure(format!("commit barrier: {e:?}")))?;
+                    state.pending = Some(Pending {
+                        provenance: PendingProvenance::Retained,
+                        operation: request.operation.clone(),
+                        cursor: current.cursor.clone(),
+                        barrier,
+                        prepared: false,
+                        mutation: false,
+                        signal: None,
+                        staged: false,
+                        from: current.cursor.clone(),
+                        opening_run: None,
+                    });
+                    let mut attempt = state
+                        .revision
+                        .admit_write(Some(&request.operation))
+                        .map_err(|e| unresolved(format!("commit admission: {e:?}")))?;
+                    attempt
+                        .begin_io()
+                        .map_err(|e| unresolved(format!("commit start: {e:?}")))?;
+                    Ok((grant, attempt))
+                };
+                let (grant, attempt) = match request.context_admission.as_ref() {
+                    Some(capability) => capability.with_admission(&request.draft, admit)?,
+                    None => admit()?,
+                };
+                // Registration/host guards are gone. The admitted writer alone owns
+                // classification and completion; no plugin lock crosses disk I/O.
+                io_started = true;
+                let id = match self.persist_granted_entry(entry, None, Some(grant)) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        state.blocked = true;
+                        return Err(error);
+                    }
+                };
+                attempt
+                    .finish_success()
+                    .map_err(|e| unresolved(format!("commit finish: {e:?}")))?;
+                let position = state.position(self.leaf_id.clone())?;
+                let appended = match RawCapture::append_from(
+                    &state.raw,
+                    &request.expected,
+                    position,
+                    CaptureMode::Full,
+                ) {
+                    Ok(appended) => appended,
+                    Err(error) => {
+                        state.blocked = true;
+                        return Err(error.into());
+                    }
+                };
+                anyhow::ensure!(
+                    appended.rows.len() == 1 && appended.rows[0].entry().id() == Some(id.as_str()),
+                    "canonical append does not contain exactly the owner's requested row"
+                );
+                let to = appended.capture.cursor.clone();
+                state
+                    .pending
+                    .as_mut()
+                    .ok_or_else(|| unresolved("commit pending state lost"))?
+                    .cursor = to.clone();
+                state.raw = appended.capture;
+                Ok(CanonicalCommitDisposition::Committed(
+                    CanonicalAppendReceipt {
+                        operation: request.operation,
+                        from: request.expected,
+                        to,
+                        rows: appended.rows,
+                        committed_entry_id: Some(id),
+                        replacement_window: None,
+                    },
+                ))
+            })
+            .map_err(|error| {
+                if io_started {
+                    unresolved(error)
+                } else {
+                    match error.downcast::<CanonicalStoreError>() {
+                        Ok(error) => error,
+                        Err(error) => failure(error),
+                    }
                 }
-            };
-            anyhow::ensure!(appended.rows.len() == 1 && appended.rows[0].entry().id() == Some(id.as_str()),
-                "canonical append does not contain exactly the owner's requested row");
-            let to = appended.capture.cursor.clone();
-            state.pending.as_mut().ok_or_else(|| unresolved("commit pending state lost"))?.cursor = to.clone();
-            state.raw = appended.capture;
-            Ok(CanonicalCommitDisposition::Committed(CanonicalAppendReceipt {
-                operation: request.operation,
-                from: request.expected,
-                to,
-                rows: appended.rows,
-                committed_entry_id: Some(id),
-                replacement_window: None,
-            }))
-        }).map_err(|error| {
-            if io_started {
-                unresolved(error)
-            } else {
-                match error.downcast::<CanonicalStoreError>() {
-                    Ok(error) => error,
-                    Err(error) => failure(error),
-                }
-            }
-        })
+            })
     }
 
     /// Explicit delivered FIFO replay, or one newly accepted SDK continuation.
@@ -1271,6 +1342,7 @@ impl SessionFile {
                             provenance: PendingProvenance::Retained,
                 operation: operation.clone(), cursor: current.cursor.clone(), barrier,
                 prepared: true, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
+                opening_run: None,
             });
             let id = if let Some(id) = state.delivered.front().cloned() {
                 validate_user_intent(&current, &id, &request.message)?;
@@ -1401,7 +1473,10 @@ impl State {
                     .abort
                     .as_ref()
                     .ok_or_else(|| failure("no-provider abort provenance is unavailable"))?;
-                return self.authority.begin_no_provider_abort(abort, draft, stage);
+                return self.authority.begin_no_provider_terminal(abort, draft, stage)
+                    .inspect_err(|_| {
+                        eprintln!("pa-daemon: canonical refusal phase=no_provider_terminal reason=terminal_provenance_refused");
+                    });
             }
         }
         let epoch = file
@@ -1794,6 +1869,7 @@ impl SessionFile {
                     signal: None,
                     staged: true,
                     from: current.cursor.clone(),
+                    opening_run: None,
                 });
                 let mut attempt = state
                     .revision
@@ -1903,6 +1979,7 @@ impl SessionFile {
                 provenance: PendingProvenance::Retained,
                 operation: operation.clone(), cursor: current.cursor.clone(), barrier,
                 prepared: true, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
+                opening_run: None,
             });
             let id = if let Some(id) = existing {
                 state.revision.advance_owner_state(Some(&operation))
@@ -2030,7 +2107,7 @@ impl SessionFile {
     pub(crate) fn register_canonical_run(
         &mut self,
         request: CanonicalLiveRunRequest,
-    ) -> Result<()> {
+    ) -> Result<CanonicalPrepared> {
         self.attach_canonical_owner()?;
         let owner = self
             .canonical_live
@@ -2045,8 +2122,14 @@ impl SessionFile {
         lease
             .with_owned_mutation(&self.path.clone(), || {
                 anyhow::ensure!(
-                    state.current(self)?.cursor == state.raw.cursor
-                        && request.expected == state.raw.cursor,
+                    state.current(self)?.cursor == state.raw.cursor,
+                    "actual AgentStart source changed outside owner"
+                );
+                // This check admits only an exact source or a monotone, same-owner
+                // advance with no outstanding adoption, mutation, or tool debt.
+                anyhow::ensure!(
+                    state.certifies_unstarted_source(&request.expected)
+                        && state.raw.certifies_prior_prefix(&request.expected),
                     "actual AgentStart belongs to another certified source"
                 );
                 if let Some(previous) = &state.registered_run {
@@ -2059,20 +2142,37 @@ impl SessionFile {
                         "previous actual run has no acknowledged native terminal row"
                     );
                 }
-                let retired = self.retire_canonical_source(&mut state)?;
-                state.authority = CanonicalOwnerEpoch::successor(&state.raw.cursor, retired)?;
-                let abort = state.authority.register_run(request.run.clone())?;
-                state.registered_run = Some(RegisteredRun {
-                    identity: request.run,
-                    abort: Some(abort),
-                    ever_provider_admitted: false,
-                    terminal_acked: false,
+                let checkpoint = state
+                    .raw
+                    .checkpoint(pa_core::session::canonical::CanonicalSourceRequest::Full)?;
+                let operation = CanonicalOperation::new();
+                let barrier = state
+                    .revision
+                    .set_barrier(&operation)
+                    .map_err(|e| unresolved(format!("run opening barrier: {e:?}")))?;
+                let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+                state.pending = Some(Pending {
+                    provenance: PendingProvenance::Retained,
+                    operation: operation.clone(),
+                    cursor: checkpoint.cursor.clone(),
+                    barrier,
+                    prepared: true,
+                    mutation: false,
+                    signal: Some(signal),
+                    staged: false,
+                    from: checkpoint.cursor.clone(),
+                    opening_run: Some(request.run),
                 });
-                state.provider = None;
-                state.serving_run = None;
-                Ok(())
+                Ok(CanonicalPrepared {
+                    caller,
+                    operation,
+                    checkpoint,
+                })
             })
-            .map_err(unresolved)
+            .map_err(|error| match error.downcast::<CanonicalStoreError>() {
+                Ok(error) => error,
+                Err(error) => unresolved(error),
+            })
     }
 }
 

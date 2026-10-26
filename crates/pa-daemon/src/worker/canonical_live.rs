@@ -129,7 +129,7 @@ impl CanonicalLiveOwner for CoreCanonicalLiveOwner {
         })
     }
 
-    fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<()> {
+    fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<CanonicalPrepared> {
         self.call(move |core| {
             core.store
                 .as_mut()

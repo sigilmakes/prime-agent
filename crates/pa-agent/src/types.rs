@@ -190,7 +190,7 @@ pub fn assistant_message_diagnostic(
     AssistantMessageDiagnostic {
         kind: kind.into(),
         timestamp: crate::now_ms(),
-        error: Some(serde_json::Value::String(format!("{error:#}"))),
+        error: Some(serde_json::json!({ "message": format!("{error:#}") })),
         details,
     }
 }

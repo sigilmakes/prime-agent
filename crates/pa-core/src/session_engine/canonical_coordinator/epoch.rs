@@ -415,19 +415,21 @@ impl CanonicalOwnerEpoch {
         })
     }
 
-    /// Seal the actual zero-usage aborted assistant before any provider served.
-    /// There is no ordinary assistant/error or native-metadata fallback.
+    /// Seal the actual zero-usage failed or aborted assistant before any provider served.
+    /// The registered run, not a model capture or metadata action, owns this terminal.
     ///
     /// # Errors
     /// Refuses foreign/retired/replayed runs, any actual serving capture, nonzero
-    /// usage, non-Aborted outcomes, tool calls, and all normal admission failures.
-    pub fn begin_no_provider_abort(
+    /// usage, successful outcomes, errors without details, tool calls, and normal admission failures.
+    pub fn begin_no_provider_terminal(
         &self,
         run: &CanonicalOwnerRun,
         draft: &CanonicalEntryDraft,
         stage: CanonicalIoStage,
     ) -> Result<CanonicalAppendGrant, CanonicalStoreError> {
-        let scope = run.inner.seal_aborted(&self.owner, draft.clone())?;
+        let scope = run
+            .inner
+            .seal_no_provider_terminal(&self.owner, draft.clone())?;
         append_scoped(scope, &self.source, stage, draft)
     }
 
@@ -1516,49 +1518,59 @@ mod tests {
     }
 
     #[test]
-    fn registered_source_run_seals_one_exact_no_provider_abort_and_drains_in_order() {
-        let owner = CanonicalOwnerEpoch::genesis(&cursor());
-        let actual = Arc::new(String::from("actual `AgentStart` allocation"));
-        let run = owner
-            .register_run(actual.clone())
-            .expect("actual run registration");
-        assert!(owner.register_run(actual).is_err());
-        let foreign = CanonicalOwnerEpoch::genesis(&cursor());
-        let draft = aborted_draft();
-        assert!(foreign
-            .begin_no_provider_abort(&run, &draft, CanonicalIoStage::RequestedMutation)
-            .is_err());
-        let grant = owner
-            .begin_no_provider_abort(&run, &draft, CanonicalIoStage::RequestedMutation)
-            .expect("actual zero-usage aborted outcome");
-        assert!(owner
-            .begin_no_provider_abort(&run, &draft, CanonicalIoStage::RequestedMutation)
-            .is_err());
-        let closing = owner.request_close();
-        assert_eq!(
-            closing.view(),
-            CanonicalDrainView::Pending {
-                io: 1,
-                transactions: 1,
-                anchors: 1
-            }
-        );
-        grant
-            .settle(CanonicalWriteCertainty::Known)
-            .expect("writer classified terminal");
-        assert_eq!(
-            closing.view(),
-            CanonicalDrainView::Pending {
-                io: 0,
-                transactions: 0,
-                anchors: 1
-            }
-        );
-        run.finish_ordered_boundary();
-        assert_eq!(closing.view(), CanonicalDrainView::Drained);
-        closing.finish().expect("one source successor token");
-        assert!(!owner.poisoned());
-        assert!(!foreign.poisoned());
+    fn registered_source_run_seals_one_exact_no_provider_terminal_and_drains_in_order() {
+        for stop_reason in ["aborted", "error"] {
+            let owner = CanonicalOwnerEpoch::genesis(&cursor());
+            let actual = Arc::new(String::from("actual `AgentStart` allocation"));
+            let run = owner
+                .register_run(actual.clone())
+                .expect("actual run registration");
+            assert!(owner.register_run(actual).is_err());
+            let foreign = CanonicalOwnerEpoch::genesis(&cursor());
+            let mut value = serde_json::to_value(aborted_draft().entry()).unwrap();
+            value["message"]["stopReason"] = serde_json::json!(stop_reason);
+            value["message"]["errorMessage"] =
+                serde_json::json!("failed before provider admission");
+            let draft = CanonicalEntryDraft::new(
+                CanonicalMutationKind::AdmittedTerminal,
+                serde_json::from_value(value).unwrap(),
+            )
+            .unwrap();
+            assert!(foreign
+                .begin_no_provider_terminal(&run, &draft, CanonicalIoStage::RequestedMutation)
+                .is_err());
+            let grant = owner
+                .begin_no_provider_terminal(&run, &draft, CanonicalIoStage::RequestedMutation)
+                .expect("actual zero-usage aborted outcome");
+            assert!(owner
+                .begin_no_provider_terminal(&run, &draft, CanonicalIoStage::RequestedMutation)
+                .is_err());
+            let closing = owner.request_close();
+            assert_eq!(
+                closing.view(),
+                CanonicalDrainView::Pending {
+                    io: 1,
+                    transactions: 1,
+                    anchors: 1
+                }
+            );
+            grant
+                .settle(CanonicalWriteCertainty::Known)
+                .expect("writer classified terminal");
+            assert_eq!(
+                closing.view(),
+                CanonicalDrainView::Pending {
+                    io: 0,
+                    transactions: 0,
+                    anchors: 1
+                }
+            );
+            run.finish_ordered_boundary();
+            assert_eq!(closing.view(), CanonicalDrainView::Drained);
+            closing.finish().expect("one source successor token");
+            assert!(!owner.poisoned());
+            assert!(!foreign.poisoned());
+        }
     }
 
     #[test]
@@ -1572,7 +1584,7 @@ mod tests {
             tool_draft("id", "native"),
         ] {
             assert!(owner
-                .begin_no_provider_abort(&run, &invalid, CanonicalIoStage::RequestedMutation)
+                .begin_no_provider_terminal(&run, &invalid, CanonicalIoStage::RequestedMutation)
                 .is_err());
         }
         for change in 0..3 {
@@ -1594,11 +1606,11 @@ mod tests {
             )
             .expect("native draft");
             assert!(owner
-                .begin_no_provider_abort(&run, &invalid, CanonicalIoStage::RequestedMutation)
+                .begin_no_provider_terminal(&run, &invalid, CanonicalIoStage::RequestedMutation)
                 .is_err());
         }
         owner
-            .begin_no_provider_abort(&run, &aborted_draft(), CanonicalIoStage::RequestedMutation)
+            .begin_no_provider_terminal(&run, &aborted_draft(), CanonicalIoStage::RequestedMutation)
             .expect("refusals did not consume the actual abort slot")
             .settle(CanonicalWriteCertainty::Known)
             .expect("known actual write");
@@ -1623,7 +1635,7 @@ mod tests {
             .capture_serving_run(actual, Arc::new(String::from("actual model")))
             .expect("matched actual serving capture");
         assert!(owner
-            .begin_no_provider_abort(&run, &aborted_draft(), CanonicalIoStage::RequestedMutation)
+            .begin_no_provider_terminal(&run, &aborted_draft(), CanonicalIoStage::RequestedMutation)
             .is_err());
         run.finish_ordered_boundary();
         assert!(owner.register_run(Arc::new(())).is_err());

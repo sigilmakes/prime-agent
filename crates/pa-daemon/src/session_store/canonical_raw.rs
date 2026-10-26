@@ -199,6 +199,66 @@ impl RawCapture {
             source: CanonicalSource::Full(self.retained.clone()),
         })
     }
+    /// Check a prior full cursor against the retained physical prefix and append ancestry.
+    /// The caller must separately verify the live owner and current physical source.
+    pub(super) fn certifies_prior_prefix(&self, expected: &CanonicalCursor) -> bool {
+        if expected == &self.cursor {
+            return true;
+        }
+        if expected.owner != self.cursor.owner
+            || expected.session_id != self.cursor.session_id
+            || expected.source_path != self.cursor.source_path
+            || expected.header_certificate != self.cursor.header_certificate
+            || expected.branch_revision != self.cursor.branch_revision
+            || expected.canonical_revision > self.cursor.canonical_revision
+            || expected.frontier.rows == 0
+            || expected.frontier.rows > self.cursor.frontier.rows
+            || expected.frontier.bytes > self.cursor.frontier.bytes
+            || self.retained.len() != self.plan.rows.len()
+        {
+            return false;
+        }
+        if expected.frontier == self.cursor.frontier {
+            return expected.raw_source_generation == self.cursor.raw_source_generation
+                && expected.selected_leaf == self.cursor.selected_leaf;
+        }
+        if expected.canonical_revision == self.cursor.canonical_revision {
+            return false;
+        }
+        let mut hash = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut rows = 0_u64;
+        for row in std::iter::once(&self.header).chain(&self.retained) {
+            if rows == expected.frontier.rows {
+                break;
+            }
+            hash.update(row.raw());
+            bytes += row.raw().len() as u64;
+            rows += 1;
+        }
+        if rows != expected.frontier.rows
+            || bytes != expected.frontier.bytes
+            || <[u8; 32]>::from(hash.finalize()) != expected.frontier.prefix_certificate
+        {
+            return false;
+        }
+        let mut walk = self.cursor.selected_leaf.as_deref();
+        while walk != expected.selected_leaf.as_deref() {
+            let Some(index) = walk.and_then(|id| self.by_id.get(id)).copied() else {
+                return false;
+            };
+            if self.plan.rows[index].span.row < expected.frontier.rows {
+                return false;
+            }
+            walk = self.plan.rows[index].parent_id.as_deref();
+        }
+        expected.selected_leaf.as_ref().is_none_or(|id| {
+            self.by_id
+                .get(id)
+                .is_some_and(|index| self.plan.rows[*index].span.row < expected.frontier.rows)
+        })
+    }
+
     /// Refresh only the logical owner position after a locked ledger transaction.
     /// Physical identity, bytes, graph and generation remain exactly unchanged.
     pub(super) fn refresh_owner_position(&mut self, position: &RawPosition) {
@@ -831,6 +891,43 @@ mod tests {
             digest(&fs::read(&path).unwrap())
         );
     }
+    #[test]
+    fn prior_prefix_certifies_only_exact_boundaries_and_append_ancestry() {
+        let (_dir, path) = source(format!("{HEADER}{A}{B}").as_bytes());
+        let old = capture(&path, Some("a"));
+        append(
+            &path,
+            format!("{META}{{\"type\":\"future\",\"id\":\"on\",\"parentId\":\"a\"}}\n").as_bytes(),
+        );
+        let current =
+            RawCapture::append_from(&old, &old.cursor, next(&old, Some("on")), CaptureMode::Full)
+                .unwrap()
+                .capture;
+        assert!(current.certifies_prior_prefix(&old.cursor));
+        assert!(current.certifies_prior_prefix(&current.cursor));
+        let mut logical = current.cursor.clone();
+        logical.canonical_revision -= 1;
+        assert!(current.certifies_prior_prefix(&logical));
+        let mut forged = old.cursor.clone();
+        forged.frontier.prefix_certificate[0] ^= 1;
+        assert!(!current.certifies_prior_prefix(&forged));
+        forged = old.cursor.clone();
+        forged.frontier.bytes -= 1;
+        assert!(!current.certifies_prior_prefix(&forged));
+        forged = old.cursor.clone();
+        forged.frontier.rows -= 1;
+        assert!(!current.certifies_prior_prefix(&forged));
+        forged = old.cursor.clone();
+        forged.selected_leaf = Some("b".into());
+        assert!(!current.certifies_prior_prefix(&forged));
+        forged = current.cursor.clone();
+        forged.raw_source_generation[0] ^= 1;
+        assert!(!current.certifies_prior_prefix(&forged));
+        forged = old.cursor;
+        forged.canonical_revision = current.cursor.canonical_revision;
+        assert!(!current.certifies_prior_prefix(&forged));
+    }
+
     #[test]
     fn unchanged_capture_has_empty_tail() {
         let (_dir, path) = source(format!("{HEADER}{A}").as_bytes());

@@ -194,7 +194,7 @@ pub trait CanonicalLiveOwner: Send + Sync {
     }
 
     fn snapshot(&self) -> CanonicalFuture<CanonicalLiveSnapshot>;
-    fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<()>;
+    fn register_run(&self, request: CanonicalLiveRunRequest) -> CanonicalFuture<CanonicalPrepared>;
     fn prepare(&self, request: CanonicalLivePrepareRequest) -> CanonicalFuture<CanonicalPrepared>;
     fn append(
         &self,
@@ -794,6 +794,25 @@ impl CanonicalLiveSession {
                 message: other,
             },
         };
+        // A rejected AgentStart can still produce synthetic lifecycle failure
+        // events. No native terminal belongs to this view until registration.
+        if kind == CanonicalMutationKind::AdmittedTerminal
+            && self
+                .run
+                .lock()
+                .map_err(|_| {
+                    failure(
+                        "canonical run lock poisoned",
+                        CanonicalRequestedWrite::NotRequested,
+                    )
+                })?
+                .is_none()
+        {
+            return Err(failure(
+                "terminal has no actual registered run",
+                CanonicalRequestedWrite::NotRequested,
+            ));
+        }
         self.append(kind, entry).await?;
         Ok(canonical_message)
     }
@@ -1266,25 +1285,36 @@ impl CanonicalLiveSession {
                 ));
             }
         }
-        let expected = self
-            .session
-            .lock()
-            .await
-            .canonical_binding()
-            .cloned()
-            .ok_or_else(|| {
+        let (expected, revision) = {
+            let session = self.session.lock().await;
+            let expected = session.canonical_binding().cloned().ok_or_else(|| {
                 failure(
                     "actual AgentStart has no canonical source",
                     CanonicalRequestedWrite::NotRequested,
                 )
             })?;
+            (expected, session.canonical_local_revision())
+        };
         let run = Arc::new(CanonicalLiveRun { _private: () });
-        self.owner
+        let prepared = self
+            .owner
             .register_run(CanonicalLiveRunRequest {
-                expected,
+                expected: expected.clone(),
                 run: Arc::clone(&run),
             })
+            .await
+            .map_err(|error| flight.refused(error))?;
+        let (caller, operation, cursor, local_revision, acknowledged) = self
+            .install(
+                prepared,
+                revision,
+                Some(expected),
+                CanonicalAdmissionPolicy::Preserve,
+            )
             .await?;
+        self.publish_prepared(&operation, &cursor, local_revision, acknowledged)
+            .await?;
+        caller.complete();
         *self.run.lock().map_err(|_| {
             failure(
                 "canonical run lock poisoned",
@@ -1431,7 +1461,19 @@ impl CanonicalLiveMutation<'_> {
                 source: CanonicalSourceRequest::Full,
                 draft,
             })
-            .await?;
+            .await;
+        let disposition = match disposition {
+            Ok(disposition) => disposition,
+            Err(error)
+                if error.kind == CanonicalFailureKind::SourceChanged
+                    && error.requested == CanonicalRequestedWrite::NotWritten
+                    && error.source == CanonicalSourceDisposition::Unchanged =>
+            {
+                self.abandon().await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let (receipt, committed) = match disposition {
             CanonicalCommitDisposition::Committed(receipt) => (receipt, true),
             CanonicalCommitDisposition::NeedsCatchUp(receipt) => (receipt, false),
@@ -1542,7 +1584,8 @@ impl CanonicalLiveMutation<'_> {
     /// # Errors
     /// Refuses changed authority, invalid source/adoption, or incomplete owner ACK.
     pub async fn abandon(mut self) -> Result<(), CanonicalStoreError> {
-        self.flight
+        let acknowledged = self
+            .flight
             .live
             .owner
             .acknowledge(CanonicalAcknowledgement {
@@ -1552,6 +1595,7 @@ impl CanonicalLiveMutation<'_> {
                 adoption: None,
             })
             .await?;
+        check_ack(&self.operation, &self.cursor, &acknowledged)?;
         self.caller.complete();
         self.flight.complete = true;
         Ok(())
@@ -1618,10 +1662,13 @@ impl CanonicalMetadataWriter for CanonicalLiveSession {
                 .await?;
             if ticket.cursor() != &expected {
                 ticket.abandon().await?;
-                return Err(failure(
-                    "metadata source advanced; precomputed policy intent not written",
-                    CanonicalRequestedWrite::NotWritten,
-                ));
+                return Err(CanonicalStoreError {
+                    kind: CanonicalFailureKind::SourceChanged,
+                    requested: CanonicalRequestedWrite::NotRequested,
+                    source: CanonicalSourceDisposition::ReadyForObservation,
+                    detail: "metadata source advanced; precomputed policy intent not written"
+                        .into(),
+                });
             }
             ticket.commit_receipt(draft).await
         })

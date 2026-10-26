@@ -664,7 +664,7 @@ pub(super) struct OwnerRun {
     boundary: bool,
 }
 impl OwnerRun {
-    pub(super) fn seal_aborted(
+    pub(super) fn seal_no_provider_terminal(
         &self,
         owner: &AuthorityOwner,
         actual: CanonicalEntryDraft,
@@ -672,7 +672,7 @@ impl OwnerRun {
         if !Arc::ptr_eq(&self.shared, &owner.shared) {
             return Err(refused(
                 CanonicalFailureKind::OwnerChanged,
-                "abort run belongs to another owner epoch",
+                "terminal run belongs to another owner epoch",
             ));
         }
         let FileEntry::Message {
@@ -681,11 +681,13 @@ impl OwnerRun {
         } = actual.entry()
         else {
             return Err(invalid(
-                "no-provider terminal must be an actual aborted assistant",
+                "no-provider terminal must be an actual failed or aborted assistant",
             ));
         };
         if actual.kind() != CanonicalMutationKind::AdmittedTerminal
-            || message.stop_reason != pa_types::ai::StopReason::Aborted
+            || !(message.stop_reason == pa_types::ai::StopReason::Aborted
+                || (message.stop_reason == pa_types::ai::StopReason::Error
+                    && message.error_message.is_some()))
             || message.usage != pa_types::ai::Usage::default()
             || message
                 .content
@@ -693,14 +695,14 @@ impl OwnerRun {
                 .any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
         {
             return Err(invalid(
-                "no-provider terminal requires Aborted, exact zero usage, and no tool calls",
+                "no-provider terminal requires Aborted or Error with error details, exact zero usage, and no tool calls",
             ));
         }
         let entry = self.shared.lock()?;
         validate_source(&self.source, &entry.source)?;
         validate_owner_run(&entry, &self.run, true)?;
         if self.run.sealed.swap(true, Ordering::AcqRel) {
-            return Err(invalid("registered run abort outcome already sealed"));
+            return Err(invalid("registered run terminal outcome already sealed"));
         }
         Ok(CapturedScope(Arc::new(ScopeSpec {
             capture: ScopeCapture::OwnerRun {
@@ -708,7 +710,7 @@ impl OwnerRun {
                 source: self.source.clone(),
                 run: self.run.clone(),
             },
-            purpose: Purpose::OwnerAbort {
+            purpose: Purpose::OwnerTerminal {
                 seal: Arc::new(TerminalSeal {
                     draft: actual,
                     consumed: AtomicBool::new(false),
@@ -750,7 +752,7 @@ enum Purpose {
         action: MetadataAction,
         exact: Arc<CanonicalEntryDraft>,
     },
-    OwnerAbort {
+    OwnerTerminal {
         seal: Arc<TerminalSeal>,
     },
     Terminal {
@@ -768,13 +770,13 @@ impl Purpose {
                 CanonicalMutationKind::ContextPolicy
             }
             Self::Metadata { .. } => CanonicalMutationKind::OwnerMetadata,
-            Self::Terminal { .. } | Self::OwnerAbort { .. } => {
+            Self::Terminal { .. } | Self::OwnerTerminal { .. } => {
                 CanonicalMutationKind::AdmittedTerminal
             }
         }
     }
     fn late(&self) -> bool {
-        matches!(self, Self::Terminal { .. } | Self::OwnerAbort { .. })
+        matches!(self, Self::Terminal { .. } | Self::OwnerTerminal { .. })
     }
     fn validate_draft(&self, draft: &CanonicalEntryDraft) -> Result<()> {
         if draft.kind() != self.kind() {
@@ -818,7 +820,7 @@ impl Purpose {
                     ))
                 }
             }
-            Self::Terminal { seal, .. } | Self::OwnerAbort { seal } => {
+            Self::Terminal { seal, .. } | Self::OwnerTerminal { seal } => {
                 if seal.draft.entry() == draft.entry() {
                     Ok(())
                 } else {
@@ -1263,7 +1265,8 @@ impl CanonicalWriteAuthority for OwnedAuthority {
             return Err(invalid("I/O stage already admitted"));
         }
         if stage == CanonicalIoStage::RequestedMutation {
-            if let Purpose::Terminal { seal, .. } | Purpose::OwnerAbort { seal } = &capture.purpose
+            if let Purpose::Terminal { seal, .. } | Purpose::OwnerTerminal { seal } =
+                &capture.purpose
             {
                 if seal.consumed.swap(true, Ordering::AcqRel) {
                     return Err(invalid("native terminal slot already consumed"));
