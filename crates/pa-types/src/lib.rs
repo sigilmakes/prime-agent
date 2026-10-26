@@ -101,3 +101,33 @@ impl<'de> Deserialize<'de> for JsNumber {
         deserializer.deserialize_any(V)
     }
 }
+
+#[cfg(test)]
+mod numeric_roundtrip_tests {
+    use super::JsNumber;
+
+    #[test]
+    fn canonical_usage_cost_numbers_keep_exact_f64_bits_after_physical_json_roundtrip() {
+        let costs = [
+            0.01744_f64,
+            0.000_410_000_000_000_000_05,
+            0.01785,
+            0.000_900_000_000_000_000_1,
+            0.017_972_000_000_000_002,
+        ];
+        for cost in costs {
+            let original = JsNumber(cost);
+            let encoded = serde_json::to_vec(&original).expect("encode cost");
+            let decoded: JsNumber = serde_json::from_slice(&encoded).expect("decode cost");
+            assert_eq!(
+                decoded.as_f64().to_bits(),
+                original.as_f64().to_bits(),
+                "physical JSON must preserve exact canonical numeric intent"
+            );
+            assert_eq!(
+                serde_json::to_value(decoded).expect("decoded intent"),
+                serde_json::to_value(original).expect("original intent")
+            );
+        }
+    }
+}

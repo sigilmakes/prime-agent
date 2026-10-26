@@ -1733,3 +1733,51 @@ async fn replacement_closed_view_refuses_admission_without_resetting_pending_fac
     );
     assert_eq!(owner.0.lock().unwrap().cursor, cursor);
 }
+
+#[tokio::test]
+async fn admitted_assistant_cost_survives_exact_physical_json_receipt_adoption() {
+    let owner = Owner::new();
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    live.start_run().await.unwrap();
+    // Construct from a Value, not parsed JSON: the owner is the first byte roundtrip.
+    let cost = 0.000_410_000_000_000_000_05_f64;
+    let draft: FileEntry = serde_json::from_value(serde_json::json!({
+        "type":"message",
+        "message":{
+            "role":"assistant", "content":[{"type":"toolCall", "id":"synthetic-call",
+                "name":"synthetic-tool", "arguments":{"value":1}}],
+            "api":"openai-completions", "provider":"test", "model":"test",
+            "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,
+                "cost":{"input":0,"output":cost,"cacheRead":0,"cacheWrite":0,"total":cost}},
+            "stopReason":"toolUse", "timestamp":12
+        }
+    }))
+    .unwrap();
+    let intent = payload_intent(&draft).unwrap();
+    let id = live
+        .append(CanonicalMutationKind::AdmittedTerminal, draft)
+        .await
+        .unwrap();
+    live.ensure_ready().unwrap();
+    let manager = session.lock().await;
+    let row = manager.canonical_raw_entry(&id).unwrap();
+    assert_eq!(payload_intent(row.entry()).unwrap(), intent);
+    let FileEntry::Message {
+        message: AgentMessage::Assistant(message),
+        ..
+    } = row.entry()
+    else {
+        panic!("assistant row must remain typed");
+    };
+    assert_eq!(message.usage.cost.output.as_f64().to_bits(), cost.to_bits());
+    assert_eq!(manager.canonical_visible_leaf(), Some(id.as_str()));
+    let state = owner.0.lock().unwrap();
+    assert_eq!(state.appends, 1, "never replay a committed assistant");
+    assert_eq!(state.rows.len(), 1);
+    assert_eq!(row.raw(), state.rows[0].raw());
+    assert_eq!(
+        state.acks,
+        vec![CanonicalAckPhase::Prepared, CanonicalAckPhase::AppliedReady]
+    );
+}
