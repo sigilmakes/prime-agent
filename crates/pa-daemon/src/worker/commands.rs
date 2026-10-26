@@ -818,14 +818,14 @@ impl Worker {
             return response_failure(None, "kill", &error.to_string(), None);
         }
         // The close cascades to the resident children with the SAME reason before
-        // the session's own archive and dispose; a close failure is swallowed.
+        // the session's own archive and dispose. Refusal keeps final usage reachable.
         let child_reason = match reason {
             KillCloseReason::Killed => crate::rlm_children::ChildCloseReason::Killed,
             KillCloseReason::Shutdown => crate::rlm_children::ChildCloseReason::Shutdown,
             KillCloseReason::Replaced => crate::rlm_children::ChildCloseReason::Replaced,
         };
         if let Err(error) = self.close_rlm_children(child_reason).await {
-            eprintln!("pa-daemon: RLM child close at kill failed: {error:#}");
+            return response_failure(None, "kill", &format!("{error:#}"), None);
         }
         // The `archived` entry lands before the turn's aborted row (the abort flag
         // below gates the aborted row), so the file order stays the TS one.

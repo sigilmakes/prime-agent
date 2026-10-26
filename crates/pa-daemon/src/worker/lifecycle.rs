@@ -111,20 +111,18 @@ impl Worker {
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_session_work_settled().await;
-        // The epoch drain, at the external idle boundary: the work has settled, the
-        // scoped `shutdown_requested` lock above is long released, and nothing is
-        // held across the wait. Never inside that lock and never inside
-        // `await_session_work_settled` (which takes the core lock at its flag check).
-        self.drain_canonical_epoch().await;
-        // The children close before the exit (an unreachable child must not
-        // block the worker's own exit); their resume entries and scheduled
-        // jobs survive.
+        // Final child reports use the parent's canonical metadata authority.
+        // Keep it open until the close walk has persisted their final usage.
+        // A refused close retains its report identities and lease for an explicit retry.
         if let Err(error) = self
             .close_rlm_children(crate::rlm_children::ChildCloseReason::Shutdown)
             .await
         {
-            eprintln!("pa-daemon: RLM child close at shutdown failed: {error:#}");
+            return response_failure(None, "shutdown", &format!("{error:#}"), None);
         }
+        // The epoch drain runs at the external idle boundary, with no core lock
+        // held and no remaining child accounting producer admitted by this close.
+        self.drain_canonical_epoch().await;
         if let Some(agent_engine) = &self.agent_engine {
             agent_engine.dispose_kernel().await;
         }

@@ -666,6 +666,12 @@ impl SupervisorChildSessions {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn set_test_child_usage_file(&self, child_id: &str, path: String) {
+        let record = self.inner.resolve_record(child_id, "child").await.unwrap();
+        record.lock().await.session_file = Some(path);
+    }
+
     /// Test seam: admit one child record without the supervisor round trip
     /// (the controller tests exercise the family join on registry state).
     #[cfg(test)]
