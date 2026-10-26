@@ -424,3 +424,64 @@ fn multibyte_source_tail_never_exceeds_configured_byte_cap() {
                 .sum::<u64>()
     );
 }
+
+#[test]
+fn snap_context_contribution_measurement() {
+    // A portable ASCII history makes the /4 text estimate reproducible. Profile
+    // image reservations are reported separately; these are not provider usage.
+    let text = "objective and observations from the current task. ".repeat(2500);
+    for profile in [RenderProfile::Claude, RenderProfile::OpenAi, RenderProfile::Google] {
+        let mut lim = limits(1568);
+        lim.profile = Some(profile);
+        let archive = compact(&text, &Config::default(), &lim);
+        let blocks = replay(&archive, &lim).unwrap();
+        let replay_chars: usize = blocks.iter().map(|block| match block {
+            ReplayBlock::Text(text) => text.chars().count(),
+            ReplayBlock::Image { .. } => 0,
+        }).sum();
+        let image_count = blocks.iter().filter(|block| matches!(block, ReplayBlock::Image { .. })).count();
+        let image_tokens = image_count * profile.geometry(false).unwrap().token_estimate;
+        let source_bytes: usize = archive.source.iter().map(|span| span.text.len()).sum();
+        let report = serde_json::json!({
+            "profile":format!("{profile:?}"),
+            "before_text_tokens":text.chars().count().div_ceil(4),
+            "after_text_tokens":replay_chars.div_ceil(4),
+            "raw_head_chars":archive.text_head.chars().count(),
+            "raw_tail_chars":archive.text_tail.chars().count(),
+            "images":image_count,"image_token_reservation":image_tokens,
+            "persisted_source_bytes_not_sent":source_bytes,
+            "archive_json_bytes":archive.to_json().unwrap().len(),
+            "fixed_system_and_tools":"unchanged; outside Snap archive"
+        });
+        eprintln!("SNAP_CONTRIBUTION {report}");
+        assert!(image_count > 0);
+        // Rerender source is stored for the next compaction, not replayed as a
+        // second raw copy alongside its PNGs.
+        assert!(source_bytes > replay_chars);
+        assert!(replay_chars.div_ceil(4) + image_tokens < text.chars().count().div_ceil(4));
+    }
+}
+
+#[test]
+fn handoff_is_replayed_once_bounded_and_optional_for_old_archives() {
+    let lim = limits(128);
+    let archive = compact("old context", &Config::default(), &lim);
+    let mut value: serde_json::Value = serde_json::from_str(&archive.to_json().unwrap()).unwrap();
+    value["handoff"] = serde_json::json!("Objective: finish task; next action: check job17");
+    let restored = Archive::from_json(&value.to_string()).unwrap();
+    let blocks = replay(&restored, &lim).unwrap();
+    let text: String = blocks.iter().filter_map(|block| match block {
+        ReplayBlock::Text(text) => Some(text.as_str()),
+        ReplayBlock::Image { .. } => None,
+    }).collect();
+    assert_eq!(text.matches("check job17").count(), 1);
+    value["handoff"] = serde_json::json!("x".repeat(16 * 1024 + 1));
+    assert!(Archive::from_json(&value.to_string()).is_err());
+    value.as_object_mut().unwrap().remove("handoff");
+    assert_eq!(Archive::from_json(&value.to_string()).unwrap(), archive);
+    let mut tight = lim.clone();
+    tight.available_tokens = 300;
+    value["handoff"] = serde_json::json!("H".repeat(400));
+    let restored = Archive::from_json(&value.to_string()).unwrap();
+    assert!(replay(&restored, &tight).is_err());
+}

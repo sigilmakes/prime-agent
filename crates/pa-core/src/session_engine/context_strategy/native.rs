@@ -759,4 +759,23 @@ mod tests {
         let limits = snap_limits(&model, &Value::Null);
         assert!(!limits.vision);
     }
+
+#[test]
+fn snap_user_images_match_shared_usage_estimate() {
+    let model: pa_types::ai::Model = serde_json::from_value(json!({
+        "id":"gpt-5","name":"Test","api":"openai-completions","provider":"test",
+        "baseUrl":"http://127.0.0.1:9/v1","reasoning":false,"input":["text","image"],
+        "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":100_000,"maxTokens":1000
+    })).unwrap();
+    let config = json!({"profile":"explicit","frame_size":128,"frame_tokens":1});
+    let source: AgentMessage = serde_json::from_value(json!({"role":"user","content":"archive text ".repeat(100),"timestamp":0})).unwrap();
+    let archive = crate::snapcompact::prepare(None, &[source], &[], &crate::snapcompact::Config::default(), &snap_limits(&model, &config), &||false).unwrap();
+    let messages = expand_snap(&archive.to_json().unwrap(), Some(&model), &config).unwrap();
+    assert!(archive.frame_count() > 0);
+    let typed = crate::session_engine::compaction::estimate_context_tokens(&messages).tokens;
+    let shared: u64 = messages.iter().map(|message|pa_types::usage::estimate_tokens(&serde_json::to_value(message).unwrap())).sum();
+    assert_eq!(typed, shared);
+    let text: AgentMessage = serde_json::from_value(json!({"role":"user","content":"12345678","timestamp":0})).unwrap();
+    assert_eq!(crate::session_engine::compaction::estimate_tokens(&text), 2);
+}
 }

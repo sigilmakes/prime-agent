@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "defaults_tests.rs"]
 mod defaults;
+#[path = "snap_handoff_tests.rs"]
+mod snap_handoff;
 use crate::session::manager::SessionManager;
 use crate::session_engine::{
     engine::{create_session, SessionEngine, SessionEngineConfig},
