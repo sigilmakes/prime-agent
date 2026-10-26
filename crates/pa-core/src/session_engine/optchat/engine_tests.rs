@@ -1182,6 +1182,7 @@ async fn actual_responses_archive_fixture(
             &window,
             CompactOptions {
                 bearer_token: "isolated-loopback-native-fixture",
+                headers: None,
                 instructions: None,
                 budget: InputBudget {
                     input_tokens_upper_bound: 1024,

@@ -1,7 +1,9 @@
 -- The default rolling view is explicit plugin policy, not canonical-history storage.
 local policy = config.policy or "rolling"
 assert(policy == "rolling" or policy == "full", "context policy must be rolling or full")
-local compactors = config.compactors or {"standard_compaction/standard"}
+local compactors = config.compactors or {
+    "server_compaction/server", "snapcompact/snapcompact", "standard_compaction/standard"
+}
 assert(type(compactors) == "table", "compactors must be an array")
 for key, route in pairs(compactors) do
     assert(type(key) == "number" and key >= 1 and key <= #compactors and key % 1 == 0,

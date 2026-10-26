@@ -184,6 +184,7 @@ fn input(route: &CompactionRoute) -> ResponsesWindow {
 fn options() -> CompactOptions<'static> {
     CompactOptions {
         bearer_token: "local-fake-key",
+        headers: None,
         instructions: Some("Keep state"),
         budget: InputBudget {
             input_tokens_upper_bound: 999,
@@ -255,6 +256,39 @@ async fn full_ordered_native_output_survives_archive_and_next_input_byte_exactly
                 .input_json(),
             RETAINED
         );
+    }
+}
+
+#[tokio::test]
+async fn resolved_headers_are_forwarded_without_overriding_explicit_bearer() {
+    let mut server = fake(200, envelope(RETAINED), Mode::Complete).await;
+    let headers = std::collections::BTreeMap::from([
+        ("X-Resolved-Team".into(), "local-team".into()),
+        ("authorization".into(), "Bearer stale-key".into()),
+    ]);
+    let mut request_options = options();
+    request_options.headers = Some(&headers);
+    let candidate = bounded(supported_adapter(&server.route).compact(
+        &input(&server.route),
+        request_options,
+        &CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+    let wire = server
+        .requests
+        .recv()
+        .await
+        .unwrap()
+        .head
+        .to_ascii_lowercase();
+    assert!(wire.contains("x-resolved-team: local-team"));
+    assert!(wire.contains("authorization: bearer local-fake-key"));
+    assert_eq!(wire.matches("authorization:").count(), 1);
+    assert!(!wire.contains("stale-key"));
+    let archive = candidate.serialize().unwrap();
+    for secret in ["local-team", "stale-key", "local-fake-key"] {
+        assert!(!archive.contains(secret));
     }
 }
 

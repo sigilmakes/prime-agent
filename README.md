@@ -89,6 +89,34 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
+## Context compaction
+
+The builtin rolling context strategy tries server-side compaction, then Snapcompact,
+then standard text summarization. No compaction route settings are required.
+The server attempt uses the **resolved** `openai-responses` provider, endpoint and
+model; other transports skip it. In particular, Codex native archive replay is
+not supported: Codex vision models continue to Snapcompact without a server probe. Only an explicit unsupported-capability response
+(or a local input-budget decline) advances the chain. Authentication, route errors,
+malformed responses, cancellation and uncertain network outcomes stop the operation.
+Provider-native archives stay bound to that exact route and model. The server request
+inherits resolved model/provider authentication headers; its explicit API key remains
+the bearer credential.
+
+Snapcompact requires image input. Native Anthropic and Google transports select their
+image profiles. OpenAI-compatible transports use recognized Claude, Gemini or OpenAI
+model lineages, not the gateway's provider name. Unknown aliases skip Snapcompact
+unless `plugins.snapcompact.config.profile` explicitly selects `claude`, `google`,
+`openai` or `explicit` (with `frame_size` and `frame_tokens`). Canonical history is
+retained independently of these context archives.
+
+To replace the chain, set `plugins.default_context.config.compactors` to an ordered
+array of `plugin/compactor` routes (an empty array disables compaction attempts).
+For example, `["standard_compaction/standard"]` selects text summarization only.
+Disabled compactor plugins are skipped. Set `plugins.server_compaction.config.route`
+to `null` to disable the server probe, or supply an exact `{provider, endpoint, model}`
+route override; a mismatched override is an error. Custom context strategies keep
+control of their own chains.
+
 ## Slack
 
 Connect Slack from `/mcp` or run `/mcp login slack` inside Prime Agent to search

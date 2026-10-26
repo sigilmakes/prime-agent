@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "defaults_tests.rs"]
+mod defaults;
 use crate::session::manager::SessionManager;
 use crate::session_engine::{
     engine::{create_session, SessionEngine, SessionEngineConfig},
@@ -510,6 +513,7 @@ async fn failed_durable_append_never_publishes_candidate() {
 
 async fn json_server(
     response: &str,
+    compact_status: u16,
 ) -> (
     String,
     tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -533,7 +537,10 @@ async fn json_server(
         for event in events {
             writeln!(sse, "data: {event}\n").unwrap();
         }
-        for (body, content_type) in [(body, "application/json"), (sse, "text/event-stream")] {
+        for (status, body, content_type) in [
+            (compact_status, body, "application/json"),
+            (200, sse, "text/event-stream"),
+        ] {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut bytes = Vec::new();
             loop {
@@ -559,7 +566,7 @@ async fn json_server(
                 }
             }
             let _ = tx.send(String::from_utf8(bytes).unwrap());
-            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            socket.write_all(format!("HTTP/1.1 {status} Status\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
         }
     });
     (format!("http://{address}/v1"), rx, task)
@@ -568,16 +575,18 @@ async fn json_server(
 #[tokio::test]
 async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuation() {
     let envelope = r#"{"id":"response_1","created_at":1,"object":"response.compaction","output":[{"type":"message","id":"kept","role":"user","content":[{"type":"input_text","text":"kept native"}]},{"type":"compaction","id":"cmp","encrypted_content":"opaque-\u0061","future":1.2300}],"usage":{"input_tokens":20,"output_tokens":7,"total_tokens":27}}"#;
-    let (base, mut request, server) = json_server(envelope).await;
+    let (base, mut request, server) = json_server(envelope, 200).await;
     let f = Fixture::new(ORDERED, "default_context/rolling", true).await;
     let mut model = f.model.clone();
-    model.provider = "openai".into();
+    model.provider = "local-gateway".into();
     model.api = "openai-responses".into();
     model.base_url = base.clone();
-    let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false,"contextStrategy":"default_context/rolling","plugins":{
-        "default_context":{"config":{"policy":"full","compactors":["server_compaction/server"]}},
-        "server_compaction":{"config":{"route":{"provider":"openai","endpoint":format!("{base}/responses/compact"),"model":"test"}}}
-    }});
+    model.headers = Some(std::collections::BTreeMap::from([
+        ("X-Model-Route".into(), "local-route".into()),
+        ("authorization".into(), "Bearer stale-model-key".into()),
+    ]));
+    // No compaction settings: the resolved route drives the default chain.
+    let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false});
     std::fs::write(f.agent.join("settings.json"), settings.to_string()).unwrap();
     f.engine.reload_plugins().await.unwrap();
     f.engine
@@ -595,6 +604,10 @@ async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuat
         panic!("native did not compact")
     };
     let sent = request.recv().await.unwrap();
+    let head = sent.split_once("\r\n\r\n").unwrap().0.to_ascii_lowercase();
+    assert!(head.contains("x-model-route: local-route"));
+    assert!(head.contains("authorization: bearer synthetic-only"));
+    assert!(!head.contains("stale-model-key"));
     assert!(!sent.contains("system_prompt"));
     assert!(sent.contains("old first"));
     let ContextRepresentation::Responses { archive, .. } =

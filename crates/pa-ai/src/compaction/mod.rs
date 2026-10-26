@@ -173,6 +173,9 @@ pub struct InputBudget {
 /// per call, never discovered from home or the environment, and never archived.
 pub struct CompactOptions<'a> {
     pub bearer_token: &'a str,
+    /// Resolved inference request headers, including model and provider auth headers.
+    /// The explicit bearer token takes precedence over any Authorization header.
+    pub headers: Option<&'a std::collections::BTreeMap<String, String>>,
     pub instructions: Option<&'a str>,
     pub budget: InputBudget,
 }
@@ -451,10 +454,20 @@ impl ResponsesCompactor {
         }
         let work = async {
             let mut response = send(RequestOptions {
-                headers: vec![(
-                    "Authorization".to_owned(),
-                    format!("Bearer {}", options.bearer_token),
-                )],
+                headers: {
+                    let mut headers: Vec<_> = options
+                        .headers
+                        .into_iter()
+                        .flatten()
+                        .filter(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect();
+                    headers.push((
+                        "Authorization".to_owned(),
+                        format!("Bearer {}", options.bearer_token),
+                    ));
+                    headers
+                },
                 body: Some(body),
                 signal: Some(cancel.clone()),
                 ..RequestOptions::new(reqwest::Method::POST, self.route.endpoint.clone())

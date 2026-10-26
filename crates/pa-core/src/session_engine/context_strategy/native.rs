@@ -59,7 +59,7 @@ pub(super) async fn expand(
             let Some(adapter) =
                 server_adapter(model, output.get("config").unwrap_or(&Value::Null))?
             else {
-                bail!("server context archive no longer has an explicitly supported route");
+                bail!("server context archive no longer has a supported resolved route");
             };
             let expected = pa_ai::compaction::CompactionRoute {
                 provider: provider.clone(),
@@ -101,19 +101,25 @@ fn configured_route(
     model: &pa_types::ai::Model,
     config: &Value,
 ) -> anyhow::Result<Option<pa_ai::compaction::CompactionRoute>> {
-    let Some(route) = config.get("route") else {
-        return Ok(None);
-    };
-    let route: pa_ai::compaction::CompactionRoute = serde_json::from_value(route.clone())
-        .context("invalid explicit server compaction route")?;
     let inference_endpoint = model.base_url.trim_end_matches('/');
     let compact_endpoint = format!("{inference_endpoint}/responses/compact");
+    let route = match config.get("route") {
+        Some(Value::Null) => return Ok(None),
+        Some(route) => serde_json::from_value::<pa_ai::compaction::CompactionRoute>(route.clone())
+            .context("invalid explicit server compaction route")?,
+        None if model.api == "openai-responses" => pa_ai::compaction::CompactionRoute {
+            provider: model.provider.clone(),
+            endpoint: compact_endpoint.clone(),
+            model: model.id.clone(),
+        },
+        None => return Ok(None),
+    };
     if model.api != "openai-responses"
         || route.provider != model.provider
         || route.model != model.id
         || route.endpoint != compact_endpoint
     {
-        bail!("configured server compaction route does not match the resolved inference route");
+        return Err(pa_ai::compaction::CompactionError::RouteMismatch.into());
     }
     Ok(Some(route))
 }
@@ -315,13 +321,25 @@ pub(super) async fn run(
                     )?
                 }
             };
-            let candidate = adapter
+            let headers = match options.auxiliary {
+                Some(context) => {
+                    super::super::auxiliary_model::session_fallback_with_headers(
+                        context,
+                        &options.model,
+                        options.api_key.clone(),
+                    )
+                    .headers
+                }
+                None => options.model.headers.clone(),
+            };
+            let result = adapter
                 .compact(
                     &input,
                     pa_ai::compaction::CompactOptions {
                         bearer_token: options.api_key.as_deref().context(
                             "server compaction needs explicitly resolved authentication",
                         )?,
+                        headers: headers.as_ref(),
                         instructions: options.custom_instructions,
                         budget: pa_ai::compaction::InputBudget {
                             // Raw bytes plus framing/instructions bound the whole window;
@@ -340,7 +358,21 @@ pub(super) async fn run(
                     },
                     &cancel,
                 )
-                .await?;
+                .await;
+            let candidate = match result {
+                Ok(candidate) => candidate,
+                // These are known preflight declines or explicit remote capability
+                // rejections. Never replay an uncertain request via another strategy.
+                Err(
+                    pa_ai::compaction::CompactionError::Unsupported
+                    | pa_ai::compaction::CompactionError::InputTooLarge
+                    | pa_ai::compaction::CompactionError::Http {
+                        kind: pa_ai::compaction::HttpFailureKind::Capability,
+                        ..
+                    },
+                ) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
             let route =
                 configured_route(&options.model, config)?.context("server route missing")?;
             let usage = candidate.usage();
@@ -465,10 +497,31 @@ fn snap_limits(model: &pa_types::ai::Model, config: &Value) -> crate::snapcompac
                 .unwrap_or(5024),
         }),
         Some(_) => None,
-        None => match model.provider.as_str() {
-            "anthropic" => Some(RenderProfile::Claude),
-            "openai" => Some(RenderProfile::OpenAi),
-            "google" => Some(RenderProfile::Google),
+        None => match model.api.as_str() {
+            "anthropic-messages" => Some(RenderProfile::Claude),
+            "google-generative-ai" | "google-vertex" => Some(RenderProfile::Google),
+            "openai-completions"
+            | "openai-responses"
+            | "openai-codex-responses"
+            | "azure-openai-responses" => {
+                // A gateway's provider name says nothing about image encoding.
+                // Use only recognized model lineages; aliases need an explicit profile.
+                let lineage = model.id.rsplit('/').next().unwrap_or(&model.id);
+                if lineage.starts_with("claude-") {
+                    Some(RenderProfile::Claude)
+                } else if lineage.starts_with("gemini-") {
+                    Some(RenderProfile::Google)
+                } else if lineage.starts_with("gpt-")
+                    || lineage.starts_with("chatgpt-")
+                    || ["o1", "o3", "o4"].iter().any(|family| {
+                        lineage == *family || lineage.starts_with(&format!("{family}-"))
+                    })
+                {
+                    Some(RenderProfile::OpenAi)
+                } else {
+                    None
+                }
+            }
             _ => None,
         },
     };
@@ -626,4 +679,84 @@ fn expand_snap(
         timestamp: 0,
         rest: pa_types::JsonMap::new(),
     })])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapcompact::RenderProfile;
+    use serde_json::json;
+
+    #[test]
+    fn snap_profiles_follow_resolved_transport_and_lineage_not_provider_brand() {
+        let mut model: pa_types::ai::Model = serde_json::from_value(json!({
+            "id":"alias", "name":"Test", "api":"anthropic-messages", "provider":"gateway",
+            "baseUrl":"http://127.0.0.1:9/v1", "reasoning":false, "input":["text","image"],
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+            "contextWindow":100_000,"maxTokens":1000
+        }))
+        .unwrap();
+        for (api, provider, id, expected) in [
+            (
+                "anthropic-messages",
+                "gateway",
+                "alias",
+                Some(RenderProfile::Claude),
+            ),
+            (
+                "google-generative-ai",
+                "gateway",
+                "alias",
+                Some(RenderProfile::Google),
+            ),
+            (
+                "google-vertex",
+                "gateway",
+                "alias",
+                Some(RenderProfile::Google),
+            ),
+            (
+                "openai-completions",
+                "gateway",
+                "anthropic/claude-sonnet-4",
+                Some(RenderProfile::Claude),
+            ),
+            (
+                "openai-completions",
+                "gateway",
+                "google/gemini-2.5-pro",
+                Some(RenderProfile::Google),
+            ),
+            (
+                "openai-responses",
+                "gateway",
+                "openai/gpt-5",
+                Some(RenderProfile::OpenAi),
+            ),
+            ("openai-completions", "openai", "unknown-vision-model", None),
+            ("custom-transport", "openai", "gpt-5", None),
+        ] {
+            model.api = api.into();
+            model.provider = provider.into();
+            model.id = id.into();
+            assert_eq!(
+                snap_limits(&model, &Value::Null).profile,
+                expected,
+                "resolved model {provider}/{id} on {api}"
+            );
+        }
+        // Explicit policy wins even for an otherwise recognized native route.
+        model.api = "anthropic-messages".into();
+        assert_eq!(
+            snap_limits(&model, &json!({"profile":"google"})).profile,
+            Some(RenderProfile::Google)
+        );
+        assert_eq!(
+            snap_limits(&model, &json!({"profile":"unsupported"})).profile,
+            None
+        );
+        model.input = vec![pa_types::ai::ModelInput::Text];
+        let limits = snap_limits(&model, &Value::Null);
+        assert!(!limits.vision);
+    }
 }

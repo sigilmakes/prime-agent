@@ -37,6 +37,9 @@ pub(crate) struct Preparation {
 
 fn terminal(error: &anyhow::Error) -> bool {
     pa_agent::abort::is_abort_error(error)
+        || error
+            .downcast_ref::<pa_ai::compaction::CompactionError>()
+            .is_some()
         || matches!(
             error.downcast_ref::<PluginError>(),
             Some(PluginError::Retired | PluginError::Cancelled | PluginError::Missing)
@@ -561,10 +564,7 @@ impl AgentSession {
                         skip = reason;
                         continue;
                     }
-                    Err(error) => {
-                        failures.push(error.to_string());
-                        continue;
-                    }
+                    Err(error) => before_commit!(live_ticket, fail: error),
                 }
                 let tokens =
                     super::compaction::estimate_context_tokens(&preparation.messages).tokens;
@@ -589,7 +589,13 @@ impl AgentSession {
                 let mut candidate = match result {
                     Ok(Some(candidate)) => candidate,
                     Ok(None) => continue,
-                    Err(error) if terminal(&error) => before_commit!(live_ticket, fail: error),
+                    Err(error)
+                        if terminal(&error)
+                            || output.get("operation").and_then(Value::as_str)
+                                == Some("server") =>
+                    {
+                        before_commit!(live_ticket, fail: error)
+                    }
                     Err(error) => {
                         failures.push(error.to_string());
                         continue;

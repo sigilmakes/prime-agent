@@ -9,7 +9,7 @@ Provider trait + per-provider streaming clients (anthropic, openai-completions/r
 No agent loop, no tool execution, no session state, no UI. Receives/returns `pa-types` messages.
 
 ## Public API
-`Provider` trait, `ProviderRegistry`, model lookup/resolution, faux provider. `compaction` owns explicit route-bound server compaction, durable native archives, fresh portable Responses conversion, and the opaque `NativeResponsesInput` handoff to `StreamOptions`. Native replay replaces the complete input array; it does not convert or summarize the retained prefix. Provider adapters must explicitly opt in to preserve native input. `utils::tls::http_client_builder` lets caller-owned HTTP transports apply the shared extra-CA trust configuration. Per-provider internals are `pub(crate)`.
+`Provider` trait, `ProviderRegistry`, model lookup/resolution, faux provider. `compaction` owns explicit route-bound server compaction, durable native archives, fresh portable Responses conversion, and the opaque `NativeResponsesInput` handoff to `StreamOptions`. Native replay replaces the complete input array; it does not convert or summarize the retained prefix. Provider adapters must explicitly opt in to preserve native input. `compaction::CompactOptions::headers` accepts caller-resolved inference headers; its explicit bearer token wins over any Authorization header. `utils::tls::http_client_builder` lets caller-owned HTTP transports apply the shared extra-CA trust configuration. Per-provider internals are `pub(crate)`.
 
 ## Depends on
 pa-types (one-way).
