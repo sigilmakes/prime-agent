@@ -775,6 +775,18 @@ impl Supervisor {
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));
             })?;
+        // Reopening a resident worker is not a new child task. Keep the
+        // completed task's display intact when its durable identity matches.
+        if crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir)).is_some_and(
+            |display| {
+                display.child_id == child_id
+                    && display.status == "completed"
+                    && crate::lease::canonical_session_path(Path::new(&display.session_file))
+                        == crate::lease::canonical_session_path(Path::new(child))
+            },
+        ) {
+            return Ok(());
+        }
         let display = crate::rlm_ledger::RlmSubagentDisplayEntry {
             type_tag: "rlm_subagent".to_string(),
             child_id,
@@ -813,6 +825,65 @@ impl Supervisor {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rlm_child_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn restored_child_admission_preserves_completed_display_and_ledger_edge() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let agent_dir = dir.path().join("agent");
+        let supervisor = Arc::new(
+            Supervisor::new(super::super::SupervisorOptions {
+                socket_path: dir.path().join("supervisor.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let parent = agent_dir.join("sessions/parent.jsonl");
+        let child_dir = agent_dir.join("session-artifacts/parent/sub-kid");
+        let child = child_dir.join("child.jsonl");
+        std::fs::create_dir_all(parent.parent().unwrap()).expect("sessions");
+        std::fs::create_dir_all(&child_dir).expect("child dir");
+        std::fs::write(&parent, "{\"type\":\"session\",\"id\":\"parent\"}\n").expect("parent");
+        std::fs::write(&child, "{\"type\":\"session\",\"id\":\"child\"}\n").expect("child");
+        let create = json!({
+            "type":"create", "name":"kid", "config":{"sessionDir":child_dir},
+            "runtimeMetadata": {
+                "kind":"subagent", "rlmChildId":"sub-kid", "rlmDepth":1,
+                "parentSessionFile":parent, "prompt":"finished task", "createdAt":123,
+                "model":{"provider":"private-loopback","modelId":"mock-1"}
+            }
+        });
+        let command: DaemonCommand = serde_json::from_value(create.clone()).expect("create");
+        let summary = json!({"sessionFile":child, "sessionName":"kid"});
+        supervisor
+            .record_rlm_child_admission(&command, &summary)
+            .await
+            .expect("initial admission");
+        let mut completed =
+            crate::rlm_ledger::read_rlm_subagent_display(&child_dir).expect("display");
+        completed.status = "completed".into();
+        crate::rlm_ledger::write_rlm_subagent_display(&completed).expect("settled display");
+        let display_path = child_dir.join("rlm-subagent.json");
+        let before = std::fs::read(&display_path).expect("completed bytes");
+        let ledger = supervisor.rlm_spawn_ledger_for(None).await.expect("ledger");
+        let edges = ledger.live_edges().expect("edges");
+        let mut restore = create;
+        restore["sessionPath"] = json!(child);
+        let command = serde_json::from_value(restore).expect("restored create");
+        supervisor
+            .record_rlm_child_admission(&command, &summary)
+            .await
+            .expect("restored admission");
+        assert_eq!(
+            std::fs::read(display_path).expect("restored display bytes"),
+            before
+        );
+        assert_eq!(ledger.live_edges().expect("restored edges"), edges);
     }
 }
 
