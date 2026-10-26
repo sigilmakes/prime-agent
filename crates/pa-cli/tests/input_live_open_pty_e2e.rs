@@ -72,7 +72,12 @@ fn input_live_open_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
         return;
     };
-    let options = child_options(PathBuf::from(socket));
+    let mut options = child_options(PathBuf::from(socket));
+    if let Ok(bindings) = std::env::var("PA_INPUT_LIVE_BINDINGS") {
+        options.keybindings = pa_tui::keybindings::KeybindingsManager::with_user_bindings(
+            serde_json::from_str(&bindings).expect("child test bindings"),
+        );
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -89,13 +94,6 @@ static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// typed-ahead text plus the queued Enter submit once the open lands.
 #[test]
 fn typing_echoes_while_the_session_open_is_stalled() {
-    if !session_runner() {
-        return;
-    }
-    match nix::unistd::setsid() {
-        Ok(_) => {}
-        Err(error) => panic!("the harness could not start a fresh session: {error}"),
-    }
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -151,25 +149,90 @@ fn typing_echoes_while_the_session_open_is_stalled() {
     // The harness drops here: the child dies with the test on every path.
 }
 
-/// Whether this runner is attached to a controlling-terminal session (the
-/// child re-exec needs a session it can leave and re-enter safely).
-fn session_runner() -> bool {
-    // SAFETY: tcgetpgrp only queries the fd's foreground process group.
-    let foreground = unsafe { libc::tcgetpgrp(0) };
-    if foreground < 0 {
-        eprintln!(
-            "no controlling-terminal session on the runner (tcgetpgrp(fd 0) \
-             failed); skipping the input-live open e2e — it needs a \
-             controlling-terminal session to drive the pty child"
+/// Drive terminal bytes through the real reader, bindings, editor, and wire.
+/// Negotiation matters: sending CSI-u alone does not prove the app enabled it.
+#[test]
+fn terminal_enter_bindings_preserve_newlines_and_follow_ups() {
+    let _lock = HARNESS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for newline in ["\x1b[13;2u", "\x1b[27;2;13~"] {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = InputLiveHarness::start(Arc::clone(&commands));
+        harness.negotiate_keyboard();
+        harness.wait_from_start("openprobe settled answer", "the session attached");
+        harness.type_text("shiftprobe first");
+        harness.type_text(newline);
+        harness.type_text("shiftprobe second");
+        harness.wait_from_start("shiftprobe second", "the second draft line painted");
+        assert!(
+            find_prompt_with(&commands, "shiftprobe").is_none(),
+            "newline encoding {newline:?} submitted the draft"
         );
-        return false;
+        harness.type_text("\r");
+        let payload = wait_for_prompt(&commands, "shiftprobe");
+        assert_eq!(payload["message"], "shiftprobe first\nshiftprobe second");
+        assert_ne!(payload["streamingBehavior"], "followUp");
+
+        // ESC CR is real Alt+Enter, not an alternative Shift+Enter encoding.
+        for follow_up in ["\x1b\r", "\x1b[13;3u"] {
+            harness.type_text("altprobe");
+            harness.type_text(follow_up);
+            let payload = wait_for_prompt(&commands, "altprobe");
+            assert_eq!(payload["message"], "altprobe");
+            assert_eq!(payload["streamingBehavior"], "followUp");
+            commands.lock().expect("commands").clear();
+        }
     }
-    true
+
+    // Reassign all three actions. No hardcoded Enter shortcut may survive.
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let bindings = serde_json::from_value(json!({
+        "tui.input.newLine": ["alt+enter"],
+        "tui.input.submit": ["shift+enter"],
+        "app.message.followUp": ["f6"],
+    }))
+    .expect("test bindings");
+    let mut harness = InputLiveHarness::start_with_bindings(Arc::clone(&commands), &bindings);
+    harness.negotiate_keyboard();
+    harness.wait_from_start("openprobe settled answer", "the session attached");
+    harness.type_text("rebound first");
+    harness.type_text("\r"); // Plain Enter is now unbound.
+    harness.type_text("\x1b\r"); // Alt+Enter now inserts a newline.
+    harness.type_text("rebound second");
+    harness.wait_from_start("rebound second", "the rebound draft painted");
+    assert!(find_prompt_with(&commands, "rebound").is_none());
+    harness.type_text("\x1b[13;2u");
+    let payload = wait_for_prompt(&commands, "rebound");
+    assert_eq!(payload["message"], "rebound first\nrebound second");
+    assert_ne!(payload["streamingBehavior"], "followUp");
+    harness.type_text("rebound next");
+    harness.wait_from_start("rebound next", "the rebound follow-up draft painted");
+    harness.type_text("\x1b[17~");
+    let payload = wait_for_prompt(&commands, "rebound next");
+    assert_eq!(payload["streamingBehavior"], "followUp");
+}
+
+fn wait_for_prompt(commands: &Arc<Mutex<Vec<String>>>, text: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(command) = find_prompt_with(commands, text) {
+            let (_, payload) = command.split_once(": ").expect("recorded command");
+            return serde_json::from_str(payload).expect("prompt command JSON");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "prompt {text:?} did not submit; commands: {:?}",
+            commands.lock().expect("commands")
+        );
+        std::thread::park_timeout(Duration::from_millis(10));
+    }
 }
 
 /// One pty-backed product child plus the mock supervisor it opens against.
 struct InputLiveHarness {
     child: Child,
+    _dir: tempfile::TempDir,
     server: Option<std::thread::JoinHandle<()>>,
     /// Whether the mock's `accept` landed: `Drop` joins the serve thread
     /// only then, so a child that dies before connecting cannot hang the
@@ -180,6 +243,13 @@ struct InputLiveHarness {
 
 impl InputLiveHarness {
     fn start(commands: Arc<Mutex<Vec<String>>>) -> InputLiveHarness {
+        Self::start_with_bindings(commands, &pa_tui::keybindings::KeybindingsConfig::default())
+    }
+
+    fn start_with_bindings(
+        commands: Arc<Mutex<Vec<String>>>,
+        bindings: &pa_tui::keybindings::KeybindingsConfig,
+    ) -> InputLiveHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -200,16 +270,39 @@ impl InputLiveHarness {
             None,
         )
         .expect("open pty");
-        let child = spawn_child(&socket, &pty.slave);
-        // Leak the temp dir's socket path on purpose: the child needs the
-        // socket for the lifetime of the test, and the whole tree dies
-        // with the child at teardown.
-        std::mem::forget(dir);
+        let child = spawn_child(&socket, &pty.slave, bindings);
         InputLiveHarness {
             child,
+            _dir: dir,
             server,
             connected,
             master: PtyReader::new(pty.master),
+        }
+    }
+
+    fn negotiate_keyboard(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut answered = false;
+        loop {
+            let mut buffer = [0u8; 8192];
+            if let Ok(n) = self.master.file.read(&mut buffer) {
+                self.master.output.extend_from_slice(&buffer[..n]);
+                self.master.feed(&buffer[..n]);
+            }
+            if !answered && self.master.output.windows(4).any(|w| w == b"\x1b[?u") {
+                self.type_text("\x1b[?0u\x1b[?1;2c");
+                answered = true;
+            }
+            if self.master.output.windows(5).any(|w| w == b"\x1b[>7u") {
+                assert!(answered, "kitty was enabled without querying the terminal");
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "kitty negotiation did not finish: {}",
+                String::from_utf8_lossy(&self.master.output)
+            );
+            std::thread::park_timeout(Duration::from_millis(1));
         }
     }
 
@@ -454,11 +547,20 @@ fn find_prompt_with(commands: &Arc<Mutex<Vec<String>>>, text: &str) -> Option<St
         .cloned()
 }
 
-/// A child process group of this very binary, re-executed in child mode
-/// with the pty slave as its terminal and no tmux.
-fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
-    fn make_process_group() -> std::io::Result<()> {
-        nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))?;
+/// A private terminal session of this very binary, re-executed in child mode
+/// with the pty slave as its controlling terminal and no inherited relay hints.
+fn spawn_child(
+    socket: &std::path::Path,
+    slave: &OwnedFd,
+    bindings: &pa_tui::keybindings::KeybindingsConfig,
+) -> Child {
+    fn make_terminal_session() -> std::io::Result<()> {
+        nix::unistd::setsid()?;
+        // SAFETY: stdin is the owned pty slave installed by Command before pre_exec.
+        // The child has just created its own session, so it cannot steal a user tty.
+        if unsafe { libc::ioctl(0, libc::TIOCSCTTY, 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         Ok(())
     }
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
@@ -466,14 +568,27 @@ fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
         .arg("--exact")
         .arg("input_live_open_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
+        .env(
+            "PA_INPUT_LIVE_BINDINGS",
+            serde_json::to_string(bindings).expect("bindings"),
+        )
+        .env("TERM", "xterm-256color")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("KITTY_WINDOW_ID")
+        .env_remove("GHOSTTY_RESOURCES_DIR")
+        .env_remove("WEZTERM_PANE")
         .env_remove("TMUX")
+        .env_remove("STY")
+        .env_remove("ZELLIJ")
+        .env_remove("SSH_CONNECTION")
+        .env_remove("SSH_TTY")
         .stdin(slave_as_stdio(slave))
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
     // SAFETY: the pre_exec hook is the supported std seam for
     // process-group setup; it runs post-fork pre-exec in the child only
     // and cannot disturb this process.
-    unsafe { command.pre_exec(make_process_group) };
+    unsafe { command.pre_exec(make_terminal_session) };
     command.spawn().expect("spawn child")
 }
 
