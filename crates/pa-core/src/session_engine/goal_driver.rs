@@ -142,14 +142,43 @@ pub async fn persist_goal_mutation<R: Send>(
         })?;
         (plan, expected)
     };
-    for entry in &plan.drafts.entries {
+    for (index, entry) in plan.drafts.entries.iter().enumerate() {
         expected = if let Some(ref cursor) = expected {
-            let receipt = crate::session::canonical::persist_metadata_entry_from(
+            let receipt = match crate::session::canonical::persist_metadata_entry_from(
                 session,
                 entry.clone(),
                 cursor.clone(),
             )
-            .await?;
+            .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    use crate::session::canonical::{
+                        CanonicalRequestedWrite, CanonicalSourceDisposition, CanonicalStoreError,
+                    };
+                    // Only the first refusal can prove the whole transaction did
+                    // no I/O. A prior successful draft retains adoption debt.
+                    if index == 0
+                        && error
+                            .downcast_ref::<CanonicalStoreError>()
+                            .is_some_and(|error| {
+                                error.requested == CanonicalRequestedWrite::NotRequested
+                                    && error.source
+                                        == CanonicalSourceDisposition::ReadyForObservation
+                            })
+                    {
+                        let mut current = driver.lock().await;
+                        if current
+                            .mutation_flight
+                            .as_ref()
+                            .is_some_and(|flight| std::sync::Arc::ptr_eq(flight, &plan.flight))
+                        {
+                            current.mutation_flight = None;
+                        }
+                    }
+                    return Err(error);
+                }
+            };
             Some(receipt.cursor)
         } else {
             crate::session::canonical::persist_metadata_entry(session, entry.clone()).await?;

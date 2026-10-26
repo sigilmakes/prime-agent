@@ -31,7 +31,9 @@ fn staging_changes_neither_live_state_nor_pending_flag() {
 struct CheckingWriter {
     driver: Arc<Mutex<GoalDriver>>,
     session: Arc<Mutex<SessionManager>>,
-    fail: bool,
+    failure_source: Option<crate::session::canonical::CanonicalSourceDisposition>,
+    fail_on_call: usize,
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl crate::session::canonical::CanonicalMetadataWriter for CheckingWriter {
@@ -86,11 +88,16 @@ impl crate::session::canonical::CanonicalMetadataWriter for CheckingWriter {
                 .expect("SDK lock released before owner");
             assert_eq!(session.canonical_binding(), Some(&expected));
             assert!(entry.id().is_none());
-            if self.fail {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(source) = self.failure_source.filter(|_| call == self.fail_on_call) {
                 return Err(crate::session::canonical::CanonicalStoreError {
                     kind: crate::session::canonical::CanonicalFailureKind::Io,
-                    requested: crate::session::canonical::CanonicalRequestedWrite::Unknown,
-                    source: crate::session::canonical::CanonicalSourceDisposition::NeedsReconcile,
+                    requested: if source == crate::session::canonical::CanonicalSourceDisposition::ReadyForObservation {
+                        crate::session::canonical::CanonicalRequestedWrite::NotRequested
+                    } else {
+                        crate::session::canonical::CanonicalRequestedWrite::Unknown
+                    },
+                    source,
                     detail: "injected receipt failure".to_owned(),
                 });
             }
@@ -158,7 +165,11 @@ async fn owner_failure_preserves_old_state_and_blocks_next_mutation() {
         Arc::new(CheckingWriter {
             driver: driver.clone(),
             session: session.clone(),
-            fail: true,
+            fail_on_call: 0,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failure_source: Some(
+                crate::session::canonical::CanonicalSourceDisposition::NeedsReconcile,
+            ),
         });
     session
         .lock()
@@ -183,7 +194,9 @@ async fn successful_writer_installs_candidate_and_keeps_pending_handle_identity(
         Arc::new(CheckingWriter {
             driver: driver.clone(),
             session: session.clone(),
-            fail: false,
+            fail_on_call: 0,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failure_source: None,
         });
     session
         .lock()
@@ -224,7 +237,9 @@ async fn uncertified_live_writer_refuses_before_running_goal_policy() {
         Arc::new(CheckingWriter {
             driver: driver.clone(),
             session: session.clone(),
-            fail: false,
+            fail_on_call: 0,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failure_source: None,
         });
     session
         .lock()
@@ -288,4 +303,86 @@ fn unresolved_handoff_replaces_pending_plan_token_without_mutating_goal() {
     assert_eq!(driver.state(), &before);
     assert!(!driver.pending_continuation());
     assert!(driver.ensure_ready().is_err());
+}
+
+#[tokio::test]
+async fn proven_unstarted_refusal_discards_candidate_and_allows_next_goal_mutation() {
+    let driver = Arc::new(Mutex::new(GoalDriver::new()));
+    let session = Arc::new(Mutex::new(certified_manager()));
+    let writer: Arc<dyn crate::session::canonical::CanonicalMetadataWriter> =
+        Arc::new(CheckingWriter {
+            driver: driver.clone(),
+            session: session.clone(),
+            fail_on_call: 0,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failure_source: Some(
+                crate::session::canonical::CanonicalSourceDisposition::ReadyForObservation,
+            ),
+        });
+    session
+        .lock()
+        .await
+        .bind_canonical_metadata_writer(Arc::downgrade(&writer));
+    let result = persist_goal_mutation(&driver, &session, |driver, drafts| {
+        driver.start(drafts, "finish work", None)
+    })
+    .await;
+    assert!(result.is_err());
+    {
+        let current = driver.lock().await;
+        assert_eq!(current.state(), &empty_goal_state());
+        current
+            .ensure_ready()
+            .expect("proven no-I/O refusal must not strand goal policy");
+    }
+    let writer: Arc<dyn crate::session::canonical::CanonicalMetadataWriter> =
+        Arc::new(CheckingWriter {
+            driver: driver.clone(),
+            session: session.clone(),
+            fail_on_call: 0,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failure_source: None,
+        });
+    session
+        .lock()
+        .await
+        .bind_canonical_metadata_writer(Arc::downgrade(&writer));
+    let state = persist_goal_mutation(&driver, &session, |driver, drafts| {
+        driver.start(drafts, "retry work", None)
+    })
+    .await
+    .unwrap();
+    assert_eq!(driver.lock().await.state(), &state);
+}
+
+#[tokio::test]
+async fn later_unstarted_refusal_keeps_prior_goal_receipt_blocked() {
+    let driver = Arc::new(Mutex::new(GoalDriver::new()));
+    let session = Arc::new(Mutex::new(certified_manager()));
+    let writer: Arc<dyn crate::session::canonical::CanonicalMetadataWriter> =
+        Arc::new(CheckingWriter {
+            driver: driver.clone(),
+            session: session.clone(),
+            fail_on_call: 1,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failure_source: Some(
+                crate::session::canonical::CanonicalSourceDisposition::ReadyForObservation,
+            ),
+        });
+    session
+        .lock()
+        .await
+        .bind_canonical_metadata_writer(Arc::downgrade(&writer));
+    let result = persist_goal_mutation(&driver, &session, |driver, drafts| {
+        driver.start(drafts, "finish work", None)?;
+        driver.pause(drafts, "paused")
+    })
+    .await;
+    assert!(result.is_err());
+    let current = driver.lock().await;
+    assert_eq!(current.state(), &empty_goal_state());
+    assert!(
+        current.ensure_ready().is_err(),
+        "prior receipt must retain goal publication debt"
+    );
 }
