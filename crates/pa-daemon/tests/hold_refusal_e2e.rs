@@ -1,6 +1,6 @@
 //! Session-hold refusal e2e: a create whose file's holder is a live FOREIGN
-//! process (the TypeScript product's daemon or workers, on the shared session
-//! store) rejects with the descriptive refusal and its typed wire info, and
+//! process (another Rust daemon's worker on the shared session store) rejects
+//! with the descriptive refusal and its typed wire info, and
 //! the daemon logs the conflict. Untyped create failures keep the wrap (control).
 #![allow(clippy::large_futures)]
 // 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
@@ -184,8 +184,8 @@ fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (Str
     (id, created)
 }
 
-/// A create over a file a live FOREIGN process holds (this test process stands in for the
-/// other product's worker) answers the session-hold refusal with the typed wire info.
+/// A create over a file another daemon's live worker holds answers the
+/// session-hold refusal with the typed wire info.
 #[test]
 fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -218,19 +218,28 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
-    // The foreign holder: THIS test process takes the runtime lease, naming a known
-    // active session — the same record the TypeScript product's holder writes.
-    std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
-    std::env::set_var(
-        pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
-        "foreign01ab3c",
+    // A worker of a second supervisor holds the lease. Both supervisors use the
+    // same executable, so classification does not depend on the Cargo target path.
+    let holder_socket = dir.path().join("holder.sock");
+    let _holder_daemon = spawn_daemon(&holder_socket, &agent_dir);
+    let mut holder_client = Client::connect(&holder_socket);
+    holder_client.send_command(
+        "h1",
+        &json!({
+            "type": "create",
+            "sessionPath": session_file,
+            "config": create_config,
+        }),
     );
-    let holder = pa_daemon::lease::acquire_session_lease(
-        Some(std::path::Path::new(&session_file)),
-        &agent_dir,
-    )
-    .expect("lease acquire probe")
-    .expect("the lease must be held");
+    let held = holder_client.read_response("h1");
+    assert_eq!(held["success"], true, "holder create failed: {held}");
+    let holder_id = held["data"]["id"]
+        .as_str()
+        .or_else(|| held["data"]["sessionId"].as_str())
+        .expect("holder session id");
+    let holder = pa_daemon::lease::live_lease_owner(&agent_dir, Path::new(&session_file))
+        .expect("the second daemon's worker holds the lease");
+    assert_eq!(holder.active_session_id.as_deref(), Some(holder_id));
 
     client.send_command(
         "c2",
@@ -251,23 +260,25 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the rejection leads with what happened: {error}"
     );
     assert!(
-        error.contains("(active in foreign01ab3c)"),
+        error.contains(&format!("(active in {holder_id})")),
         "the rejection names the holder's active session: {error}"
     );
     assert!(
-        error.contains("prime-agent --daemon-socket <socket> --resume 'foreign01ab3c'"),
+        error.contains(&format!(
+            "prime-agent --daemon-socket <socket> --resume '{holder_id}'"
+        )),
         "the continue path is the exact attach command: {error}"
     );
     assert!(
-        error.contains(&format!("kill {}", std::process::id())),
+        error.contains(&format!("kill {}", holder.pid)),
         "the take-over path names the holder pid: {error}"
     );
     assert!(
-        error.contains("Session: foreign01ab3c"),
+        error.contains(&format!("Session: {holder_id}")),
         "the footer names the session: {error}"
     );
-    // This test process runs a build of this product, so the holder classification
-    // reads as another Rust build, never the TypeScript product.
+    // The holder worker runs the refusing supervisor's executable, so it is
+    // another Rust build, never the TypeScript product.
     assert!(
         error.starts_with("This session is currently open in another Rust build of Prime Agent"),
         "the holder is classified, not guessed: {error}"
@@ -288,7 +299,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "{rejected}"
     );
     assert_eq!(
-        rejected["errorInfo"]["activeSessionId"], "foreign01ab3c",
+        rejected["errorInfo"]["activeSessionId"], holder_id,
         "{rejected}"
     );
     let info_path = rejected["errorInfo"]["sessionPath"]
@@ -310,7 +321,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the daemon log records the refused create: {log}"
     );
     assert!(
-        log.contains("is already active in foreign01ab3c"),
+        log.contains(&format!("is already active in {holder_id}")),
         "the daemon log names the holder: {log}"
     );
     assert!(
@@ -340,7 +351,13 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "untyped create failures keep the wrap: {untyped}"
     );
 
-    holder.release();
-    std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
-    std::env::remove_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV);
+    holder_client.send_command(
+        "hk1",
+        &json!({ "type": "kill", "activeSessionId": holder_id }),
+    );
+    let holder_killed = holder_client.read_response("hk1");
+    assert_eq!(
+        holder_killed["success"], true,
+        "holder kill failed: {holder_killed}"
+    );
 }
