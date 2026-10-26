@@ -51,7 +51,7 @@ package-check:
 workspace-check: hooks-check
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings
-	cargo test --locked --workspace
+	cargo test --locked --workspace --no-fail-fast
 
 # Optional gates fail when their tools or target toolchains are unavailable.
 deny:

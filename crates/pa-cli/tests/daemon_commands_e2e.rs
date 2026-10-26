@@ -256,10 +256,12 @@ fn run_cli(binary: &Path, dir: &Path, agent_dir: &Path, args: &[&str]) -> Output
         .current_dir(dir)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env("TMPDIR", dir)
-        // TS uses Date.toLocaleString; the native formatter is US English/UTC.
-        .env("LANG", "en_US.UTF-8")
-        .env("LC_ALL", "en_US.UTF-8")
-        .env("LC_TIME", "en_US.UTF-8")
+        // C is available even in minimal CI images; requesting an uninstalled
+        // locale makes the installed TS CLI's shell wrapper pollute stderr.
+        // Node's ICU default for C is US English, matching the native formatter.
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LC_TIME", "C")
         .env("TZ", "UTC");
     for key in SCRUB_ENV {
         command.env_remove(key);
