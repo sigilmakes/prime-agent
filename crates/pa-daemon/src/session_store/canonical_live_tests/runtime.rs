@@ -754,3 +754,35 @@ async fn accepted_user_survives_run_start_source_advance_before_a_different_foll
         1
     );
 }
+
+#[tokio::test]
+async fn goal_source_advance_before_first_write_keeps_real_owner_driver_retryable() {
+    use pa_core::session_engine::goal_driver::persist_goal_mutation;
+    let (_dir, owner, engine, provider) = runtime().await;
+    let session = engine.session.shared_persistence();
+    let writer_owner = owner.clone();
+    let result = persist_goal_mutation(&engine.goal_driver, &session, move |driver, drafts| {
+        writer_owner
+            .store
+            .lock()
+            .unwrap()
+            .persist_owner_metadata("custom", json!({"customType":"child_finished", "data":{}}))?;
+        driver.start(drafts, "first intent must be refused", None)
+    })
+    .await;
+    assert!(result.is_err());
+    engine.goal_driver.lock().await.ensure_ready().unwrap();
+    assert!(!engine.goal_driver.lock().await.state().active);
+    persist_goal_mutation(&engine.goal_driver, &session, |driver, drafts| {
+        driver.start(drafts, "next intent succeeds", None)
+    })
+    .await
+    .unwrap();
+    assert!(engine.goal_driver.lock().await.state().active);
+    engine
+        .session
+        .prompt("next", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(provider.calls().len(), 1);
+}
