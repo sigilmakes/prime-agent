@@ -1094,11 +1094,13 @@ mod tests {
     fn the_seq_never_restarts_below_a_used_value() {
         // The process-global seq is monotonic and floor-clamped: within
         // one test run the successive values strictly increase.
+        // Compare against the floor before minting, not a later millisecond.
+        let first_floor = now_ms_x1000();
         let first = next_report_seq();
         let second = next_report_seq();
         let third = next_report_seq();
         assert!(first < second && second < third, "{first} {second} {third}");
-        assert!(first >= now_ms_x1000() - 1, "seeded at now_ms*1000");
+        assert!(first >= first_floor, "seeded at now_ms*1000");
     }
 
     /// A fake Herdr socket: one listener that records every request line
