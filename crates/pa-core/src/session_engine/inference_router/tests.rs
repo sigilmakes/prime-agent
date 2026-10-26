@@ -95,6 +95,7 @@ fn model(id: &str) -> Model {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 10000,
         max_tokens: 100,
+        input: Vec::new(),
         max_tokens_explicit: false,
     }
 }

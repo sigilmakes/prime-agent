@@ -1290,6 +1290,7 @@ mod tests {
             cost: pa_agent::types::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
+            input: Vec::new(),
             max_tokens_explicit: false,
         };
         let provider = Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));

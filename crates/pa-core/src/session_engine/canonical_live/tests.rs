@@ -1,6 +1,7 @@
 use super::*;
 
 mod preflight;
+mod snap_archive;
 use crate::session::canonical::{
     CanonicalAppendReceipt, CanonicalCallerNotifier, CanonicalFrontier, CanonicalJournalRow,
     CanonicalOwnerScope,

@@ -42,6 +42,7 @@ async fn engine_runs_tool_loop_and_persists() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        input: Vec::new(),
         max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
@@ -155,6 +156,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        input: Vec::new(),
         max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
@@ -227,6 +229,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             cost: pa_agent::types::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
+            input: Vec::new(),
             max_tokens_explicit: false,
         }
     }
@@ -411,6 +414,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        input: Vec::new(),
         max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));

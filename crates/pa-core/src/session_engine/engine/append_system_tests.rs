@@ -46,6 +46,7 @@ async fn assert_prompt_case(case: PromptCase) {
             cost: pa_agent::types::UsageCost::default(),
             context_window: 100_000,
             max_tokens: 100,
+            input: Vec::new(),
             max_tokens_explicit: false,
         };
         let provider = Arc::new(ScriptedProvider::new(model.clone()));

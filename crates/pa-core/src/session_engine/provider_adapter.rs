@@ -53,7 +53,9 @@ where
 pub fn native_model(model: &AgentModel) -> anyhow::Result<Model> {
     let mut wire = serde_json::to_value(model)?;
     wire["baseUrl"] = serde_json::Value::String(model.base_url.clone());
-    wire["input"] = serde_json::json!(["text"]);
+    if model.input.is_empty() {
+        wire["input"] = serde_json::json!(["text"]);
+    }
     serde_json::from_value(wire).map_err(Into::into)
 }
 
@@ -733,6 +735,31 @@ mod tests {
                 timestamp: 1,
                 rest: serde_json::Map::default(),
             }))
+        );
+    }
+
+    #[test]
+    fn routed_model_modalities_survive_the_agent_boundary() {
+        let mut routed = pa_agent::types::Model::unknown();
+        routed.id = "routed-vision".into();
+        routed.api = "openai-completions".into();
+        routed.provider = "test".into();
+        routed.input = vec!["text".into(), "image".into()];
+        let native = native_model(&routed).unwrap();
+        assert_eq!(native.id, "routed-vision");
+        assert_eq!(
+            native.input,
+            vec![
+                pa_types::ai::ModelInput::Text,
+                pa_types::ai::ModelInput::Image
+            ]
+        );
+        let restored: pa_agent::types::Model = json_round_trip(&native).unwrap();
+        assert_eq!(restored.input, routed.input);
+        routed.input.clear();
+        assert_eq!(
+            native_model(&routed).unwrap().input,
+            vec![pa_types::ai::ModelInput::Text]
         );
     }
 

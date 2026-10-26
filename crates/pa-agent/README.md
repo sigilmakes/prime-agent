@@ -9,7 +9,12 @@ Turn loop: drives a provider stream, dispatches tool calls, enforces max-turn an
 No tool implementations (pa-core), no providers (pa-ai), no session persistence, no UI. The loop is tool-agnostic: it receives a `ToolDispatcher` boundary.
 
 ## Public API
-`run_loop` (session inputs -> stream of loop events), `ToolDispatcher` trait. Loop internals `pub(crate)`.
+`run_loop` (session inputs -> stream of loop events), `ToolDispatcher` trait.
+`types::Model` carries the routed request descriptor, including advertised `input`
+modalities, through model switches and per-run overrides. Missing modalities stay
+unspecified; the provider boundary preserves the existing text-only interpretation.
+The loop does not discover capabilities or resolve provider routes.
+Loop internals `pub(crate)`.
 
 ## Depends on
 No workspace dependencies.

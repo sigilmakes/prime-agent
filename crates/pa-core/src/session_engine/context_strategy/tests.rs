@@ -1703,6 +1703,7 @@ async fn reference_replay_is_rejected_before_actual_provider_or_selection_public
     assert_eq!(f.state().await, before);
     let plugins = Arc::clone(f.engine.session.plugins.as_ref().unwrap());
     let stream = wrap_stream_fn(
+        ModelContextSource::Assembled,
         plugins,
         Arc::new(std::sync::RwLock::new(None)),
         f.provider.stream_fn(),
@@ -1838,6 +1839,7 @@ async fn reference_model_echo_matches_prior_tool_image_signature_conversion_and_
     assert_eq!(old, messages);
     let plugins = Arc::clone(f.engine.session.plugins.as_ref().unwrap());
     let stream = wrap_stream_fn(
+        ModelContextSource::Assembled,
         plugins,
         Arc::new(std::sync::RwLock::new(None)),
         f.provider.stream_fn(),
@@ -1920,6 +1922,7 @@ async fn reference_selected_disable_fails_closed_until_explicit_recovery() {
     f.engine.reload_plugins().await.unwrap();
     let plugins = Arc::clone(f.engine.session.plugins.as_ref().unwrap());
     let stream = wrap_stream_fn(
+        ModelContextSource::Assembled,
         plugins,
         Arc::new(std::sync::RwLock::new(None)),
         f.provider.stream_fn(),

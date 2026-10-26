@@ -420,6 +420,10 @@ pub struct Model {
     pub base_url: String,
     #[serde(default)]
     pub reasoning: bool,
+    /// Advertised modalities of this exact routed model. Empty means unspecified;
+    /// consumers keep the established text-only behavior for older descriptors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
     #[serde(default)]
     pub cost: UsageCost,
     #[serde(rename = "contextWindow", default)]
@@ -457,6 +461,7 @@ impl Model {
             cost: UsageCost::default(),
             context_window: 0,
             max_tokens: 0,
+            input: Vec::new(),
             max_tokens_explicit: false,
         }
     }

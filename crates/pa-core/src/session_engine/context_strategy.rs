@@ -869,9 +869,18 @@ fn generated_model_messages(value: Value) -> anyhow::Result<Vec<pa_agent::types:
         .collect()
 }
 
+/// Whether the upstream loop already assembled archives or just certified the
+/// canonical continuation. Only the latter needs bitmap expansion at this boundary.
+#[derive(Clone, Copy)]
+pub(crate) enum ModelContextSource {
+    Assembled,
+    Canonical,
+}
+
 /// Apply current strategy policy at every actual model call. Native archive items
 /// remain typed and route-bound; only uncovered ordinary continuation is converted.
 pub(crate) fn wrap_stream_fn(
+    source: ModelContextSource,
     plugins: std::sync::Arc<SessionPlugins>,
     archive: std::sync::Arc<std::sync::RwLock<Option<ContextArchive>>>,
     stream: pa_agent::stream::StreamFn,
@@ -885,6 +894,32 @@ pub(crate) fn wrap_stream_fn(
         let stream = std::sync::Arc::clone(&stream);
         Box::pin(async move {
             let target = plugins.context_selection()?;
+            if let Some(archive) = archive.as_ref().filter(|archive| {
+                matches!(source, ModelContextSource::Canonical)
+                    && matches!(
+                        archive.representation,
+                        ContextRepresentation::Snapcompact { .. }
+                    )
+            }) {
+                let model_info = super::provider_adapter::native_model(&model)?;
+                let expanded = guarded(
+                    &plugins,
+                    &target,
+                    None,
+                    Some(&options.signal),
+                    native::expand(&plugins, archive, Some(&model_info)),
+                )
+                .await?;
+                let mut messages = super::messages::convert_to_llm(&expanded)
+                    .iter()
+                    .map(|message| {
+                        super::provider_adapter::json_round_trip(message)
+                            .context("invalid bitmap archive message")
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                messages.append(&mut context.messages);
+                context.messages = messages;
+            }
             // Refs mode never round-trips existing model bodies through JSON or
             // a portable DTO. The same typed messages stay owned by this call.
             let selected = if target.context_data == crate::plugins::ContextDataMode::RefsV1 {

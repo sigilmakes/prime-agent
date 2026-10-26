@@ -111,6 +111,7 @@ async fn assert_persisted_status(is_error: bool) {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 10_000,
         max_tokens: 100,
+        input: Vec::new(),
         max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
