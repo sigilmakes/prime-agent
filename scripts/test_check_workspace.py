@@ -2,6 +2,7 @@
 """Offline behavior tests for workspace state/credential and kernel provenance gates."""
 import json
 import shutil
+import shlex
 from pathlib import Path
 import tempfile
 import time
@@ -143,6 +144,10 @@ class WorkspaceGateTests(unittest.TestCase):
             self.assertEqual(checks.kwargs["env"]["CARGO_NET_OFFLINE"], "true")
             self.assertEqual(checks.kwargs["env"]["UV_OFFLINE"], "1")
             self.assertEqual(checks.kwargs["env"]["HOME"], str(root / "state/home"))
+            self.assertEqual(shlex.split(checks.kwargs["env"]["WORKSPACE_TEST_COMMAND"]), [
+                "python3", "-B", "scripts/check_workspace_tests.py", "--state-root",
+                str(root / "state/test-targets"), "--deadline", str(checks.kwargs["deadline"]),
+            ])
 
             self.assertEqual(events, ["cargo fetch", "vendor prepare", "cargo build", "vendor check", "make workspace-check"])
             prepare_vendor.assert_called_once()

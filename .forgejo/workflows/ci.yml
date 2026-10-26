@@ -35,6 +35,10 @@ jobs:
               uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
               with:
                   persist-credentials: false
+            - name: Fast formatting and runner regressions
+              run: |
+                  nix develop --no-update-lock-file --command cargo fmt --all --check
+                  nix develop --no-update-lock-file --command make hooks-check
             - name: Build and audited offline checks
               run: nix flake check --no-update-lock-file --print-build-logs --keep-going
 

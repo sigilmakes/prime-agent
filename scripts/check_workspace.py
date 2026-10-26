@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import signal
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -185,6 +186,7 @@ def require_ts_reference(env):
 
 def run(command, *, repo, env, deadline, capture=False):
     print("+ " + " ".join(map(str, command)), flush=True)
+    started = time.monotonic()
     child = subprocess.Popen(command, cwd=repo, env=env, start_new_session=True,
                              stdout=subprocess.PIPE if capture else None,
                              text=True)
@@ -198,6 +200,8 @@ def run(command, *, repo, env, deadline, capture=False):
             os.killpg(child.pid, signal.SIGKILL)
             child.communicate()
         raise
+    print(f"Elapsed {time.monotonic() - started:.2f}s (exit {child.returncode}): "
+          + " ".join(map(str, command)), flush=True)
     if child.returncode:
         raise subprocess.CalledProcessError(child.returncode, command)
     return output
@@ -396,6 +400,10 @@ def main():
             repo=repo, env=env, deadline=deadline)
         test_env = dict(env, CARGO_NET_OFFLINE="true", UV_OFFLINE="1")
         check_vendor_mlua(repo, vendor_copy, vendor_identity, test_env, deadline)
+        test_env["WORKSPACE_TEST_COMMAND"] = shlex.join([
+            "python3", "-B", "scripts/check_workspace_tests.py", "--state-root",
+            str(state / "test-targets"), "--deadline", str(deadline),
+        ])
         run(["make", "workspace-check"], repo=repo, env=test_env, deadline=deadline)
     print("Full workspace gate passed", flush=True)
     return 0

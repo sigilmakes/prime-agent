@@ -11,6 +11,7 @@ PACKAGE_FLAGS = $(foreach package,$(PACKAGES),-p $(package))
 # Detached fixture children need an owned reaping ancestor even under a non-reaping
 # container PID 1. Do not change their strict whole-process-group exit assertions.
 WORKSPACE_TEST_RUNNER = $(if $(filter Linux,$(shell uname -s)),tini -s --)
+WORKSPACE_TEST_COMMAND ?= cargo test --locked --workspace
 
 help:
 	@printf '%s\n' \
@@ -41,6 +42,7 @@ test:
 hooks-check:
 	python3 scripts/test_downstream_hooks.py
 	python3 -B scripts/test_check_workspace.py
+	python3 -B scripts/test_check_workspace_tests.py
 	python3 -B scripts/release/test_legacy_runtime_restart_options.py
 
 # These are intentional, manual source builds; no upstream release scripts,
@@ -54,7 +56,7 @@ package-check:
 workspace-check: hooks-check
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings
-	$(WORKSPACE_TEST_RUNNER) cargo test --locked --workspace
+	$(WORKSPACE_TEST_RUNNER) $(WORKSPACE_TEST_COMMAND)
 
 # Optional gates fail when their tools or target toolchains are unavailable.
 deny:
