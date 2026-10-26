@@ -35,8 +35,12 @@ impl AgentView {
                 crate::chat::assistant_row_count(
                     message,
                     detail,
-                    &self.theme,
-                    &self.code_block_indent,
+                    &crate::chat::ChatMarkdown {
+                        theme: &self.theme,
+                        code_block_indent: &self.code_block_indent,
+                        link_base_url: url::Url::from_directory_path(&self.chrome.cwd).ok(),
+                        mermaid: self.mermaid,
+                    },
                     width,
                     preceded_by_tool,
                     caches.get(&index).unwrap_or(&empty),

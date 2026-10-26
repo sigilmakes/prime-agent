@@ -178,9 +178,13 @@ impl AgentView {
                 rows
             }
             ChatEntry::Assistant(message) => {
-                let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-                md.code_block_indent.clone_from(&self.code_block_indent);
-                md.link_base_url = url::Url::from_directory_path(&self.chrome.cwd).ok();
+                let md = crate::chat::ChatMarkdown {
+                    theme: &self.theme,
+                    code_block_indent: &self.code_block_indent,
+                    link_base_url: url::Url::from_directory_path(&self.chrome.cwd).ok(),
+                    mermaid: self.mermaid,
+                }
+                .style(message.streaming);
                 // The per-entry block cache (TS's per-component `blockCache`): a streaming
                 // message's settled blocks replay per frame; a settled message drops the copy.
                 if message.streaming {

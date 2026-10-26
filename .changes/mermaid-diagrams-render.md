@@ -1,0 +1,1 @@
+- Mermaid code blocks in the chat render as Unicode diagrams again: flowcharts, sequence, class, and state diagrams draw inline while the answer streams, the `markdown.mermaid` setting (`off`, `final`, `streaming`) now takes effect, and a diagram wider than the pane keeps its source text.

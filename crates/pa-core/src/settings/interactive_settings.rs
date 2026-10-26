@@ -282,16 +282,12 @@ impl SettingsManager {
     /// `markdown.mermaid` (TS default `streaming`; only `off` and `final` are recognized).
     #[must_use]
     pub fn get_mermaid_rendering_mode(&self) -> &'static str {
-        match self
-            .settings()
+        self.settings()
             .markdown
             .as_ref()
             .and_then(|markdown| markdown.mermaid)
-        {
-            Some(super::types::MermaidRenderingMode::Off) => "off",
-            Some(super::types::MermaidRenderingMode::Final) => "final",
-            _ => "streaming",
-        }
+            .unwrap_or_default()
+            .wire_name()
     }
 
     /// `markdown.mermaid` setter (`off`, `final`, or `streaming`).

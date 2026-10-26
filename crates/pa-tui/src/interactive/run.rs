@@ -246,6 +246,13 @@ async fn run_interactive_surface(
     let mut startup_theme_retired = false;
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
+    // The chat settings menu updates the live field; a run starts from the persisted value.
+    view.mermaid = options.client_settings.as_deref().map_or_else(
+        crate::markdown::MermaidRenderingMode::default,
+        |settings| {
+            crate::markdown::MermaidRenderingMode::from_wire(&settings.mermaid_rendering_mode())
+        },
+    );
     // The file-completion provider browses the SESSION cwd, not the process cwd: the completion
     // menu must browse the directory the user sees.
     view.editor.set_autocomplete_provider(Box::new(

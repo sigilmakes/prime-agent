@@ -3,13 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MermaidRenderingMode {
-    Off,
-    Final,
-    Streaming,
-}
+// The mode is shared vocabulary: `pa-tui` renders diagrams from it but may not depend on
+// this crate, so the enum lives in `pa-types` and settings re-export it.
+pub use pa_types::markdown::MermaidRenderingMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

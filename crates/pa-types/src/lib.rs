@@ -11,6 +11,7 @@ pub mod compaction;
 pub mod daemon;
 pub mod goal;
 pub mod incident;
+pub mod markdown;
 pub mod memory_release;
 pub mod model_refresh;
 pub mod platform;

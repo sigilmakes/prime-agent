@@ -52,6 +52,8 @@ pub(super) fn thinking_style(md: &MarkdownStyle, theme: &Theme) -> MarkdownStyle
     md.quote_border = dim;
     md.hr = dim;
     md.list_bullet = dim;
+    // TS applied the mermaid transform to text blocks only; thinking keeps its source.
+    md.mermaid = false;
     md
 }
 
@@ -67,19 +69,39 @@ pub(crate) fn user_block_row_count(
     markdown_row_count(&mask.text, width.saturating_sub(4).max(1), &md).max(1) + 2
 }
 
+/// The chat markdown settings a transcript entry renders and measures under.
+pub(crate) struct ChatMarkdown<'a> {
+    pub theme: &'a Theme,
+    pub code_block_indent: &'a str,
+    pub link_base_url: Option<url::Url>,
+    pub mermaid: crate::markdown::MermaidRenderingMode,
+}
+
+impl ChatMarkdown<'_> {
+    /// The style assistant text paints and counts under. Both paths call this, so the
+    /// settings that change row height — indent, base URL, and the resolved mermaid
+    /// decision — cannot drift between what is drawn and what is measured.
+    pub(crate) fn style(&self, streaming: bool) -> MarkdownStyle {
+        let mut md = MarkdownStyle::from_theme(self.theme);
+        self.code_block_indent.clone_into(&mut md.code_block_indent);
+        md.link_base_url.clone_from(&self.link_base_url);
+        md.mermaid = crate::markdown::mermaid_renders(self.mermaid, streaming);
+        md
+    }
+}
+
 pub(crate) fn assistant_row_count(
     message: &AssistantMessage,
     detail: Detail,
-    theme: &Theme,
-    code_block_indent: &str,
+    settings: &ChatMarkdown<'_>,
     width: usize,
     preceded_by_tool_activity: bool,
     cache: &MarkdownBlockCache,
 ) -> usize {
+    let theme = settings.theme;
     let blocks = visible_blocks(message, detail);
     let mut count = usize::from(!blocks.is_empty());
-    let mut md = MarkdownStyle::from_theme(theme);
-    code_block_indent.clone_into(&mut md.code_block_indent);
+    let md = settings.style(message.streaming);
     let content_width = width.saturating_sub(2).max(1);
     for (index, block) in blocks.iter().enumerate() {
         match block {

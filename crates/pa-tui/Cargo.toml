@@ -25,6 +25,11 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+# Mermaid fenced blocks render as Unicode diagrams. Library mode only: the default
+# `cli` feature pulls clap, libc, tracing-subscriber, windows-sys, and xterm-color.
+# Transitive additions: pest, pest_derive, pest_generator, pest_meta, pest_stack_guard,
+# stacker, psm, ucd-trie, and a `cc` build step (pest's stack guard).
+mmdflux = { version = "2.6", default-features = false }
 
 [[bin]]
 name = "pa-tui-replay"

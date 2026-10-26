@@ -6,6 +6,10 @@
 mod geometry;
 pub(crate) use geometry::{markdown_row_count, markdown_row_count_tagged};
 mod inline;
+mod mermaid;
+/// Whether a mermaid fence in a message that is streaming or settled draws.
+pub(crate) use mermaid::renders as mermaid_renders;
+pub(crate) use pa_types::markdown::MermaidRenderingMode;
 #[cfg(test)]
 mod tests;
 
@@ -36,6 +40,10 @@ pub struct MarkdownStyle {
     pub strikethrough: Modifier,
     /// The fenced-code indent string (`markdown.codeBlockIndent` in settings; default " ").
     pub code_block_indent: String,
+    /// Draw mermaid fences as diagrams (`markdown.mermaid`). Set only where the render
+    /// context resolves it — assistant text with the mode and streaming state in hand — so
+    /// thinking blocks, user blocks, and every other markdown surface keep the source.
+    pub(crate) mermaid: bool,
     /// The `syntax*` palette for fenced-code token colors (TS `highlightCode`, cli-highlight
     /// over the highlight.js grammar). `None` renders every code line uniform in `code_block`
     /// — the TS no-valid-language fallback, and the quiet thinking theme.
@@ -75,6 +83,7 @@ impl MarkdownStyle {
             italic: Modifier::ITALIC,
             strikethrough: Modifier::CROSSED_OUT,
             code_block_indent: "  ".to_string(),
+            mermaid: false,
             syntax: Some(crate::tool_card::highlight::SyntaxPalette::from_theme(
                 theme,
             )),
@@ -119,6 +128,7 @@ pub fn render_markdown_tagged(
             i,
             content_width,
             style.link_base_url.as_ref(),
+            style.mermaid,
         );
         if let Some(cached) = key.as_ref().and_then(|key| cache.0.get(key)) {
             lines.extend_from_slice(cached);
@@ -164,6 +174,9 @@ struct BlockKey {
     /// `render_block`'s only reads of the next block: `[blank_after(next, false), blank_after(next,
     /// true)]`.
     blank_after: [bool; 2],
+    /// The resolved `markdown.mermaid` decision for this render: the same block draws or
+    /// stays source depending on it, so the cached rows must not cross.
+    mermaid: bool,
 }
 
 /// The one cacheability rule shared by render and count (TS `useCache = cacheable && i <
@@ -174,6 +187,7 @@ fn block_cache_key(
     index: usize,
     width: usize,
     link_base_url: Option<&url::Url>,
+    mermaid: bool,
 ) -> Option<BlockKey> {
     if index + 1 == blocks.len() {
         return None;
@@ -190,6 +204,7 @@ fn block_cache_key(
             geometry::blank_after(next, false),
             geometry::blank_after(next, true),
         ],
+        mermaid,
     })
 }
 
@@ -658,10 +673,18 @@ fn highlighted_code_lines(
     ))
 }
 
-/// The block's unwrapped rows (TS `renderCodeBlock`): the indent outside
-/// each highlighted or uniform code line; an empty block is one indented
-/// empty row. Paint wraps these rows and the count measures the same rows.
-fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Line> {
+/// The block's rows (TS `renderCodeBlock`): the indent outside each highlighted or uniform
+/// code line; an empty block is one indented empty row. Paint wraps these rows and the count
+/// measures the same rows. A drawn mermaid block instead returns art already fitted to
+/// `width` with no indent, so paint leaves it on one row each.
+fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle, width: usize) -> Vec<Line> {
+    if style.mermaid && lang.is_some_and(mermaid::is_mermaid) {
+        // A drawn diagram replaces the fenced source, indent included: TS emitted the art
+        // as inline code rows, so no block indentation applies.
+        if let Some(rows) = mermaid::rows(&block.lines.join("\n"), width, style) {
+            return rows;
+        }
+    }
     let indent = style.code_block_indent.as_str();
     let lines = highlighted_code_lines(block, lang, style).unwrap_or_else(|| {
         block
@@ -762,7 +785,7 @@ fn render_block(
             // both sides. TS `renderBlock` then wraps every code row
             // (wrapTextWithAnsi), so a continuation row starts at column 0
             // with no re-added indent.
-            for row in code_rows(block, lang.as_deref(), style) {
+            for row in code_rows(block, lang.as_deref(), style, width) {
                 wrap_spans(&row, width, out);
             }
             if blank_after(false) {

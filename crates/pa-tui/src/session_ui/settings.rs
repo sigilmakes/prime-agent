@@ -552,8 +552,12 @@ impl SessionUi {
                 if let Some(settings) = &self.client_settings {
                     if let Err(error) = settings.set_mermaid_rendering_mode(value) {
                         self.error_row(&format!("{error:#}"), view);
+                        return;
                     }
                 }
+                // The view on screen redraws with the new mode; the layout re-prepares on
+                // the changed option, so cached entry heights are dropped.
+                view.mermaid = crate::markdown::MermaidRenderingMode::from_wire(value);
             }
             "quiet-startup" => {
                 self.persist_bool_setting(

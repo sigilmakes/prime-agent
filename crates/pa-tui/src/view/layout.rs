@@ -7,8 +7,19 @@ use crate::chat::{render_loader, ChatEntry};
 use crate::chrome::render_splash;
 use crate::Line;
 
-/// Inputs shared by local entry caches and cross-view handoffs.
-pub(super) type LayoutOptions = (crate::theme::Theme, String, bool, bool, Option<url::Url>);
+/// Inputs shared by local entry caches and cross-view handoffs: the render settings that
+/// invalidate cached entry heights. Changing any field clears the measured heights, so every
+/// setting that affects layout belongs here — a new one joins the struct, or a stale height
+/// survives its change.
+#[derive(Clone, PartialEq)]
+pub(super) struct LayoutOptions {
+    pub theme: crate::theme::Theme,
+    pub code_block_indent: String,
+    pub mermaid: crate::markdown::MermaidRenderingMode,
+    pub show_images: bool,
+    pub fullscreen_image_fallback: bool,
+    pub link_base_url: Option<url::Url>,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -318,13 +329,14 @@ impl AgentView {
         if let (Some(working), Some(since)) = (&mut self.working, self.working_since) {
             working.elapsed_secs = since.elapsed().as_secs();
         }
-        let options = (
-            self.theme.clone(),
-            self.code_block_indent.clone(),
-            self.show_images,
-            crate::image_component::fullscreen_image_fallback_active(),
-            url::Url::from_directory_path(&self.chrome.cwd).ok(),
-        );
+        let options = LayoutOptions {
+            theme: self.theme.clone(),
+            code_block_indent: self.code_block_indent.clone(),
+            mermaid: self.mermaid,
+            show_images: self.show_images,
+            fullscreen_image_fallback: crate::image_component::fullscreen_image_fallback_active(),
+            link_base_url: url::Url::from_directory_path(&self.chrome.cwd).ok(),
+        };
         if self.layout_width != width || self.layout_options.as_ref() != Some(&options) {
             self.entry_heights.clear();
             self.layout_width = width;

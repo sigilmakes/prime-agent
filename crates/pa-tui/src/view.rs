@@ -55,6 +55,10 @@ pub struct AgentView {
     /// The chat markdown fenced-code indent (`markdown.codeBlockIndent`;
     /// default two spaces).
     pub code_block_indent: String,
+    /// The chat `markdown.mermaid` mode; assistant text resolves it against the message's
+    /// streaming state before rendering. The interactive session sets it from the user's
+    /// setting; replay surfaces keep the product default and draw.
+    pub(crate) mermaid: crate::markdown::MermaidRenderingMode,
     pub editor: Editor,
     pub chrome: ChromeState,
     /// Queued input parked behind the running turn (steering/follow-up
@@ -278,6 +282,7 @@ impl AgentView {
         Self {
             theme,
             code_block_indent: "  ".to_string(),
+            mermaid: crate::markdown::MermaidRenderingMode::default(),
             editor: Editor::new(),
             chrome: ChromeState::default(),
             queued: crate::queued::QueuedMessages::default(),

@@ -1774,3 +1774,47 @@ fn a_failed_restored_replay_returns_the_error_without_an_exit_retry() {
     assert_eq!(out.calls, 1);
     assert!(flush_bytes(&mut v, 80, 24).is_empty());
 }
+
+/// `markdown.mermaid` gates assistant text by mode and message state: `final` waits for the
+/// message to settle, `streaming` draws at once, and a thinking block always keeps its source.
+#[test]
+fn mermaid_mode_gates_drawing_by_message_state_and_block_kind() {
+    use crate::markdown::MermaidRenderingMode;
+    let text = "```mermaid\nflowchart LR\n    A[Build] --> B[Test]\n```";
+    let message = |streaming: bool, blocks: Vec<MessageBlock>| {
+        ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks,
+            has_tool_calls: false,
+            streaming,
+            error: None,
+            aborted: false,
+        }))
+    };
+    let render = |mode, streaming| {
+        let mut view = view_with(vec![message(
+            streaming,
+            vec![MessageBlock::Text(text.to_string())],
+        )]);
+        view.mermaid = mode;
+        transcript_text(&mut view, 80)
+    };
+    let drawn = |out: &str| out.contains('\u{250c}');
+    assert!(drawn(&render(MermaidRenderingMode::Streaming, true)));
+    assert!(drawn(&render(MermaidRenderingMode::Streaming, false)));
+    assert!(!drawn(&render(MermaidRenderingMode::Final, true)));
+    assert!(drawn(&render(MermaidRenderingMode::Final, false)));
+    assert!(!drawn(&render(MermaidRenderingMode::Off, false)));
+
+    let mut view = view_with(vec![message(
+        false,
+        vec![
+            MessageBlock::Thinking(text.to_string()),
+            MessageBlock::Text(text.to_string()),
+        ],
+    )]);
+    view.detail = crate::chat::Detail::Details;
+    view.mermaid = MermaidRenderingMode::Streaming;
+    let out = transcript_text(&mut view, 80);
+    assert_eq!(out.matches("flowchart LR").count(), 1, "{out}");
+    assert!(drawn(&out), "{out}");
+}

@@ -98,6 +98,7 @@ pub(crate) fn markdown_row_count_tagged(
                     index,
                     width,
                     style.link_base_url.as_ref(),
+                    style.mermaid,
                 )
             })
             .flatten()
@@ -114,7 +115,7 @@ pub(crate) fn markdown_row_count_tagged(
             }
             BlockKind::Hr => 1,
             BlockKind::Code { lang } => {
-                code_rows(block, lang.as_deref(), style)
+                code_rows(block, lang.as_deref(), style, width)
                     .iter()
                     .map(|row| wrapped_span_count(row, width))
                     .sum::<usize>()

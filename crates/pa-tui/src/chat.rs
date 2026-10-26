@@ -3,7 +3,7 @@
 //! working loader line. Tool-call cards live in `crate::tool_card`.
 
 mod geometry;
-pub(crate) use geometry::{assistant_row_count, user_block_row_count};
+pub(crate) use geometry::{assistant_row_count, user_block_row_count, ChatMarkdown};
 
 use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
