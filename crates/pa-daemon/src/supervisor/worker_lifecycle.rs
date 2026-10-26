@@ -620,9 +620,7 @@ impl Supervisor {
         Ok(())
     }
 
-    /// The plain kill's stop aftermath, run on every route outcome: TS's root-kill block wraps
-    /// the forward in a `finally`, so a hung worker still completes the stop. The stop's only
-    /// `Err` is the tombstone persist, so the worker stays untouched and the kill retryable.
+    /// Complete a plain kill only after the worker accepted its accounting close.
     pub(super) async fn finish_plain_kill_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -630,7 +628,7 @@ impl Supervisor {
     ) {
         if let Err(error) = self.stop_worker(resident).await {
             self.log_line(&format!(
-                "session worker {} stop after kill failed: {error:#}; the stop never durably started and stays retryable",
+                "session worker {} stop after kill failed: {error:#}; retaining unresolved stop ownership",
                 resident.worker_id
             ));
             return;
@@ -755,21 +753,11 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
         fence: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<()> {
-        // The stop's durable intent persists BEFORE the worker is told (TS
-        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
-        // survives the escalation, must never be adopted as healthy by a later boot.
-        self.persist_stop_tombstone_stop(resident).await?;
-        resident.intentional_stop.store(true, Ordering::SeqCst);
-        // The stop is intentional: routes waiting out a replacement must
-        // fail fast instead of parking on this worker.
-        resident.note_retired();
-        // The fence releases past the retire (a tombstone-persist failure
-        // fails the stop before it, and the worker stays fully
-        // routable) and before the shutdown route, which needs a permit
-        // of its own. A client route that acquires a freed permit next
-        // sees the retire (the post-admission check in routing.rs).
+        // The shutdown route needs its own permit. Refusal must leave this worker
+        // routable and its accounting state reachable for an explicit retry.
         drop(fence);
-        match self
+        let was_intentional = resident.intentional_stop.swap(true, Ordering::SeqCst);
+        let response = self
             .route_command_typed(
                 resident,
                 "shutdown",
@@ -777,25 +765,26 @@ impl Supervisor {
                 ROUTE_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
-            .await
-        {
+            .await;
+        let (pid, start_id) = {
+            let descriptor = resident.descriptor.lock().await;
+            (descriptor.pid, descriptor.process_start_id.clone())
+        };
+        match response {
             Ok(response) if response.success => {}
-            Ok(response) => {
-                self.log_line(&format!(
-                    "session worker {} shutdown route refused: {:?}",
-                    resident.worker_id, response.error
-                ));
-            }
-            Err(error) => {
-                self.log_line(&format!(
-                    "session worker {} shutdown route failed: {error:#}",
-                    resident.worker_id
-                ));
+            Err(_) if worker_process_gone(pid, start_id).await => {}
+            result => {
+                resident
+                    .intentional_stop
+                    .store(was_intentional, Ordering::SeqCst);
+                anyhow::bail!("Worker shutdown refused: {result:?}");
             }
         }
-        // The per-session stop shares the terminal-stop contract: the descriptor dies only
-        // with a provably-gone process — a worker that missed the shutdown stays adoptable.
-        self.retire_worker_after_stop(resident).await;
+        self.persist_stop_tombstone_stop(resident).await?;
+        resident.note_retired();
+        if self.retire_worker_after_stop(resident).await != WorkerRetirement::Retired {
+            anyhow::bail!("Worker retirement remains unresolved");
+        }
         // A client-owned (ephemeral) worker's scheduled jobs die with the
         // registration (TS `cancelEphemeralWorkerScheduledJobs`).
         let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();

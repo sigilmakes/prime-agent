@@ -180,11 +180,14 @@ pub struct Supervisor {
     pub(crate) shutting_down: AtomicBool,
     launch_admission: Arc<tokio::sync::RwLock<()>>,
     launch_cleanup_uncertain: Arc<AtomicBool>,
-    /// Whether some path has taken ownership of the one terminal stop pass: exactly one
-    /// connection runs `begin_shutdown`, even if several clients notice the shutdown.
+    /// One shutdown attempt owns resident stops until its verdict. Refusal releases
+    /// the gate for an explicit retry; concurrent requests never duplicate a pass.
     shutdown_started: AtomicBool,
+    shutdown_prepared: AtomicBool,
+    #[cfg(unix)]
+    signal_shutdown_started: AtomicBool,
     /// The connection that accepted the one terminal shutdown request: only it may
-    /// run the stop pass from its response-write or disconnect paths.
+    /// publish the completed stop verdict from its response-write or disconnect paths.
     shutdown_owner: std::sync::Mutex<Option<String>>,
     /// The accept loop's exit flag: the loop must stay up until
     /// [`Supervisor::begin_shutdown`] has stopped every resident worker — an
@@ -277,6 +280,9 @@ impl Supervisor {
             launch_admission: Arc::new(tokio::sync::RwLock::new(())),
             launch_cleanup_uncertain: Arc::new(AtomicBool::new(false)),
             shutdown_started: AtomicBool::new(false),
+            shutdown_prepared: AtomicBool::new(false),
+            #[cfg(unix)]
+            signal_shutdown_started: AtomicBool::new(false),
             shutdown_owner: std::sync::Mutex::new(None),
             accept_exit: AtomicBool::new(false),
             shutdown_notify: tokio::sync::Notify::new(),

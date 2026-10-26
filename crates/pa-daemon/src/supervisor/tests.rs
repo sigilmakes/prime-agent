@@ -1070,7 +1070,7 @@ async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
         !supervisor.accept_exit.load(Ordering::SeqCst),
         "the gate alone must not exit the accept loop"
     );
-    supervisor.begin_shutdown().await;
+    supervisor.begin_shutdown(/*force*/ true).await;
     assert!(
         supervisor.accept_exit.load(Ordering::SeqCst),
         "the completed stop pass must exit the accept loop"
@@ -1321,17 +1321,9 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         "Supervisor is shutting down",
         "the refusal error: {refused:#}"
     );
-    let (routing, closing) = tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await
-        .expect("the drain broadcasts daemon_closing")
-        .expect("the events channel stays open");
     assert!(
-        matches!(routing, ClientRouting::Broadcast),
-        "every client learns the closing"
-    );
-    assert_eq!(
-        *closing,
-        json!({ "type": "daemon_closing", "reason": "shutdown" })
+        events.try_recv().is_err(),
+        "no early daemon_closing before accounting ACK"
     );
     tokio::time::timeout(Duration::from_secs(2), shutdown_routed_rx)
         .await
@@ -1353,6 +1345,18 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         .await
         .expect("the turn settles within the drain")
         .expect("the settle channel stays open");
+    let (routing, closing) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("the drain broadcasts daemon_closing")
+        .expect("the events channel stays open");
+    assert!(
+        matches!(routing, ClientRouting::Broadcast),
+        "every client learns the closing"
+    );
+    assert_eq!(
+        *closing,
+        json!({ "type": "daemon_closing", "reason": "shutdown" })
+    );
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !supervisor.accept_exit.load(Ordering::SeqCst) {
         assert!(
@@ -1654,6 +1658,7 @@ async fn idle_passivation_refuses_a_client_owned_worker() {
     // tombstone — and the same ask stops the worker once the route
     // drains.
     let resident = ResidentWorker::new("w-idle".to_string(), idle, dir.path().join("w-idle.d"));
+    accepting_shutdown(&resident);
     supervisor.registry.insert(resident.clone()).await;
     let in_flight = Arc::clone(&resident.inflight).try_acquire_owned().unwrap();
     supervisor
@@ -2474,4 +2479,24 @@ proptest! {
             Ok(())
         })?;
     }
+}
+
+/// Connect a local terminal-response pump for fixtures without an OS worker.
+pub(super) fn accepting_shutdown(resident: &Arc<ResidentWorker>) {
+    let (tx, mut rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.try_lock().unwrap() = Some(tx);
+    let resident = Arc::clone(resident);
+    tokio::spawn(async move {
+        let request = rx.recv().await.expect("shutdown request");
+        assert_eq!(request.command_type, "shutdown");
+        let reply = resident
+            .pending
+            .lock()
+            .await
+            .remove(&request.request_id)
+            .unwrap();
+        let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+            None, "shutdown", None,
+        )));
+    });
 }

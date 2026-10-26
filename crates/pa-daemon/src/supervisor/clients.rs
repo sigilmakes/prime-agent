@@ -636,8 +636,15 @@ impl Supervisor {
                 )
             }
             DaemonCommand::Restart { .. } | DaemonCommand::Shutdown { .. } => {
+                let force = matches!(
+                    command,
+                    DaemonCommand::Shutdown {
+                        force: Some(true),
+                        ..
+                    }
+                );
                 // WHO asked: the request's client id and command id land in the daemon log
-                // the moment the drain commits, so the client that stopped the daemon is
+                // when shutdown is requested, so the client that asked is
                 // nameable from the log alone. Both values are newline-stripped: a
                 // client-chosen id carrying \n must not forge attribution lines.
                 let logged_client = request_client_id.replace(['\n', '\r'], " ");
@@ -645,6 +652,17 @@ impl Supervisor {
                 self.log_line(&format!(
                     "{type_name} requested by client {logged_client} (command {logged_command})"
                 ));
+                if let Err(error) = self.prepare_shutdown(force).await {
+                    return (
+                        vec![response_line(&response_failure(
+                            Some(&command_id),
+                            &type_name,
+                            &format!("Shutdown refused: {error:#}"),
+                            None,
+                        ))],
+                        false,
+                    );
+                }
                 let response = response_success(Some(&command_id), &type_name, None);
                 let mut lines = vec![response_line(&response)];
                 // daemon_closing goes to every client before the exit.
@@ -656,9 +674,8 @@ impl Supervisor {
                     std::sync::Arc::new(closing.clone()),
                 ));
                 lines.push(closing);
-                // Answer first, then shut down: the client receives the response and
-                // daemon_closing before the stop pass can end the process. The gate flips
-                // synchronously here, so no create dispatched after the shutdown can slip past it.
+                // The resident stop pass succeeded. Flush the response and closing event
+                // before allowing the accept loop to exit; disconnect uses the same verdict.
                 *self.shutdown_owner.lock().unwrap() = Some(connection_id.to_string());
                 self.shutting_down.store(true, Ordering::SeqCst);
                 (lines, true)
@@ -1487,6 +1504,7 @@ mod tests {
             descriptor,
             dir.path().join("w-owned.json"),
         );
+        super::super::tests::accepting_shutdown(&resident);
         supervisor.registry.insert(Arc::clone(&resident)).await;
 
         // Phase 1: two connections speak for acp:1; closing one must leave

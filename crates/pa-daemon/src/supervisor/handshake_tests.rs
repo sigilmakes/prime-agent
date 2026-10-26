@@ -580,3 +580,329 @@ async fn model_refresh_requires_negotiated_worker_capability_and_revision() {
         );
     }
 }
+
+/// A real private worker channel and real public client transport. The worker's
+/// only fake is its terminal verdict; accounting refusal must survive both hops.
+async fn accounting_refusal_fixture(
+    name: &str,
+) -> (
+    tempfile::TempDir,
+    Arc<Supervisor>,
+    Arc<ResidentWorker>,
+    tokio::sync::mpsc::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("pa-close-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket_path = dir.path().join("w.sock");
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("d.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .unwrap(),
+    );
+    let descriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": name, "pid": 0,
+        "socketPath": socket_path, "recoveryJournalPath": dir.path().join("recovery"),
+        "supervisorSocketPath": supervisor.options.socket_path,
+        "authenticationToken": "close-fixture", "rootActiveSessionId": name,
+        "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+        "createCommand": {}, "consecutiveFailures": 0
+    }))
+    .unwrap();
+    let resident = ResidentWorker::new(name.into(), descriptor, dir.path().join("w.json"));
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let listener = bind_fake_worker(&socket_path).await;
+    let connect = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let frame = read_supervisor_frame(&mut fake).await;
+    answer_supervisor_frame(
+        &mut fake,
+        frame.header["requestId"].as_str().unwrap(),
+        "worker_auth",
+    )
+    .await;
+    connect.await.unwrap().unwrap();
+    resident.note_session_ready();
+    let (verdict, mut verdicts) = tokio::sync::mpsc::channel::<bool>(4);
+    let worker = tokio::spawn(async move {
+        while let Some(success) = verdicts.recv().await {
+            let frame = read_supervisor_frame(&mut fake).await;
+            let payload = crate::protocol::response_line_bytes(&DaemonResponse {
+                id: None,
+                command: frame.header["commandType"].as_str().unwrap().into(),
+                success,
+                data: None,
+                error: (!success).then(|| "Final child accounting remains owed".into()),
+                error_info: None,
+            });
+            write_frame(&mut fake.write_half, &json!({
+                "kind": "outbound", "requestId": frame.header["requestId"], "outboundType": "response",
+            }), &payload, DEFAULT_PRIVATE_FRAME_LIMITS).await.unwrap();
+        }
+    });
+    (dir, supervisor, resident, verdict, worker)
+}
+
+fn assert_no_retirement(supervisor: &Supervisor, resident: &ResidentWorker) {
+    assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+    assert!(!resident.intentional_stop.load(Ordering::SeqCst));
+    assert!(!resident.route_state().retired);
+    assert!(super::worker_lifecycle::retirement_overrides()
+        .lock()
+        .unwrap()
+        .contains_key(&resident.descriptor_path));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_graceful_shutdown_refusal_preserves_worker_then_retry_or_force_completes() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    for (command, force) in [("shutdown", false), ("restart", false), ("shutdown", true)] {
+        let (_dir, supervisor, resident, verdict, worker) =
+            accounting_refusal_fixture("w-close").await;
+        super::worker_lifecycle::retirement_overrides()
+            .lock()
+            .unwrap()
+            .insert(
+                resident.descriptor_path.clone(),
+                super::worker_lifecycle::WorkerRetirement::Retired,
+            );
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let serving = {
+            let supervisor = Arc::clone(&supervisor);
+            tokio::spawn(async move { supervisor.handle_client(Box::new(server)).await })
+        };
+        let (read, mut write) = client.into_split();
+        let mut read = BufReader::new(read);
+        let mut line = String::new();
+        read.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["type"],
+            "daemon_hello"
+        );
+        for attempt in 0..2 {
+            verdict.send(attempt == 1 && !force).await.unwrap();
+            let command = json!({ "type": "command", "id": format!("close-{attempt}"),
+                "protocol": { "name": "prime-agent.daemon", "version": 7 },
+                "command": { "type": command, "force": attempt == 1 && force },
+            });
+            write
+                .write_all(format!("{command}\n").as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(2), read.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                response["type"], "response",
+                "no early daemon_closing: {response}"
+            );
+            assert_eq!(response["success"], attempt == 1, "{response}");
+            if attempt == 0 {
+                assert_no_retirement(&supervisor, &resident);
+                assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
+                assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+                assert!(!supervisor.shutting_down.load(Ordering::SeqCst));
+                assert!(!supervisor.shutdown_started.load(Ordering::SeqCst));
+            }
+        }
+        line.clear();
+        read.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["type"],
+            "daemon_closing"
+        );
+        serving.await.unwrap().unwrap();
+        assert!(supervisor.accept_exit.load(Ordering::SeqCst));
+        assert!(supervisor.registry.get(&resident.worker_id).await.is_none());
+        assert!(!super::worker_lifecycle::retirement_overrides()
+            .lock()
+            .unwrap()
+            .contains_key(&resident.descriptor_path));
+        worker.abort();
+    }
+}
+
+#[tokio::test]
+async fn per_session_graceful_stop_refusal_does_not_retire_and_can_retry() {
+    let (_dir, supervisor, resident, verdict, worker) = accounting_refusal_fixture("w-close").await;
+    super::worker_lifecycle::retirement_overrides()
+        .lock()
+        .unwrap()
+        .insert(
+            resident.descriptor_path.clone(),
+            super::worker_lifecycle::WorkerRetirement::Retired,
+        );
+    verdict.send(false).await.unwrap();
+    assert!(supervisor.stop_worker(&resident).await.is_err());
+    assert_no_retirement(&supervisor, &resident);
+    assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
+    verdict.send(true).await.unwrap();
+    supervisor.stop_worker(&resident).await.unwrap();
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_none());
+    worker.abort();
+}
+
+#[tokio::test]
+async fn concurrent_shutdown_attempt_cannot_duplicate_stop_or_reopen_completed_gate() {
+    let (_dir, supervisor, resident, verdict, worker) = accounting_refusal_fixture("w-close").await;
+    let first = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor.prepare_shutdown(/*force*/ false).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while resident.pending.lock().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(supervisor.prepare_shutdown(/*force*/ false).await.is_err());
+    assert!(supervisor.shutdown_started.load(Ordering::SeqCst));
+    verdict.send(false).await.unwrap();
+    assert!(first.await.unwrap().is_err());
+    assert!(!supervisor.shutdown_started.load(Ordering::SeqCst));
+    assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+    worker.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_plain_kill_refusal_does_not_run_finally_retirement() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (_dir, supervisor, resident, verdict, worker) = accounting_refusal_fixture("w-close").await;
+    super::worker_lifecycle::retirement_overrides()
+        .lock()
+        .unwrap()
+        .insert(
+            resident.descriptor_path.clone(),
+            super::worker_lifecycle::WorkerRetirement::Retired,
+        );
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let serving = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.handle_client(Box::new(server)).await })
+    };
+    let (read, mut write) = client.into_split();
+    let mut read = BufReader::new(read);
+    let mut line = String::new();
+    read.read_line(&mut line).await.unwrap();
+    verdict.send(false).await.unwrap();
+    let command = json!({ "type": "command", "id": "kill-owed",
+        "protocol": { "name": "prime-agent.daemon", "version": 7 },
+        "command": { "type": "kill", "activeSessionId": "w-close" },
+    });
+    write
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .unwrap();
+    line.clear();
+    tokio::time::timeout(Duration::from_secs(2), read.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["success"], false, "{response}");
+    assert!(
+        response["error"].as_str().unwrap().contains("accounting"),
+        "{response}"
+    );
+    assert_no_retirement(&supervisor, &resident);
+    assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
+    serving.abort();
+    worker.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn first_signal_accounting_refusal_preserves_worker_without_closing_event() {
+    let (_dir, supervisor, resident, verdict, worker) = accounting_refusal_fixture("w-close").await;
+    super::worker_lifecycle::retirement_overrides()
+        .lock()
+        .unwrap()
+        .insert(
+            resident.descriptor_path.clone(),
+            super::worker_lifecycle::WorkerRetirement::Retired,
+        );
+    let mut events = supervisor.events.subscribe();
+    verdict.send(false).await.unwrap();
+    assert!(supervisor.begin_signal_drain());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while supervisor.shutting_down.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_no_retirement(&supervisor, &resident);
+    assert!(
+        events.try_recv().is_err(),
+        "refusal cannot announce terminal closing"
+    );
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
+    assert!(
+        !supervisor.begin_signal_drain(),
+        "the operator's repeated signal remains force"
+    );
+    worker.abort();
+}
+
+#[tokio::test]
+async fn partial_shutdown_retry_targets_only_the_worker_that_refused_accounting() {
+    let (_dir, supervisor, closed, closed_verdict, closed_worker) =
+        accounting_refusal_fixture("a-closed").await;
+    let (_other_dir, _other_supervisor, owed, owed_verdict, owed_worker) =
+        accounting_refusal_fixture("z-owed").await;
+    supervisor.registry.insert(Arc::clone(&owed)).await;
+    for resident in [&closed, &owed] {
+        super::worker_lifecycle::retirement_overrides()
+            .lock()
+            .unwrap()
+            .insert(
+                resident.descriptor_path.clone(),
+                super::worker_lifecycle::WorkerRetirement::Retired,
+            );
+    }
+    closed_verdict.send(true).await.unwrap();
+    owed_verdict.send(false).await.unwrap();
+    assert!(supervisor.prepare_shutdown(/*force*/ false).await.is_err());
+    assert!(supervisor.registry.get(&closed.worker_id).await.is_none());
+    assert!(supervisor.registry.get(&owed.worker_id).await.is_some());
+    assert_no_retirement(&supervisor, &owed);
+    owed_verdict.send(true).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        supervisor.prepare_shutdown(/*force*/ false),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(supervisor.registry.list().await.is_empty());
+    assert!(
+        !supervisor.accept_exit.load(Ordering::SeqCst),
+        "exit waits for public response completion"
+    );
+    supervisor.ensure_shutdown_started().await;
+    assert!(supervisor.accept_exit.load(Ordering::SeqCst));
+    closed_worker.abort();
+    owed_worker.abort();
+}

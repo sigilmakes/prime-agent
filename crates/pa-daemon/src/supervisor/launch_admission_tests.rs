@@ -27,7 +27,7 @@ async fn stopping(supervisor: &Supervisor) {
 #[tokio::test]
 async fn launch_admission_refuses_after_terminal_stop() {
     let (_dir, supervisor) = fixture();
-    supervisor.begin_shutdown().await;
+    supervisor.begin_shutdown(/*force*/ true).await;
     assert!(supervisor.accept_exit.load(Ordering::SeqCst));
     assert!(supervisor.acquire_launch_admission().is_err());
 }
@@ -40,7 +40,9 @@ async fn terminal_drain_waits_for_every_clone_of_the_owned_launch_permit() {
         .expect("launch admitted");
     let cleanup_permit = Arc::clone(&permit);
     let stopping_supervisor = Arc::clone(&supervisor);
-    let shutdown = tokio::spawn(async move { stopping_supervisor.begin_shutdown().await });
+    let shutdown = tokio::spawn(async move {
+        stopping_supervisor.begin_shutdown(/*force*/ true).await;
+    });
     stopping(&supervisor).await;
     assert!(supervisor.launch_admission.try_write().is_err());
     assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
@@ -79,9 +81,12 @@ async fn uncertain_launch_cleanup_never_certifies_terminal_exit() {
     supervisor
         .launch_cleanup_uncertain
         .store(true, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
-        .await
-        .expect("uncertainty is bounded");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        supervisor.begin_shutdown(/*force*/ true),
+    )
+    .await
+    .expect("uncertainty is bounded");
     assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
     assert!(supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst));
 }
@@ -177,7 +182,9 @@ async fn queued_terminal_writer_does_not_invert_unknown_registration_and_boot_ad
         .expect("boot blocked behind registration guard")
         .expect("blocked");
     let stopping_supervisor = Arc::clone(&supervisor);
-    let shutdown = tokio::spawn(async move { stopping_supervisor.begin_shutdown().await });
+    let shutdown = tokio::spawn(async move {
+        stopping_supervisor.begin_shutdown(/*force*/ true).await;
+    });
     stopping(&supervisor).await;
     assert!(
         !shutdown.is_finished(),
@@ -220,7 +227,9 @@ async fn admission_fast_check_race_refuses_after_terminal_writer_queues() {
         .expect("first check observed stopping=false")
         .expect("pause entered");
     let stopping_supervisor = Arc::clone(&supervisor);
-    let shutdown = tokio::spawn(async move { stopping_supervisor.begin_shutdown().await });
+    let shutdown = tokio::spawn(async move {
+        stopping_supervisor.begin_shutdown(/*force*/ true).await;
+    });
     stopping(&supervisor).await;
     assert!(!shutdown.is_finished());
     release.send(()).expect("resume after queued writer");

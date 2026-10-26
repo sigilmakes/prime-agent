@@ -500,8 +500,8 @@ impl Supervisor {
             }
         };
         // The plain-kill gate (TS `isRootKill`): the `rlmCloseReason` marker is a child-close
-        // cascade, not a root kill. Only the plain kill tombstones and finalizes BEFORE the
-        // worker is told, so a mid-stop death adopts the tombstone.
+        // cascade, not a root kill. A plain kill finalizes only after the worker has
+        // accepted its accounting close.
         let plain_kill = match command {
             DaemonCommand::Kill { rest, .. } => {
                 let no_marker = !rest.contains_key("rlmCloseReason");
@@ -518,19 +518,6 @@ impl Supervisor {
             }
             _ => false,
         };
-        if plain_kill {
-            if let Err(error) = self.persist_stop_tombstone(&resident).await {
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        &format!("Failed to persist the session stop: {error:#}"),
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        }
         // A delete's deletion boundary persists BEFORE the teardown: a failed tombstone is
         // a failed, retryable deletion; a plain stop must not tombstone the child.
         if let DaemonCommand::Kill { rest, .. } = command {
@@ -850,9 +837,7 @@ impl Supervisor {
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
-                    // TS's root-kill `finally`: the stop completes on a rejected or timed-out
-                    // forward too; the marker-carrying child closes keep the success gate.
-                    if plain_kill {
+                    if plain_kill && response.success {
                         self.finish_plain_kill_stop(&resident, rest).await;
                     } else if response.success {
                         // A cascade-stop failure is observable (logged) instead of silently
@@ -901,24 +886,15 @@ impl Supervisor {
                 }
                 (vec![response_line(&response)], false)
             }
-            Err(error) => {
-                // TS's root-kill `finally` runs its stop on a thrown forward as well, so the
-                // lease cannot outlive the command; child closes keep the plain forward.
-                if plain_kill {
-                    if let DaemonCommand::Kill { rest, .. } = command {
-                        self.finish_plain_kill_stop(&resident, rest).await;
-                    }
-                }
-                (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        &error.to_string(),
-                        None,
-                    ))],
-                    false,
-                )
-            }
+            Err(error) => (
+                vec![response_line(&response_failure(
+                    Some(&command_id),
+                    &type_name,
+                    &error.to_string(),
+                    None,
+                ))],
+                false,
+            ),
         }
     }
 

@@ -1446,7 +1446,9 @@ mod owned_reap_causal_tests {
             .expect("watch entered")
             .expect("watch pause");
         let stopping = Arc::clone(&supervisor);
-        let shutdown = tokio::spawn(async move { stopping.begin_shutdown().await });
+        let shutdown = tokio::spawn(async move {
+            stopping.begin_shutdown(/*force*/ true).await;
+        });
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if process_scalars(pid).is_some_and(|state| state.0 == 'Z') {
@@ -1570,9 +1572,12 @@ mod launch_rollback_tests {
         entered_rx.await.expect("launch owns child");
         launch.abort();
         assert!(launch.await.expect_err("launch cancelled").is_cancelled());
-        tokio::time::timeout(Duration::from_secs(3), supervisor.begin_shutdown())
-            .await
-            .expect("rollback drains before terminal exit");
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            supervisor.begin_shutdown(/*force*/ true),
+        )
+        .await
+        .expect("rollback drains before terminal exit");
         assert!(supervisor.accept_exit.load(Ordering::SeqCst));
         assert_eq!(
             *completion.borrow(),
@@ -1635,9 +1640,12 @@ mod launch_rollback_tests {
             "debt was recorded before release"
         );
         drop(exclusive);
-        tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
-            .await
-            .expect("uncertain stop is bounded");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            supervisor.begin_shutdown(/*force*/ true),
+        )
+        .await
+        .expect("uncertain stop is bounded");
         assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
         // Tokio's dropped Child reaper still owns this fixture cleanup. The
         // certification must remain refused regardless of eventual OS cleanup.
@@ -1679,9 +1687,12 @@ mod launch_rollback_tests {
         launch.abort();
         assert!(launch.await.expect_err("launch cancelled").is_cancelled());
         drop(release);
-        tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
-            .await
-            .expect("no launch remains");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            supervisor.begin_shutdown(/*force*/ true),
+        )
+        .await
+        .expect("no launch remains");
         assert!(supervisor.accept_exit.load(Ordering::SeqCst));
         assert!(!supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst));
         assert!(resident.owned_reap.lock().expect("owned record").is_none());
@@ -1725,9 +1736,12 @@ mod launch_rollback_tests {
         launch.abort();
         assert!(launch.await.expect_err("launch cancelled").is_cancelled());
         drop(release);
-        tokio::time::timeout(Duration::from_secs(3), supervisor.begin_shutdown())
-            .await
-            .expect("OS rollback drained");
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            supervisor.begin_shutdown(/*force*/ true),
+        )
+        .await
+        .expect("OS rollback drained");
         assert!(supervisor.accept_exit.load(Ordering::SeqCst));
         assert_eq!(*record.completed.borrow(), Some(true));
         assert!(!supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst));
@@ -1801,7 +1815,9 @@ mod orphan_callback_truth_tests {
                 "owned PID reaped before callback"
             );
             let stopping = Arc::clone(&supervisor);
-            let shutdown = tokio::spawn(async move { stopping.begin_shutdown().await });
+            let shutdown = tokio::spawn(async move {
+                stopping.begin_shutdown(/*force*/ true).await;
+            });
             tokio::time::timeout(Duration::from_secs(1), async {
                 while !supervisor.shutting_down.load(Ordering::SeqCst) {
                     tokio::task::yield_now().await;
