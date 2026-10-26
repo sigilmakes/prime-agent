@@ -6,6 +6,7 @@
 //! name nor reasoning/vision flags establish support. No catalog or global provider
 //! state is changed. HTTP cancellation drops local work; it cannot promise a refund.
 
+mod codex;
 mod native_input;
 mod protocol;
 pub use native_input::{responses_input_json, NativeResponsesInput};
@@ -20,6 +21,7 @@ use crate::utils_inner::stream_failure::ProviderError;
 use protocol::{parse_response, validate_input, ItemWindow};
 
 const PROTOCOL: &str = "openai.responses.compact";
+const CODEX_PROTOCOL: &str = "openai.codex.responses.compaction.v2";
 const VERSION: u32 = 1;
 
 /// Exact caller-resolved route. `endpoint` is the full `/responses/compact` URL.
@@ -146,6 +148,7 @@ impl ResponsesWindow {
         let input = NativeResponsesInput {
             route: self.route.clone(),
             input_json: self.input_json.clone(),
+            codex: adapter.codex,
         };
         if cancel.is_cancelled() {
             return Err(CompactionError::Cancelled);
@@ -309,7 +312,7 @@ impl CompactionCandidate {
         }
         let archive: Archive = serde_json::from_str(serialized)
             .map_err(|_| CompactionError::InvalidData("invalid archive JSON"))?;
-        if archive.version != VERSION || archive.protocol != PROTOCOL {
+        if archive.version != VERSION || archive.protocol != adapter.protocol() {
             return Err(CompactionError::InvalidData(
                 "unsupported archive protocol/version",
             ));
@@ -317,7 +320,7 @@ impl CompactionCandidate {
         if archive.route != adapter.route {
             return Err(CompactionError::RouteMismatch);
         }
-        let parsed = parse_response(&archive.response_json, &adapter.route, adapter.limits)?;
+        let parsed = parse_response(&archive.response_json, &adapter.route, adapter.limits, adapter.window_kind())?;
         if parsed.usage != archive.usage {
             return Err(CompactionError::InvalidData(
                 "archive usage does not match response",
@@ -344,13 +347,13 @@ impl CompactionCandidate {
         cancel: &CancellationToken,
     ) -> Result<ResponsesWindow, CompactionError> {
         adapter.check_support(cancel)?;
-        if self.archive.route != adapter.route {
+        if self.archive.route != adapter.route || self.archive.protocol != adapter.protocol() {
             return Err(CompactionError::RouteMismatch);
         }
         let window = ResponsesWindow {
             route: self.archive.route.clone(),
             input_json: self.output_json.clone(),
-            kind: ItemWindow::Compacted,
+            kind: adapter.window_kind(),
         };
         if cancel.is_cancelled() {
             return Err(CompactionError::Cancelled);
@@ -366,6 +369,7 @@ pub struct ResponsesCompactor {
     route: CompactionRoute,
     supported_route: Option<CompactionRoute>,
     limits: CompactionLimits,
+    codex: bool,
 }
 
 impl ResponsesCompactor {
@@ -401,7 +405,38 @@ impl ResponsesCompactor {
             route,
             supported_route,
             limits,
+            codex: false,
         })
+    }
+
+    /// Register the Codex Responses V2 compaction protocol for an exact resolved
+    /// `/codex/responses` route. Uses the normal Codex OAuth request machinery.
+    ///
+    /// # Errors
+    /// Rejects invalid routes and resource limits.
+    pub fn new_codex(
+        route: CompactionRoute,
+        supported_route: Option<CompactionRoute>,
+        limits: CompactionLimits,
+    ) -> Result<Self, CompactionError> {
+        if !route.endpoint.ends_with("/codex/responses") {
+            return Err(CompactionError::InvalidRoute);
+        }
+        let mut validated = route.clone();
+        validated.endpoint.push_str("/compact");
+        let mut adapter = Self::new(validated, None, limits)?;
+        adapter.route = route;
+        adapter.supported_route = supported_route;
+        adapter.codex = true;
+        Ok(adapter)
+    }
+
+    fn protocol(&self) -> &'static str {
+        if self.codex { CODEX_PROTOCOL } else { PROTOCOL }
+    }
+
+    fn window_kind(&self) -> ItemWindow {
+        if self.codex { ItemWindow::CodexCompacted } else { ItemWindow::Compacted }
     }
 
     fn check_support(&self, cancel: &CancellationToken) -> Result<(), CompactionError> {
@@ -438,6 +473,9 @@ impl ResponsesCompactor {
             return Err(CompactionError::InputTooLarge);
         }
         validate_input(&input.input_json, self.limits, input.kind)?;
+        if self.codex {
+            return codex::compact(self, input, options, cancel).await;
+        }
         // Embed the raw array; round-tripping through Value corrupts native replay.
         let model =
             serde_json::to_string(&self.route.model).map_err(|_| CompactionError::InvalidRoute)?;
@@ -492,7 +530,7 @@ impl ResponsesCompactor {
             }
             let response_json = String::from_utf8(bytes)
                 .map_err(|_| CompactionError::InvalidData("response is not UTF-8"))?;
-            let parsed = parse_response(&response_json, &self.route, self.limits)?;
+            let parsed = parse_response(&response_json, &self.route, self.limits, self.window_kind())?;
             if cancel.is_cancelled() {
                 return Err(CompactionError::Cancelled);
             }

@@ -102,19 +102,30 @@ fn configured_route(
     config: &Value,
 ) -> anyhow::Result<Option<pa_ai::compaction::CompactionRoute>> {
     let inference_endpoint = model.base_url.trim_end_matches('/');
-    let compact_endpoint = format!("{inference_endpoint}/responses/compact");
+    let compact_endpoint = if model.api == "openai-codex-responses" {
+        let base = inference_endpoint;
+        if base.ends_with("/codex/responses") {
+            base.to_owned()
+        } else if base.ends_with("/codex") {
+            format!("{base}/responses")
+        } else {
+            format!("{base}/codex/responses")
+        }
+    } else {
+        format!("{inference_endpoint}/responses/compact")
+    };
     let route = match config.get("route") {
         Some(Value::Null) => return Ok(None),
         Some(route) => serde_json::from_value::<pa_ai::compaction::CompactionRoute>(route.clone())
             .context("invalid explicit server compaction route")?,
-        None if model.api == "openai-responses" => pa_ai::compaction::CompactionRoute {
+        None if matches!(model.api.as_str(), "openai-responses" | "openai-codex-responses") => pa_ai::compaction::CompactionRoute {
             provider: model.provider.clone(),
             endpoint: compact_endpoint.clone(),
             model: model.id.clone(),
         },
         None => return Ok(None),
     };
-    if model.api != "openai-responses"
+    if !matches!(model.api.as_str(), "openai-responses" | "openai-codex-responses")
         || route.provider != model.provider
         || route.model != model.id
         || route.endpoint != compact_endpoint
@@ -130,11 +141,12 @@ pub(super) fn server_adapter(
 ) -> anyhow::Result<Option<pa_ai::compaction::ResponsesCompactor>> {
     configured_route(model, config)?
         .map(|route| {
-            pa_ai::compaction::ResponsesCompactor::new(
-                route.clone(),
-                Some(route),
-                pa_ai::compaction::CompactionLimits::default(),
-            )
+            let constructor = if model.api == "openai-codex-responses" {
+                pa_ai::compaction::ResponsesCompactor::new_codex
+            } else {
+                pa_ai::compaction::ResponsesCompactor::new
+            };
+            constructor(route.clone(), Some(route), pa_ai::compaction::CompactionLimits::default())
             .map_err(anyhow::Error::from)
         })
         .transpose()

@@ -17,6 +17,7 @@ pub(super) struct ParsedResponse {
 pub(super) enum ItemWindow {
     Input,
     Compacted,
+    CodexCompacted,
 }
 
 pub(super) fn validate_input(
@@ -65,7 +66,7 @@ fn validate_items(
             Some("message") | None => {
                 let valid_role =
                     matches!(role, Some("user" | "assistant" | "system" | "developer"))
-                        || (window == ItemWindow::Compacted
+                        || (window != ItemWindow::Input
                             && matches!(
                                 role,
                                 Some("unknown" | "critic" | "discriminator" | "tool")
@@ -91,7 +92,7 @@ fn validate_items(
             }
             Some("function_call") => nonempty("call_id") && nonempty("name") && string("arguments"),
             Some("function_call_output") => {
-                (window == ItemWindow::Compacted || nonempty("call_id"))
+                (window != ItemWindow::Input || nonempty("call_id"))
                     && object
                         .get("output")
                         .is_some_and(|output| output.is_string() || output.is_array())
@@ -105,7 +106,7 @@ fn validate_items(
                     .get("encrypted_content")
                     .and_then(Value::as_str)
                     .is_some_and(|content| !content.trim().is_empty())
-                    && (window == ItemWindow::Input || nonempty("id"))
+                    && (window != ItemWindow::Compacted || nonempty("id"))
             }
             // Unknown future native variants are opaque. Never prune them or
             // confuse a new type with a known, malformed retained message.
@@ -115,7 +116,7 @@ fn validate_items(
             return Err(CompactionError::InvalidData("unusable Responses item"));
         }
     }
-    if window == ItemWindow::Compacted && !has_compaction {
+    if window != ItemWindow::Input && !has_compaction {
         return Err(CompactionError::InvalidData(
             "response lacks compaction item",
         ));
@@ -127,6 +128,7 @@ pub(super) fn parse_response(
     raw: &str,
     route: &CompactionRoute,
     limits: CompactionLimits,
+    window: ItemWindow,
 ) -> Result<ParsedResponse, CompactionError> {
     if raw.len() > limits.max_response_bytes {
         return Err(CompactionError::LimitExceeded);
@@ -152,7 +154,7 @@ pub(super) fn parse_response(
     let output = response
         .get("output")
         .ok_or(CompactionError::InvalidData("missing output"))?;
-    validate_items(output, limits, ItemWindow::Compacted)?;
+    validate_items(output, limits, window)?;
     let usage = response
         .get("usage")
         .ok_or(CompactionError::InvalidData("missing usage"))?;
@@ -227,7 +229,7 @@ pub(super) fn parse_response(
 
 // Locate a value's end in already-valid JSON. Strings consume their escapes;
 // containers count nested delimiters. Scalars end at the next structural comma.
-fn value_end(bytes: &[u8], start: usize) -> usize {
+pub(super) fn value_end(bytes: &[u8], start: usize) -> usize {
     let mut pos = start;
     let mut depth = 0usize;
     let mut quoted = false;
@@ -263,7 +265,7 @@ fn value_end(bytes: &[u8], start: usize) -> usize {
     pos
 }
 
-fn root_fields(raw: &str) -> Result<HashMap<String, &str>, CompactionError> {
+pub(super) fn root_fields(raw: &str) -> Result<HashMap<String, &str>, CompactionError> {
     let bytes = raw.as_bytes();
     let mut pos = 0;
     let mut fields = HashMap::new();

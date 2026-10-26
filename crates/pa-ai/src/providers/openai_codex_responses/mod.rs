@@ -186,6 +186,9 @@ async fn run_stream(
     writer: &AssistantMessageEventWriter,
 ) -> Result<(), ProviderError> {
     let options = options.cloned().unwrap_or_default();
+    if let Some(native) = &options.base.native_responses_input {
+        native.validate(model, context, &options.base)?;
+    }
     let api_key = options
         .base
         .api_key
@@ -210,8 +213,23 @@ async fn run_stream(
     })?;
 
     let mut body = build_request_body(model, context, &options);
+    if let Some(native) = &options.base.native_responses_input {
+        body["input"] = serde_json::from_str(native.input_json())
+            .map_err(|_| ProviderError::Message("Invalid native Codex input".into()))?;
+    }
     if let Some(on_payload) = &options.base.on_payload {
+        let original_input = body.get("input").cloned();
         if let Some(next) = on_payload(body.clone(), model) {
+            if options.base.native_responses_input.is_some()
+                && (next.get("input") != original_input.as_ref()
+                    || next.get("model") != body.get("model")
+                    || next.get("previous_response_id").is_some()
+                    || next.get("conversation").is_some())
+            {
+                return Err(ProviderError::Message(
+                    "Payload hook conflicts with authoritative native Codex input or model".into(),
+                ));
+            }
             body = next;
         }
     }
@@ -232,8 +250,27 @@ async fn run_stream(
         &api_key,
         &websocket_request_id,
     );
-    let body_json = body.to_string();
-    let transport = options.base.transport.unwrap_or(Transport::Auto);
+    let body_json = if let Some(native) = &options.base.native_responses_input {
+        let object = body.as_object_mut().ok_or_else(|| {
+            ProviderError::Message("Native Codex payload must be an object".into())
+        })?;
+        object.remove("input");
+        let mut serialized = body.to_string();
+        serialized.pop();
+        serialized.push_str(",\"input\":");
+        serialized.push_str(native.input_json());
+        serialized.push('}');
+        serialized
+    } else {
+        body.to_string()
+    };
+    // Native windows are complete stateless input. Do not reuse a cached WS
+    // continuation or serialize their raw items through its Value-based delta path.
+    let transport = if options.base.native_responses_input.is_some() {
+        Transport::Sse
+    } else {
+        options.base.transport.unwrap_or(Transport::Auto)
+    };
     // Transport recovery belongs to this logical request. Historical socket failures must not
     // disable the next request's fresh WebSocket probe.
     if transport != Transport::Sse {
@@ -835,6 +872,10 @@ impl Provider for OpenAICodexResponsesProvider {
     }
 
     fn supports_bounded_event_delivery(&self) -> bool {
+        true
+    }
+
+    fn supports_native_responses_input(&self) -> bool {
         true
     }
 

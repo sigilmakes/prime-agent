@@ -17,6 +17,7 @@ use super::CompactionRoute;
 pub struct NativeResponsesInput {
     pub(super) route: CompactionRoute,
     pub(super) input_json: String,
+    pub(super) codex: bool,
 }
 
 impl std::fmt::Debug for NativeResponsesInput {
@@ -39,12 +40,16 @@ impl NativeResponsesInput {
         context: &Context,
         options: &StreamOptions,
     ) -> Result<(), ProviderError> {
-        if model.api != "openai-responses" {
+        if model.api != if self.codex { "openai-codex-responses" } else { "openai-responses" } {
             return Err(ProviderError::Message(
                 "Native Responses input is not supported by this transport".into(),
             ));
         }
-        let endpoint = format!("{}/responses/compact", model.base_url.trim_end_matches('/'));
+        let endpoint = if self.codex {
+            crate::providers::openai_codex_responses::request::resolve_codex_url(&model.base_url)
+        } else {
+            format!("{}/responses/compact", model.base_url.trim_end_matches('/'))
+        };
         if self.route.provider != model.provider
             || self.route.model != model.id
             || self.route.endpoint != endpoint
@@ -76,7 +81,7 @@ impl NativeResponsesInput {
 /// # Errors
 /// Rejects other transports and reports JSON serialization failures.
 pub fn responses_input_json(model: &Model, messages: &[Message]) -> Result<String, ProviderError> {
-    if model.api != "openai-responses" {
+    if !matches!(model.api.as_str(), "openai-responses" | "openai-codex-responses") {
         return Err(ProviderError::Message(
             "Portable Responses input requires the openai-responses transport".into(),
         ));
