@@ -200,13 +200,12 @@ impl CanonicalLiveOwner for CoreCanonicalLiveOwner {
         request: CanonicalLiveProviderStepRequest,
     ) -> CanonicalFuture<()> {
         self.call(move |core| {
-            if core.shutdown_requested || core.abort_requested || core.retry_abort_requested {
-                return Err(refused("new canonical provider work is closing or aborted"));
-            }
+            let cancelled =
+                core.shutdown_requested || core.abort_requested || core.retry_abort_requested;
             core.store
                 .as_mut()
                 .expect("validated store")
-                .begin_canonical_provider_step(request)
+                .begin_canonical_provider_step(request, cancelled)
         })
     }
 

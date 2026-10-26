@@ -113,6 +113,89 @@ async fn update_snapshot_reports_the_session_and_flushes_the_journal() {
 }
 
 #[tokio::test]
+async fn update_snapshot_failure_preserves_live_and_recovery_state() {
+    let (worker, _) = snapshot_after_create().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering
+            .push_back(queued_user_item("keep this steering row"));
+        core.follow_up
+            .push_back(queued_user_item("keep this follow-up row"));
+        core.store
+            .as_mut()
+            .unwrap()
+            .persist_entry(
+                "custom",
+                json!({ "customType": "recovery-test", "data": { "retain": true } }),
+            )
+            .unwrap();
+    }
+    let (before_lanes, before_actions, before_history) = {
+        let core = worker.core.lock().unwrap();
+        (
+            queue_lanes(&core),
+            session_snapshot(&core),
+            serde_json::to_value(core.store.as_ref().unwrap().entries()).unwrap(),
+        )
+    };
+    let (before_snapshot, before_verdicts) = {
+        let recovery = worker.recovery.lock().unwrap();
+        let journal = recovery.as_ref().unwrap();
+        (
+            journal.latest_queue_snapshot("target-session"),
+            journal.get_latest(),
+        )
+    };
+    let path = &worker.config.recovery_journal_path;
+    let preserved = path.with_extension("preserved.jsonl");
+    let before_bytes = std::fs::read(path).unwrap();
+    // An unopenable append target fails before I/O, including when tests run as root.
+    std::fs::rename(path, &preserved).unwrap();
+    std::fs::create_dir(path).unwrap();
+
+    let response = worker.dispatch("update_snapshot", &json!({})).await;
+    assert!(
+        !response.success,
+        "failed flush must refuse the snapshot: {response:?}"
+    );
+    assert!(response.data.is_none());
+    assert!(response.error.is_some());
+    {
+        let core = worker.core.lock().unwrap();
+        let after_lanes = queue_lanes(&core);
+        assert_eq!(after_lanes.steering, before_lanes.steering);
+        assert_eq!(after_lanes.follow_up, before_lanes.follow_up);
+        assert_eq!(session_snapshot(&core), before_actions);
+        assert_eq!(
+            serde_json::to_value(core.store.as_ref().unwrap().entries()).unwrap(),
+            before_history,
+        );
+    }
+    {
+        let recovery = worker.recovery.lock().unwrap();
+        let journal = recovery.as_ref().unwrap();
+        assert_eq!(
+            journal.latest_queue_snapshot("target-session"),
+            before_snapshot
+        );
+        assert_eq!(journal.get_latest(), before_verdicts);
+    }
+    assert_eq!(std::fs::read(&preserved).unwrap(), before_bytes);
+}
+
+#[tokio::test]
+async fn update_snapshot_requires_a_recovery_journal() {
+    let (worker, _) = snapshot_after_create().await;
+    worker.recovery.lock().unwrap().take();
+    let response = worker.dispatch("update_snapshot", &json!({})).await;
+    assert!(
+        !response.success,
+        "missing durable sink must refuse: {response:?}"
+    );
+    assert!(response.data.is_none());
+}
+
+#[tokio::test]
 async fn update_snapshot_reflects_queued_work() {
     let (worker, _) = snapshot_after_create().await;
     worker
@@ -560,10 +643,15 @@ async fn injected_continuations_still_project_their_lane_text() {
 async fn restored_lane_rows_keep_the_child_status_provenance() {
     let (worker, _) = snapshot_after_create().await;
     let content = "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
-    worker.persist_queue_snapshot(
-        "target-session",
-        &QueueLanes {
-            steering: vec![crate::journal::WorkerQueueItemRecord {
+    worker
+        .recovery
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .record_queue_snapshot(
+            "target-session",
+            &[crate::journal::WorkerQueueItemRecord {
                 priority: Some(QueuePriority::Background),
                 message: content,
                 preview: None,
@@ -572,9 +660,9 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
                 queue_visible: true,
                 policy: "queued".to_string(),
             }],
-            follow_up: Vec::new(),
-        },
-    );
+            &[],
+        )
+        .unwrap();
     let (steering, follow_up) = {
         let recovery = worker.recovery.lock().unwrap();
         let journal = recovery.as_ref().unwrap();

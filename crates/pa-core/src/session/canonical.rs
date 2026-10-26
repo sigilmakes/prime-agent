@@ -27,6 +27,9 @@ pub enum CanonicalSourceDisposition {
     Unchanged,
     PendingAdoption,
     NeedsReconcile,
+    /// The leased owner refused before starting this request and certifies no
+    /// outstanding prepare, write, tool or adoption debt. Observe again before use.
+    ReadyForObservation,
 }
 
 /// Typed refusal/failure without guessing whether an append happened.

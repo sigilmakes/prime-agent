@@ -1,4 +1,6 @@
 use super::*;
+
+mod preflight;
 use crate::session::canonical::{
     CanonicalAppendReceipt, CanonicalCallerNotifier, CanonicalFrontier, CanonicalJournalRow,
     CanonicalOwnerScope,
@@ -25,6 +27,7 @@ struct State {
     delivered_users: std::collections::VecDeque<String>,
     delivered_custom: std::collections::VecDeque<String>,
     steps: usize,
+    cancel_next_provider: bool,
     tool_admissions: usize,
     bootstrap_preserves_owner_admission: bool,
     preparation_admissions: Vec<CanonicalAdmissionPolicy>,
@@ -68,6 +71,7 @@ impl Owner {
             delivered_users: std::collections::VecDeque::default(),
             delivered_custom: std::collections::VecDeque::default(),
             steps: 0,
+            cancel_next_provider: false,
             tool_admissions: 0,
             bootstrap_preserves_owner_admission: false,
             preparation_admissions: Vec::new(),
@@ -156,6 +160,20 @@ impl CanonicalLiveOwner for Owner {
     }
     fn prepare(&self, request: CanonicalLivePrepareRequest) -> CanonicalFuture<CanonicalPrepared> {
         let mut state = self.0.lock().unwrap();
+        if request
+            .expected
+            .as_ref()
+            .is_some_and(|expected| expected != &state.cursor)
+        {
+            return Box::pin(async {
+                Err(CanonicalStoreError {
+                    kind: CanonicalFailureKind::SourceChanged,
+                    requested: CanonicalRequestedWrite::NotRequested,
+                    source: CanonicalSourceDisposition::ReadyForObservation,
+                    detail: "owned prepare source advanced before admission".into(),
+                })
+            });
+        }
         state.preparation_admissions.push(request.admission.clone());
         match &request.admission {
             CanonicalAdmissionPolicy::Append(ids) | CanonicalAdmissionPolicy::Replace(ids) => {
@@ -287,9 +305,23 @@ impl CanonicalLiveOwner for Owner {
     }
     fn admit_user(
         &self,
-        _: CanonicalLiveUserRequest,
+        request: CanonicalLiveUserRequest,
     ) -> CanonicalFuture<CanonicalLiveUserPrepared> {
         let mut state = self.0.lock().unwrap();
+        if request
+            .expected
+            .as_ref()
+            .is_some_and(|expected| expected != &state.cursor)
+        {
+            return Box::pin(async {
+                Err(CanonicalStoreError {
+                    kind: CanonicalFailureKind::SourceChanged,
+                    requested: CanonicalRequestedWrite::NotRequested,
+                    source: CanonicalSourceDisposition::ReadyForObservation,
+                    detail: "owned delivery source advanced before admission".into(),
+                })
+            });
+        }
         let id = state
             .delivered_users
             .pop_front()
@@ -309,9 +341,23 @@ impl CanonicalLiveOwner for Owner {
     }
     fn admit_custom(
         &self,
-        _: CanonicalLiveCustomRequest,
+        request: CanonicalLiveCustomRequest,
     ) -> CanonicalFuture<CanonicalLiveCustomPrepared> {
         let mut state = self.0.lock().unwrap();
+        if request
+            .expected
+            .as_ref()
+            .is_some_and(|expected| expected != &state.cursor)
+        {
+            return Box::pin(async {
+                Err(CanonicalStoreError {
+                    kind: CanonicalFailureKind::SourceChanged,
+                    requested: CanonicalRequestedWrite::NotRequested,
+                    source: CanonicalSourceDisposition::ReadyForObservation,
+                    detail: "owned delivery source advanced before admission".into(),
+                })
+            });
+        }
         let id = state
             .delivered_custom
             .pop_front()
@@ -333,12 +379,24 @@ impl CanonicalLiveOwner for Owner {
         request: CanonicalLiveProviderStepRequest,
     ) -> CanonicalFuture<()> {
         let mut state = self.0.lock().unwrap();
+        if std::mem::take(&mut state.cancel_next_provider) {
+            return Box::pin(async {
+                Err(CanonicalStoreError {
+                    kind: CanonicalFailureKind::Cancelled,
+                    requested: CanonicalRequestedWrite::NotRequested,
+                    source: CanonicalSourceDisposition::ReadyForObservation,
+                    detail: "provider cancelled before work".into(),
+                })
+            });
+        }
         if request.expected != state.cursor {
             return Box::pin(async {
-                Err(failure(
-                    "projection source drifted before actual inference",
-                    CanonicalRequestedWrite::NotWritten,
-                ))
+                Err(CanonicalStoreError {
+                    kind: CanonicalFailureKind::SourceChanged,
+                    requested: CanonicalRequestedWrite::NotRequested,
+                    source: CanonicalSourceDisposition::ReadyForObservation,
+                    detail: "projection source drifted before actual inference".into(),
+                })
             });
         }
         state.steps += 1;

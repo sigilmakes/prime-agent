@@ -12,6 +12,17 @@ impl Worker {
     /// capture; the queue lanes persist BEFORE replying, so the reported queue
     /// and the durable respawn state agree (`busy` is the continuation signal).
     pub(crate) fn handle_update_snapshot(&self) -> DaemonResponse {
+        // Serialize capture with other recovery checkpoints. Never publish a
+        // snapshot captured before a newer checkpoint acquired this lock.
+        let mut recovery = self.recovery.lock().unwrap();
+        let Some(journal) = recovery.as_mut() else {
+            return response_failure(
+                None,
+                "update_snapshot",
+                "Worker recovery journal is unavailable",
+                None,
+            );
+        };
         let (core_data, lanes) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
@@ -40,12 +51,14 @@ impl Worker {
             });
             (data, queue_lanes(&core))
         };
-        // Journal the lanes after releasing the core lock (record paths take
-        // the locks in the opposite order).
-        self.persist_queue_snapshot(
+        // Release core before disk I/O, retaining recovery through the append.
+        if let Err(error) = journal.record_queue_snapshot(
             core_data["activeSessionId"].as_str().unwrap_or_default(),
-            &lanes,
-        );
+            &lanes.steering,
+            &lanes.follow_up,
+        ) {
+            return response_failure(None, "update_snapshot", &error.to_string(), None);
+        }
         response_success(None, "update_snapshot", Some(core_data))
     }
 

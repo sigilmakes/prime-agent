@@ -4,8 +4,8 @@ use super::lifecycle::active_lifecycle;
 use super::{
     checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
     is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
-    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
+    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueuedItem,
+    Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
 };
 
 use crate::types::SessionSummary;
@@ -137,17 +137,6 @@ impl Worker {
                 crate::session_stats::store_context_usage(store, inputs.model_context_window)
             }),
         }
-    }
-
-    /// Persist the queue lanes to the recovery journal. Call after
-    /// releasing the core lock: `record_recovery` takes the locks in
-    /// the opposite order.
-    pub(crate) fn persist_queue_snapshot(&self, active_session_id: &str, lanes: &QueueLanes) {
-        let mut guard = self.recovery.lock().unwrap();
-        let Some(journal) = guard.as_mut() else {
-            return;
-        };
-        let _ = journal.record_queue_snapshot(active_session_id, &lanes.steering, &lanes.follow_up);
     }
 
     /// One queue-lane recovery checkpoint: the lane snapshot and the

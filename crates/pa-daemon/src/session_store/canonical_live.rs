@@ -193,6 +193,37 @@ impl LiveCanonicalOwner {
 }
 
 impl State {
+    // Called only inside the verified lease mutation, before this request creates
+    // an operation. A stale SDK source is not permission to ignore existing debt.
+    fn refuse_unstarted(
+        &self,
+        expected: &pa_core::session::canonical::CanonicalCursor,
+        detail: &str,
+    ) -> CanonicalStoreError {
+        if self.available().is_ok()
+            && self.prepared.is_empty()
+            && self.tools.is_empty()
+            && self.callers.iter().all(|signal| {
+                signal.state() == pa_core::session::canonical::CanonicalCallerState::Completed
+            })
+            && expected.owner == self.raw.cursor.owner
+            && expected.session_id == self.raw.cursor.session_id
+            && expected.source_path == self.raw.cursor.source_path
+            && expected.header_certificate == self.raw.cursor.header_certificate
+            && expected.branch_revision == self.raw.cursor.branch_revision
+            && expected.canonical_revision <= self.raw.cursor.canonical_revision
+        {
+            CanonicalStoreError {
+                kind: CanonicalFailureKind::SourceChanged,
+                requested: CanonicalRequestedWrite::NotRequested,
+                source: CanonicalSourceDisposition::ReadyForObservation,
+                detail: detail.to_owned(),
+            }
+        } else {
+            unresolved(detail)
+        }
+    }
+
     fn position(&self, leaf: Option<String>) -> Result<RawPosition> {
         let revision = self
             .revision
@@ -793,11 +824,8 @@ impl SessionFile {
                     raw.cursor == state.raw.cursor,
                     "canonical source changed outside owner"
                 );
-                if let Some(expected) = &request.expected {
-                    anyhow::ensure!(
-                        expected == &raw.cursor,
-                        "canonical prepare source/branch CAS conflict"
-                    );
+                if let Some(expected) = request.expected.as_ref().filter(|expected| *expected != &raw.cursor) {
+                    return Err(state.refuse_unstarted(expected, "canonical prepare source/branch CAS conflict").into());
                 }
                 state.approve_admission(&request.admission)?;
                 raw.checkpoint(request.source)?;
@@ -861,7 +889,10 @@ impl SessionFile {
                     checkpoint,
                 })
             })
-            .map_err(failure)
+            .map_err(|error| match error.downcast::<CanonicalStoreError>() {
+                Ok(error) => error,
+                Err(error) => failure(error),
+            })
     }
 
     pub(crate) fn acknowledge_canonical(
@@ -1220,8 +1251,8 @@ impl SessionFile {
         lease.with_owned_mutation(&self.path.clone(), || {
             let current = state.current(self)?;
             anyhow::ensure!(current.cursor == state.raw.cursor, "canonical source changed outside owner");
-            if let Some(expected) = &request.expected {
-                anyhow::ensure!(expected == &current.cursor, "canonical user admission source CAS conflict");
+            if let Some(expected) = request.expected.as_ref().filter(|expected| *expected != &current.cursor) {
+                return Err(state.refuse_unstarted(expected, "canonical user admission source CAS conflict").into());
             }
             current.checkpoint(request.source)?;
             if let Some(id) = state.delivered.front() {
@@ -1287,7 +1318,10 @@ impl SessionFile {
                 prepared: CanonicalPrepared { caller, operation, checkpoint },
                 admitted_entry_id: id,
             })
-        }).map_err(unresolved)
+        }).map_err(|error| match error.downcast::<CanonicalStoreError>() {
+                Ok(error) => error,
+                Err(error) => unresolved(error),
+            })
     }
 }
 
@@ -1470,6 +1504,7 @@ impl SessionFile {
     pub(crate) fn begin_canonical_provider_step(
         &mut self,
         request: CanonicalLiveProviderStepRequest,
+        cancelled: bool,
     ) -> Result<()> {
         self.attach_canonical_owner()?;
         let owner = self
@@ -1488,8 +1523,16 @@ impl SessionFile {
                     state.current(self)?.cursor == state.raw.cursor,
                     "canonical provider source changed"
                 );
-                anyhow::ensure!(request.expected == state.raw.cursor,
-                    "actual provider invocation projected another canonical source; refusing without rebase");
+                if cancelled {
+                    let mut error = state.refuse_unstarted(&request.expected, "new canonical provider work is closing or aborted");
+                    if error.source == CanonicalSourceDisposition::ReadyForObservation {
+                        error.kind = CanonicalFailureKind::Cancelled;
+                    }
+                    return Err(error.into());
+                }
+                if request.expected != state.raw.cursor {
+                    return Err(state.refuse_unstarted(&request.expected, "actual provider invocation projected another canonical source; refusing without rebase").into());
+                }
                 anyhow::ensure!(
                     state.tools.is_empty(),
                     "previous tool executions have no terminal adoption"
@@ -1509,7 +1552,10 @@ impl SessionFile {
                 self.epoch = Some(super::canonical_adapter::EpochHandle(Arc::new(epoch)));
                 Ok(())
             })
-            .map_err(unresolved)
+            .map_err(|error| match error.downcast::<CanonicalStoreError>() {
+                Ok(error) => error,
+                Err(error) => unresolved(error),
+            })
     }
 
     /// Called by the awaited `ToolExecutionStart` boundary, before tool execution.
@@ -1837,8 +1883,8 @@ impl SessionFile {
         lease.with_owned_mutation(&self.path.clone(), || {
             let current = state.current(self)?;
             anyhow::ensure!(current.cursor == state.raw.cursor, "canonical Custom source changed outside owner");
-            if let Some(expected) = &request.expected {
-                anyhow::ensure!(expected == &current.cursor, "canonical Custom admission source CAS conflict");
+            if let Some(expected) = request.expected.as_ref().filter(|expected| *expected != &current.cursor) {
+                return Err(state.refuse_unstarted(expected, "canonical Custom admission source CAS conflict").into());
             }
             current.checkpoint(request.source)?;
             let existing = state.delivered_custom.front().cloned();
@@ -1897,7 +1943,10 @@ impl SessionFile {
             Ok(CanonicalLiveCustomPrepared {
                 prepared: CanonicalPrepared { caller, operation, checkpoint }, admitted_entry_id: id,
             })
-        }).map_err(unresolved)
+        }).map_err(|error| match error.downcast::<CanonicalStoreError>() {
+                Ok(error) => error,
+                Err(error) => unresolved(error),
+            })
     }
 }
 

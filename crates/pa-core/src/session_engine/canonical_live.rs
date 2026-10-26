@@ -275,11 +275,26 @@ pub struct CanonicalLiveSession {
 struct Flight<'a> {
     live: &'a CanonicalLiveSession,
     complete: bool,
+    started_at: &'static std::panic::Location<'static>,
+}
+impl Flight<'_> {
+    fn refused(&mut self, error: CanonicalStoreError) -> CanonicalStoreError {
+        if error.requested == CanonicalRequestedWrite::NotRequested
+            && error.source == CanonicalSourceDisposition::ReadyForObservation
+        {
+            self.complete = true;
+        }
+        error
+    }
 }
 impl Drop for Flight<'_> {
     fn drop(&mut self) {
-        if !self.complete {
-            self.live.blocked.store(true, Ordering::Release);
+        if !self.complete && !self.live.blocked.swap(true, Ordering::AcqRel) {
+            eprintln!(
+                "pa-core: canonical view quarantined after incomplete operation at {}:{}",
+                self.started_at.file(),
+                self.started_at.line()
+            );
         }
         self.live.busy.store(false, Ordering::Release);
     }
@@ -375,6 +390,7 @@ impl CanonicalLiveSession {
             .bind_canonical_metadata_writer(Arc::downgrade(&writer));
     }
 
+    #[track_caller]
     fn enter(&self) -> Result<Flight<'_>, CanonicalStoreError> {
         if self
             .projection
@@ -414,6 +430,7 @@ impl CanonicalLiveSession {
         Ok(Flight {
             live: self,
             complete: false,
+            started_at: std::panic::Location::caller(),
         })
     }
 
@@ -641,7 +658,8 @@ impl CanonicalLiveSession {
                 mode: CanonicalPrepareMode::Observe,
                 admission: admission.clone(),
             })
-            .await?;
+            .await
+            .map_err(|error| flight.refused(error))?;
         let (caller, operation, cursor, local_revision, acknowledged) =
             self.install(prepared, revision, binding, admission).await?;
         self.publish_prepared(&operation, &cursor, local_revision, acknowledged)
@@ -660,7 +678,7 @@ impl CanonicalLiveSession {
         kind: CanonicalMutationKind,
     ) -> Result<CanonicalLiveMutation<'_>, CanonicalStoreError> {
         self.observe().await?;
-        let flight = self.enter()?;
+        let mut flight = self.enter()?;
         let (revision, binding, admission) = {
             let session = self.session.lock().await;
             (
@@ -683,7 +701,8 @@ impl CanonicalLiveSession {
                 mode: CanonicalPrepareMode::Mutation(kind),
                 admission: admission.clone(),
             })
-            .await?;
+            .await
+            .map_err(|error| flight.refused(error))?;
         let (mut caller, operation, cursor, local_revision, acknowledged) =
             self.install(prepared, revision, binding, admission).await?;
         let local_revision = self
@@ -799,7 +818,8 @@ impl CanonicalLiveSession {
                 source: CanonicalSourceRequest::Full,
                 message: message.clone(),
             })
-            .await?;
+            .await
+            .map_err(|error| flight.refused(error))?;
         let id = delivered.admitted_entry_id;
         let rows = match &delivered.prepared.checkpoint.source {
             CanonicalSource::Full(rows) => rows,
@@ -930,7 +950,8 @@ impl CanonicalLiveSession {
                 source: CanonicalSourceRequest::Full,
                 message: message.clone(),
             })
-            .await?;
+            .await
+            .map_err(|error| flight.refused(error))?;
         let id = delivered.admitted_entry_id;
         let rows = match &delivered.prepared.checkpoint.source {
             CanonicalSource::Full(rows) => rows,
@@ -1111,7 +1132,8 @@ impl CanonicalLiveSession {
                 model: Arc::new(model),
                 invocation: Arc::new(CanonicalLiveProviderInvocation { _private: () }),
             })
-            .await?;
+            .await
+            .map_err(|error| flight.refused(error))?;
         {
             let session = self.session.lock().await;
             session

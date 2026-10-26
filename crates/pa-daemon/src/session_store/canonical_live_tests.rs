@@ -1,4 +1,5 @@
 //! Real lease/file regressions for the owner initiated canonical seam.
+mod preflight;
 use super::SessionFile;
 use pa_core::session::canonical::{
     CanonicalAckPhase, CanonicalAcknowledgement, CanonicalAdmissionPolicy, CanonicalCallerGuard,
