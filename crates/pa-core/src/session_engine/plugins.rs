@@ -1118,7 +1118,7 @@ mod context_selection_tests {
                 .invoke_context(&strategy, json!({"stage":"prepare"}), &cancel)
                 .await
                 .unwrap(),
-            json!({"policy":"rolling","compactors":["standard_compaction/standard"]})
+            json!({"policy":"rolling","compactors":["server_compaction/server","snapcompact/snapcompact","standard_compaction/standard"]})
         );
         for (route, expected) in [
             (
