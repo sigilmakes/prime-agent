@@ -896,10 +896,14 @@ impl SessionFile {
                             != pa_core::session::canonical::CanonicalCallerState::Abandoned,
                         "prepared-only caller already abandoned"
                     );
+                    // The binding proves this operation has not entered I/O:
+                    // a write would retain pending adoption until its ACK removes
+                    // the binding. Other certified owner deliveries may advance
+                    // the source while the caller does work. Abandon only the old
+                    // preparation, without adopting or rebasing onto those rows.
                     anyhow::ensure!(
-                        state.current(self)?.cursor == request.cursor
-                            && state.raw.cursor == request.cursor,
-                        "prepared-only source advanced; no requested row written"
+                        state.current(self)?.cursor == state.raw.cursor,
+                        "prepared-only source changed outside owner; no requested row written"
                     );
                     let visible_leaf = state.safe_visible_leaf()?;
                     state.prepared.remove(&request.operation);

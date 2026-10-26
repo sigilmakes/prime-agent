@@ -515,6 +515,148 @@ fn prepared_ack_then_explicit_prepared_only_abandon_does_not_require_pending_rec
 }
 
 #[test]
+fn prepared_only_abandon_survives_owner_delivered_agent_message() {
+    let (_dir, mut store) = fixture();
+    let mut manager = mirror(&store);
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Mutation(
+            CanonicalMutationKind::ContextPolicy,
+        )))
+        .unwrap();
+    let operation = prepared.operation.clone();
+    let cursor = prepared.checkpoint.cursor.clone();
+    let caller = adopt_prepared(&mut store, &mut manager, prepared);
+    // Incoming subagent messages persist through another handle while context
+    // work is prepared. This advances the owner, not the prepared operation.
+    let mut delivery = store.clone();
+    let id = delivery
+        .persist_delivered_custom(json!({
+            "customType":"agent_message",
+            "content":"[agent-message from child] done",
+            "display":true
+        }))
+        .unwrap();
+    store.leaf_id = delivery.leaf_id.clone();
+    let before = std::fs::read(&store.path).unwrap();
+    let error = store
+        .append_canonical(CanonicalLiveAppendRequest {
+            context_admission: None,
+            run: None,
+            operation: operation.clone(),
+            expected: cursor.clone(),
+            source: CanonicalSourceRequest::Full,
+            draft: custom_draft(),
+        })
+        .err()
+        .expect("stale preparation must not append");
+    assert_eq!(
+        error.requested,
+        pa_core::session::canonical::CanonicalRequestedWrite::NotWritten
+    );
+    store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation,
+            cursor,
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .expect("certified delivery must not strand an unwritten preparation");
+    caller.complete();
+    assert_eq!(std::fs::read(&store.path).unwrap(), before);
+    let snapshot = store.canonical_snapshot().unwrap();
+    assert_eq!(
+        snapshot.pending_custom,
+        std::collections::VecDeque::from([id])
+    );
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .unwrap();
+    adopt_prepared(&mut store, &mut manager, prepared).complete();
+    assert_eq!(std::fs::read(&store.path).unwrap(), before);
+}
+
+#[test]
+fn prepared_only_abandon_survives_child_usage_attribution() {
+    let (_dir, mut store) = fixture();
+    let target = store
+        .persist_entry(
+            "message",
+            json!({"message": {
+                "role":"assistant", "content":[], "api":"openai-completions", "provider":"fake",
+                "model":"fake", "stopReason":"stop", "timestamp":1,
+                "usage": pa_types::ai::Usage::default(),
+            }}),
+        )
+        .unwrap();
+    let mut manager = mirror(&store);
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Mutation(
+            CanonicalMutationKind::OwnerMetadata,
+        )))
+        .unwrap();
+    let operation = prepared.operation.clone();
+    let cursor = prepared.checkpoint.cursor.clone();
+    let caller = adopt_prepared(&mut store, &mut manager, prepared);
+    store
+        .append_child_usage_once(
+            "child-report",
+            &target,
+            pa_types::ai::Usage::default(),
+            None,
+        )
+        .unwrap();
+    let before = std::fs::read(&store.path).unwrap();
+    store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation,
+            cursor,
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .expect("child usage must not strand an unwritten preparation");
+    caller.complete();
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Observe))
+        .unwrap();
+    adopt_prepared(&mut store, &mut manager, prepared).complete();
+    assert_eq!(std::fs::read(&store.path).unwrap(), before);
+    assert_eq!(store.entries().last().unwrap().id, "child-report");
+}
+
+#[test]
+fn prepared_only_abandon_refuses_unowned_source_change() {
+    use std::io::Write;
+    let (_dir, mut store) = fixture();
+    let mut manager = mirror(&store);
+    let prepared = store
+        .prepare_canonical(request(CanonicalPrepareMode::Mutation(
+            CanonicalMutationKind::ContextPolicy,
+        )))
+        .unwrap();
+    let operation = prepared.operation.clone();
+    let cursor = prepared.checkpoint.cursor.clone();
+    let caller = adopt_prepared(&mut store, &mut manager, prepared);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&store.path)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let before = std::fs::read(&store.path).unwrap();
+    assert!(store
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation,
+            cursor,
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .is_err());
+    drop(caller);
+    assert!(store.canonical_snapshot().is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), before);
+}
+
+#[test]
 fn exact_unwritten_observation_can_be_abandoned_after_caller_drop() {
     let (_dir, mut store) = fixture();
     let before = std::fs::read(&store.path).unwrap();

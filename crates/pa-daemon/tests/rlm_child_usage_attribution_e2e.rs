@@ -9,6 +9,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -465,5 +466,262 @@ fn child_usage_attributed_row_reaches_the_parent_transcript() {
     assert_eq!(
         folded.fields["message"]["usage"], row["aggregateUsage"],
         "the reopened store folds the aggregate into the target row"
+    );
+}
+
+// Opening the isolated FIFO read/write never blocks, and releases a waiting
+// fake git probe on panic before the supervisor teardown runs.
+struct GitGate(std::fs::File);
+
+impl Drop for GitGate {
+    fn drop(&mut self) {
+        let _ = self.0.write_all(b"release\n");
+    }
+}
+
+/// A real child sends a parent message before settling its usage. Both owner
+/// deliveries must leave the parent's canonical source usable for the next turn.
+#[test]
+fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("supervisor.sock");
+    let spawn_receipt = dir.path().join("spawn.json");
+    let spawn_error = dir.path().join("spawn.error");
+    let send_receipt = dir.path().join("send.json");
+    let child_script = dir.path().join("child.json");
+    let gate_ready = dir.path().join("git-ready");
+    let gate_release = dir.path().join("git-release");
+    let gate_arm = dir.path().join("git-arm");
+    assert!(Command::new("mkfifo")
+        .arg(&gate_release)
+        .status()
+        .expect("create gate FIFO")
+        .success());
+    let send_cell = format!(
+        "from rlm import host_request\nimport json, asyncio, pathlib\nreceipt = await host_request(\"agent_message.send\", {{\"message\": \"child report before usage\", \"receiver_role\": \"parent\"}})\nopen({receipt:?}, \"w\").write(json.dumps(receipt))\nwhile not pathlib.Path({ready:?}).exists():\n    await asyncio.sleep(0.02)",
+        ready = gate_ready.display().to_string(),
+        receipt = send_receipt.display().to_string(),
+    );
+    let arm_cell = format!(
+        "open({arm:?}, \"w\").close()",
+        arm = gate_arm.display().to_string(),
+    );
+    std::fs::write(
+        &child_script,
+        json!({
+            "engine": "faux",
+            "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "python_repl", "arguments": { "code": send_cell } },
+                ] },
+                { "text": "child settled after report" },
+            ],
+        })
+        .to_string(),
+    )
+    .expect("write child script");
+    let parent_script = dir.path().join("parent.json");
+    std::fs::write(
+        &parent_script,
+        json!({
+            "engine": "faux",
+            "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "python_repl", "arguments": {
+                        "code": spawn_cell(&spawn_receipt, &spawn_error),
+                    } },
+                ] },
+                { "text": "parent spawn completed" },
+                { "content": [
+                    { "type": "toolCall", "name": "python_repl", "arguments": { "code": arm_cell } },
+                ] },
+                { "text": "parent capture gate armed" },
+                { "text": "parent accepted child report" },
+                { "text": "parent next prompt completed" },
+                { "text": "parent subsequent prompt completed" },
+            ],
+        })
+        .to_string(),
+    )
+    .expect("write parent script");
+    // Only the parent's armed AgentEnd capture blocks. Child captures and
+    // the initial header/AgentStart captures return no git context immediately.
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("git shim dir");
+    let git = bin.join("git");
+    std::fs::write(&git, format!(
+        "#!/bin/sh\nif [ \"$2\" = rev-parse ] && [ -f '{arm}' ] && [ \"$PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID\" = \"$(cat '{owner}')\" ]; then\n    rm '{arm}'\n    : > '{ready}'\n    read -r release < '{release}'\nfi\nexit 1\n",
+        arm = gate_arm.display(), owner = dir.path().join("parent-id").display(),
+        ready = gate_ready.display(), release = gate_release.display(),
+    )).expect("git shim");
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
+        .expect("executable git shim");
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    )))
+    .expect("shim PATH");
+    let binary = std::env::var_os("PA_E2E_DAEMON_BINARY").map_or_else(
+        || PathBuf::from(env!("CARGO_BIN_EXE_pa-daemon")),
+        PathBuf::from,
+    );
+    let _daemon = Daemon {
+        child: Command::new(binary)
+            .args(["supervisor", "--socket"])
+            .arg(&socket)
+            .arg("--agent-dir")
+            .arg(&agent_dir)
+            .env("PATH", path)
+            .env_remove("PRIME_API_KEY")
+            .env("PRIME_AGENT_KERNEL_PYTHON", &kernel_python)
+            .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
+            .env(
+                pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+                "15000",
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn supervisor"),
+    };
+    wait_socket_ready(&socket);
+    let (mut client, _) = Client::connect(&socket);
+    let mut gate = GitGate(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&gate_release)
+            .expect("open gate FIFO"),
+    );
+    let parent = create_parent(
+        &mut client,
+        dir.path(),
+        &parent_script,
+        &child_script,
+        "create",
+    );
+    let parent_id = parent["activeSessionId"]
+        .as_str()
+        .or_else(|| parent["id"].as_str())
+        .expect("parent active session id");
+    let parent_file = Path::new(parent["sessionFile"].as_str().expect("parent session file"));
+    std::fs::write(dir.path().join("parent-id"), parent_id).expect("parent git gate owner");
+    client.send_command("spawn", &json!({ "type": "prompt", "activeSessionId": parent_id, "message": "spawn reporting child" }));
+    let spawned = client.read_response("spawn");
+    assert_eq!(spawned["success"], true, "spawn prompt refused: {spawned}");
+    assert!(!spawn_error.exists(), "spawn failed");
+    let sent: Value = serde_json::from_str(&await_receipt(&send_receipt)).expect("send receipt");
+    assert!(
+        matches!(
+            sent["deliveryStatus"].as_str(),
+            Some("queued" | "delivered")
+        ),
+        "{sent}"
+    );
+
+    let deadline = Instant::now() + Duration::from_mins(2);
+    let rows = loop {
+        let rows = transcript_rows(parent_file);
+        if rows
+            .iter()
+            .any(|row| row["type"] == "child_usage_attributed")
+        {
+            break rows;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child attribution never arrived: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let message_index = rows
+        .iter()
+        .position(|row| {
+            row["type"] == "custom_message" && row.to_string().contains("child report before usage")
+        })
+        .expect("parent durable child report");
+    let usage_index = rows
+        .iter()
+        .position(|row| row["type"] == "child_usage_attributed")
+        .expect("child usage row");
+    assert!(
+        message_index < usage_index,
+        "message must precede child usage: {rows:?}"
+    );
+    // Usage is now durable while the original metadata preparation is held.
+    gate.0.write_all(b"release\n").expect("release git capture");
+    client.send_command(
+        "settled",
+        &json!({ "type": "wait_for_idle", "activeSessionId": parent_id }),
+    );
+    let settled = client.read_response("settled");
+    assert_eq!(
+        settled["success"], true,
+        "parent failed after capture release: {settled}"
+    );
+    client.send_command(
+        "read",
+        &json!({ "type": "get_messages", "activeSessionId": parent_id }),
+    );
+    let read = client.read_response("read");
+    assert_eq!(read["success"], true, "parent read refused: {read}");
+    assert!(read["data"]
+        .to_string()
+        .contains("child report before usage"));
+    client.send_command(
+        "state",
+        &json!({ "type": "get_state", "activeSessionId": parent_id }),
+    );
+    let state = client.read_response("state");
+    assert_eq!(state["success"], true, "parent state refused: {state}");
+    run_turn(
+        &mut client,
+        parent_id,
+        "next prompt after child usage",
+        "next",
+    );
+    let after = transcript_rows(parent_file);
+    assert!(
+        after.iter().any(|row| {
+            row["type"] == "message"
+                && row["message"]["role"] == "user"
+                && row.to_string().contains("next prompt after child usage")
+        }),
+        "next prompt was not durable: {after:?}"
+    );
+    assert!(after.starts_with(&rows), "prior canonical history changed");
+
+    // A physical append outside the owner must still fail closed, including
+    // after a successful prepared-only cleanup. No requested row may be written.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(parent_file)
+        .expect("open isolated foreign append")
+        .write_all(b"\n")
+        .expect("foreign append");
+    let foreign = std::fs::read(parent_file).expect("foreign source bytes");
+    client.send_command("foreign-prompt", &json!({ "type": "prompt", "activeSessionId": parent_id, "message": "must not persist after foreign append" }));
+    let refused = client.read_response("foreign-prompt");
+    // Prompt acknowledgement accepts queueing, not a durable canonical write.
+    assert_eq!(
+        refused["success"], true,
+        "prompt queue acknowledgement: {refused}"
+    );
+    client.send_command(
+        "foreign-idle",
+        &json!({ "type": "wait_for_idle", "activeSessionId": parent_id }),
+    );
+    let idle = client.read_response("foreign-idle");
+    assert_eq!(
+        idle["success"], true,
+        "foreign prompt did not settle: {idle}"
+    );
+    assert_eq!(
+        std::fs::read(parent_file).expect("refused source bytes"),
+        foreign
     );
 }
