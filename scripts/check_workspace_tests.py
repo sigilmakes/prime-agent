@@ -8,12 +8,13 @@ No individual tests are split, filtered, retried, or given different timeouts.
 import argparse
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
+import tempfile
 from threading import current_thread, main_thread
 import time
 import tomllib
@@ -123,7 +124,7 @@ def target_groups(metadata):
 
 
 def target_environment(repo, state, ambient):
-    state.mkdir(mode=0o700)
+    state.mkdir(mode=0o700, exist_ok=True)
     env = isolated_environment(repo, state, Path(ambient["CARGO_TARGET_DIR"]),
                                Path(ambient["CARGO_HOME"]), ambient)
     for key in ("HOME", "TMPDIR", "XDG_RUNTIME_DIR", "PRIME_AGENT_CODING_AGENT_DIR"):
@@ -144,6 +145,7 @@ def target_environment(repo, state, ambient):
 def run_groups(groups, *, repo, state, env, deadline, jobs):
     pending = deque(groups)
     active = {}
+    private_dirs = []
     # Workers only wait on tracked Cargo children; the main thread owns scheduling,
     # logs and whole-process-group teardown, including on interrupt or failure.
     with ThreadPoolExecutor(max_workers=jobs) as workers:
@@ -154,9 +156,11 @@ def run_groups(groups, *, repo, state, env, deadline, jobs):
                 while pending and len(active) < jobs:
                     name, selectors = pending.popleft()
                     command = ["cargo", "test", "--locked", "--offline", "--workspace", *selectors]
-                    # Target names can exceed Unix socket path limits under the
-                    # state root. Logs retain readable names; private homes stay short.
-                    private = state / hashlib.sha256(name.encode()).hexdigest()[:12]
+                    # A test that binds a socket under `TMPDIR` needs the whole
+                    # `sockaddr_un::sun_path` budget, so the private root stays short and
+                    # independent of the caller's state depth. Logs retain the readable name.
+                    private = Path(tempfile.mkdtemp(prefix="pa-t-", dir="/tmp"))
+                    private_dirs.append(private)
                     private_env = target_environment(repo, private, env)
                     output = (state / f"{name}.log").open("w")
                     print(f"Test target started: {name}", flush=True)
@@ -186,6 +190,8 @@ def run_groups(groups, *, repo, state, env, deadline, jobs):
             cleanup([entry[0] for entry in active.values()])
             for _, output, _, _, _ in active.values():
                 output.close()
+            for private in private_dirs:
+                shutil.rmtree(private, ignore_errors=True)
 
 
 def main():

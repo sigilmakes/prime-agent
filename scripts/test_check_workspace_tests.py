@@ -192,8 +192,12 @@ class WorkspaceTestScheduling(unittest.TestCase):
                         future.result(timeout=5)
                     homes = [call.args[1] for call in private.call_args_list]
                     self.assertEqual(len(homes), len(set(homes)))
-                    self.assertTrue(all(home.parent == root and len(home.name) == 12
+                    # A target's private root carries `TMPDIR`, so it stays short whatever
+                    # the state depth is, and it does not outlive its group.
+                    self.assertTrue(all(home.parent == Path("/tmp")
+                                        and home.name.startswith("pa-t-")
                                         for home in homes))
+                    self.assertTrue(all(not home.exists() for home in homes))
             finally:
                 for peer in peers:
                     peer.close()
