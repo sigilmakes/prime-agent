@@ -338,3 +338,71 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
         "the run boundary cleared the note: {summary:?}"
     );
 }
+
+/// Lock-order coverage only: this holds the existing construction gate, not
+/// an injected pending receipt or a substitute canonical authority.
+#[allow(clippy::await_holding_lock)] // the faux registry must span the async worker flow
+#[tokio::test]
+async fn state_and_prompt_admission_wait_for_existing_build_gate() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.path().join("worker.sock"),
+        supervisor_socket_path: std::path::PathBuf::new(),
+        token: "token".to_owned(),
+        worker_instance_id: String::new(),
+        active_session_id: "build-gate-session".to_owned(),
+        agent_dir: dir.path().join("agent"),
+        recovery_journal_path: dir.path().join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({
+                "cwd": dir.path().to_str().unwrap(), "name": "build gate"
+            }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let engine = worker.agent_engine.as_ref().expect("real faux engine");
+    let building = engine.prompt_acceptance_build_guard().await.unwrap();
+    let state_payload = json!({});
+    let mut state = Box::pin(worker.dispatch("get_state", &state_payload));
+    tokio::select! {
+        biased;
+        _ = &mut state => panic!("state read bypassed the build/adoption gate"),
+        () = std::future::ready(()) => {}
+    }
+    drop(building);
+    let state = tokio::time::timeout(std::time::Duration::from_secs(10), state)
+        .await
+        .expect("state read must finish after construction gate release");
+    assert!(state.success, "state failed after gate release: {state:?}");
+    assert_eq!(
+        state.data.as_ref().unwrap()["activeSessionId"],
+        "build-gate-session"
+    );
+
+    let building = engine.prompt_acceptance_build_guard().await.unwrap();
+    let prompt_payload = json!({ "message": "hello" });
+    let mut prompt = Box::pin(worker.dispatch("prompt_and_wait", &prompt_payload));
+    tokio::select! {
+        biased;
+        _ = &mut prompt => panic!("prompt admission bypassed the build/adoption gate"),
+        () = std::future::ready(()) => {}
+    }
+    assert!(worker.core.lock().unwrap().steering.is_empty());
+    drop(building);
+    let prompt = tokio::time::timeout(std::time::Duration::from_secs(10), prompt)
+        .await
+        .expect("prompt completion must not retain the construction gate");
+    assert!(
+        prompt.success,
+        "prompt failed after gate release: {prompt:?}"
+    );
+}

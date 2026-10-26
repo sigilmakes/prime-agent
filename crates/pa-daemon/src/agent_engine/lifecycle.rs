@@ -280,7 +280,7 @@ impl AgentSessionEngine {
 
     /// Serialize accepted rows behind any active build/adoption without starting
     /// a lazy build. A failed build must not rerun its callbacks on this path.
-    pub(super) async fn prompt_acceptance_build_guard(
+    pub(crate) async fn prompt_acceptance_build_guard(
         &self,
     ) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<String>>> {
         let completion_state = self.session_build.lock().await;

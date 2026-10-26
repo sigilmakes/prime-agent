@@ -126,7 +126,7 @@ impl Worker {
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
-            "get_state" => self.handle_get_state(),
+            "get_state" => self.handle_get_state().await,
             "get_messages" => self.handle_get_messages(payload),
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),
@@ -453,7 +453,19 @@ impl Worker {
         response_success(None, "abort_and_send_queued", None)
     }
 
-    fn handle_get_state(&self) -> DaemonResponse {
+    async fn handle_get_state(&self) -> DaemonResponse {
+        // Hold the existing construction gate through the snapshot, not just
+        // until a warmup finishes: a detached warmup may not have started yet.
+        let _build = if let Some(engine) = &self.agent_engine {
+            match engine.prompt_acceptance_build_guard().await {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    return response_failure(None, "get_state", &error.to_string(), None);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(response) = self.require_created("get_state") {
             return response;
         }

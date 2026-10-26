@@ -13,6 +13,18 @@ use crate::protocol::{response_failure, DaemonResponse};
 
 impl Worker {
     pub(crate) async fn handle_prompt(&self, payload: &Value, wait: bool) -> DaemonResponse {
+        // A create-owned warmup may still owe real canonical adoption/ACK.
+        // Keep admission outside that window without starting a lazy build.
+        let build = if let Some(engine) = &self.agent_engine {
+            match engine.prompt_acceptance_build_guard().await {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    return response_failure(None, "prompt", &error.to_string(), None);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(response) = self.require_created("prompt") {
             return response;
         }
@@ -148,6 +160,8 @@ impl Worker {
         if queued_behind_work {
             let _ = self.emit_action_update(&snapshot);
         }
+        // Accepted-row persistence and turn demand acquire this same gate.
+        drop(build);
         self.work_notify.notify_one();
         if !wait {
             return response_success(None, "prompt", None);
