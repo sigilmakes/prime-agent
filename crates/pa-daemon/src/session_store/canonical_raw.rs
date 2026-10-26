@@ -167,6 +167,64 @@ pub(crate) struct RawAppend {
 }
 
 impl RawCapture {
+    /// Verify an earlier owner cursor against this exact full physical capture.
+    /// The owner separately restricts which suffix rows may precede a terminal.
+    pub fn certified_suffix_since(
+        &self,
+        expected: &CanonicalCursor,
+    ) -> Result<Vec<CanonicalJournalRow>> {
+        guard(&self.file, &self.cursor.source_path, &self.generation)?;
+        if expected == &self.cursor {
+            return Ok(Vec::new());
+        }
+        if expected.owner != self.cursor.owner
+            || expected.session_id != self.cursor.session_id
+            || expected.source_path != self.cursor.source_path
+            || expected.header_certificate != self.cursor.header_certificate
+            || expected.branch_revision != self.cursor.branch_revision
+            || expected.canonical_revision >= self.cursor.canonical_revision
+            || expected.frontier.rows >= self.cursor.frontier.rows
+            || expected.frontier.bytes >= self.cursor.frontier.bytes
+            || self.cursor.frontier.bytes - expected.frontier.bytes > MAX_TAIL_BYTES
+            || self.retained.len() != self.plan.rows.len()
+        {
+            return Err(error(
+                RawErrorKind::CursorChanged,
+                "terminal source is not an earlier owned prefix",
+            ));
+        }
+        let prefix_rows = expected
+            .frontier
+            .rows
+            .checked_sub(1)
+            .and_then(|rows| usize::try_from(rows).ok())
+            .filter(|rows| *rows < self.retained.len())
+            .ok_or_else(|| {
+                error(
+                    RawErrorKind::CursorChanged,
+                    "terminal prefix row count is invalid",
+                )
+            })?;
+        let mut hash = Sha256::new();
+        hash.update(self.header.raw());
+        let mut bytes = self.header.raw().len() as u64;
+        for row in &self.retained[..prefix_rows] {
+            hash.update(row.raw());
+            bytes = checked(bytes, row.raw().len() as u64)?;
+        }
+        if bytes != expected.frontier.bytes
+            || <[u8; 32]>::from(hash.finalize()) != expected.frontier.prefix_certificate
+            || self.cursor.canonical_revision - expected.canonical_revision
+                != self.cursor.frontier.rows - expected.frontier.rows
+        {
+            return Err(error(
+                RawErrorKind::SourceChanged,
+                "terminal prefix certificate differs",
+            ));
+        }
+        Ok(self.retained[prefix_rows..].to_vec())
+    }
+
     /// Standalone request helper until a sparse derived-store factory is available.
     /// `PreferWindow` scans with a 1 MiB body budget even if the file grows during open.
     pub fn capture_checkpoint(
@@ -1181,6 +1239,31 @@ mod tests {
             A.as_bytes()
         );
     }
+    #[test]
+    fn certified_suffix_rejects_forged_prefix_and_replaced_current_file() {
+        let (_dir, path) = source(format!("{HEADER}{A}").as_bytes());
+        let prior = capture(&path, Some("a"));
+        let expected = prior.cursor.clone();
+        let appended = "{\"type\":\"future_kind\",\"id\":\"c\",\"parentId\":\"a\"}\n";
+        append(&path, appended.as_bytes());
+        let current =
+            RawCapture::capture(&path, next(&prior, Some("c")), CaptureMode::Full).unwrap();
+        assert_eq!(current.certified_suffix_since(&expected).unwrap().len(), 1);
+        let mut forged = expected.clone();
+        forged.frontier.prefix_certificate[0] ^= 1;
+        assert!(current.certified_suffix_since(&forged).is_err());
+        forged = expected.clone();
+        forged.frontier.bytes -= 1;
+        assert!(current.certified_suffix_since(&forged).is_err());
+        forged = expected.clone();
+        forged.branch_revision += 1;
+        assert!(current.certified_suffix_since(&forged).is_err());
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, fs::read(&path).unwrap()).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(current.certified_suffix_since(&expected).is_err());
+    }
+
     #[test]
     fn generation_ignores_atime_but_guards_all_write_generation_fields() {
         let (_dir, path) = source(format!("{HEADER}{A}").as_bytes());

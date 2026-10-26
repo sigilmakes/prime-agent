@@ -578,6 +578,45 @@ fn prepared_only_abandon_survives_owner_delivered_agent_message() {
 }
 
 #[test]
+fn native_terminal_prepare_does_not_absorb_conversation_or_context_changes() {
+    for entry_type in ["custom", "custom_message", "message"] {
+        let (_dir, mut store) = fixture();
+        let expected = store.attach_canonical_owner().unwrap();
+        match entry_type {
+            "custom" => {
+                store
+                    .persist_owner_metadata(
+                        "custom",
+                        json!({"customType":"context_strategy_selection", "data":{}}),
+                    )
+                    .unwrap();
+            }
+            "custom_message" => {
+                store
+                    .persist_delivered_custom(
+                        json!({"customType":"input", "content":"new input", "display":false}),
+                    )
+                    .unwrap();
+            }
+            "message" => {
+                store.persist_delivered_user(json!({"role":"user", "content":[{"type":"text", "text":"new input"}], "timestamp":1})).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(&store.path).unwrap();
+        let result = store.prepare_canonical(CanonicalLivePrepareRequest {
+            expected: Some(expected),
+            source: CanonicalSourceRequest::Full,
+            mode: CanonicalPrepareMode::Mutation(CanonicalMutationKind::AdmittedTerminal),
+            admission: CanonicalAdmissionPolicy::Preserve,
+        });
+        assert!(result.is_err(), "terminal prepare absorbed {entry_type}");
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+        store.canonical_snapshot().unwrap();
+    }
+}
+
+#[test]
 fn prepared_only_abandon_survives_child_usage_attribution() {
     let (_dir, mut store) = fixture();
     let target = store

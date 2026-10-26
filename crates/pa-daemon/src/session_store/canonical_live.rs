@@ -235,6 +235,32 @@ impl State {
             && expected.canonical_revision <= self.raw.cursor.canonical_revision
     }
 
+    fn terminal_metadata_suffix(
+        &self,
+        expected: &CanonicalCursor,
+    ) -> Result<Vec<pa_core::session::canonical::CanonicalJournalRow>> {
+        let rows = self.raw.certified_suffix_since(expected).map_err(failure)?;
+        let mut leaf = expected.selected_leaf.as_deref();
+        for row in &rows {
+            if !matches!(
+                row.entry(),
+                pa_types::session::FileEntry::ChildUsageAttributed { .. }
+            ) || row.entry().parent_id() != leaf
+            {
+                return Err(failure(
+                    "native terminal source advanced beyond owner metadata",
+                ));
+            }
+            leaf = row.entry().id();
+        }
+        if leaf != self.raw.cursor.selected_leaf.as_deref() {
+            return Err(failure(
+                "native terminal metadata changed selected ancestry",
+            ));
+        }
+        Ok(rows)
+    }
+
     fn position(&self, leaf: Option<String>) -> Result<RawPosition> {
         let revision = self
             .revision
@@ -836,7 +862,11 @@ impl SessionFile {
                     raw.cursor == state.raw.cursor,
                     "canonical source changed outside owner"
                 );
-                if let Some(expected) = request.expected.as_ref().filter(|expected| *expected != &raw.cursor) {
+                if let Some(expected) = request.expected.as_ref().filter(|expected| {
+                    *expected != &raw.cursor
+                        && !(request.mode == CanonicalPrepareMode::Mutation(pa_core::session::canonical::CanonicalMutationKind::AdmittedTerminal)
+                            && state.terminal_metadata_suffix(expected).is_ok())
+                }) {
                     return Err(state.refuse_unstarted(expected, "canonical prepare source/branch CAS conflict").into());
                 }
                 state.approve_admission(&request.admission)?;
@@ -1198,15 +1228,23 @@ impl SessionFile {
                     current.cursor == state.raw.cursor,
                     "canonical append source changed outside owner; requested row not written"
                 );
+                let mut metadata_suffix = Vec::new();
                 if current.cursor != request.expected {
-                    return Err(CanonicalStoreError {
-                        kind: CanonicalFailureKind::SourceChanged,
-                        requested: CanonicalRequestedWrite::NotWritten,
-                        source: CanonicalSourceDisposition::Unchanged,
-                        detail: "canonical append source advanced; prepared operation not written"
-                            .into(),
+                    if request.draft.kind()
+                        == pa_core::session::canonical::CanonicalMutationKind::AdmittedTerminal
+                    {
+                        metadata_suffix = state.terminal_metadata_suffix(&request.expected)?;
+                    } else {
+                        return Err(CanonicalStoreError {
+                            kind: CanonicalFailureKind::SourceChanged,
+                            requested: CanonicalRequestedWrite::NotWritten,
+                            source: CanonicalSourceDisposition::Unchanged,
+                            detail:
+                                "canonical append source advanced; prepared operation not written"
+                                    .into(),
+                        }
+                        .into());
                     }
-                    .into());
                 }
                 // Validate sparse support before any requested mutation, never after writing.
                 current.checkpoint(request.source)?;
@@ -1259,7 +1297,7 @@ impl SessionFile {
                 let position = state.position(self.leaf_id.clone())?;
                 let appended = match RawCapture::append_from(
                     &state.raw,
-                    &request.expected,
+                    &current.cursor,
                     position,
                     CaptureMode::Full,
                 ) {
@@ -1280,12 +1318,13 @@ impl SessionFile {
                     .ok_or_else(|| unresolved("commit pending state lost"))?
                     .cursor = to.clone();
                 state.raw = appended.capture;
+                metadata_suffix.extend(appended.rows);
                 Ok(CanonicalCommitDisposition::Committed(
                     CanonicalAppendReceipt {
                         operation: request.operation,
                         from: request.expected,
                         to,
-                        rows: appended.rows,
+                        rows: metadata_suffix,
                         committed_entry_id: Some(id),
                         replacement_window: None,
                     },

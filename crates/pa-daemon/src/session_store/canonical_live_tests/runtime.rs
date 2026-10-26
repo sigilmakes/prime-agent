@@ -25,9 +25,17 @@ enum RunStartFault {
     ForgedLeaf,
     ForgedGeneration,
 }
+#[derive(Clone, Copy, Default)]
+enum ToolAttribution {
+    #[default]
+    None,
+    BeforePrepare,
+    AfterPrepare,
+}
 #[derive(Default)]
 struct Faults {
     run_start: RunStartFault,
+    tool_attribution: ToolAttribution,
     advance_at_provider: bool,
     lose_append_reply: bool,
     lose_applied_ack: bool,
@@ -40,21 +48,70 @@ struct RealOwner {
     store: Mutex<SessionFile>,
     faults: Mutex<Faults>,
 }
+fn append_tool_attributions(store: &mut SessionFile) {
+    let target = store
+        .entries()
+        .iter()
+        .rev()
+        .find(|row| row.type_ == "message" && row.fields["message"]["role"] == "assistant")
+        .unwrap()
+        .id
+        .clone();
+    for id in ["tool-child-report-a", "tool-child-report-b"] {
+        store
+            .append_child_usage_once(id, &target, pa_types::ai::Usage::default(), None)
+            .unwrap();
+    }
+}
+
 impl CanonicalLiveOwner for RealOwner {
     fn snapshot(&self) -> CanonicalFuture<CanonicalLiveSnapshot> {
         let result = self.store.lock().unwrap().canonical_snapshot();
         Box::pin(async move { result })
     }
     fn prepare(&self, request: CanonicalLivePrepareRequest) -> CanonicalFuture<CanonicalPrepared> {
-        let result = self.store.lock().unwrap().prepare_canonical(request);
+        let mut store = self.store.lock().unwrap();
+        let mut faults = self.faults.lock().unwrap();
+        if matches!(faults.tool_attribution, ToolAttribution::BeforePrepare)
+            && matches!(
+                &request.mode,
+                CanonicalPrepareMode::Mutation(CanonicalMutationKind::AdmittedTerminal)
+            )
+            && store
+                .entries()
+                .iter()
+                .rev()
+                .find(|row| row.type_ == "message")
+                .is_some_and(|row| row.fields["message"]["stopReason"] == "toolUse")
+        {
+            append_tool_attributions(&mut store);
+            faults.tool_attribution = ToolAttribution::None;
+        }
+        drop(faults);
+        let result = store.prepare_canonical(request);
         Box::pin(async move { result })
     }
     fn append(
         &self,
         request: CanonicalLiveAppendRequest,
     ) -> CanonicalFuture<CanonicalCommitDisposition> {
-        let result = self.store.lock().unwrap().append_canonical(request);
-        let lose_reply = self.faults.lock().unwrap().lose_append_reply;
+        let mut store = self.store.lock().unwrap();
+        let mut faults = self.faults.lock().unwrap();
+        if matches!(faults.tool_attribution, ToolAttribution::AfterPrepare)
+            && matches!(
+                request.draft.entry(),
+                pa_types::session::FileEntry::Message {
+                    message: pa_types::session::AgentMessage::ToolResult(_),
+                    ..
+                }
+            )
+        {
+            append_tool_attributions(&mut store);
+            faults.tool_attribution = ToolAttribution::None;
+        }
+        let lose_reply = faults.lose_append_reply;
+        drop(faults);
+        let result = store.append_canonical(request);
         Box::pin(async move {
             let result = result?;
             if lose_reply {
@@ -385,6 +442,96 @@ async fn provider_owned_advance_leaves_next_real_owner_prompt_ready() {
         .await
         .unwrap();
     assert_eq!(provider.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn actual_tool_terminal_survives_child_attribution_without_rerunning_tool() {
+    struct EchoTool(Arc<std::sync::atomic::AtomicUsize>);
+    impl pa_agent::types::AgentTool for EchoTool {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+        fn description(&self) -> &'static str {
+            "echo the call"
+        }
+        fn parameters(&self) -> &serde_json::Value {
+            static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            PARAMETERS.get_or_init(|| json!({"type":"object"}))
+        }
+        fn execute(
+            self: Arc<Self>,
+            _tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: pa_agent::abort::AbortSignal,
+            _on_update: pa_agent::types::AgentToolUpdateCallback,
+        ) -> pa_agent::BoxFut<'static, anyhow::Result<pa_agent::types::AgentToolResult>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(pa_agent::types::AgentToolResult::text("tool output")) })
+        }
+    }
+    for stage in [
+        ToolAttribution::BeforePrepare,
+        ToolAttribution::AfterPrepare,
+    ] {
+        let (_dir, owner, engine, provider) = runtime().await;
+        engine
+            .session
+            .prompt("warmup one", PromptOptions::default())
+            .await
+            .unwrap();
+        engine
+            .session
+            .prompt("warmup two", PromptOptions::default())
+            .await
+            .unwrap();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine
+            .session
+            .agent()
+            .set_tools(vec![Arc::new(EchoTool(executions.clone()))])
+            .await;
+        provider.push_tool_call_turn(None, vec![("actual-tool", "echo", json!({}))]);
+        provider.push_text_turn("tool finished");
+        provider.push_text_turn("next prompt succeeds");
+        owner.faults.lock().unwrap().tool_attribution = stage;
+        engine
+            .session
+            .prompt("call tool", PromptOptions::default())
+            .await
+            .unwrap();
+        engine
+            .session
+            .canonical_live_session()
+            .unwrap()
+            .ensure_ready()
+            .unwrap();
+        engine
+            .session
+            .prompt("next", PromptOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let store = owner.store.lock().unwrap();
+        assert_eq!(
+            store
+                .entries()
+                .iter()
+                .filter(|row| row.type_ == "child_usage_attributed")
+                .count(),
+            2
+        );
+        assert_eq!(
+            store
+                .entries()
+                .iter()
+                .filter(
+                    |row| row.type_ == "message" && row.fields["message"]["role"] == "toolResult"
+                )
+                .count(),
+            1
+        );
+        assert_eq!(provider.calls().len(), 5);
+    }
 }
 
 #[tokio::test]
