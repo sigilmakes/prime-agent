@@ -88,6 +88,8 @@ pub type UnavailableSkillsCallback = Arc<dyn Fn(&UnavailablePythonSkills) + Send
 pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
+    #[cfg(test)]
+    pub bootstrap_execution_timeout_ms: Option<u64>,
     pub env: HashMap<String, String>,
     /// Command prefix prepended to every kernel `bash()` invocation.
     pub command_prefix: Option<String>,
@@ -1106,6 +1108,12 @@ async fn start_kernel(
     // boot stage against the dispose-linked abort): a dispose mid-bootstrap
     // settles the cell aborted, and the aborted-status arm below tears the
     // kernel down instead of leaking it into a disposed provisioner.
+    #[cfg(test)]
+    let bootstrap_timeout_ms = options
+        .bootstrap_execution_timeout_ms
+        .unwrap_or(BOOTSTRAP_EXECUTION_TIMEOUT_MS);
+    #[cfg(not(test))]
+    let bootstrap_timeout_ms = BOOTSTRAP_EXECUTION_TIMEOUT_MS;
     let bootstrap = manager
         .execute_bounded(
             &bootstrap_code,
@@ -1113,7 +1121,7 @@ async fn start_kernel(
                 signal: Some(dispose_signal.clone()),
                 ..Default::default()
             },
-            Some(BOOTSTRAP_EXECUTION_TIMEOUT_MS),
+            Some(bootstrap_timeout_ms),
         )
         .await;
     match bootstrap {
@@ -1190,7 +1198,7 @@ async fn start_kernel(
             {
                 anyhow!(
                     "Failed to initialize rlm runtime in the Python kernel: \
-                     the runtime bootstrap did not finish within {BOOTSTRAP_EXECUTION_TIMEOUT_MS}ms:\n{details}"
+                     the runtime bootstrap did not finish within {bootstrap_timeout_ms}ms:\n{details}"
                 )
             } else {
                 anyhow!("Failed to initialize rlm runtime in the Python kernel:\n{details}")
@@ -1804,6 +1812,7 @@ mod tests {
             dir.path(),
             IpythonKernelProvisionerOptions {
                 python: Some(python),
+                bootstrap_execution_timeout_ms: Some(500),
                 python_skills: vec![KernelPythonSkill {
                     name: "oversized".into(),
                     import_name: "x".repeat(1024 * 1024),
@@ -1869,6 +1878,7 @@ for line in sys.stdin:
             dir.path(),
             IpythonKernelProvisionerOptions {
                 python: Some(python),
+                bootstrap_execution_timeout_ms: Some(500),
                 ..Default::default()
             },
         );
@@ -1886,9 +1896,7 @@ for line in sys.stdin:
             "{chain}"
         );
         assert!(
-            chain.contains(&format!(
-                "the runtime bootstrap did not finish within {BOOTSTRAP_EXECUTION_TIMEOUT_MS}ms"
-            )),
+            chain.contains("the runtime bootstrap did not finish within 500ms"),
             "{chain}"
         );
         assert!(
@@ -1900,5 +1908,12 @@ for line in sys.stdin:
             1,
             "the fatal classification must not auto-retry the boot"
         );
+    }
+
+    #[test]
+    fn real_kernel_bootstrap_keeps_default_budget_in_test_builds() {
+        let options = IpythonKernelProvisionerOptions::default();
+        assert_eq!(options.bootstrap_execution_timeout_ms, None);
+        assert_eq!(BOOTSTRAP_EXECUTION_TIMEOUT_MS, 30_000);
     }
 }

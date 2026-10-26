@@ -21,6 +21,11 @@ use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+// Keep executable writes out of sibling process-spawn windows: a fork can
+// retain a writable descriptor until exec, even after the writer closes it.
+static EXECUTABLE_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 const NPM_SHIM: &str = r#"#!/usr/bin/env bash
 echo "npm $*" >> {LOG}
@@ -140,6 +145,7 @@ fn write_executable(path: &Path, content: &str) {
 
 #[test]
 fn generated_shell_shims_use_a_direct_interpreter() {
+    let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().unwrap();
     let root = tempfile::tempdir().unwrap();
     let shim = root.path().join("shim");
     write_executable(&shim, "#!/usr/bin/env bash\nexit 0\n");
@@ -517,6 +523,7 @@ fn drive(binary: &Path, base: &Path, fixtures: &Fixtures) -> (String, Sandbox) {
 
 #[test]
 fn package_manager_corpus_matches_ts_binary() {
+    let _fixture_guard = EXECUTABLE_FIXTURE_LOCK.lock().unwrap();
     let Some(ts) = ts_binary() else {
         eprintln!("SKIPPED: TS prime-agent binary not installed");
         return;

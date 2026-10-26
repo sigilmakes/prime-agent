@@ -727,6 +727,30 @@ mod tests {
     }
 
     #[test]
+    fn exact_slash_confirm_refreshes_a_menu_from_before_the_typing_burst() {
+        let mut e = Editor::new();
+        e.set_autocomplete_provider(Box::new(
+            crate::autocomplete::CombinedAutocompleteProvider::from_registry(std::env::temp_dir()),
+        ));
+        e.handle_input("/");
+        e.materialize_autocomplete();
+        let selected = e.autocomplete_state().unwrap().selected_item().unwrap();
+        assert_ne!(
+            selected.value, "exit",
+            "fixture starts with another slash selection"
+        );
+        for ch in ["e", "x", "i", "t"] {
+            e.handle_input(ch);
+        }
+        assert_eq!(e.get_text(), "/exit");
+        assert!(e.pending_autocomplete.is_some());
+        e.handle_input("enter");
+        assert!(e.take_events().iter().any(|event| matches!(event,
+            EditorEvent::Submitted(text) if text == "/exit")));
+        assert_eq!(e.get_text(), "");
+    }
+
+    #[test]
     fn typing_and_backspace() {
         let mut e = ed();
         e.handle_input("h");

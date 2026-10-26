@@ -389,6 +389,23 @@ async fn state_and_prompt_admission_wait_for_existing_build_gate() {
     );
 
     let building = engine.prompt_acceptance_build_guard().await.unwrap();
+    let messages_payload = json!({});
+    let mut messages = Box::pin(worker.dispatch("get_messages", &messages_payload));
+    tokio::select! {
+        biased;
+        _ = &mut messages => panic!("message read bypassed the build/adoption gate"),
+        () = std::future::ready(()) => {}
+    }
+    drop(building);
+    let messages = tokio::time::timeout(std::time::Duration::from_secs(10), messages)
+        .await
+        .expect("message read must finish after construction gate release");
+    assert!(
+        messages.success,
+        "message read failed after gate release: {messages:?}"
+    );
+
+    let building = engine.prompt_acceptance_build_guard().await.unwrap();
     let prompt_payload = json!({ "message": "hello" });
     let mut prompt = Box::pin(worker.dispatch("prompt_and_wait", &prompt_payload));
     tokio::select! {

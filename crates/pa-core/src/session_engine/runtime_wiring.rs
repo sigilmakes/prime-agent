@@ -248,6 +248,8 @@ pub fn kernel_provisioner(
         cwd,
         IpythonKernelProvisionerOptions {
             python: None,
+            #[cfg(test)]
+            bootstrap_execution_timeout_ms: None,
             env,
             command_prefix,
             shell_path,

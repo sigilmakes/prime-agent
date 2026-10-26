@@ -12,6 +12,23 @@ use crate::protocol::DaemonResponse;
 
 impl Worker {
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
+        // A resumed session's detached construction can still owe canonical
+        // adoption. Order message hydration and projection after that existing
+        // build, without constructing an idle/lazy session or relaxing fences.
+        let _messages_build = if command_type == "get_messages" {
+            if let Some(engine) = &self.agent_engine {
+                match engine.prompt_acceptance_build_guard().await {
+                    Ok(guard) => Some(guard),
+                    Err(error) => {
+                        return response_failure(None, command_type, &error.to_string(), None)
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Display reads need the entire active branch, not the model's compacted
         // window. Hydrate once off the executor; viewport/backfill stay bounded.
         let display_read = matches!(command_type, "attach" | "get_messages")

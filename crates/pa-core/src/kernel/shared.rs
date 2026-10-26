@@ -18,12 +18,9 @@ pub const SNAPSHOT_EXECUTION_TIMEOUT_MS: u64 = 5_000;
 pub const RESTORE_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 /// The provisioner's runtime bootstrap imports the runtime and skills in one
 /// cell: bounded like the restore step, so a lost bootstrap frame fails the
-/// boot loudly instead of parking it forever. Shrunk in test builds so the
-/// regression test does not wait out the production bound.
-#[cfg(not(test))]
+/// boot loudly instead of parking it forever. Synthetic timeout tests override
+/// their own provisioner budget; real kernels retain this bound in every build.
 pub const BOOTSTRAP_EXECUTION_TIMEOUT_MS: u64 = 30_000;
-#[cfg(test)]
-pub const BOOTSTRAP_EXECUTION_TIMEOUT_MS: u64 = 500;
 pub const KERNEL_ABORT_GRACE_MS: u64 = 1_000;
 pub const KERNEL_BUSY_REUSE_WAIT_MS: u64 = 5_000;
 pub const KERNEL_BUSY_INTERRUPT_INTERVAL_MS: u64 = 500;

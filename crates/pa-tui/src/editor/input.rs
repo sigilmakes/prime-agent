@@ -135,6 +135,16 @@ impl Editor {
             return;
         }
 
+        // A slash-name edit can park newer suggestions while the previous
+        // dropdown remains visible. Confirm must not apply its stale selection.
+        if self.pending_autocomplete.is_some()
+            && self.is_slash_name_completion_at_prompt_start()
+            && (self.kb_matches(input, "tui.select.confirm")
+                || self.kb_matches(input, "tui.input.tab"))
+        {
+            self.materialize_autocomplete();
+        }
+
         if self.autocomplete.is_some() {
             if self.kb_matches(input, "tui.select.cancel") {
                 self.cancel_autocomplete();
@@ -394,6 +404,73 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(submitted, vec!["/goal"]);
         assert_eq!(e.get_text(), "");
+    }
+
+    #[test]
+    fn stale_slash_dropdown_does_not_rewrite_the_submitted_command() {
+        let mut e = ed();
+        for key in ["/", "m"] {
+            e.handle_input(key);
+        }
+        e.materialize_autocomplete();
+        assert!(e.is_showing_autocomplete());
+        assert_eq!(e.autocomplete.as_ref().unwrap().prefix, "/m");
+        for key in ["o", "d", "e", "l"] {
+            e.handle_input(key);
+        }
+        assert_eq!(e.get_text(), "/model");
+        assert_eq!(e.autocomplete.as_ref().unwrap().prefix, "/m");
+        e.handle_input("enter");
+        let submitted = e
+            .take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EditorEvent::Submitted(text) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(submitted, vec!["/model"]);
+        assert_eq!(e.get_text(), "");
+    }
+
+    #[test]
+    fn refreshed_partial_slash_completes_before_it_submits() {
+        let mut e = ed();
+        e.handle_input("/");
+        e.materialize_autocomplete();
+        e.handle_input("m");
+        e.handle_input("enter");
+        assert_eq!(e.get_text(), "/model");
+        assert!(!e
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, EditorEvent::Submitted(_))));
+        e.handle_input("enter");
+        assert!(e
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, EditorEvent::Submitted(text) if text == "/model")));
+    }
+
+    #[test]
+    fn stale_slash_tab_requeries_without_rewriting_the_current_command() {
+        let mut e = ed();
+        for key in ["/", "m"] {
+            e.handle_input(key);
+        }
+        e.materialize_autocomplete();
+        assert!(e.is_showing_autocomplete());
+        for key in ["o", "d", "e", "l"] {
+            e.handle_input(key);
+        }
+        e.handle_input("tab");
+        assert_eq!(e.get_text(), "/model");
+        e.materialize_autocomplete();
+        assert_eq!(e.autocomplete.as_ref().unwrap().prefix, "/model");
+        assert!(!e
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, EditorEvent::Submitted(_))));
     }
 
     /// The TS async-suggestion behavior for character-by-character typing

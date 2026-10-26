@@ -11,7 +11,7 @@ impl Supervisor {
     pub(super) fn acquire_launch_admission(&self) -> Result<Arc<LaunchAdmission>> {
         // Fast refusal also keeps shutdown callbacks out of a queued writer.
         if self.shutting_down.load(Ordering::SeqCst) {
-            return Err(anyhow!("supervisor is shutting down"));
+            return Err(anyhow!("Supervisor is shutting down"));
         }
         #[cfg(test)]
         self.pause_admission_lock();
@@ -21,7 +21,7 @@ impl Supervisor {
             .try_read_owned()
             .map_err(|_| anyhow!("supervisor launch admission is closed"))?;
         if self.shutting_down.load(Ordering::SeqCst) {
-            return Err(anyhow!("supervisor is shutting down"));
+            return Err(anyhow!("Supervisor is shutting down"));
         }
         Ok(Arc::new(LaunchAdmission {
             _guard: guard,
