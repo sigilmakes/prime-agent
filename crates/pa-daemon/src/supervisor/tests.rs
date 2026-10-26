@@ -1345,10 +1345,16 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         .await
         .expect("the turn settles within the drain")
         .expect("the settle channel stays open");
-    let (routing, closing) = tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await
-        .expect("the drain broadcasts daemon_closing")
-        .expect("the events channel stays open");
+    let (routing, closing) = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("the events channel stays open");
+            if event.1["type"] == "daemon_closing" {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("the drain broadcasts daemon_closing after residency cleanup");
     assert!(
         matches!(routing, ClientRouting::Broadcast),
         "every client learns the closing"

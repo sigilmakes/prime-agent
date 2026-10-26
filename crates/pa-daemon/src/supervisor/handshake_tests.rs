@@ -702,16 +702,23 @@ async fn public_graceful_shutdown_refusal_preserves_worker_then_retry_or_force_c
                 .write_all(format!("{command}\n").as_bytes())
                 .await
                 .unwrap();
-            line.clear();
-            tokio::time::timeout(Duration::from_secs(2), read.read_line(&mut line))
-                .await
-                .unwrap()
-                .unwrap();
-            let response: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(
-                response["type"], "response",
-                "no early daemon_closing: {response}"
-            );
+            let response = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    line.clear();
+                    read.read_line(&mut line).await.unwrap();
+                    let response: Value = serde_json::from_str(&line).unwrap();
+                    if response["type"] == "heartbeats_changed" {
+                        continue;
+                    }
+                    assert_eq!(
+                        response["type"], "response",
+                        "no early daemon_closing: {response}"
+                    );
+                    break response;
+                }
+            })
+            .await
+            .unwrap();
             assert_eq!(response["success"], attempt == 1, "{response}");
             if attempt == 0 {
                 assert_no_retirement(&supervisor, &resident);
@@ -867,6 +874,69 @@ async fn first_signal_accounting_refusal_preserves_worker_without_closing_event(
 }
 
 #[tokio::test]
+async fn idle_eviction_fences_racing_client_routes_until_refusal_or_retirement() {
+    let (_dir, supervisor, resident, verdict, worker) = accounting_refusal_fixture("w-idle").await;
+    super::worker_lifecycle::retirement_overrides()
+        .lock()
+        .unwrap()
+        .insert(
+            resident.descriptor_path.clone(),
+            super::worker_lifecycle::WorkerRetirement::Retired,
+        );
+    for success in [false, true] {
+        let stopping = {
+            let supervisor = Arc::clone(&supervisor);
+            tokio::spawn(async move {
+                supervisor
+                    .handle_worker_idle_passivation(
+                        "idle",
+                        "worker_idle_passivation",
+                        "close-fixture",
+                        None,
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while resident.pending.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown reached the worker");
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervisor.route_command_typed(
+                &resident,
+                "prompt",
+                json!({ "message": "racing user work" }),
+                ROUTE_TIMEOUT_MS,
+                RouteAdmission::ClientRequest,
+            ),
+        )
+        .await
+        .expect("fenced client gets an immediate refusal")
+        .unwrap();
+        assert!(!response.success, "idle eviction cannot accept racing work");
+        assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+        assert!(!resident.route_state().retired);
+        verdict.send(success).await.unwrap();
+        assert_eq!(stopping.await.unwrap().success, success);
+        if !success {
+            assert_no_retirement(&supervisor, &resident);
+            assert_eq!(
+                resident.inflight.available_permits(),
+                crate::backpressure::WORKER_INFLIGHT_CAPACITY,
+                "refusal reopens client admission",
+            );
+        }
+    }
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_none());
+    assert!(resident.route_state().retired);
+    worker.abort();
+}
+
+#[tokio::test]
 async fn partial_shutdown_retry_targets_only_the_worker_that_refused_accounting() {
     let (_dir, supervisor, closed, closed_verdict, closed_worker) =
         accounting_refusal_fixture("a-closed").await;
@@ -882,12 +952,50 @@ async fn partial_shutdown_retry_targets_only_the_worker_that_refused_accounting(
                 super::worker_lifecycle::WorkerRetirement::Retired,
             );
     }
+    for resident in [&closed, &owed] {
+        supervisor.roster.lock().unwrap().write_summary(
+            json!({
+                "sessionId": resident.worker_id,
+                "type": "root",
+                "activeSessionId": resident.worker_id,
+                "status": "idle",
+            }),
+            Some(&resident.worker_id),
+            None,
+        );
+    }
+    let mut events = supervisor.events.subscribe();
     closed_verdict.send(true).await.unwrap();
     owed_verdict.send(false).await.unwrap();
     assert!(supervisor.prepare_shutdown(/*force*/ false).await.is_err());
     assert!(supervisor.registry.get(&closed.worker_id).await.is_none());
     assert!(supervisor.registry.get(&owed.worker_id).await.is_some());
     assert_no_retirement(&supervisor, &owed);
+    {
+        let roster = supervisor.roster.lock().unwrap();
+        let rows = roster.entries();
+        let closed_row = rows
+            .iter()
+            .find(|row| row.summary["sessionId"] == closed.worker_id)
+            .unwrap();
+        assert!(closed_row.worker_id.is_none());
+        assert_eq!(closed_row.summary["isSessionActive"], false);
+        assert_eq!(roster.entries_for_worker(&owed.worker_id).len(), 1);
+    }
+    let mut heartbeat_invalidated = false;
+    let mut roster_changed = false;
+    while let Ok((_, event)) = events.try_recv() {
+        heartbeat_invalidated |= event["type"] == "heartbeats_changed";
+        roster_changed |= event["type"] == "roster_update";
+    }
+    assert!(
+        heartbeat_invalidated,
+        "partial close invalidates job catalogs"
+    );
+    assert!(
+        roster_changed,
+        "partial close publishes passive roster rows"
+    );
     owed_verdict.send(true).await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(1),

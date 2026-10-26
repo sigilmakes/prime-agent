@@ -753,19 +753,39 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
         fence: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<()> {
-        // The shutdown route needs its own permit. Refusal must leave this worker
-        // routable and its accounting state reachable for an explicit retry.
-        drop(fence);
+        // Idle eviction already owns all admission. Keep that fence through the
+        // verdict and retirement; a refusal releases it without retiring the worker.
         let was_intentional = resident.intentional_stop.swap(true, Ordering::SeqCst);
-        let response = self
-            .route_command_typed(
+        let response = if let Some(fence) = fence.as_ref() {
+            let cmd_tx = resident.cmd_tx.lock().await.clone();
+            match cmd_tx {
+                Some(cmd_tx) => self
+                    .route_command_on_admitted(
+                        resident,
+                        cmd_tx,
+                        super::WorkerRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            command_type: "shutdown".to_string(),
+                            payload: json!({}),
+                        },
+                        tokio::time::Instant::now() + Duration::from_millis(ROUTE_TIMEOUT_MS),
+                        RouteAdmission::SupervisorInternal,
+                        fence,
+                    )
+                    .await
+                    .and_then(super::WorkerReply::typed),
+                None => Err(anyhow!(super::routing::WORKER_NOT_CONNECTED)),
+            }
+        } else {
+            self.route_command_typed(
                 resident,
                 "shutdown",
                 json!({}),
                 ROUTE_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
-            .await;
+            .await
+        };
         let (pid, start_id) = {
             let descriptor = resident.descriptor.lock().await;
             (descriptor.pid, descriptor.process_start_id.clone())
@@ -785,6 +805,12 @@ impl Supervisor {
         if self.retire_worker_after_stop(resident).await != WorkerRetirement::Retired {
             anyhow::bail!("Worker retirement remains unresolved");
         }
+        self.complete_worker_stop(resident).await;
+        Ok(())
+    }
+
+    /// Finish residency cleanup only after the caller has proved retirement.
+    pub(super) async fn complete_worker_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         // A client-owned (ephemeral) worker's scheduled jobs die with the
         // registration (TS `cancelEphemeralWorkerScheduledJobs`).
         let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
@@ -802,7 +828,6 @@ impl Supervisor {
         // tombstoned, queued, and ephemeral rows die with the stop.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
-        Ok(())
     }
 
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS

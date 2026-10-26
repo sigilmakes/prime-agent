@@ -176,7 +176,7 @@ impl Supervisor {
                 }
                 // A successful partial close stays closed; a later explicit attempt
                 // targets only the residents whose accounting or retirement is unresolved.
-                self.registry.remove(&resident.worker_id).await;
+                self.complete_worker_stop(&resident).await;
             }
             if !complete {
                 self.log_line(

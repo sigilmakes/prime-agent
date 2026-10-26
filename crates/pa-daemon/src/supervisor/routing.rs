@@ -102,7 +102,7 @@ impl Supervisor {
         // The semaphore methods take their Arc by value (the permit owns it for its
         // lifetime), so the route hands them a strong reference of their own.
         let inflight = Arc::clone(&resident.inflight);
-        let _permit = match admission {
+        let permit = match admission {
             RouteAdmission::ClientRequest => match inflight.try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_saturated) => {
@@ -120,6 +120,27 @@ impl Supervisor {
                 }
             }
         };
+        let request = WorkerRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            command_type: command_type.to_string(),
+            payload,
+        };
+        self.route_command_on_admitted(resident, cmd_tx, request, deadline, admission, &permit)
+            .await
+    }
+
+    /// Enqueue using admission already held by the caller. The idle eviction fence
+    /// owns every permit until its stop verdict and retirement have completed.
+    pub(super) async fn route_command_on_admitted(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        cmd_tx: mpsc::Sender<WorkerRequest>,
+        request: WorkerRequest,
+        deadline: tokio::time::Instant,
+        admission: RouteAdmission,
+        _permit: &tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<WorkerReply> {
+        let command_type = request.command_type.clone();
         // A retired worker admits no client request (the
         // retire-then-release order of the idle passivation fence): the
         // check runs after admission, so a route that passed readiness
@@ -127,8 +148,10 @@ impl Supervisor {
         if matches!(admission, RouteAdmission::ClientRequest) && resident.route_state().retired {
             return Err(anyhow!(WORKER_NOT_CONNECTED));
         }
-        if matches!(command_type, "refresh_models" | "apply_model_snapshots")
-            && !resident.supports_model_refresh()
+        if matches!(
+            command_type.as_str(),
+            "refresh_models" | "apply_model_snapshots"
+        ) && !resident.supports_model_refresh()
         {
             bail!("Resident worker does not support model refresh");
         }
@@ -136,7 +159,7 @@ impl Supervisor {
             bail!("Resident worker does not support native plugin commands");
         }
         let (reply_tx, reply_rx) = oneshot::channel();
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = request.request_id.clone();
         resident
             .pending
             .lock()
@@ -144,11 +167,6 @@ impl Supervisor {
             .insert(request_id.clone(), reply_tx);
         // A full channel means the writer pump is wedged: client commands answer the same
         // overload refusal (a cancelled send enqueues nothing, so a retry cannot duplicate).
-        let request = WorkerRequest {
-            request_id: request_id.clone(),
-            command_type: command_type.to_string(),
-            payload,
-        };
         let unsent = match cmd_tx.try_send(request) {
             Ok(()) => None,
             Err(mpsc::error::TrySendError::Full(unsent)) => Some(unsent),
@@ -162,7 +180,10 @@ impl Supervisor {
                 RouteAdmission::ClientRequest => {
                     resident.pending.lock().await.remove(&request_id);
                     return Ok(WorkerReply::Typed(
-                        crate::backpressure::overloaded_response(command_type, &resident.worker_id),
+                        crate::backpressure::overloaded_response(
+                            &command_type,
+                            &resident.worker_id,
+                        ),
                     ));
                 }
                 RouteAdmission::SupervisorInternal => {
