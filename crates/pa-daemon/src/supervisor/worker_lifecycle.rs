@@ -1,6 +1,14 @@
 //! Worker lifecycle: the launch/probe/connect plumbing for new workers
 //! and the stop, kill, retire, and tombstone passes for resident ones.
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkerRetirement {
+    Retired,
+    Survived,
+    IdentityUnverified,
+    DeathUnproven,
+}
+
 #[cfg(unix)]
 use super::launch_budget::WORKER_CONNECT_BACKOFF_MS;
 use super::launch_budget::{
@@ -17,6 +25,15 @@ use super::{
 };
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
+
+#[cfg(test)]
+pub(super) fn retirement_overrides(
+) -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WorkerRetirement>> {
+    static OVERRIDES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, WorkerRetirement>>,
+    > = std::sync::OnceLock::new();
+    OVERRIDES.get_or_init(Default::default)
+}
 
 impl Supervisor {
     /// Complete a tombstoned stop for a worker encountered at adoption: adoption
@@ -100,6 +117,7 @@ impl Supervisor {
         create: &DaemonCommand,
         owner_client_id: Option<String>,
     ) -> Result<(Arc<ResidentWorker>, Value)> {
+        let admission = self.acquire_launch_admission()?;
         let DaemonCommand::Create {
             session_path,
             continue_recent,
@@ -363,7 +381,12 @@ impl Supervisor {
         // `persistWorker` shape on this fresh create (the relaunch paths
         // keep the synced persist).
         let child = match self
-            .spawn_worker_process(&resident, deadline, TempSync::Unsynced)
+            .spawn_worker_process(
+                &resident,
+                deadline,
+                TempSync::Unsynced,
+                Arc::clone(&admission),
+            )
             .await
         {
             Ok(child) => child,
@@ -507,6 +530,8 @@ impl Supervisor {
         // The create completed with a validated session identity: client commands may
         // now be routed to this worker — nothing overtakes the session's create.
         resident.note_session_ready();
+        #[cfg(test)]
+        self.pause_launch_at("fresh_before_handoff").await;
         let pid = child.id().unwrap_or(0);
         self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid), None);
         Ok((resident, create_summary))
@@ -794,11 +819,25 @@ impl Supervisor {
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
     /// it behind its lease.
-    pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    pub(super) async fn retire_worker_after_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> WorkerRetirement {
+        #[cfg(test)]
+        if let Some(outcome) = retirement_overrides()
+            .lock()
+            .expect("retirement overrides")
+            .remove(&resident.descriptor_path)
+        {
+            return outcome;
+        }
         let (pid, start_id, recovery_journal_path) = {
             let descriptor = resident.descriptor.lock().await;
+            let Ok(pid) = u32::try_from(descriptor.pid) else {
+                return WorkerRetirement::IdentityUnverified;
+            };
             (
-                descriptor.pid as u32,
+                pid,
                 descriptor.process_start_id.clone(),
                 descriptor.recovery_journal_path.clone(),
             )
@@ -815,14 +854,23 @@ impl Supervisor {
                     "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
                     resident.worker_id
                 ));
+                WorkerRetirement::Survived
             }
             _ if alive_unverified => {
                 self.log_line(&format!(
                     "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
                     resident.worker_id
                 ));
+                WorkerRetirement::IdentityUnverified
             }
             _ => {
+                if !recovery_journal_owner_is_gone(
+                    crate::lease::is_process_alive(pid).ok(),
+                    start_id.as_deref(),
+                    crate::lease::get_process_start_id(pid).as_deref(),
+                ) {
+                    return WorkerRetirement::DeathUnproven;
+                }
                 // The worker is provably gone, so its kernels can no longer
                 // run their teardown reap: kill the `bash()` groups they
                 // journaled before the descriptor dies with its files.
@@ -843,6 +891,7 @@ impl Supervisor {
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
                 // The reaper alone owns orphan-journal removal. A read or
                 // identity-verified kill failure must preserve its retry records.
+                WorkerRetirement::Retired
             }
         }
     }

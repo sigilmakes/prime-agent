@@ -72,6 +72,8 @@ pub(crate) struct ExtraData {
     // Waker for polling futures
     #[cfg(feature = "async")]
     pub(super) waker: NonNull<Waker>,
+    #[cfg(feature = "async")]
+    pub(super) wake_debt: Option<Arc<std::sync::atomic::AtomicBool>>,
 
     #[cfg(not(feature = "luau"))]
     pub(super) hook_callback: Option<crate::types::HookCallback>,
@@ -178,6 +180,8 @@ impl ExtraData {
             wrapped_failure_mt_ptr,
             #[cfg(feature = "async")]
             waker: NonNull::from(noop_waker_ref()),
+            #[cfg(feature = "async")]
+            wake_debt: None,
             #[cfg(not(feature = "luau"))]
             hook_callback: None,
             #[cfg(not(feature = "luau"))]

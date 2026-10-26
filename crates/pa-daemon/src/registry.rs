@@ -89,6 +89,90 @@ impl WorkerRouteState {
     }
 }
 
+pub(crate) struct OwnedWorkerReap {
+    pub(crate) pid: u32,
+    pub(crate) start_id: Option<String>,
+    pub(crate) completed: tokio::sync::watch::Receiver<Option<bool>>,
+}
+
+impl OwnedWorkerReap {
+    pub(crate) fn bind(
+        pid: u32,
+        start_id: Option<&str>,
+        owned: Option<Arc<Self>>,
+    ) -> Result<Option<Arc<Self>>, ()> {
+        let Some(owned) = owned else {
+            return Ok(None);
+        };
+        if pid == 0 || pid != owned.pid {
+            return Err(());
+        }
+        let identity_matches = matches!((start_id, owned.start_id.as_deref()),
+            (Some(expected), Some(actual)) if !expected.is_empty() && expected == actual);
+        if identity_matches {
+            Ok(Some(owned))
+        } else {
+            Err(())
+        }
+    }
+
+    pub(crate) async fn matches_adopted(
+        resident: &ResidentWorker,
+        pid: u64,
+        start_id: Option<&str>,
+    ) -> bool {
+        let descriptor = resident.descriptor.lock().await;
+        descriptor.pid == pid
+            && descriptor.process_start_id.as_deref() == start_id
+            && resident
+                .owned_reap
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+    }
+
+    pub(crate) async fn matches_bound(bound: &Arc<Self>, resident: &ResidentWorker) -> bool {
+        let descriptor = resident.descriptor.lock().await;
+        let identity_matches = descriptor.pid == u64::from(bound.pid)
+            && descriptor
+                .process_start_id
+                .as_deref()
+                .is_some_and(|start| !start.is_empty() && bound.start_id.as_deref() == Some(start));
+        let same_record = resident
+            .owned_reap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, bound));
+        identity_matches && same_record
+    }
+
+    pub(crate) async fn wait_bound(
+        bound: &Arc<Self>,
+        resident: &ResidentWorker,
+        budget: std::time::Duration,
+    ) -> bool {
+        if !Self::matches_bound(bound, resident).await {
+            return false;
+        }
+        let mut completed = bound.completed.clone();
+        let reaped = tokio::time::timeout(budget, async {
+            loop {
+                let outcome = *completed.borrow_and_update();
+                if let Some(reaped) = outcome {
+                    return reaped;
+                }
+                if completed.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        reaped && Self::matches_bound(bound, resident).await
+    }
+}
+
 /// One resident session worker: the durable identity (descriptor) plus the
 /// live request channel once the supervisor has connected to the worker.
 pub(crate) struct ResidentWorker {
@@ -112,6 +196,8 @@ pub(crate) struct ResidentWorker {
     /// A watch whose generation was superseded returns at the exit check
     /// instead of running crash bookkeeping over the new owner's process.
     pub(crate) monitor_epoch: AtomicU64,
+    /// Exact owned process generation, independent of later watcher callbacks.
+    pub(crate) owned_reap: std::sync::Mutex<Option<Arc<OwnedWorkerReap>>>,
     /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
     /// The optional refresh gate belongs to one authenticated connection generation.
@@ -190,6 +276,7 @@ impl ResidentWorker {
             consecutive_failures: AtomicU32::new(0),
             spawned_at_ms: AtomicU64::new(0),
             monitor_epoch: AtomicU64::new(0),
+            owned_reap: std::sync::Mutex::new(None),
             peer_transport_capable: AtomicBool::new(false),
             model_refresh_capability: std::sync::Mutex::new(None),
             plugin_command_capability: std::sync::Mutex::new(None),
@@ -834,5 +921,169 @@ mod tests {
                 generation: 6,
             })
         );
+    }
+
+    fn owned_reap_record(
+        pid: u32,
+        start: Option<&str>,
+        outcome: Option<bool>,
+    ) -> (
+        Arc<OwnedWorkerReap>,
+        tokio::sync::watch::Sender<Option<bool>>,
+    ) {
+        let (sender, completed) = tokio::sync::watch::channel(outcome);
+        (
+            Arc::new(OwnedWorkerReap {
+                pid,
+                start_id: start.map(str::to_string),
+                completed,
+            }),
+            sender,
+        )
+    }
+
+    #[test]
+    fn owned_reap_binding_rejects_mismatched_or_uncertain_identity() {
+        let (record, _sender) = owned_reap_record(7, Some("generation"), Some(true));
+        assert!(OwnedWorkerReap::bind(8, Some("generation"), Some(Arc::clone(&record))).is_err());
+        assert!(OwnedWorkerReap::bind(0, Some("generation"), Some(Arc::clone(&record))).is_err());
+        assert!(OwnedWorkerReap::bind(7, Some(""), Some(Arc::clone(&record))).is_err());
+        let (empty, _empty_sender) = owned_reap_record(7, Some(""), Some(true));
+        assert!(OwnedWorkerReap::bind(7, Some(""), Some(empty)).is_err());
+        assert!(OwnedWorkerReap::bind(7, None, Some(Arc::clone(&record))).is_err());
+        assert!(OwnedWorkerReap::bind(7, Some("successor"), Some(Arc::clone(&record))).is_err());
+        let (uncertain, _sender) = owned_reap_record(7, None, Some(true));
+        assert!(OwnedWorkerReap::bind(7, Some("generation"), Some(uncertain)).is_err());
+        assert!(matches!(OwnedWorkerReap::bind(7, None, None), Ok(None)));
+        assert!(matches!(
+            OwnedWorkerReap::bind(7, Some("generation"), Some(record)),
+            Ok(Some(_))
+        ));
+    }
+
+    async fn reap_fixture(
+        outcome: Option<bool>,
+    ) -> (
+        Arc<ResidentWorker>,
+        Arc<OwnedWorkerReap>,
+        tokio::sync::watch::Sender<Option<bool>>,
+    ) {
+        let resident = resident("reap-fixture");
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            descriptor.pid = 7;
+            descriptor.process_start_id = Some("generation".into());
+        }
+        let (record, sender) = owned_reap_record(7, Some("generation"), outcome);
+        *resident.owned_reap.lock().expect("owned record") = Some(Arc::clone(&record));
+        (resident, record, sender)
+    }
+
+    #[tokio::test]
+    async fn owned_reap_rejects_stale_completed_record_and_descriptor_successors() {
+        let budget = std::time::Duration::from_millis(20);
+        let (resident, record, _sender) = reap_fixture(Some(true)).await;
+        assert!(OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        let (replacement, _replacement_sender) =
+            owned_reap_record(7, Some("generation"), Some(true));
+        *resident.owned_reap.lock().expect("owned record") = Some(replacement);
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        *resident.owned_reap.lock().expect("owned record") = Some(Arc::clone(&record));
+        resident.descriptor.lock().await.process_start_id = Some("successor".into());
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        resident.descriptor.lock().await.process_start_id = None;
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        resident.descriptor.lock().await.process_start_id = Some("generation".into());
+        resident.descriptor.lock().await.pid = 8;
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+    }
+
+    #[tokio::test]
+    async fn owned_reap_error_closed_channel_and_timeout_fail_closed() {
+        let budget = std::time::Duration::from_millis(20);
+        let (resident, record, _sender) = reap_fixture(Some(false)).await;
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        let (resident, record, sender) = reap_fixture(None).await;
+        drop(sender);
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        let (resident, record, sender) = reap_fixture(None).await;
+        assert!(!OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+        assert!(resident
+            .owned_reap
+            .lock()
+            .expect("owned record")
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &record)));
+        sender.send_replace(Some(true));
+        assert!(OwnedWorkerReap::wait_bound(&record, &resident, budget).await);
+    }
+
+    #[tokio::test]
+    async fn owned_reap_revalidates_descriptor_after_completion_without_holding_locks() {
+        let (resident, record, sender) = reap_fixture(None).await;
+        let waiting_resident = Arc::clone(&resident);
+        let waiting_record = Arc::clone(&record);
+        let waiter = tokio::spawn(async move {
+            OwnedWorkerReap::wait_bound(
+                &waiting_record,
+                &waiting_resident,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while sender.receiver_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter cloned completion after initial validation");
+        // This mutation acquires the descriptor lock while completion is pending.
+        resident.descriptor.lock().await.process_start_id = Some("successor".into());
+        sender.send_replace(Some(true));
+        assert!(!waiter.await.expect("waiter"));
+    }
+
+    #[tokio::test]
+    async fn owned_reap_revalidates_token_after_completion() {
+        let (resident, record, sender) = reap_fixture(None).await;
+        let waiting_resident = Arc::clone(&resident);
+        let waiting_record = Arc::clone(&record);
+        let waiter = tokio::spawn(async move {
+            OwnedWorkerReap::wait_bound(
+                &waiting_record,
+                &waiting_resident,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while sender.receiver_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter cloned completion after initial validation");
+        let (successor, _successor_sender) = owned_reap_record(7, Some("generation"), Some(true));
+        *resident.owned_reap.lock().expect("owned record") = Some(successor);
+        sender.send_replace(Some(true));
+        assert!(!waiter.await.expect("waiter"));
+    }
+
+    #[tokio::test]
+    async fn adopted_reap_capture_rejects_later_owned_or_descriptor_generation() {
+        let resident = resident("adopted-reap");
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            descriptor.pid = 7;
+            descriptor.process_start_id = Some("generation".into());
+        }
+        assert!(OwnedWorkerReap::matches_adopted(&resident, 7, Some("generation")).await);
+        let (owned, _sender) = owned_reap_record(7, Some("generation"), Some(true));
+        *resident.owned_reap.lock().expect("owned record") = Some(owned);
+        assert!(!OwnedWorkerReap::matches_adopted(&resident, 7, Some("generation")).await);
+        *resident.owned_reap.lock().expect("owned record") = None;
+        resident.descriptor.lock().await.process_start_id = Some("successor".into());
+        assert!(!OwnedWorkerReap::matches_adopted(&resident, 7, Some("generation")).await);
     }
 }

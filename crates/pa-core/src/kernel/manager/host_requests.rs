@@ -1,6 +1,14 @@
 //! Host request handling: execute-side requests answered by the host
 //! (harness/goal/etc.) and their settle/exit waits.
 
+#[cfg(all(test, unix))]
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 use super::{
     anyhow, json, lock, AbortSignal, Arc, AsyncWriteExt, Duration, HostRequestPayload, Inner,
     Value, MAX_HANDLED_HOST_REQUEST_IDS,
@@ -390,7 +398,10 @@ for line in sys.stdin:
 ";
         std::fs::write(
             &python,
-            script.replace("SOCKET_PATH", &serde_json::to_string(&socket).unwrap()),
+            super::fixture_executable::script(
+                &script.replace("SOCKET_PATH", &serde_json::to_string(&socket).unwrap()),
+                "python3",
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700)).unwrap();

@@ -1,6 +1,14 @@
 //! The scenario runner: pty harness, daemon lifecycle, per-run corpus
 //! restore, and the scenario mechanics. Unix-only.
 
+#[cfg(all(test, unix))]
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -1020,7 +1028,10 @@ mod tests {
         let binary = dir.path().join("mock-product.py");
         std::fs::write(
             &binary,
-            include_str!("../../tests/fixtures/draining_daemon.py"),
+            super::fixture_executable::script(
+                include_str!("../../tests/fixtures/draining_daemon.py"),
+                "python3",
+            ),
         )
         .expect("write the mock modes");
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))

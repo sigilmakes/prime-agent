@@ -1,6 +1,14 @@
 //! npm/git package flows against local fixtures: a bash "npm" shim (no
 //! network) and a bare git repo cloned over the filesystem.
 
+#[cfg(all(test, unix))]
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -65,6 +73,8 @@ esac
 "#
     );
     let shim = dir.join("npm-shim.sh");
+    #[cfg(unix)]
+    let script = fixture_executable::script(&script, "bash");
     std::fs::write(&shim, script).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();

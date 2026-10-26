@@ -325,3 +325,212 @@ fn test_global_hook() -> Result<()> {
 
     Ok(())
 }
+
+// Sweep each instruction boundary rather than relying on scheduler timing.
+#[cfg(all(feature = "async", any(feature = "lua54", feature = "lua55")))]
+#[tokio::test]
+async fn zero_result_hook_yields_preserve_concat_arguments_and_frame_locals() -> Result<()> {
+    use std::sync::atomic::AtomicUsize;
+    use futures_util::StreamExt;
+    const SCRIPT: &str = r#"
+        local run = {"alpha", "beta", "gamma", "delta"}
+        local scalar = 271828
+        local function add(term)
+            assert(type(term) == "string", "concat result lost across hook yield")
+            return term
+        end
+        local joined = add(table.concat(run))
+        assert(joined == "alphabetagammadelta")
+        assert(scalar == 271828 and run[3] == "gamma")
+        assert(await_tick() == 17)
+        assert(table.concat(run) == joined)
+        return joined .. ":" .. scalar
+    "#;
+    for stream in [false, true] {
+        for boundary in 1..=256 {
+            let started = std::time::Instant::now();
+            eprintln!("hook-arity start stream={stream} boundary={boundary}");
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let lua = Lua::new();
+            lua.globals().set("await_tick", lua.create_async_function(|_, ()| async {
+                eprintln!("hook-arity async-C enter");
+                tokio::task::yield_now().await;
+                eprintln!("hook-arity async-C return");
+                Ok(17)
+            })?)?;
+            let instruction = Arc::new(AtomicUsize::new(0));
+            let observed = instruction.clone();
+            lua.set_global_hook(HookTriggers::new().every_nth_instruction(1), move |_, _| {
+                let current = observed.fetch_add(1, Ordering::Relaxed) + 1;
+                if current > 100_000 {
+                    return Err(Error::RuntimeError(format!("instruction non-progress stream={stream} boundary={boundary} count={current}")));
+                }
+                Ok(if current == boundary { VmState::Yield } else { VmState::Continue })
+            })?;
+            let function = lua.load(SCRIPT).into_function()?;
+            let thread = lua.create_thread(function)?;
+            if stream {
+                let mut execution = thread.into_async::<mlua::MultiValue>(())?;
+                let mut final_text = None;
+                while let Some(row) = execution.next().await {
+                    let row = row?;
+                    if let Some(Value::String(text)) = row.front() {
+                        final_text = Some(text.to_str()?.to_string());
+                    } else {
+                        assert!(row.is_empty(), "unexpected hook/async yield payload");
+                    }
+                }
+                assert_eq!(final_text.as_deref(), Some("alphabetagammadelta:271828"), "stream boundary {boundary}");
+            } else {
+                let result: String = thread.into_async(())?.await?;
+                assert_eq!(result, "alphabetagammadelta:271828", "future boundary {boundary}");
+            }
+            Ok::<(), Error>(())
+            }).await.unwrap_or_else(|_| panic!("hook-arity deadline stream={stream} boundary={boundary}"))?;
+            assert!(started.elapsed() < std::time::Duration::from_secs(1), "timer-rescued hook boundary stream={stream} boundary={boundary}");
+            eprintln!("hook-arity complete stream={stream} boundary={boundary}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "async", any(feature = "lua54", feature = "lua55")))]
+#[tokio::test]
+async fn async_stream_keeps_ordinary_yield_payloads_and_initial_arguments() -> Result<()> {
+    use futures_util::StreamExt;
+    let lua = Lua::new();
+    let function = lua.load(r#"
+        local initial = ...
+        assert(initial == 42)
+        local resumed = coroutine.yield("first", initial)
+        assert(resumed == nil)
+        coroutine.yield()
+        return "last", initial + 1
+    "#).into_function()?;
+    let mut stream = lua.create_thread(function)?.into_async::<mlua::MultiValue>(42)?;
+    let first = stream.next().await.unwrap()?;
+    assert_eq!(first.len(), 2);
+    assert!(matches!(first.get(1), Some(Value::Integer(42))));
+    assert!(stream.next().await.unwrap()?.is_empty());
+    let last = stream.next().await.unwrap()?;
+    assert_eq!(last.len(), 2);
+    assert!(matches!(last.get(1), Some(Value::Integer(43))));
+    assert!(stream.next().await.is_none());
+    Ok(())
+}
+
+#[cfg(all(feature = "async", any(feature = "lua54", feature = "lua55")))]
+#[tokio::test]
+async fn async_c_yield_preserves_initial_arguments_and_return_values() -> Result<()> {
+    let lua = Lua::new();
+    lua.globals().set("await_echo", lua.create_async_function(|_, value: i64| async move {
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        Ok((value, "echo"))
+    })?)?;
+    let function = lua.load(r#"
+        local initial = ...
+        assert(initial == 42)
+        local number, text = await_echo(initial)
+        assert(number == initial and text == "echo")
+        return number + 1
+    "#).into_function()?;
+    let answer: i64 = lua.create_thread(function)?.into_async(42)?.await?;
+    assert_eq!(answer, 43);
+    Ok(())
+}
+
+#[cfg(all(feature = "async", any(feature = "lua54", feature = "lua55")))]
+#[tokio::test]
+async fn counted_hook_async_handoff_timeline() -> Result<()> {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll, Waker};
+    use futures_util::task::{ArcWake, waker_ref};
+    struct TraceWake { target: Waker, generation: Arc<AtomicUsize> }
+    impl ArcWake for TraceWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            let generation = this.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            eprintln!("timeline WAKE generation={generation}");
+            this.target.wake_by_ref();
+        }
+    }
+    struct OnePending { polled: bool, count: Arc<AtomicUsize> }
+    impl Future for OnePending {
+        type Output = Result<i64>;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<i64>> {
+            let count = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+            eprintln!("timeline C_POLL count={count}");
+            if self.polled { return Poll::Ready(Ok(17)); }
+            self.polled = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+    for boundary in [49usize, 50, 51] {
+        let started = std::time::Instant::now();
+        eprintln!("timeline START boundary={boundary}");
+        let lua = Lua::new();
+        let c_polls = Arc::new(AtomicUsize::new(0));
+        let callback_polls = c_polls.clone();
+        lua.globals().set("await_tick", lua.create_async_function(move |_, ()| {
+            OnePending { polled: false, count: callback_polls.clone() }
+        })?)?;
+        let instructions = Arc::new(AtomicUsize::new(0));
+        let counted = instructions.clone();
+        lua.set_global_hook(HookTriggers::new().every_nth_instruction(1), move |_, _| {
+            let instruction = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            if instruction > 100_000 { return Err(Error::RuntimeError("timeline instruction cap".into())); }
+            if instruction == boundary {
+                eprintln!("timeline HOOK_YIELD boundary={boundary}");
+                return Ok(VmState::Yield);
+            }
+            Ok(VmState::Continue)
+        })?;
+        let function = lua.load(r#"
+            local run = {"alpha", "beta", "gamma", "delta"}
+            local scalar = 271828
+            local function add(term)
+                assert(type(term) == "string", "concat result lost across hook yield")
+                return term
+            end
+            local joined = add(table.concat(run))
+            assert(joined == "alphabetagammadelta")
+            assert(scalar == 271828 and run[3] == "gamma")
+            assert(await_tick() == 17)
+            assert(table.concat(run) == joined)
+            return joined .. ":" .. scalar
+        "#).into_function()?;
+        let execution = lua.create_thread(function)?.into_async::<String>(())?;
+        let deadline = tokio::time::timeout(std::time::Duration::from_secs(3), execution);
+        tokio::pin!(deadline);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let mut polls = 0usize;
+        let result = futures_util::future::poll_fn(|cx| {
+            polls += 1;
+            let proxy = Arc::new(TraceWake { target: cx.waker().clone(), generation: wakes.clone() });
+            let wake = waker_ref(&proxy);
+            let mut traced = Context::from_waker(&wake);
+            eprintln!("timeline OUTER_ENTER boundary={boundary} poll={polls} wakes={} c_polls={}", wakes.load(Ordering::SeqCst), c_polls.load(Ordering::SeqCst));
+            let result = deadline.as_mut().poll(&mut traced);
+            eprintln!("timeline OUTER_RETURN boundary={boundary} poll={polls} ready={} wakes={} c_polls={}", result.is_ready(), wakes.load(Ordering::SeqCst), c_polls.load(Ordering::SeqCst));
+            result
+        }).await;
+        let answer = result.unwrap_or_else(|_| panic!("timeline DEADLINE boundary={boundary} polls={polls} c_polls={}", c_polls.load(Ordering::SeqCst)))?;
+        assert_eq!(answer, "alphabetagammadelta:271828");
+        assert_eq!(c_polls.load(Ordering::SeqCst), 2);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "timer-rescued counted boundary={boundary}");
+        eprintln!("timeline COMPLETE boundary={boundary}");
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "async", any(feature = "lua54", feature = "lua55")))]
+#[tokio::test]
+async fn counted_hook_timer_control() {
+    eprintln!("timeline TIMER_CONTROL enter");
+    let deadline = tokio::time::timeout(std::time::Duration::from_millis(100), std::future::pending::<()>());
+    assert!(deadline.await.is_err());
+    eprintln!("timeline TIMER_CONTROL complete");
+}

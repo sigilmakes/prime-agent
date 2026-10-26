@@ -55,8 +55,10 @@ fn persisted_harness_context_is_model_only_and_disappears_when_disabled() {
         .unwrap()["message"]["content"][0]["text"]
         .as_str()
         .unwrap();
-    assert!(response.contains("Optional continual harness:"));
-    assert!(response.contains(&format!("[session:{id}:memory:fixture] learned context")));
+    assert!(response.contains("Optional continual harness routing snippets (not full directives)."));
+    assert!(response.contains(&format!(
+        r#"[scope="session:{id}", kind=memory, id="fixture"] : learned context"#
+    )));
     assert!(!events
         .iter()
         .any(|event| event["message"]["customType"] == "harness_digest"));
@@ -73,7 +75,9 @@ fn persisted_harness_context_is_model_only_and_disappears_when_disabled() {
     );
     success(&disabled);
     let response = stdout(&disabled);
-    assert!(!response.contains("Optional continual harness:"));
+    assert!(
+        !response.contains("Optional continual harness routing snippets (not full directives).")
+    );
     assert!(!response.contains("learned context"));
     assert!(!response.contains("plugin.harness."));
     assert_eq!(std::fs::read_to_string(imported_path).unwrap(), legacy);
@@ -180,7 +184,7 @@ fn first_party_refine_drains_its_admitted_job_before_cli_exit() {
     );
     success(&probe);
     assert!(stdout(&probe).contains(&format!(
-        "[session:{id}:memory:learned] post-exit learned memory"
+        r#"[scope="session:{id}", kind=memory, id="learned"] : post-exit learned memory"#
     )));
     assert_eq!(
         network.accept().unwrap_err().kind(),

@@ -48,7 +48,7 @@ async fn a_known_resident_registration_writes_nothing_to_disk() {
     let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
         "version": 2,
         "workerId": "w-regskip",
-        "pid": 4242,
+        "pid": std::process::id(),
         "socketPath": "/tmp/w-regskip.sock",
         "recoveryJournalPath": "/tmp/none.jsonl",
         "supervisorSocketPath": "/tmp/none.sock",
@@ -81,7 +81,7 @@ async fn a_known_resident_registration_writes_nothing_to_disk() {
         socket_path: "/tmp/w-regskip-live.sock".to_string(),
         worker_instance_id: "inst-live".to_string(),
         token: "reg-token".to_string(),
-        pid: 4242,
+        pid: u64::from(std::process::id()),
         rest: Map::default(),
     };
     let response = supervisor

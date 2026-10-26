@@ -1356,7 +1356,12 @@ impl RawLua {
 
                 let fut = &mut (*future).data;
                 let mut ctx = Context::from_waker(rawlua.waker());
-                match fut.as_mut().map(|fut| fut.as_mut().poll(&mut ctx)) {
+                match fut.as_mut().map(|fut| {
+                    if let Some(debt) = (*extra).wake_debt.as_ref() {
+                        debt.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    fut.as_mut().poll(&mut ctx)
+                }) {
                     Some(Poll::Pending) => {
                         let fut_nvals = ffi::lua_gettop(state) - 1; // Exclude the future itself
                         if fut_nvals >= 3 && ffi::lua_tolightuserdata(state, -3) == Lua::poll_yield().0 {
@@ -1480,6 +1485,14 @@ impl RawLua {
     #[inline]
     pub(crate) fn waker(&self) -> &Waker {
         unsafe { (*self.extra.get()).waker.as_ref() }
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn set_wake_debt(
+        &self,
+        debt: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        unsafe { mem::replace(&mut (*self.extra.get()).wake_debt, debt) }
     }
 
     #[cfg(feature = "async")]

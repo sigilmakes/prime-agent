@@ -12,6 +12,60 @@ use super::{
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 
+#[cfg(all(test, target_os = "linux"))]
+type ReapPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(all(test, target_os = "linux"))]
+fn owned_reap_pauses(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(u32, String), ReapPause>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(u32, String), ReapPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+async fn pause_owned_reap(child: &SpawnedWorker) {
+    let pause = child.id().and_then(|pid| {
+        let start = crate::lease::get_process_start_id(pid)?;
+        owned_reap_pauses()
+            .lock()
+            .expect("reap pauses")
+            .remove(&(pid, start))
+    });
+    if let Some((entered, release)) = pause {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+#[cfg(test)]
+type OrphanPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+    bool,
+);
+#[cfg(test)]
+fn orphan_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<String, OrphanPause>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, OrphanPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+#[cfg(test)]
+async fn pause_orphan_callback(path: &str) -> bool {
+    let pause = orphan_pauses().lock().expect("orphan pauses").remove(path);
+    if let Some((entered, release, panic_callback)) = pause {
+        let _ = entered.send(());
+        let _ = release.await;
+        return panic_callback;
+    }
+    false
+}
+
 /// The immutable cleanup identity of one worker process lifetime.
 #[derive(Clone, Debug)]
 pub(super) struct OrphanGeneration {
@@ -31,25 +85,37 @@ impl OrphanGeneration {
 
     /// The caller has observed this generation exit; no resident lookup or
     /// fallible liveness recheck may substitute a different process here.
-    async fn reap(&self) {
+    async fn reap(&self) -> bool {
+        #[cfg(test)]
+        let panic_callback = pause_orphan_callback(&self.path).await;
         let generation = self.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            assert!(!panic_callback, "fixture orphan callback panic");
             if let Ok(pid) = i32::try_from(generation.pid) {
                 pa_core::kernel::orphan_journal::reap_worker_orphan_processes(
                     std::path::Path::new(&generation.path),
                     pid,
                 );
+                true
+            } else {
+                false
             }
         })
-        .await;
+        .await
+        .unwrap_or(false)
     }
 }
 
 /// A child and its cleanup identity must survive descriptor replacements together.
 #[derive(Debug)]
 pub(crate) struct SpawnedWorker {
-    child: Child,
+    child: Option<Child>,
+    start_id: Option<String>,
     orphan_generation: OrphanGeneration,
+    reap_completed: tokio::sync::watch::Sender<Option<bool>>,
+    admission: Option<Arc<super::launch_admission::LaunchAdmission>>,
+    cleanup_uncertain: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Compose the worker spawn env (TS `launchWorker`'s merged env,
@@ -72,14 +138,126 @@ fn apply_worker_env(
 }
 
 impl SpawnedWorker {
+    fn new(child: Child, orphan_generation: OrphanGeneration, resident: &ResidentWorker) -> Self {
+        Self::new_with_identity_probe(
+            child,
+            orphan_generation,
+            resident,
+            crate::lease::get_process_start_id,
+        )
+    }
+
+    fn new_with_identity_probe(
+        child: Child,
+        orphan_generation: OrphanGeneration,
+        resident: &ResidentWorker,
+        probe: impl FnOnce(u32) -> Option<String>,
+    ) -> Self {
+        let pid = child.id().unwrap_or(0);
+        let start_id = probe(pid);
+        let (reap_completed, completed) = tokio::sync::watch::channel(None);
+        *resident
+            .owned_reap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(crate::registry::OwnedWorkerReap {
+                pid,
+                start_id: start_id.clone(),
+                completed,
+            }));
+        Self {
+            child: Some(child),
+            start_id,
+            orphan_generation,
+            reap_completed,
+            admission: None,
+            cleanup_uncertain: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn publish_process_identity(&self, descriptor: &mut crate::descriptor::WorkerDescriptor) {
+        descriptor.pid = u64::from(self.id().unwrap_or(0));
+        descriptor.process_start_id.clone_from(&self.start_id);
+    }
+
+    fn with_admission(mut self, admission: Arc<super::launch_admission::LaunchAdmission>) -> Self {
+        self.cleanup_uncertain = Arc::clone(&admission.cleanup_uncertain);
+        self.admission = Some(admission);
+        self
+    }
+
+    fn release_admission(&mut self) {
+        self.admission.take();
+    }
+
     pub(crate) fn id(&self) -> Option<u32> {
-        self.child.id()
+        self.child.as_ref().and_then(Child::id)
     }
 
     pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
-        self.child.kill().await?;
+        let result = self.child.as_mut().expect("owned child").kill().await;
+        if result.is_err() {
+            self.cleanup_uncertain.store(true, Ordering::SeqCst);
+        }
+        self.reap_completed.send_replace(Some(result.is_ok()));
+        result?;
         self.orphan_generation.reap().await;
         Ok(())
+    }
+}
+
+// Field order is deliberate: cancellation records uncertainty before dropping
+// the permit, including when the spawned cleanup future was never polled.
+struct WorkerRollback {
+    proof: super::launch_admission::CleanupProof,
+    _admission: Option<Arc<super::launch_admission::LaunchAdmission>>,
+    child: Child,
+    completed: tokio::sync::watch::Sender<Option<bool>>,
+    generation: OrphanGeneration,
+}
+
+impl WorkerRollback {
+    async fn run(mut self) {
+        let result = self.child.kill().await;
+        self.completed.send_replace(Some(result.is_ok()));
+        // OS wait proof is separate from completion of the owner-scoped orphan
+        // callback. Keep admission until that callback has returned as well.
+        // This callback has no supervisor/fence reentry. Its current unit-return
+        // reaper reports an attempted pass, not proof that all descendants died.
+        let cleanup_finished = if result.is_ok() {
+            self.generation.reap().await
+        } else {
+            false
+        };
+        self.proof.verified = result.is_ok() && cleanup_finished;
+        drop(self); // cancellation/failure records debt before admission release.
+    }
+}
+
+impl Drop for SpawnedWorker {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        if child.id().is_none() {
+            return; // Tokio observed and reaped this exact child already.
+        }
+        let rollback = WorkerRollback {
+            proof: super::launch_admission::CleanupProof {
+                uncertain: Arc::clone(&self.cleanup_uncertain),
+                verified: false,
+            },
+            _admission: self.admission.take(),
+            child,
+            completed: self.reap_completed.clone(),
+            generation: self.orphan_generation.clone(),
+        };
+        // If no runtime exists, dropping rollback records debt synchronously.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                rollback.run().await;
+            });
+        }
     }
 }
 
@@ -160,6 +338,11 @@ impl Supervisor {
         adopted_pid: u64,
         orphan_generation: Option<OrphanGeneration>,
     ) -> impl std::future::Future<Output = ()> {
+        let mut child = child;
+        // Synchronous handoff: registry and descriptor publication precede this arm.
+        if let Some(child) = child.as_mut() {
+            child.release_admission();
+        }
         let monitor_epoch = resident.monitor_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.watch_worker_owned(
             resident,
@@ -180,7 +363,14 @@ impl Supervisor {
     ) {
         loop {
             if let Some(mut child) = child.take() {
-                let status = child.child.wait().await;
+                #[cfg(all(test, target_os = "linux"))]
+                pause_owned_reap(&child).await;
+                let status = child.child.as_mut().expect("owned child").wait().await;
+                if status.is_err() {
+                    child.cleanup_uncertain.store(true, Ordering::SeqCst);
+                }
+                // Publish OS reaping before cleanup callbacks can await supervisor work.
+                child.reap_completed.send_replace(Some(status.is_ok()));
                 if status.is_ok() {
                     child.orphan_generation.reap().await;
                 }
@@ -200,9 +390,13 @@ impl Supervisor {
                 // to watch, and a watch on pid 0 would report a phantom
                 // exit; fall straight to the failure/backoff/relaunch arm
                 // instead.
-                let exited = match pa_core::platform::process::wait_for_exit(adopted_pid as u32)
-                    .await
-                {
+                let Ok(adopted_pid32) = u32::try_from(adopted_pid) else {
+                    self.log_line(
+                        "adopted worker PID is out of range; process watch remains unresolved",
+                    );
+                    return;
+                };
+                let exited = match pa_core::platform::process::wait_for_exit(adopted_pid32).await {
                     Ok(()) => true,
                     Err(error) => {
                         self.log_line(&format!(
@@ -210,7 +404,7 @@ impl Supervisor {
                             resident.worker_id, ADOPTED_EXIT_FALLBACK_POLL.as_secs()
                         ));
                         loop {
-                            match is_process_alive(adopted_pid as u32) {
+                            match is_process_alive(adopted_pid32) {
                                 Ok(false) => break true,
                                 Ok(true) => tokio::time::sleep(ADOPTED_EXIT_FALLBACK_POLL).await,
                                 Err(_) => break false,
@@ -254,18 +448,21 @@ impl Supervisor {
                 descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
                 descriptor.last_failure_at = Some(util::now_iso());
                 let journal_path = descriptor.recovery_journal_path.clone();
-                let owner_pid = descriptor.pid as u32;
+                let owner_pid = descriptor.pid;
                 let owner_start_id = descriptor.process_start_id.clone();
                 let _ = persist_worker(&resident.descriptor_path, &descriptor);
                 drop(descriptor);
                 // The give-up settles its own revival evidence: the journal's busy records
                 // are what a later boot reads as "interrupted live work" — the give-up
                 // verdict must outlive them.
-                if super::worker_lifecycle::recovery_journal_owner_is_gone(
-                    is_process_alive(owner_pid).ok(),
-                    owner_start_id.as_deref(),
-                    crate::lease::get_process_start_id(owner_pid).as_deref(),
-                ) {
+                let owner_gone = u32::try_from(owner_pid).is_ok_and(|owner_pid| {
+                    super::worker_lifecycle::recovery_journal_owner_is_gone(
+                        is_process_alive(owner_pid).ok(),
+                        owner_start_id.as_deref(),
+                        crate::lease::get_process_start_id(owner_pid).as_deref(),
+                    )
+                });
+                if owner_gone {
                     if let Err(error) = crate::journal::WorkerRecoveryJournal::settle_busy_records(
                         std::path::Path::new(&journal_path),
                         "worker_gave_up",
@@ -319,7 +516,9 @@ impl Supervisor {
                 return;
             }
             match self.relaunch_worker(&resident).await {
-                Ok(new_child) => {
+                Ok(mut new_child) => {
+                    // This watcher already owns the resident; the replacement is published.
+                    new_child.release_admission();
                     // No counter reset on a successful relaunch: a spawn that dies fast must
                     // accumulate toward the give-up cap (the reset comes only from a stable
                     // lifetime on the crash path).
@@ -366,6 +565,15 @@ impl Supervisor {
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
     ) -> Result<SpawnedWorker> {
+        let admission = self.acquire_launch_admission()?;
+        self.relaunch_worker_admitted(resident, admission).await
+    }
+
+    pub(super) async fn relaunch_worker_admitted(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        admission: Arc<super::launch_admission::LaunchAdmission>,
+    ) -> Result<SpawnedWorker> {
         if self.is_stopping(resident) {
             return Err(anyhow!("supervisor is shutting down"));
         }
@@ -383,7 +591,7 @@ impl Supervisor {
         // fresh create is the only launch class that rides the unsynced
         // TS `persistWorker` shape).
         let child = self
-            .spawn_worker_process(resident, deadline, TempSync::Synced)
+            .spawn_worker_process(resident, deadline, TempSync::Synced, admission)
             .await?;
         if let Err(error) = self.connect_worker(resident, deadline).await {
             // Never leave a spawned-but-unwired worker process behind.
@@ -526,6 +734,8 @@ impl Supervisor {
                 descriptor.session_file.as_deref(),
             );
         }
+        #[cfg(test)]
+        self.pause_launch_at("relaunch_before_handoff").await;
         Ok(child)
     }
 
@@ -534,6 +744,7 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
         connect_deadline: tokio::time::Instant,
         spawn_record_sync: TempSync,
+        admission: Arc<super::launch_admission::LaunchAdmission>,
     ) -> Result<SpawnedWorker> {
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
@@ -583,7 +794,10 @@ impl Supervisor {
         let mut command = Command::new(&executable);
         command.arg("worker");
         apply_worker_env(&mut command, client_launch_env.as_ref(), launch_env);
+        // Exact-owned fallback if its cleanup task cannot run. Drop-kill is
+        // never OS-wait proof; the cleanup uncertainty latch still blocks exit.
         command
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             // The worker's stderr lands in its per-worker log (a detached supervisor has no
@@ -595,16 +809,18 @@ impl Supervisor {
         // Detached and window-hidden, the TS worker spawn (`spawnHidden`, `{ detached: true }`):
         // the worker leaves the supervisor's console group and shows no fresh console.
         pa_core::platform::process::set_new_process_group(command.as_std_mut());
+        #[cfg(test)]
+        self.pause_launch_at("before_physical_spawn").await;
         let child = command
             .spawn()
             .with_context(|| format!("spawn session worker {}", resident.worker_id))?;
-        let child = SpawnedWorker {
-            orphan_generation: OrphanGeneration {
-                pid: child.id().unwrap_or(0),
-                path: orphan_path.clone(),
-            },
-            child,
+        let generation = OrphanGeneration {
+            pid: child.id().unwrap_or(0),
+            path: orphan_path.clone(),
         };
+        let child = SpawnedWorker::new(child, generation, resident).with_admission(admission);
+        #[cfg(test)]
+        self.pause_launch_at("before_spawn_descriptor").await;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64);
@@ -616,9 +832,9 @@ impl Supervisor {
             let mut descriptor = resident.descriptor.lock().await;
             // Capture the child's start identity alongside its pid (TS `getProcessStartId`
             // at spawn): the holder checks need it to recognize a recycled pid.
-            let child_pid = child.id().unwrap_or(0);
-            descriptor.pid = u64::from(child_pid);
-            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
+            // Reuse the one spawn-time observation, including None. A later
+            // successful probe must not replace an uncertain owned generation.
+            child.publish_process_identity(&mut descriptor);
             // This flag belongs to the successfully spawned generation, not
             // to a still-live worker loaded from a legacy descriptor.
             descriptor.telemetry_disabled = Some(true);
@@ -1129,5 +1345,576 @@ mod tests {
             Some(&Some(std::ffi::OsStr::new("1"))),
             "the internal identity still rides"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod owned_reap_causal_tests {
+    use super::*;
+
+    struct ReleaseReap {
+        key: (u32, String),
+        release: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl Drop for ReleaseReap {
+        fn drop(&mut self) {
+            // Both an installed pause and an already-entered pause are released on panic.
+            owned_reap_pauses()
+                .lock()
+                .expect("reap pauses")
+                .remove(&self.key);
+            self.release.take();
+        }
+    }
+
+    fn process_scalars(pid: u32) -> Option<(char, u32, u64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let fields: Vec<_> = fields.split_whitespace().collect();
+        Some((
+            fields.first()?.chars().next()?,
+            fields.get(1)?.parse().ok()?,
+            fields.get(19)?.parse().ok()?,
+        ))
+    }
+
+    /// Terminal shutdown must join OS reaping, not merely observe zombie death.
+    #[tokio::test]
+    async fn terminal_shutdown_waits_for_owned_os_reaping() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let supervisor = Arc::new(
+            Supervisor::new(super::super::SupervisorOptions {
+                socket_path: dir.path().join("supervisor.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let child = Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fixture child");
+        let pid = child.id().expect("child pid");
+        let start = crate::lease::get_process_start_id(pid).expect("child identity");
+        let original = process_scalars(pid).expect("child scalars");
+        let descriptor_path = supervisor.descriptor_dir.join("owned-reap.json");
+        let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2, "workerId": "owned-reap", "pid": pid,
+            "processStartId": start, "socketPath": dir.path().join("worker.sock"),
+            "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+            "supervisorSocketPath": supervisor.options.socket_path,
+            "authenticationToken": "fixture-only", "rootActiveSessionId": "owned-reap",
+            "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+            "createCommand": {}, "consecutiveFailures": 0
+        }))
+        .expect("descriptor");
+        let resident = ResidentWorker::new("owned-reap".into(), descriptor, descriptor_path);
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let key = (pid, start.clone());
+        owned_reap_pauses()
+            .lock()
+            .expect("reap pauses")
+            .insert(key.clone(), (entered_tx, release_rx));
+        let release = ReleaseReap {
+            key,
+            release: Some(release_tx),
+        };
+        let watch = tokio::spawn(
+            Arc::clone(&supervisor).watch_worker(
+                Arc::clone(&resident),
+                Some(SpawnedWorker::new(
+                    child,
+                    OrphanGeneration {
+                        pid,
+                        path: dir
+                            .path()
+                            .join("orphans.jsonl")
+                            .to_string_lossy()
+                            .into_owned(),
+                    },
+                    &resident,
+                )),
+                u64::from(pid),
+                None,
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(3), entered_rx)
+            .await
+            .expect("watch entered")
+            .expect("watch pause");
+        let stopping = Arc::clone(&supervisor);
+        let shutdown = tokio::spawn(async move { stopping.begin_shutdown().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if process_scalars(pid).is_some_and(|state| state.0 == 'Z') {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned child reaches zombie state");
+        // Poll shutdown after retirement has observed the same zombie. A short
+        // bounded timeout admits progress but must not complete the stop.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while !shutdown.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "shutdown completed before OS reaping"
+        );
+        let current = process_scalars(pid).expect("unreaped child");
+        assert_eq!(
+            current.0, 'Z',
+            "pid={pid} original={original:?} current={current:?}"
+        );
+        assert_eq!(current.2, original.2, "same child generation");
+        assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+        assert!(!watch.is_finished(), "owned watcher still held");
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(3), shutdown)
+            .await
+            .expect("shutdown joins reaping")
+            .expect("shutdown task");
+        assert!(supervisor.accept_exit.load(Ordering::SeqCst));
+        tokio::time::timeout(Duration::from_secs(3), watch)
+            .await
+            .expect("reaper bounded")
+            .expect("watch completed");
+        assert!(process_scalars(pid).is_none(), "raw owned pid reaped");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod launch_rollback_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Arc<Supervisor>) {
+        let dir = tempfile::tempdir().expect("fixture");
+        let supervisor = Arc::new(
+            Supervisor::new(super::super::SupervisorOptions {
+                socket_path: dir.path().join("supervisor.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        (dir, supervisor)
+    }
+
+    fn resident(supervisor: &Supervisor, dir: &std::path::Path, pid: u32) -> Arc<ResidentWorker> {
+        let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2, "workerId": "rollback-fixture", "pid": pid,
+            "processStartId": crate::lease::get_process_start_id(pid),
+            "socketPath": dir.join("worker.sock"),
+            "recoveryJournalPath": dir.join("recovery.jsonl"),
+            "supervisorSocketPath": supervisor.options.socket_path,
+            "authenticationToken": "fixture-only", "rootActiveSessionId": "rollback-fixture",
+            "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+            "createCommand": {}, "consecutiveFailures": 0
+        }))
+        .expect("descriptor");
+        ResidentWorker::new(
+            "rollback-fixture".into(),
+            descriptor,
+            dir.join("worker.json"),
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelled_owned_launch_retains_admission_until_exact_child_is_reaped() {
+        let (dir, supervisor) = fixture();
+        let admission = supervisor
+            .acquire_launch_admission()
+            .expect("launch admitted");
+        let child = Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fixture child");
+        let pid = child.id().expect("owned pid");
+        let start = crate::lease::get_process_start_id(pid).expect("owned identity");
+        let resident = resident(&supervisor, dir.path(), pid);
+        let child = SpawnedWorker::new(
+            child,
+            OrphanGeneration {
+                pid,
+                path: dir
+                    .path()
+                    .join("orphans.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+            &resident,
+        )
+        .with_admission(admission);
+        let completion = resident
+            .owned_reap
+            .lock()
+            .expect("owned record")
+            .as_ref()
+            .expect("owned generation")
+            .completed
+            .clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let launch = tokio::spawn(async move {
+            let _child = child;
+            let _ = entered_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        entered_rx.await.expect("launch owns child");
+        launch.abort();
+        assert!(launch.await.expect_err("launch cancelled").is_cancelled());
+        tokio::time::timeout(Duration::from_secs(3), supervisor.begin_shutdown())
+            .await
+            .expect("rollback drains before terminal exit");
+        assert!(supervisor.accept_exit.load(Ordering::SeqCst));
+        assert_eq!(
+            *completion.borrow(),
+            Some(true),
+            "OS wait proof precedes admission release"
+        );
+        assert!(!supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst));
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "pid={pid} start={start} must be OS-reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpolled_rollback_cancellation_records_debt_before_permit_release() {
+        let (dir, supervisor) = fixture();
+        let admission = supervisor
+            .acquire_launch_admission()
+            .expect("launch admitted");
+        let child = Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fixture child");
+        let pid = child.id().expect("owned pid");
+        let (completed, _completion) = tokio::sync::watch::channel(None);
+        let rollback = WorkerRollback {
+            proof: super::super::launch_admission::CleanupProof {
+                uncertain: Arc::clone(&supervisor.launch_cleanup_uncertain),
+                verified: false,
+            },
+            _admission: Some(admission),
+            child,
+            completed,
+            generation: OrphanGeneration {
+                pid,
+                path: dir
+                    .path()
+                    .join("orphans.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        };
+        // current-thread Tokio does not poll this task before the immediate abort.
+        // Drop must record debt even if WorkerRollback::run never executes once.
+        let cleanup = tokio::spawn(async move {
+            rollback.run().await;
+        });
+        cleanup.abort();
+        assert!(cleanup
+            .await
+            .expect_err("rollback cancelled")
+            .is_cancelled());
+        let exclusive = supervisor
+            .launch_admission
+            .try_write()
+            .expect("cancelled cleanup released permit");
+        assert!(
+            supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst),
+            "debt was recorded before release"
+        );
+        drop(exclusive);
+        tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
+            .await
+            .expect("uncertain stop is bounded");
+        assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+        // Tokio's dropped Child reaper still owns this fixture cleanup. The
+        // certification must remain refused regardless of eventual OS cleanup.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture child reaped by Tokio drop cleanup");
+    }
+    #[tokio::test]
+    async fn cancelled_physical_launch_before_spawn_releases_admission_without_publication() {
+        let (dir, supervisor) = fixture();
+        let resident = resident(&supervisor, dir.path(), 0);
+        let admission = supervisor
+            .acquire_launch_admission()
+            .expect("launch admitted");
+        let (entered, release) =
+            super::super::launch_admission::pause_at(&supervisor, "before_physical_spawn");
+        let launching = Arc::clone(&supervisor);
+        let launching_resident = Arc::clone(&resident);
+        let launch = tokio::spawn(async move {
+            launching
+                .spawn_worker_process(
+                    &launching_resident,
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                    TempSync::Unsynced,
+                    admission,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), entered)
+            .await
+            .expect("physical seam entered")
+            .expect("entry");
+        assert!(resident.owned_reap.lock().expect("owned record").is_none());
+        assert!(!resident.descriptor_path.exists());
+        launch.abort();
+        assert!(launch.await.expect_err("launch cancelled").is_cancelled());
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
+            .await
+            .expect("no launch remains");
+        assert!(supervisor.accept_exit.load(Ordering::SeqCst));
+        assert!(!supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst));
+        assert!(resident.owned_reap.lock().expect("owned record").is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_physical_launch_before_descriptor_drains_actual_child_cleanup() {
+        let (dir, supervisor) = fixture();
+        let resident = resident(&supervisor, dir.path(), 0);
+        let admission = supervisor
+            .acquire_launch_admission()
+            .expect("launch admitted");
+        let (entered, release) =
+            super::super::launch_admission::pause_at(&supervisor, "before_spawn_descriptor");
+        let launching = Arc::clone(&supervisor);
+        let launching_resident = Arc::clone(&resident);
+        let launch = tokio::spawn(async move {
+            launching
+                .spawn_worker_process(
+                    &launching_resident,
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                    TempSync::Unsynced,
+                    admission,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), entered)
+            .await
+            .expect("descriptor seam entered")
+            .expect("entry");
+        let record = resident
+            .owned_reap
+            .lock()
+            .expect("owned record")
+            .as_ref()
+            .expect("physical child wrapped before publication")
+            .clone();
+        assert!(record.pid > 0);
+        assert!(!resident.descriptor_path.exists());
+        assert_eq!(resident.descriptor.lock().await.pid, 0);
+        launch.abort();
+        assert!(launch.await.expect_err("launch cancelled").is_cancelled());
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(3), supervisor.begin_shutdown())
+            .await
+            .expect("OS rollback drained");
+        assert!(supervisor.accept_exit.load(Ordering::SeqCst));
+        assert_eq!(*record.completed.borrow(), Some(true));
+        assert!(!supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst));
+        assert!(
+            !std::path::Path::new(&format!("/proc/{}", record.pid)).exists(),
+            "exact fixture pid must be reaped"
+        );
+        assert!(!resident.descriptor_path.exists());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod orphan_callback_truth_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rollback_admission_covers_orphan_callback_success_panic_and_abort() {
+        // Each case owns a fresh supervisor, child, journal path and pause.
+        for mode in ["success", "panic", "abort"] {
+            let dir = tempfile::tempdir().expect("fixture");
+            let supervisor = Arc::new(
+                Supervisor::new(super::super::SupervisorOptions {
+                    socket_path: dir.path().join("supervisor.sock"),
+                    agent_dir: dir.path().join("agent"),
+                })
+                .expect("supervisor"),
+            );
+            let admission = supervisor.acquire_launch_admission().expect("admission");
+            let child = Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("fixture child");
+            let pid = child.id().expect("owned pid");
+            let path = dir
+                .path()
+                .join("orphans.jsonl")
+                .to_string_lossy()
+                .into_owned();
+            let (entered_tx, entered) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            orphan_pauses()
+                .lock()
+                .expect("orphan pauses")
+                .insert(path.clone(), (entered_tx, released, mode == "panic"));
+            let (completed, completion) = tokio::sync::watch::channel(None);
+            let rollback = WorkerRollback {
+                proof: super::super::launch_admission::CleanupProof {
+                    uncertain: Arc::clone(&supervisor.launch_cleanup_uncertain),
+                    verified: false,
+                },
+                _admission: Some(admission),
+                child,
+                completed,
+                generation: OrphanGeneration { pid, path },
+            };
+            let cleanup = tokio::spawn(async move {
+                rollback.run().await;
+            });
+            tokio::time::timeout(Duration::from_secs(3), entered)
+                .await
+                .expect("callback reached")
+                .expect("callback pause");
+            assert_eq!(
+                *completion.borrow(),
+                Some(true),
+                "OS wait proof is already published"
+            );
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "owned PID reaped before callback"
+            );
+            let stopping = Arc::clone(&supervisor);
+            let shutdown = tokio::spawn(async move { stopping.begin_shutdown().await });
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !supervisor.shutting_down.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("terminal drain entered");
+            assert!(
+                supervisor.launch_admission.try_write().is_err(),
+                "callback retains admission"
+            );
+            assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+            assert!(!shutdown.is_finished());
+            if mode == "abort" {
+                cleanup.abort();
+                assert!(cleanup.await.expect_err("cleanup cancelled").is_cancelled());
+                drop(release); // RAII also releases this pause on every panic path.
+            } else {
+                drop(release);
+                tokio::time::timeout(Duration::from_secs(3), cleanup)
+                    .await
+                    .expect("callback bounded")
+                    .expect("cleanup task");
+            }
+            tokio::time::timeout(Duration::from_secs(3), shutdown)
+                .await
+                .expect("terminal result bounded")
+                .expect("shutdown task");
+            assert_eq!(
+                supervisor.accept_exit.load(Ordering::SeqCst),
+                mode == "success"
+            );
+            assert_eq!(
+                supervisor.launch_cleanup_uncertain.load(Ordering::SeqCst),
+                mode != "success"
+            );
+            assert!(
+                supervisor.launch_admission.try_write().is_ok(),
+                "callback permit released after proof/debt"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod spawn_identity_capture_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owned_record_and_descriptor_reuse_one_spawn_identity_observation_including_none() {
+        for captured in [None, Some("captured-once".to_string())] {
+            let dir = tempfile::tempdir().expect("fixture");
+            let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_value(json!({
+                "version": 2, "workerId": "identity", "pid": 0,
+                "processStartId": "stale", "socketPath": dir.path().join("worker.sock"),
+                "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+                "supervisorSocketPath": dir.path().join("supervisor.sock"),
+                "authenticationToken": "fixture-only", "rootActiveSessionId": "identity",
+                "createdAt": "t", "updatedAt": "t", "lifecycle": "starting",
+                "createCommand": {}, "consecutiveFailures": 0
+            }))
+            .expect("descriptor");
+            let resident = ResidentWorker::new(
+                "identity".into(),
+                descriptor,
+                dir.path().join("worker.json"),
+            );
+            let child = Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("fixture child");
+            let pid = child.id().expect("child pid");
+            let probes = std::cell::Cell::new(0);
+            let mut child = SpawnedWorker::new_with_identity_probe(
+                child,
+                OrphanGeneration {
+                    pid,
+                    path: dir
+                        .path()
+                        .join("orphans.jsonl")
+                        .to_string_lossy()
+                        .into_owned(),
+                },
+                &resident,
+                |observed_pid| {
+                    assert_eq!(observed_pid, pid);
+                    probes.set(probes.get() + 1);
+                    captured.clone()
+                },
+            );
+            {
+                let mut descriptor = resident.descriptor.lock().await;
+                child.publish_process_identity(&mut descriptor);
+                assert_eq!(descriptor.pid, u64::from(pid));
+                assert_eq!(descriptor.process_start_id, captured);
+            }
+            let record = resident
+                .owned_reap
+                .lock()
+                .expect("owned record")
+                .as_ref()
+                .expect("record")
+                .clone();
+            assert_eq!(record.pid, pid);
+            assert_eq!(record.start_id, captured);
+            assert_eq!(
+                probes.get(),
+                1,
+                "descriptor publication must not retry a missing start identity"
+            );
+            child.kill().await.expect("owned fixture reaped");
+            assert_eq!(*record.completed.borrow(), Some(true));
+        }
     }
 }

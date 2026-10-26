@@ -75,6 +75,32 @@ pub(super) enum AdoptionOutcome {
     Failed,
 }
 
+fn registration_start_id(worker_id: &str, pid: u32) -> Result<String> {
+    #[cfg(test)]
+    if let Some(observed) = registration_identity_overrides()
+        .lock()
+        .expect("identity overrides")
+        .remove(worker_id)
+    {
+        return observed
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Session worker registration identity is unavailable"));
+    }
+    let _ = worker_id;
+    crate::protocol::process_start_id(pid)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Session worker registration identity is unavailable"))
+}
+
+#[cfg(test)]
+fn registration_identity_overrides(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<String>>> {
+    static OVERRIDES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+    > = std::sync::OnceLock::new();
+    OVERRIDES.get_or_init(Default::default)
+}
+
 impl Supervisor {
     /// Adopt or relaunch persisted workers, concurrently: one dead worker's relaunch must
     /// not delay adopting live sessions; the fan-out is capped at
@@ -140,6 +166,13 @@ impl Supervisor {
         descriptor: crate::descriptor::WorkerDescriptor,
         boot: AdoptionBoot,
     ) -> AdoptionOutcome {
+        let Ok(recorded_pid) = u32::try_from(descriptor.pid) else {
+            self.log_line("worker descriptor PID is out of range; adoption remains unresolved");
+            return AdoptionOutcome::Failed;
+        };
+        let Ok(admission) = self.acquire_launch_admission() else {
+            return AdoptionOutcome::Failed;
+        };
         let worker_id = descriptor.worker_id.clone();
         let guard = self.registry.adoption_guard(&worker_id).await;
         if self.registry.get(&worker_id).await.is_some() {
@@ -169,7 +202,7 @@ impl Supervisor {
         // below degrades to the same finalize a dead verdict runs).
         let tombstoned = descriptor.stop_requested_at.is_some();
         let recorded_process_alive = if tombstoned {
-            let pid = descriptor.pid as u32;
+            let pid = recorded_pid;
             let expected = descriptor.process_start_id.clone();
             tokio::task::spawn_blocking(move || {
                 recorded_process_alive(
@@ -274,13 +307,18 @@ impl Supervisor {
             // Dead worker with journal-proven live work (or a kept worker): relaunch from
             // the durable create command. The spawned child rides out to the monitor arming
             // below — the descriptor's pid is the DEAD pre-restart holder.
-            match self.relaunch_worker(&resident).await {
+            match self
+                .relaunch_worker_admitted(&resident, Arc::clone(&admission))
+                .await
+            {
                 Ok(child) => (Ok(()), Some(child)),
                 Err(error) => (Err(error), None),
             }
         };
         let outcome = match result {
             Ok(()) => {
+                #[cfg(test)]
+                self.pause_launch_at("adoption_before_registry").await;
                 self.registry.insert(Arc::clone(&resident)).await;
                 // A live leftover keeps its real pid; a revived worker is watched through
                 // the child handle itself.
@@ -355,6 +393,9 @@ impl Supervisor {
         if active_session_id.is_empty() || socket_path.is_empty() || *pid == 0 {
             return fail("Session worker registration is missing identity fields");
         }
+        let Ok(registration_pid) = u32::try_from(*pid) else {
+            return fail("Session worker registration PID is out of range");
+        };
         let worker_instance_id =
             (!worker_instance_id.is_empty()).then(|| worker_instance_id.clone());
         let registration = WorkerRegistration {
@@ -368,16 +409,30 @@ impl Supervisor {
         };
         // Serialize against descriptor adoption for the same worker.
         let guard = self.registry.adoption_guard(active_session_id).await;
-        let (resident, re_arm_monitor) = match self.registry.get(active_session_id).await {
+        let (resident, re_arm_monitor, registration_start_id) = match self
+            .registry
+            .get(active_session_id)
+            .await
+        {
             Some(resident) => {
                 // The monitor ownership reads before this registration's
                 // descriptor update overwrites the pid: a registrant naming
                 // a different process than the watched one takes the resident.
-                let pid_changed = resident.descriptor.lock().await.pid != *pid;
-                (resident, pid_changed)
+                let descriptor = resident.descriptor.lock().await;
+                if token.as_str() != descriptor.authentication_token {
+                    return fail("Session worker authentication failed");
+                }
+                let registration_start_id =
+                    match registration_start_id(active_session_id, registration_pid) {
+                        Ok(start_id) => start_id,
+                        Err(error) => return fail(&error.to_string()),
+                    };
+                let pid_changed = descriptor.pid != *pid;
+                drop(descriptor);
+                (resident, pid_changed, registration_start_id)
             }
             None => match self.adopt_registered_worker(&registration, token).await {
-                Ok(resident) => (resident, false),
+                Ok((resident, start_id)) => (resident, false, start_id),
                 Err(error) => {
                     let message = format!("{error:#}");
                     // The definitive unknown-worker refusal is observable in the local log
@@ -397,6 +452,11 @@ impl Supervisor {
         // this one lock acquisition — a second one let the create path race into a stall.
         let (durable_session_id, orphan_generation) = {
             let mut descriptor = resident.descriptor.lock().await;
+            // The initial registration check preceded adoption/auth awaits.
+            // Never republish a process identity after terminal admission closed.
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return fail("Supervisor is shutting down");
+            }
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
@@ -430,11 +490,9 @@ impl Supervisor {
                 );
             }
             descriptor.pid = *pid;
-            // Refresh the identity from the live registrant: a recycled pid must not keep
-            // the old holder's identity; an unobservable start id keeps the previous value.
-            if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
-                descriptor.process_start_id = Some(start_id);
-            }
+            // Reuse the one authenticated registration observation. Missing or
+            // empty identities were refused before descriptor/registry mutation.
+            descriptor.process_start_id = Some(registration_start_id);
             descriptor.socket_path.clone_from(socket_path);
             descriptor
                 .worker_instance_id
@@ -529,7 +587,10 @@ impl Supervisor {
         self: &Arc<Self>,
         registration: &WorkerRegistration,
         token: &str,
-    ) -> Result<Arc<ResidentWorker>> {
+    ) -> Result<(Arc<ResidentWorker>, String)> {
+        let registration_pid = u32::try_from(registration.pid)
+            .context("Session worker registration PID is out of range")?;
+        let _admission = self.acquire_launch_admission()?;
         let descriptor_path = self
             .descriptor_dir
             .join(format!("{}.json", registration.active_session_id));
@@ -556,9 +617,12 @@ impl Supervisor {
         let mut descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
             .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
         crate::descriptor::validate_descriptor(&descriptor, &self.options.socket_path)?;
+        u32::try_from(descriptor.pid).context("worker descriptor PID is out of range")?;
         if token != descriptor.authentication_token.as_str() {
             return Err(anyhow!("Session worker authentication failed"));
         }
+        let registration_start_id =
+            registration_start_id(&registration.active_session_id, registration_pid)?;
         // The same boot-load backfill: a pre-upgrade descriptor wires its
         // orphan journal here too, so a relaunch of this worker journals.
         crate::descriptor::backfill_orphan_journal_path(&self.descriptor_dir, &mut descriptor);
@@ -598,10 +662,7 @@ impl Supervisor {
                     );
                     descriptor.pid = registration.pid;
                 }
-                if let Some(start_id) = crate::lease::get_process_start_id(registration.pid as u32)
-                {
-                    descriptor.process_start_id = Some(start_id);
-                }
+                descriptor.process_start_id = Some(registration_start_id.clone());
                 let _ = crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor);
             }
             self.finish_tombstoned_stop(&resident, true).await;
@@ -628,6 +689,8 @@ impl Supervisor {
         // The self-registered worker's session already exists: routed
         // client commands may reach it immediately.
         resident.note_session_ready();
+        #[cfg(test)]
+        self.pause_launch_at("registration_before_registry").await;
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(
             Arc::clone(&resident),
@@ -638,7 +701,7 @@ impl Supervisor {
         self.log_line(&format!(
             "adopted session worker {worker_id} via self-registration"
         ));
-        Ok(resident)
+        Ok((resident, registration_start_id))
     }
 
     /// Record one RLM child admission: the spawn edge in the daemon-owned
@@ -750,5 +813,232 @@ impl Supervisor {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod launch_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn terminal_stop_refuses_boot_adoption_and_unknown_registration_before_publication() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let supervisor = Arc::new(
+            Supervisor::new(super::super::SupervisorOptions {
+                socket_path: dir.path().join("supervisor.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2, "workerId": "refused", "pid": 0,
+            "socketPath": dir.path().join("worker.sock"),
+            "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+            "supervisorSocketPath": supervisor.options.socket_path,
+            "authenticationToken": "fixture-only", "rootActiveSessionId": "refused",
+            "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+            "createCommand": {}, "consecutiveFailures": 0
+        }))
+        .expect("descriptor");
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        let outcome = supervisor
+            .adopt_persisted_worker(
+                dir.path().join("refused.json"),
+                descriptor,
+                AdoptionBoot::PlainStartup,
+            )
+            .await;
+        assert!(matches!(outcome, AdoptionOutcome::Failed));
+        let registration = WorkerRegistration {
+            active_session_id: "refused".into(),
+            session_id: None,
+            socket_path: dir
+                .path()
+                .join("worker.sock")
+                .to_string_lossy()
+                .into_owned(),
+            worker_instance_id: None,
+            pid: 1,
+        };
+        let error = supervisor
+            .adopt_registered_worker(&registration, "fixture-only")
+            .await
+            .err()
+            .expect("registration refused");
+        assert!(error.to_string().contains("shutting down"));
+        assert!(supervisor.registry.list().await.is_empty());
+        assert!(!dir.path().join("refused.json").exists());
+    }
+}
+
+#[cfg(test)]
+mod pid_range_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oversized_pid_is_refused_before_registration_or_boot_adoption_work() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let supervisor = Arc::new(
+            Supervisor::new(super::super::SupervisorOptions {
+                socket_path: dir.path().join("supervisor.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let oversized = u64::from(u32::MAX) + 1; // Low bits zero: never an ambient target.
+        let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2, "workerId": "oversized", "pid": oversized,
+            "socketPath": dir.path().join("worker.sock"),
+            "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+            "supervisorSocketPath": supervisor.options.socket_path,
+            "authenticationToken": "fixture-only", "rootActiveSessionId": "oversized",
+            "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+            "stopRequestedAt": "t", "createCommand": {}, "consecutiveFailures": 0
+        }))
+        .expect("descriptor");
+        let path = dir.path().join("worker.json");
+        assert!(matches!(
+            supervisor
+                .adopt_persisted_worker(
+                    path.clone(),
+                    descriptor.clone(),
+                    AdoptionBoot::PlainStartup,
+                )
+                .await,
+            AdoptionOutcome::Failed
+        ));
+        assert!(supervisor.registry.list().await.is_empty());
+        assert!(!path.exists());
+        let command = DaemonCommand::WorkerRegister {
+            id: None,
+            active_session_id: "oversized".into(),
+            session_id: None,
+            socket_path: dir
+                .path()
+                .join("worker.sock")
+                .to_string_lossy()
+                .into_owned(),
+            worker_instance_id: "fixture".into(),
+            token: "fixture-only".into(),
+            pid: oversized,
+            rest: serde_json::Map::default(),
+        };
+        let refusal = supervisor
+            .handle_worker_register("unknown", "worker_register", &command)
+            .await;
+        assert!(!refusal.success);
+        assert!(refusal.error.unwrap_or_default().contains("out of range"));
+        let resident = ResidentWorker::new("oversized".into(), descriptor, path.clone());
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        let before = serde_json::to_value(&*resident.descriptor.lock().await).expect("before");
+        let refusal = supervisor
+            .handle_worker_register("known", "worker_register", &command)
+            .await;
+        assert!(!refusal.success);
+        assert!(refusal.error.unwrap_or_default().contains("out of range"));
+        assert_eq!(
+            serde_json::to_value(&*resident.descriptor.lock().await).expect("after"),
+            before
+        );
+        let registration = WorkerRegistration {
+            active_session_id: "oversized".into(),
+            session_id: None,
+            socket_path: dir
+                .path()
+                .join("worker.sock")
+                .to_string_lossy()
+                .into_owned(),
+            worker_instance_id: None,
+            pid: oversized,
+        };
+        assert!(supervisor
+            .adopt_registered_worker(&registration, "fixture-only")
+            .await
+            .err()
+            .expect("direct adoption refused")
+            .to_string()
+            .contains("out of range"));
+        assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod registration_uncertainty_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_or_empty_registration_identity_preserves_known_and_unknown_state() {
+        for known in [false, true] {
+            for observed in [None, Some(String::new())] {
+                let dir = tempfile::tempdir().expect("fixture");
+                let supervisor = Arc::new(
+                    Supervisor::new(super::super::SupervisorOptions {
+                        socket_path: dir.path().join("supervisor.sock"),
+                        agent_dir: dir.path().join("agent"),
+                    })
+                    .expect("supervisor"),
+                );
+                let worker_id = format!("identity-{}", uuid::Uuid::new_v4());
+                let pid = u64::from(std::process::id());
+                let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_value(json!({
+                    "version": 2, "workerId": worker_id, "pid": pid,
+                    "processStartId": "must-not-retain", "socketPath": dir.path().join("worker.sock"),
+                    "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+                    "supervisorSocketPath": supervisor.options.socket_path,
+                    "authenticationToken": "fixture-only", "rootActiveSessionId": worker_id,
+                    "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+                    "createCommand": {}, "consecutiveFailures": 0
+                })).expect("descriptor");
+                let path = supervisor.descriptor_dir.join(format!("{worker_id}.json"));
+                let bytes = serde_json::to_vec(&descriptor).expect("fixture bytes");
+                std::fs::write(&path, &bytes).expect("fixture descriptor");
+                let resident = ResidentWorker::new(worker_id.clone(), descriptor, path.clone());
+                if known {
+                    supervisor.registry.insert(Arc::clone(&resident)).await;
+                }
+                let before =
+                    serde_json::to_value(&*resident.descriptor.lock().await).expect("before");
+                registration_identity_overrides()
+                    .lock()
+                    .expect("overrides")
+                    .insert(worker_id.clone(), observed);
+                let command = DaemonCommand::WorkerRegister {
+                    id: None,
+                    active_session_id: worker_id.clone(),
+                    session_id: None,
+                    socket_path: dir
+                        .path()
+                        .join("worker.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    worker_instance_id: "fixture".into(),
+                    token: "fixture-only".into(),
+                    pid,
+                    rest: serde_json::Map::default(),
+                };
+                let response = supervisor
+                    .handle_worker_register("uncertain", "worker_register", &command)
+                    .await;
+                assert!(!response.success);
+                assert!(response
+                    .error
+                    .unwrap_or_default()
+                    .contains("identity is unavailable"));
+                assert_eq!(
+                    serde_json::to_value(&*resident.descriptor.lock().await).expect("after"),
+                    before
+                );
+                assert_eq!(std::fs::read(&path).expect("preserved descriptor"), bytes);
+                assert_eq!(supervisor.registry.list().await.len(), usize::from(known));
+                assert!(!registration_identity_overrides()
+                    .lock()
+                    .expect("overrides")
+                    .contains_key(&worker_id));
+                assert!(
+                    resident.cmd_tx.lock().await.is_none(),
+                    "refusal never starts monitor/stop or connects"
+                );
+            }
+        }
     }
 }

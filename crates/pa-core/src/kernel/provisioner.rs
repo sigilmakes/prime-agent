@@ -3,6 +3,14 @@
 //! disposes/kills on demand. Reader tasks hold only weak references, so no
 //! kernel outlives its provisioner; `dispose()` flushes the snapshot first.
 
+#[cfg(all(test, unix))]
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -1787,7 +1795,7 @@ mod tests {
         let python = dir.path().join("ready-but-not-reading");
         std::fs::write(
             &python,
-            "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
+            super::fixture_executable::script("#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n", "python3"),
         )
         .expect("write fake kernel");
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
@@ -1850,7 +1858,11 @@ for line in sys.stdin:
 
         let dir = tempfile::TempDir::new().expect("temp dir");
         let python = dir.path().join("fake-kernel");
-        std::fs::write(&python, SILENT_BOOTSTRAP_RUNTIME).expect("write fake runtime");
+        std::fs::write(
+            &python,
+            super::fixture_executable::script(SILENT_BOOTSTRAP_RUNTIME, "python3"),
+        )
+        .expect("write fake runtime");
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
             .expect("chmod fake runtime");
         let provisioner = IpythonKernelProvisioner::new(

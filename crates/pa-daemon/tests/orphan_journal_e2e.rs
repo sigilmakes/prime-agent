@@ -382,15 +382,75 @@ fn group_alive(pgid: i32) -> bool {
     signal_pid(Pid::from_raw(-pgid), None).is_ok()
 }
 
-/// Wait out the one liveness signal the feature produces: the group's
-/// death. The message names the kill that failed to reap it, so a red
-/// run says exactly which half of the contract leaked.
+#[cfg(target_os = "linux")]
+fn failed_group_membership(expected_group: i32) -> Value {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return json!({"status": "proc-unavailable", "pgid": expected_group});
+    };
+    let mut members = Vec::new();
+    let mut unreadable = 0;
+    for entry in processes.flatten() {
+        let Some(process_id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let text = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        // The command name may contain spaces and parentheses; never emit it.
+        let Some((_, tail)) = text.rsplit_once(')') else {
+            unreadable += 1;
+            continue;
+        };
+        let fields: Vec<_> = tail.split_whitespace().collect();
+        if fields.get(2).and_then(|value| value.parse::<i32>().ok()) != Some(expected_group) {
+            continue;
+        }
+        let Some(state) = fields.first().copied() else {
+            continue;
+        };
+        let Some(parent_id) = fields.get(1).and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Some(start_ticks) = fields.get(19) else {
+            continue;
+        };
+        members.push(json!({"pid": process_id, "state": state, "ppid": parent_id, "start_ticks": start_ticks}));
+    }
+    members.sort_by_key(|member| member["pid"].as_i64());
+    let zombies = members
+        .iter()
+        .filter(|member| member["state"] == "Z")
+        .count();
+    json!({"status": "point-in-time-only", "pgid": expected_group,
+           "member_count": members.len(), "zombie_count": zombies,
+           "non_zombie_count": members.len() - zombies,
+           "unreadable_scan_entries_lower_bound": unreadable,
+           "membership_complete_proven": false, "members": members})
+}
+
+#[cfg(not(target_os = "linux"))]
+fn failed_group_membership(expected_group: i32) -> Value {
+    json!({"status": "proc-diagnostics-unavailable-on-platform", "pgid": expected_group})
+}
+
+/// Require strict whole-group disappearance. Failure diagnostics distinguish
+/// observed zombie retention from live members without weakening this oracle.
 fn expect_group_dead(pgid: i32, cause: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while group_alive(pgid) {
         assert!(
             Instant::now() < deadline,
-            "the journaled bash group (pgid {pgid}) survived {cause}: the reap never ran"
+            "the journaled bash group (pgid {pgid}) survived {cause}; failure-only membership: {}",
+            failed_group_membership(pgid)
         );
         std::thread::sleep(Duration::from_millis(100));
     }

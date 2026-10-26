@@ -1,6 +1,14 @@
 //! Request plumbing: enqueue/execute state machine, signal enum, and failure
 //! description helpers.
 
+#[cfg(all(test, unix))]
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 use super::{
     anyhow, json, lock, merge_signals, oneshot, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
     Duration, ExecBuffers, ExecuteOptions, ExecuteResult, ExecuteStatus, Instant,
@@ -353,7 +361,7 @@ mod tests {
         let python = dir.path().join("echo-refresh-frame");
         std::fs::write(
             &python,
-            concat!(
+            super::fixture_executable::script(concat!(
                 "#!/usr/bin/env python3\n",
                 "import json, sys\n",
                 "print(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.14.0'}), flush=True)\n",
@@ -362,7 +370,7 @@ mod tests {
                 "    if request['type'] == 'execute':\n",
                 "        print(json.dumps({'event': 'result', 'id': request['id'], 'text': str(request.get('refresh_plugins', False))}), flush=True)\n",
                 "        print(json.dumps({'event': 'done', 'id': request['id'], 'status': 'ok'}), flush=True)\n",
-            ),
+            ), "python3"),
         )
         .expect("write fake kernel");
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
@@ -406,7 +414,7 @@ mod tests {
         let python = dir.path().join("ready-but-not-reading");
         std::fs::write(
             &python,
-            "#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n",
+            super::fixture_executable::script("#!/usr/bin/env python3\nimport json, time\nprint(json.dumps({'event': 'ready', 'protocol': 3, 'python': '3.13.0'}), flush=True)\ntime.sleep(30)\n", "python3"),
         )
         .expect("write fake kernel");
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
@@ -478,7 +486,11 @@ for line in sys.stdin:
 
         let dir = tempfile::TempDir::new().expect("temp dir");
         let python = dir.path().join("torn-frame-kernel");
-        std::fs::write(&python, TORN_FRAME_RUNTIME).expect("write fake kernel");
+        std::fs::write(
+            &python,
+            super::fixture_executable::script(TORN_FRAME_RUNTIME, "python3"),
+        )
+        .expect("write fake kernel");
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
             .expect("chmod fake kernel");
         let manager = ReplKernelManager::new(crate::kernel::shared::KernelManagerOptions {

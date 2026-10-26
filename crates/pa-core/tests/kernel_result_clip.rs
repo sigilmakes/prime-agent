@@ -12,6 +12,13 @@ use pa_core::kernel::shared::{
     ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
 };
 
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 const FAKE_RUNTIME: &str = r#"#!/usr/bin/env python3
 import json
 import sys
@@ -29,7 +36,8 @@ for line in sys.stdin:
 async fn result_clipping_counts_characters_and_preserves_follow_up_cells() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let python = dir.path().join("fake-kernel");
-    std::fs::write(&python, FAKE_RUNTIME).expect("write fake runtime");
+    std::fs::write(&python, fixture_executable::script(FAKE_RUNTIME, "python3"))
+        .expect("write fake runtime");
     std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let manager = ReplKernelManager::new(KernelManagerOptions {
         python: Some(python),

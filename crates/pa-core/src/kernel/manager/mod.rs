@@ -154,6 +154,8 @@ struct MemoSlot {
     done: AtomicBool,
     failed: Mutex<Option<String>>,
     notify: Notify,
+    #[cfg(test)]
+    after_pending_check: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl MemoSlot {
@@ -162,6 +164,8 @@ impl MemoSlot {
             done: AtomicBool::new(false),
             failed: Mutex::new(None),
             notify: Notify::new(),
+            #[cfg(test)]
+            after_pending_check: Mutex::new(None),
         })
     }
 
@@ -174,10 +178,22 @@ impl MemoSlot {
 
     async fn wait(&self) -> anyhow::Result<()> {
         loop {
+            // Register before observing completion: notify_waiters does not
+            // retain a permit for a waiter created after the notification.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.done.load(Ordering::SeqCst) {
                 return self.outcome();
             }
-            self.notify.notified().await;
+            #[cfg(test)]
+            {
+                let after_pending_check = lock(&self.after_pending_check).take();
+                if let Some(after_pending_check) = after_pending_check {
+                    after_pending_check();
+                }
+            }
+            notified.await;
         }
     }
 
@@ -992,5 +1008,59 @@ impl ReplKernelManager {
         lock(&self.inner.guarded).state = KernelState::Shutdown;
         live_kernels::remove_inner(&self.inner);
         self.inner.cleanup_resources(Signal::Term);
+    }
+}
+
+#[cfg(test)]
+mod memo_slot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn memo_slot_completion_between_pending_check_and_wait_is_not_lost() {
+        let slot = MemoSlot::new();
+        let finishing = Arc::clone(&slot);
+        *lock(&slot.after_pending_check) = Some(Box::new(move || {
+            finishing.finish(Some(anyhow!("exact completion failure")));
+        }));
+        let result = tokio::time::timeout(Duration::from_secs(1), slot.wait())
+            .await
+            .expect("completion in the check/wait gap must wake the waiter");
+        assert_eq!(result.unwrap_err().to_string(), "exact completion failure");
+    }
+
+    #[tokio::test]
+    async fn memo_slot_completion_wakes_all_joiners_and_remains_durable() {
+        for fail in [false, true] {
+            let slot = MemoSlot::new();
+            let mut joiners = Vec::new();
+            for _ in 0..4 {
+                let mut waiter = Box::pin(slot.wait());
+                tokio::select! {
+                    biased;
+                    _ = &mut waiter => panic!("unfinished memo must remain pending"),
+                    () = std::future::ready(()) => {}
+                }
+                joiners.push(waiter);
+            }
+            slot.finish(fail.then(|| anyhow!("shared completion failure")));
+            for waiter in joiners {
+                let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+                    .await
+                    .expect("every registered joiner must wake");
+                if fail {
+                    assert_eq!(result.unwrap_err().to_string(), "shared completion failure");
+                } else {
+                    result.unwrap();
+                }
+            }
+            let late = tokio::time::timeout(Duration::from_secs(1), slot.wait())
+                .await
+                .expect("late joiner must observe durable completion");
+            if fail {
+                assert_eq!(late.unwrap_err().to_string(), "shared completion failure");
+            } else {
+                late.unwrap();
+            }
+        }
     }
 }

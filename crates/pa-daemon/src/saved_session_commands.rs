@@ -1095,8 +1095,11 @@ mod tombstone_usage_tests {
     #[cfg(unix)]
     #[test]
     fn a_non_regular_session_path_captures_nothing() {
-        let root = temp_dir("fifo-del");
-        let agent_dir = root.join("agent");
+        let root = tempfile::Builder::new()
+            .prefix("pd-")
+            .tempdir_in("/tmp")
+            .expect("short owned socket fixture directory");
+        let agent_dir = root.path().join("agent");
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let parent = sessions_dir.join("p.jsonl");

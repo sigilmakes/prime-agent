@@ -23,13 +23,30 @@ use pa_core::kernel::shared::{
     ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
 };
 
+mod fixture_executable {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/executable.rs"
+    ));
+}
+
 /// Speaks protocol v3: ready, then per request the oversized unterminated
 /// line (the corruption under test), a multi-MiB blank line followed by a
 /// plain stdout frame (the linear-scan test), or a plain done frame.
-fn fake_runtime_path() -> std::path::PathBuf {
-    // An immutable program avoids writable executable descriptors during concurrent spawns.
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/protocol_caps_kernel.py")
+fn fake_runtime_path() -> tempfile::TempPath {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut file = tempfile::NamedTempFile::new().expect("fake runtime file");
+    let source =
+        fixture_executable::script(include_str!("fixtures/protocol_caps_kernel.py"), "python3");
+    file.write_all(source.as_bytes())
+        .expect("write fake runtime");
+    file.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake runtime");
+    // Close the writable descriptor before any concurrent child can execute this file.
+    file.into_temp_path()
 }
 
 fn manager(python: std::path::PathBuf) -> ReplKernelManager {
@@ -49,7 +66,8 @@ fn manager(python: std::path::PathBuf) -> ReplKernelManager {
 
 #[tokio::test]
 async fn oversized_unterminated_protocol_line_poisons_and_repairs() {
-    let manager = manager(fake_runtime_path());
+    let fixture = fake_runtime_path();
+    let manager = manager(fixture.to_path_buf());
     manager
         .start(KernelStartOptions::default())
         .await
@@ -79,7 +97,8 @@ async fn oversized_unterminated_protocol_line_poisons_and_repairs() {
 async fn normal_protocol_lines_still_stream_through_the_bounded_reader() {
     // Multiple frames in one 64 Ki chunk plus a trailing partial line must
     // all dispatch: the chunked reader only poisons past the ceiling.
-    let manager = manager(fake_runtime_path());
+    let fixture = fake_runtime_path();
+    let manager = manager(fixture.to_path_buf());
     manager
         .start(KernelStartOptions::default())
         .await
@@ -114,7 +133,8 @@ async fn multi_mib_blank_protocol_line_is_read_in_linear_time() {
     // A 31 MiB blank line arrives in pipe reads of at most 64 KiB; rescanning
     // the buffered prefix per read would scan >= 8 GB. Blank lines skip
     // parse_event, so the fixed path pays only the one-pass scan.
-    let manager = manager(fake_runtime_path());
+    let fixture = fake_runtime_path();
+    let manager = manager(fixture.to_path_buf());
     manager
         .start(KernelStartOptions::default())
         .await

@@ -6,6 +6,9 @@
 mod accept_loop;
 mod adoption;
 mod clients;
+mod launch_admission;
+#[cfg(test)]
+mod launch_admission_tests;
 mod launch_budget;
 mod model_refresh;
 mod notes;
@@ -175,6 +178,8 @@ pub struct Supervisor {
     /// same-name rename or spawn fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) shutting_down: AtomicBool,
+    launch_admission: Arc<tokio::sync::RwLock<()>>,
+    launch_cleanup_uncertain: Arc<AtomicBool>,
     /// Whether some path has taken ownership of the one terminal stop pass: exactly one
     /// connection runs `begin_shutdown`, even if several clients notice the shutdown.
     shutdown_started: AtomicBool,
@@ -269,6 +274,8 @@ impl Supervisor {
             pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutting_down: AtomicBool::new(false),
+            launch_admission: Arc::new(tokio::sync::RwLock::new(())),
+            launch_cleanup_uncertain: Arc::new(AtomicBool::new(false)),
             shutdown_started: AtomicBool::new(false),
             shutdown_owner: std::sync::Mutex::new(None),
             accept_exit: AtomicBool::new(false),

@@ -899,6 +899,22 @@ fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
     );
 }
 
+/// Scalar-only diagnostics for fixture-owned pids; never log command lines or environments.
+fn fixture_process_scalars(pid: u32) -> (u32, Option<char>, Option<u32>, Option<u64>) {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    let fields: Vec<&str> = stat
+        .as_deref()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields))
+        .map(|fields| fields.split_whitespace().collect())
+        .unwrap_or_default();
+    (
+        pid,
+        fields.first().and_then(|state| state.chars().next()),
+        fields.get(1).and_then(|ppid| ppid.parse().ok()),
+        fields.get(19).and_then(|start| start.parse().ok()),
+    )
+}
+
 /// An agent-dir override can contain the shared worker directory while its
 /// own supervisor is pinned elsewhere. Such a root must still exclude other
 /// supervisors' workers from both discovery and the force residual sweep.
@@ -919,6 +935,8 @@ fn a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers() {
     let mut foreign_daemon = spawn_daemon(&foreign_socket, &foreign_agent, shared_tmp.path());
     let _foreign_session = create_scripted_session(&foreign_socket, &foreign_agent);
     let foreign_worker = tracked_worker_pid(&foreign_agent, &foreign_socket);
+    let original_own = fixture_process_scalars(own_worker);
+    let original_foreign = fixture_process_scalars(foreign_worker);
 
     let status = run_cli_state_env(
         shared_tmp.path(),
@@ -947,7 +965,36 @@ fn a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers() {
     );
     assert!(shutdown.status.success(), "{}", stderr(&shutdown));
     wait_until_stopped(&own_socket, &mut own_daemon);
-    assert!(wait_for_pid_exit(own_worker, Duration::from_secs(10)));
+    let own_exited = wait_for_pid_exit(own_worker, Duration::from_secs(10));
+    // Evaluate foreign protection even if the unchanged raw own-pid exit oracle fails.
+    let foreign_supervisor_alive = foreign_daemon
+        .child
+        .try_wait()
+        .expect("foreign supervisor diagnostic wait")
+        .is_none();
+    let foreign_worker_alive = pid_alive(foreign_worker);
+    let foreign_connects = UnixStream::connect(&foreign_socket).is_ok();
+    let report = serde_json::from_slice::<Value>(&shutdown.stdout).ok();
+    let shutdown_stopped = report
+        .as_ref()
+        .and_then(|report| report.get("stopped"))
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    let shutdown_failed = report
+        .as_ref()
+        .and_then(|report| report.get("failed"))
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    eprintln!(
+        "fixture_owner_diagnostic original_own={original_own:?} current_own={:?} original_foreign={original_foreign:?} current_foreign={:?} own_raw_exit={own_exited} foreign_supervisor_alive={foreign_supervisor_alive} foreign_worker_alive={foreign_worker_alive} foreign_connects={foreign_connects} shutdown_success={} shutdown_report_valid={} shutdown_stopped={shutdown_stopped:?} shutdown_failed={shutdown_failed:?}",
+        fixture_process_scalars(own_worker),
+        fixture_process_scalars(foreign_worker),
+        shutdown.status.success(),
+        report.is_some(),
+    );
+    assert!(own_exited);
+    assert!(foreign_supervisor_alive && foreign_worker_alive);
+    assert!(foreign_connects);
     assert!(
         foreign_daemon
             .child

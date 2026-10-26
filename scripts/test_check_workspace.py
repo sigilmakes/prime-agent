@@ -12,6 +12,15 @@ import check_workspace as gate
 
 
 class WorkspaceGateTests(unittest.TestCase):
+    def setUp(self):
+        # Runtime-only unit fixtures deliberately omit the skill tree.
+        discovery = patch.object(gate, "bundled_skills", return_value=[])
+        verification = patch.object(gate, "verify_skills")
+        discovery.start()
+        verification.start()
+        self.addCleanup(discovery.stop)
+        self.addCleanup(verification.stop)
+
     def runtime(self, root, text="runtime"):
         (root / "src/rlm/machines/demo").mkdir(parents=True)
         (root / "pyproject.toml").write_text("manifest")
@@ -109,8 +118,20 @@ class WorkspaceGateTests(unittest.TestCase):
             root = Path(temporary)
             args = ["check_workspace.py", "--state-root", str(root / "state"),
                     "--target-dir", str(root / "target"), "--cargo-home", str(root / "cargo")]
+            events = []
+            vendor_copy, vendor_identity = root / "state/vendor-mlua", {"source.rs":"reviewed"}
+            def record_command(command, **kwargs):
+                events.append(command[0] + " " + command[1])
+            def record_prepare(*arguments):
+                events.append("vendor prepare")
+                return vendor_copy, vendor_identity
+            def record_check(*arguments):
+                events.append("vendor check")
             with patch.object(gate.sys, "argv", args), \
-                    patch.object(gate, "prepare_kernel"), patch.object(gate, "run") as command:
+                    patch.object(gate, "prepare_kernel"), \
+                    patch.object(gate, "prepare_vendor_mlua", side_effect=record_prepare) as prepare_vendor, \
+                    patch.object(gate, "check_vendor_mlua", side_effect=record_check) as check_vendor, \
+                    patch.object(gate, "run", side_effect=record_command) as command:
                 self.assertEqual(gate.main(), 0)
             self.assertEqual(command.call_count, 3)
             fetch, build, checks = command.call_args_list
@@ -122,6 +143,25 @@ class WorkspaceGateTests(unittest.TestCase):
             self.assertEqual(checks.kwargs["env"]["CARGO_NET_OFFLINE"], "true")
             self.assertEqual(checks.kwargs["env"]["UV_OFFLINE"], "1")
             self.assertEqual(checks.kwargs["env"]["HOME"], str(root / "state/home"))
+
+            self.assertEqual(events, ["cargo fetch", "vendor prepare", "cargo build", "vendor check", "make workspace-check"])
+            prepare_vendor.assert_called_once()
+            check_vendor.assert_called_once()
+            prepared = prepare_vendor.call_args.args
+            qualified = check_vendor.call_args.args
+            self.assertEqual(prepared[0], fetch.kwargs["repo"])
+            self.assertEqual(prepared[1], root / "state")
+            self.assertIs(prepared[2], fetch.kwargs["env"])
+            self.assertEqual(prepared[3], fetch.kwargs["deadline"])
+            self.assertEqual(qualified[:3], (fetch.kwargs["repo"], vendor_copy, vendor_identity))
+            self.assertIs(qualified[3], checks.kwargs["env"])
+            self.assertEqual(qualified[4], checks.kwargs["deadline"])
+            self.assertEqual(qualified[4], prepared[3])
+            self.assertNotIn("CARGO_NET_OFFLINE", prepared[2])
+            self.assertEqual(qualified[3]["CARGO_NET_OFFLINE"], "true")
+            self.assertEqual(qualified[3]["UV_OFFLINE"], "1")
+            self.assertEqual(qualified[3]["CARGO_TARGET_DIR"], prepared[2]["CARGO_TARGET_DIR"])
+            self.assertEqual(qualified[3]["CARGO_HOME"], prepared[2]["CARGO_HOME"])
 
     def test_run_executes_the_requested_command_directly(self):
         with patch.object(gate.subprocess, "Popen") as launch:
@@ -212,10 +252,14 @@ class WorkspaceGateTests(unittest.TestCase):
             env = gate.isolated_environment(root, root / "state", root / "target", root / "cargo", {
                 "PA_WORKSPACE_BOOTSTRAP_PYTHON": str(bootstrap),
             })
-            with patch.object(gate, "run", side_effect=[None, self.observation(root / "prime-agent-runtime")]) as command:
+            with patch.object(gate, "run", side_effect=[None, None, None, self.observation(root / "prime-agent-runtime")]) as command:
                 gate.prepare_kernel(root, env, time.monotonic() + 10)
-            self.assertEqual(command.call_count, 2)
-            sync, probe = command.call_args_list
+            self.assertEqual(command.call_count, 4)
+            sync, install, dependency_check, probe = command.call_args_list
+            self.assertEqual(install.args[0][:3], ["uv", "pip", "install"])
+            self.assertNotIn(str(root / "prime-agent-runtime"), install.args[0])
+            self.assertIn("--no-deps", install.args[0])
+            self.assertEqual(dependency_check.args[0][:3], ["uv", "pip", "check"])
             self.assertEqual(sync.args[0], [
                 "uv", "sync", "--locked", "--no-default-groups", "--group", "kernel",
                 "--no-config", "--project", str(root / "prime-agent-runtime"),
@@ -243,6 +287,233 @@ class WorkspaceGateTests(unittest.TestCase):
                     command.assert_not_called()
                     self.assertNotIn("PRIME_AGENT_KERNEL_PYTHON", env)
                     self.assertNotIn("PA_E2E_KERNEL_PYTHON", env)
+
+
+class BundledSkillGateTests(unittest.TestCase):
+    def test_probe_uses_fresh_private_bytecode_prefix_and_removes_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = {"PRIME_AGENT_KERNEL_VENV": str(root / "kernel")}
+            caches = []
+            def observe(command, **kwargs):
+                self.assertEqual(command[:4], ["/approved/python", "-I", "-B", "-X"])
+                cache = Path(command[4].removeprefix("pycache_prefix="))
+                self.assertEqual(cache.parent, root)
+                self.assertTrue(cache.is_dir())
+                self.assertEqual(list(cache.iterdir()), [])
+                caches.append(cache)
+                return "{}"
+            with patch.object(gate, "run", side_effect=observe):
+                for _ in range(2):
+                    gate.probe_kernel(Path("/approved/python"), "pass", root, env, 1)
+            self.assertNotEqual(caches[0], caches[1])
+            self.assertTrue(all(not cache.exists() for cache in caches))
+
+    def test_checkout_manifest_set_includes_required_apis(self):
+        skills = gate.bundled_skills(Path(gate.__file__).resolve().parents[1])
+        self.assertEqual({module for _, module, _, _ in skills}, set(gate.SKILL_APIS))
+        self.assertIn("complete", gate.SKILL_APIS["goal"])
+        self.assertIn("send", gate.SKILL_APIS["agent_message"])
+
+    def test_cold_installer_receives_all_checkout_skills_only_after_new_venv_sync(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "prime-agent-runtime"
+            WorkspaceGateTests().runtime(source)
+            bootstrap = root / "python"
+            bootstrap.write_text("fixture")
+            bootstrap.chmod(0o755)
+            env = gate.isolated_environment(root, root / "state", root / "target", root / "cargo",
+                                            {"PA_WORKSPACE_BOOTSTRAP_PYTHON": str(bootstrap)})
+            skills = [(name, name, root / "skills" / name, "src/" + name)
+                      for name in gate.SKILL_APIS]
+            with patch.object(gate, "bundled_skills", return_value=skills), \
+                    patch.object(gate, "verify_skills") as verify, \
+                    patch.object(gate, "run", side_effect=[None, None, None, WorkspaceGateTests().observation(source)]) as command:
+                gate.prepare_kernel(root, env, 1)
+            install = command.call_args_list[1].args[0]
+            for _, _, skill_source, _ in skills:
+                self.assertIn(str(skill_source), install)
+            self.assertNotIn(str(source), install)
+            self.assertIn("--no-deps", install)
+            self.assertNotIn("--reinstall", install)
+            self.assertEqual(install[install.index("--python") + 1],
+                             str(Path(env["PRIME_AGENT_KERNEL_VENV"]) / "bin/python"))
+            verify.assert_called_once()
+
+    def test_skill_provenance_rejects_stale_copies_and_wrong_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "skills/goal"
+            package = source / "src/goal"
+            package.mkdir(parents=True)
+            (source / "pyproject.toml").write_text("manifest")
+            (package / "__init__.py").write_text("async def complete(): pass")
+            copied = root / "installed/goal"
+            shutil.copytree(package, copied)
+            skills = [("goal", "goal", source, "src/goal")]
+            observation = {"goal": {"direct_url": {"url": source.as_uri()},
+                                     "package_root": str(copied)}}
+            def verify():
+                gate.verify_skills(root, Path("/approved/python"),
+                                   {"PRIME_AGENT_KERNEL_VENV": str(root / "kernel")}, 1, skills)
+            with patch.object(gate, "run", return_value=json.dumps(observation)) as command:
+                verify()
+                self.assertEqual(command.call_args.args[0][:3], ["/approved/python", "-I", "-B"])
+            (copied / "__init__.py").write_text("stale")
+            with patch.object(gate, "run", return_value=json.dumps(observation)):
+                with self.assertRaisesRegex(ValueError, "actually imported bundled skill goal"):
+                    verify()
+            observation["goal"]["direct_url"]["url"] = "https://example.invalid/goal"
+            with patch.object(gate, "run", return_value=json.dumps(observation)):
+                with self.assertRaisesRegex(ValueError, "local-source"):
+                    verify()
+            other = root / "other"
+            shutil.copytree(source, other)
+            (other / "pyproject.toml").write_text("wrong manifest")
+            observation["goal"]["direct_url"]["url"] = other.as_uri()
+            with patch.object(gate, "run", return_value=json.dumps(observation)):
+                with self.assertRaisesRegex(ValueError, "source identity"):
+                    verify()
+
+    def test_approved_missing_skills_fail_without_installer_or_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "prime-agent-runtime"
+            WorkspaceGateTests().runtime(source)
+            observation = WorkspaceGateTests().observation(source)
+            env = gate.isolated_environment(root, root / "state", root / "target", root / "cargo", {})
+            with patch.object(gate, "bundled_skills", return_value=[("goal", "goal", root, "src/goal")]), \
+                    patch.object(gate, "run", return_value=observation) as command, \
+                    patch.object(gate, "verify_skills", side_effect=ValueError("missing goal")):
+                with self.assertRaisesRegex(ValueError, "missing goal"):
+                    gate.prepare_kernel(root, env, 1, root / "approved/bin/python")
+            self.assertEqual(command.call_count, 2)
+            self.assertEqual(command.call_args_list[0].args[0][:3], ["uv", "pip", "check"])
+            self.assertFalse(any("install" in call.args[0] for call in command.call_args_list))
+            self.assertNotIn("PA_E2E_KERNEL_PYTHON", env)
+            self.assertFalse(Path(env["PRIME_AGENT_KERNEL_VENV"]).exists())
+
+
+
+class VendorMluaGateTests(unittest.TestCase):
+    def fixture(self, root):
+        repo, state = root / "repo", root / "state"
+        source = repo / "vendor/mlua"
+        source.mkdir(parents=True)
+        state.mkdir()
+        (repo / "scripts").mkdir()
+        (source / "Cargo.toml").write_text("manifest")
+        (source / "source.rs").write_text("reviewed source")
+        lock = b"reviewed locked graph"
+        (repo / "vendor/mlua/Cargo.lock").write_bytes(lock)
+        provenance = {"schema":1,"backend":"lua54","features":gate.VENDOR_MLUA_FEATURES.split(","),
+            "manifest_sha256":gate.hashlib.sha256(b"manifest").hexdigest(),
+            "lock_sha256":gate.hashlib.sha256(lock).hexdigest()}
+        (repo / "scripts/vendor-mlua-lock.json").write_text(json.dumps(provenance))
+        return repo, state
+
+    def listing(self, command, **kwargs):
+        if command[-1] == "--list":
+            if "--lib" in command:
+                return "\n".join("thread::wake_debt_tests::" + name + ": test" for name in gate.VENDOR_MLUA_CONTRACTS)
+            return "\n".join(name + ": test" for name in gate.VENDOR_MLUA_HOOKS)
+        return ""
+
+    def test_exact_copy_locked_fetch_offline_named_contracts_full_hooks_and_shared_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, state = self.fixture(Path(tmp))
+            env, deadline = {"CARGO_TARGET_DIR":"/one-target", "CARGO_HOME":"/one-cache"}, 123
+            with patch.object(gate, "run", side_effect=self.listing) as run:
+                copied, identity = gate.prepare_vendor_mlua(repo, state, env, deadline)
+                gate.check_vendor_mlua(repo, copied, identity, env, deadline)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0], ["cargo","fetch","--locked","--manifest-path",str(copied / "Cargo.toml")])
+            self.assertEqual(len(commands), 13)
+            for command in commands[1:]:
+                self.assertIn("--locked", command)
+                self.assertIn("--offline", command)
+                self.assertIn("--no-default-features", command)
+                self.assertEqual(command[command.index("--features")+1], "lua54,vendored,async,send,serialize")
+            self.assertEqual([command[-2:] for command in commands[-3:]], [["--test", "hooks"], ["--test", "async"], ["--test", "thread"]])
+            for call in run.call_args_list:
+                self.assertIs(call.kwargs["env"], env)
+                self.assertEqual(call.kwargs["deadline"], deadline)
+                self.assertEqual(call.kwargs["repo"], repo)
+            self.assertEqual((copied / "source.rs").read_bytes(), (repo / "vendor/mlua/source.rs").read_bytes())
+
+    def test_source_mutation_during_cargo_gate_fails_final_identity_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, state = self.fixture(Path(tmp))
+            with patch.object(gate, "run", return_value=""):
+                copied, identity = gate.prepare_vendor_mlua(repo, state, {}, 1)
+            def mutate(command, **kwargs):
+                answer = self.listing(command, **kwargs)
+                if command[-2:] == ["--test", "thread"]:
+                    (copied / "source.rs").write_text("changed during test")
+                return answer
+            with patch.object(gate, "run", side_effect=mutate):
+                with self.assertRaisesRegex(ValueError, "source changed"):
+                    gate.check_vendor_mlua(repo, copied, identity, {}, 1)
+
+    def test_missing_contract_fails_before_any_contract_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, state = self.fixture(Path(tmp))
+            with patch.object(gate, "run", return_value=""):
+                copied, identity = gate.prepare_vendor_mlua(repo, state, {}, 1)
+            with patch.object(gate, "run", return_value="") as run:
+                with self.assertRaisesRegex(ValueError, "contract test missing"):
+                    gate.check_vendor_mlua(repo, copied, identity, {}, 1)
+            self.assertEqual(run.call_count, 1)
+
+    def test_missing_hook_fails_before_named_contracts_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, state = self.fixture(Path(tmp))
+            with patch.object(gate, "run", return_value=""):
+                copied, identity = gate.prepare_vendor_mlua(repo, state, {}, 1)
+            listing = "\n".join("thread::wake_debt_tests::" + name + ": test" for name in gate.VENDOR_MLUA_CONTRACTS)
+            with patch.object(gate, "run", side_effect=[listing, ""]) as run:
+                with self.assertRaisesRegex(ValueError, "hook regression missing"):
+                    gate.check_vendor_mlua(repo, copied, identity, {}, 1)
+            self.assertEqual(run.call_count, 2)
+
+    def test_provenance_mismatch_and_source_symlink_fail_before_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, state = self.fixture(Path(tmp))
+            (repo / "vendor/mlua/Cargo.lock").write_text("changed lock")
+            with patch.object(gate, "run") as run:
+                with self.assertRaisesRegex(ValueError, "provenance mismatch"):
+                    gate.prepare_vendor_mlua(repo, state, {}, 1)
+                run.assert_not_called()
+            (repo / "vendor/mlua/link").symlink_to("source.rs")
+            with patch.object(gate, "run") as run:
+                with self.assertRaisesRegex(ValueError, "symlinks"):
+                    gate.prepare_vendor_mlua(repo, state, {}, 1)
+                run.assert_not_called()
+
+    def test_copy_or_lock_mutation_fails_before_offline_execution(self):
+        for changed in ("source.rs", "Cargo.lock"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as tmp:
+                repo, state = self.fixture(Path(tmp))
+                with patch.object(gate, "run", return_value=""):
+                    copied, identity = gate.prepare_vendor_mlua(repo, state, {}, 1)
+                (copied / changed).write_text("mutated")
+                with patch.object(gate, "run") as run:
+                    with self.assertRaisesRegex(ValueError, "identity mismatch|source changed"):
+                        gate.check_vendor_mlua(repo, copied, identity, {}, 1)
+                    run.assert_not_called()
+
+    def test_copied_package_cannot_join_outer_workspace_or_reuse_existing_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, state = self.fixture(Path(tmp))
+            with patch.object(gate, "run") as run:
+                with self.assertRaisesRegex(ValueError, "outside the workspace"):
+                    gate.prepare_vendor_mlua(repo, repo / "state", {}, 1)
+                run.assert_not_called()
+            with patch.object(gate, "run", return_value=""):
+                gate.prepare_vendor_mlua(repo, state, {}, 1)
+                with self.assertRaises(FileExistsError):
+                    gate.prepare_vendor_mlua(repo, state, {}, 1)
 
 
 if __name__ == "__main__":

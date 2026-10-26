@@ -22,6 +22,8 @@ use {
         marker::PhantomData,
         pin::Pin,
         ptr::NonNull,
+        sync::{Arc, Weak, atomic::{AtomicBool, Ordering}},
+        task::Wake,
         task::{Context, Poll, Waker},
     },
 };
@@ -88,6 +90,9 @@ pub struct AsyncThread<R> {
     thread: Thread,
     ret: PhantomData<fn() -> R>,
     recycle: bool,
+    resume_nargs: Option<c_int>,
+    wake_debt: Arc<AtomicBool>,
+    wake_route: Weak<FutureWake>,
 }
 
 impl Thread {
@@ -435,6 +440,9 @@ impl Thread {
                 thread: self,
                 ret: PhantomData,
                 recycle: false,
+                resume_nargs: None,
+                wake_debt: Arc::new(AtomicBool::new(false)),
+                wake_route: Weak::new(),
             })
         }
     }
@@ -514,6 +522,13 @@ impl LuaType for Thread {
 
 #[cfg(feature = "async")]
 impl<R> AsyncThread<R> {
+    fn clear_wake_route(&self) {
+        if let Some(route) = self.wake_route.upgrade() {
+            let previous = route.caller.lock().take();
+            drop(previous);
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn set_recyclable(&mut self, recyclable: bool) {
         self.recycle = recyclable;
@@ -523,6 +538,7 @@ impl<R> AsyncThread<R> {
 #[cfg(feature = "async")]
 impl<R> Drop for AsyncThread<R> {
     fn drop(&mut self) {
+        self.clear_wake_route();
         if self.recycle {
             if let Some(lua) = self.thread.0.lua.try_lock() {
                 unsafe {
@@ -551,33 +567,63 @@ impl<R: FromLuaMulti> Stream for AsyncThread<R> {
     type Item = Result<R>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let lua = self.thread.0.lua.lock();
-        let nargs = match self.thread.status_inner(&lua) {
+        let this = self.get_mut();
+        let lua = this.thread.0.lua.lock();
+        let nargs = match this.thread.status_inner(&lua) {
             ThreadStatusInner::New(nargs) | ThreadStatusInner::Yielded(nargs) => nargs,
-            _ => return Poll::Ready(None),
+            _ => { this.clear_wake_route(); return Poll::Ready(None); },
         };
 
+        // A retained hook-suspended frame is not a list of resume arguments.
+        let nargs = this.resume_nargs.take().unwrap_or(nargs);
         let state = lua.state();
-        let thread_state = self.thread.state();
+        let thread_state = this.thread.state();
         unsafe {
             let _sg = StackGuard::new(state);
-            let _thread_sg = StackGuard::with_top(thread_state, 0);
-            let _wg = WakerGuard::new(&lua, cx.waker());
+            let mut thread_sg = StackGuard::with_top(thread_state, 0);
+            let route = match this.wake_route.upgrade() {
+                Some(route) => route,
+                None => {
+                    let route = Arc::new(FutureWake {
+                        caller: parking_lot::Mutex::new(Some(Arc::new(cx.waker().clone()))),
+                        debt: this.wake_debt.clone(),
+                    });
+                    this.wake_route = Arc::downgrade(&route);
+                    route
+                }
+            };
+            let caller = Arc::new(cx.waker().clone());
+            let previous = std::mem::replace(&mut *route.caller.lock(), Some(caller));
+            drop(previous);
+            let proxy = Waker::from(route);
+            let _wg = WakerGuard::new(&lua, &proxy, this.wake_debt.clone());
 
-            let (status, nresults) = (self.thread).resume_inner(&lua, nargs)?;
+            let (status, nresults) = (this.thread).resume_inner(&lua, nargs).map_err(|error| { this.clear_wake_route(); error })?;
 
             if status.is_yielded() {
+                this.resume_nargs = Some(0);
+                if nresults == 0 {
+                    thread_sg.keep(ffi::lua_gettop(thread_state));
+                }
                 if nresults == 1 && is_poll_pending(thread_state) {
+                    if this.wake_debt.load(Ordering::SeqCst) {
+                        cx.waker().wake_by_ref();
+                    }
                     return Poll::Pending;
                 }
                 // Continue polling
                 cx.waker().wake_by_ref();
             }
 
-            check_stack(state, nresults + 1)?;
+            if !status.is_yielded() {
+                this.clear_wake_route();
+            }
+            check_stack(state, nresults + 1).map_err(|error| { this.clear_wake_route(); error })?;
             ffi::lua_xmove(thread_state, state, nresults);
 
-            Poll::Ready(Some(R::from_stack_multi(nresults, &lua)))
+            let result = R::from_stack_multi(nresults, &lua);
+            if result.is_err() { this.clear_wake_route(); }
+            Poll::Ready(Some(result))
         }
     }
 }
@@ -587,35 +633,61 @@ impl<R: FromLuaMulti> Future for AsyncThread<R> {
     type Output = Result<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let lua = self.thread.0.lua.lock();
-        let nargs = match self.thread.status_inner(&lua) {
+        let this = self.get_mut();
+        let lua = this.thread.0.lua.lock();
+        let nargs = match this.thread.status_inner(&lua) {
             ThreadStatusInner::New(nargs) | ThreadStatusInner::Yielded(nargs) => nargs,
-            _ => return Poll::Ready(Err(Error::CoroutineUnresumable)),
+            _ => { this.clear_wake_route(); return Poll::Ready(Err(Error::CoroutineUnresumable)); },
         };
 
+        // A retained hook-suspended frame is not a list of resume arguments.
+        let nargs = this.resume_nargs.take().unwrap_or(nargs);
         let state = lua.state();
-        let thread_state = self.thread.state();
+        let thread_state = this.thread.state();
         unsafe {
             let _sg = StackGuard::new(state);
             let mut thread_sg = StackGuard::with_top(thread_state, 0);
-            let _wg = WakerGuard::new(&lua, cx.waker());
+            let route = match this.wake_route.upgrade() {
+                Some(route) => route,
+                None => {
+                    let route = Arc::new(FutureWake {
+                        caller: parking_lot::Mutex::new(Some(Arc::new(cx.waker().clone()))),
+                        debt: this.wake_debt.clone(),
+                    });
+                    this.wake_route = Arc::downgrade(&route);
+                    route
+                }
+            };
+            let caller = Arc::new(cx.waker().clone());
+            let previous = std::mem::replace(&mut *route.caller.lock(), Some(caller));
+            drop(previous);
+            let proxy = Waker::from(route);
+            let _wg = WakerGuard::new(&lua, &proxy, this.wake_debt.clone());
 
-            let (status, nresults) = self.thread.resume_inner(&lua, nargs)?;
+            let (status, nresults) = this.thread.resume_inner(&lua, nargs).map_err(|error| { this.clear_wake_route(); error })?;
 
             if status.is_yielded() {
+                this.resume_nargs = Some(0);
                 if nresults == 0 {
                     // A count-hook suspension exposes the current Lua frame, not
                     // returned yield values. Keep those locals until resume.
                     thread_sg.keep(ffi::lua_gettop(thread_state));
                 }
-                if !(nresults == 1 && is_poll_pending(thread_state)) {
+                if nresults == 1 && is_poll_pending(thread_state) {
+                    if this.wake_debt.load(Ordering::SeqCst) {
+                        cx.waker().wake_by_ref();
+                    }
+                } else {
                     // Ignore values returned via yield()
                     cx.waker().wake_by_ref();
                 }
                 return Poll::Pending;
             }
 
-            check_stack(state, nresults + 1)?;
+            if !status.is_yielded() {
+                this.clear_wake_route();
+            }
+            check_stack(state, nresults + 1).map_err(|error| { this.clear_wake_route(); error })?;
             ffi::lua_xmove(thread_state, state, nresults);
 
             Poll::Ready(R::from_stack_multi(nresults, &lua))
@@ -630,20 +702,44 @@ unsafe fn is_poll_pending(state: *mut ffi::lua_State) -> bool {
 }
 
 #[cfg(feature = "async")]
+struct FutureWake {
+    caller: parking_lot::Mutex<Option<Arc<Waker>>>,
+    debt: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "async")]
+impl Wake for FutureWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.debt.store(true, Ordering::SeqCst);
+        let caller = self.caller.lock().clone();
+        if let Some(caller) = caller {
+            caller.wake_by_ref();
+        }
+    }
+}
+
+#[cfg(feature = "async")]
 struct WakerGuard<'lua, 'a> {
     lua: &'lua RawLua,
     prev: NonNull<Waker>,
+    previous_debt: Option<Arc<AtomicBool>>,
     _phantom: PhantomData<&'a ()>,
 }
 
 #[cfg(feature = "async")]
 impl<'lua, 'a> WakerGuard<'lua, 'a> {
     #[inline]
-    pub fn new(lua: &'lua RawLua, waker: &'a Waker) -> Result<WakerGuard<'lua, 'a>> {
+    pub fn new(lua: &'lua RawLua, waker: &'a Waker, debt: Arc<AtomicBool>) -> Result<WakerGuard<'lua, 'a>> {
         let prev = lua.set_waker(NonNull::from(waker));
+        let previous_debt = lua.set_wake_debt(Some(debt));
         Ok(WakerGuard {
             lua,
             prev,
+            previous_debt,
             _phantom: PhantomData,
         })
     }
@@ -653,6 +749,7 @@ impl<'lua, 'a> WakerGuard<'lua, 'a> {
 impl Drop for WakerGuard<'_, '_> {
     fn drop(&mut self) {
         self.lua.set_waker(self.prev);
+        self.lua.set_wake_debt(self.previous_debt.take());
     }
 }
 
@@ -668,4 +765,270 @@ mod assertions {
     static_assertions::assert_not_impl_any!(AsyncThread<()>: Send);
     #[cfg(all(feature = "async", feature = "send"))]
     static_assertions::assert_impl_all!(AsyncThread<()>: Send, Sync);
+}
+
+#[cfg(all(test, feature = "async", any(feature = "lua54", feature = "lua55")))]
+mod wake_debt_tests {
+    use super::*;
+    use crate::Lua;
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) { self.wake_by_ref(); }
+        fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    }
+
+    #[test]
+    fn route_migration_forwards_to_latest_parent_and_clears_on_drop() {
+        let first = Arc::new(CountWake(AtomicUsize::new(0)));
+        let second = Arc::new(CountWake(AtomicUsize::new(0)));
+        let debt = Arc::new(AtomicBool::new(false));
+        let route = Arc::new(FutureWake { caller: parking_lot::Mutex::new(Some(Arc::new(Waker::from(first.clone())))), debt: debt.clone() });
+        let old_proxy = Waker::from(route.clone());
+        let parent = Arc::new(Waker::from(second.clone()));
+        let previous = std::mem::replace(&mut *route.caller.lock(), Some(parent));
+        drop(previous);
+        old_proxy.wake_by_ref();
+        assert!(debt.load(Ordering::SeqCst));
+        assert_eq!(first.0.load(Ordering::SeqCst), 0);
+        assert_eq!(second.0.load(Ordering::SeqCst), 1);
+        let previous = route.caller.lock().take();
+        drop(previous);
+        old_proxy.wake_by_ref();
+        assert_eq!(second.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn real_wake_debt_before_during_after_ack_is_not_consumed_by_forwarding() {
+        let parent = Arc::new(CountWake(AtomicUsize::new(0)));
+        let debt = Arc::new(AtomicBool::new(false));
+        let route = Arc::new(FutureWake { caller: parking_lot::Mutex::new(Some(Arc::new(Waker::from(parent.clone())))), debt: debt.clone() });
+        let wake = Waker::from(route);
+        wake.wake_by_ref();
+        assert!(debt.load(Ordering::SeqCst));
+        debt.store(false, Ordering::SeqCst); // Actual Rust poll acknowledges prior wake.
+        assert!(!debt.load(Ordering::SeqCst));
+        let concurrent = wake.clone();
+        std::thread::spawn(move || concurrent.wake()).join().unwrap();
+        assert!(debt.load(Ordering::SeqCst));
+        assert_eq!(parent.0.load(Ordering::SeqCst), 2);
+        assert!(debt.load(Ordering::SeqCst)); // A conditional handoff does not acknowledge.
+        debt.store(false, Ordering::SeqCst);
+        wake.wake_by_ref();
+        assert!(debt.load(Ordering::SeqCst));
+        assert_eq!(parent.0.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn nested_waker_guards_restore_both_bindings() -> crate::Result<()> {
+        let lua = Lua::new();
+        let raw = lua.lock();
+        let initial = raw.waker() as *const Waker;
+        let first = Waker::from(Arc::new(CountWake(AtomicUsize::new(0))));
+        let second = Waker::from(Arc::new(CountWake(AtomicUsize::new(0))));
+        let first_debt = Arc::new(AtomicBool::new(false));
+        let second_debt = Arc::new(AtomicBool::new(false));
+        {
+            let _outer = WakerGuard::new(&raw, &first, first_debt.clone())?;
+            assert!(std::ptr::eq(raw.waker(), &first));
+            {
+                let _inner = WakerGuard::new(&raw, &second, second_debt.clone())?;
+                assert!(std::ptr::eq(raw.waker(), &second));
+                let bound = raw.set_wake_debt(None);
+                assert!(Arc::ptr_eq(bound.as_ref().unwrap(), &second_debt));
+                raw.set_wake_debt(bound);
+            }
+            assert!(std::ptr::eq(raw.waker(), &first));
+            let bound = raw.set_wake_debt(None);
+            assert!(Arc::ptr_eq(bound.as_ref().unwrap(), &first_debt));
+            raw.set_wake_debt(bound);
+        }
+        assert_eq!(raw.waker() as *const Waker, initial);
+        assert!(raw.set_wake_debt(None).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn never_ready_no_wake_future_does_not_schedule_marker_spin() -> crate::Result<()> {
+        let lua = Lua::new();
+        lua.globals().set("wait_forever", lua.create_async_function(|_, ()| async {
+            std::future::pending::<()>().await;
+            Ok(())
+        })?)?;
+        let function = lua.load("wait_forever()").into_function()?;
+        let mut execution = lua.create_thread(function)?.into_async::<()>(())?;
+        let parent = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(parent.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut execution).poll(&mut cx).is_pending());
+        assert_eq!(parent.0.load(Ordering::SeqCst), 0);
+        assert!(!execution.wake_debt.load(Ordering::SeqCst));
+        drop(execution);
+        assert_eq!(parent.0.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn async_thread_migration_routes_registered_proxy_without_rust_repoll() -> crate::Result<()> {
+        struct PendingProbe {
+            polls: Arc<AtomicUsize>,
+            registered: Arc<parking_lot::Mutex<Option<Waker>>>,
+        }
+        impl Future for PendingProbe {
+            type Output = crate::Result<i64>;
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                *self.registered.lock() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+        let lua = Lua::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let registered = Arc::new(parking_lot::Mutex::new(None));
+        let callback_polls = polls.clone();
+        let callback_registered = registered.clone();
+        lua.globals().set("await_tick", lua.create_async_function(move |_, ()| PendingProbe {
+            polls: callback_polls.clone(), registered: callback_registered.clone(),
+        })?)?;
+        let instructions = Arc::new(AtomicUsize::new(0));
+        let counted = instructions.clone();
+        lua.set_global_hook(HookTriggers::new().every_nth_instruction(1), move |_, _| {
+            let instruction = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            assert!(instruction < 100_000);
+            Ok(if instruction == 49 { crate::VmState::Yield } else { crate::VmState::Continue })
+        })?;
+        let function = lua.load(r#"
+            local run = {"alpha", "beta", "gamma", "delta"}
+            local scalar = 271828
+            local function add(term)
+                assert(type(term) == "string", "concat result lost across hook yield")
+                return term
+            end
+            local joined = add(table.concat(run))
+            assert(joined == "alphabetagammadelta")
+            assert(scalar == 271828 and run[3] == "gamma")
+            assert(await_tick() == 17)
+            assert(table.concat(run) == joined)
+            return joined .. ":" .. scalar
+        "#).into_function()?;
+        let mut execution = lua.create_thread(function)?.into_async::<String>(())?;
+        let first = Arc::new(CountWake(AtomicUsize::new(0)));
+        let second = Arc::new(CountWake(AtomicUsize::new(0)));
+        let first_waker = Waker::from(first.clone());
+        let second_waker = Waker::from(second.clone());
+        assert!(Pin::new(&mut execution).poll(&mut Context::from_waker(&first_waker)).is_pending());
+        assert_eq!(polls.load(Ordering::SeqCst), 1, "hook must interrupt after Rust registration");
+        let old_proxy = registered.lock().as_ref().unwrap().clone();
+        assert!(Pin::new(&mut execution).poll(&mut Context::from_waker(&second_waker)).is_pending());
+        assert_eq!(polls.load(Ordering::SeqCst), 1, "migration poll must only advance hook handoff");
+        let before_first = first.0.load(Ordering::SeqCst);
+        let before_second = second.0.load(Ordering::SeqCst);
+        old_proxy.wake_by_ref();
+        assert_eq!(first.0.load(Ordering::SeqCst), before_first);
+        assert_eq!(second.0.load(Ordering::SeqCst), before_second + 1);
+        // Drain only actual notifications, never manually spin a Pending future.
+        let mut consumed = before_second;
+        let mut drains = 0;
+        while second.0.load(Ordering::SeqCst) > consumed {
+            consumed = second.0.load(Ordering::SeqCst);
+            drains += 1;
+            assert!(drains < 16, "never-ready future scheduled indefinitely");
+            assert!(Pin::new(&mut execution).poll(&mut Context::from_waker(&second_waker)).is_pending());
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert!(!execution.wake_debt.load(Ordering::SeqCst));
+        drop(execution);
+        let after_drop = second.0.load(Ordering::SeqCst);
+        old_proxy.wake_by_ref();
+        assert_eq!(second.0.load(Ordering::SeqCst), after_drop);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_route_registration_and_real_wake_forward_once() {
+        for _ in 0..64 {
+            let first = Arc::new(CountWake(AtomicUsize::new(0)));
+            let second = Arc::new(CountWake(AtomicUsize::new(0)));
+            let debt = Arc::new(AtomicBool::new(false));
+            let route = Arc::new(FutureWake { caller: parking_lot::Mutex::new(Some(Arc::new(Waker::from(first.clone())))), debt: debt.clone() });
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let notifying_route = route.clone();
+            let notifying_gate = gate.clone();
+            let notifier = std::thread::spawn(move || {
+                notifying_gate.wait();
+                Waker::from(notifying_route).wake();
+            });
+            let latest = Arc::new(Waker::from(second.clone()));
+            gate.wait();
+            let previous = std::mem::replace(&mut *route.caller.lock(), Some(latest));
+            drop(previous);
+            notifier.join().unwrap();
+            assert!(debt.load(Ordering::SeqCst));
+            assert_eq!(first.0.load(Ordering::SeqCst) + second.0.load(Ordering::SeqCst), 1);
+            // Once registration finished, every old proxy must reach latest parent.
+            let before = second.0.load(Ordering::SeqCst);
+            Waker::from(route).wake();
+            assert_eq!(second.0.load(Ordering::SeqCst), before + 1);
+        }
+    }
+
+    #[test]
+    fn actual_rust_poll_ack_preserves_concurrent_notification() -> crate::Result<()> {
+        struct RacingPending {
+            polls: Arc<AtomicUsize>,
+            registered: Arc<parking_lot::Mutex<Option<Waker>>>,
+        }
+        impl Future for RacingPending {
+            type Output = crate::Result<()>;
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+                *self.registered.lock() = Some(cx.waker().clone());
+                if poll == 1 {
+                    // raw.rs has acknowledged debt before entering this actual poll.
+                    let gate = Arc::new(std::sync::Barrier::new(2));
+                    let notify_gate = gate.clone();
+                    let notify = cx.waker().clone();
+                    let notifier = std::thread::spawn(move || {
+                        notify_gate.wait();
+                        notify.wake();
+                    });
+                    gate.wait();
+                    notifier.join().unwrap();
+                }
+                Poll::Pending
+            }
+        }
+        let lua = Lua::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let registered = Arc::new(parking_lot::Mutex::new(None));
+        let callback_polls = polls.clone();
+        let callback_registered = registered.clone();
+        lua.globals().set("racing_pending", lua.create_async_function(move |_, ()| RacingPending {
+            polls: callback_polls.clone(), registered: callback_registered.clone(),
+        })?)?;
+        let function = lua.load("racing_pending()").into_function()?;
+        let mut execution = lua.create_thread(function)?.into_async::<()>(())?;
+        let parent = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(parent.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut execution).poll(&mut cx).is_pending());
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert!(execution.wake_debt.load(Ordering::SeqCst), "wake during actual poll must survive raw ack");
+        assert!(parent.0.load(Ordering::SeqCst) >= 1);
+        // Consume the real notification: actual Rust poll now acknowledges it.
+        assert!(Pin::new(&mut execution).poll(&mut cx).is_pending());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert!(!execution.wake_debt.load(Ordering::SeqCst));
+        let count = parent.0.load(Ordering::SeqCst);
+        // An after-poll wake is retained until the next actual poll.
+        let registered = registered.lock().as_ref().unwrap().clone();
+        registered.wake_by_ref();
+        assert_eq!(parent.0.load(Ordering::SeqCst), count + 1);
+        assert!(execution.wake_debt.load(Ordering::SeqCst));
+        assert!(Pin::new(&mut execution).poll(&mut cx).is_pending());
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        assert!(!execution.wake_debt.load(Ordering::SeqCst));
+        Ok(())
+    }
 }

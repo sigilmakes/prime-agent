@@ -8,6 +8,9 @@ export CARGO_PROFILE_DEV_DEBUG := 0
 export CARGO_PROFILE_TEST_DEBUG := 0
 PACKAGES ?= pa-cli
 PACKAGE_FLAGS = $(foreach package,$(PACKAGES),-p $(package))
+# Detached fixture children need an owned reaping ancestor even under a non-reaping
+# container PID 1. Do not change their strict whole-process-group exit assertions.
+WORKSPACE_TEST_RUNNER = $(if $(filter Linux,$(shell uname -s)),tini -s --)
 
 help:
 	@printf '%s\n' \
@@ -51,7 +54,7 @@ package-check:
 workspace-check: hooks-check
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings
-	cargo test --locked --workspace --no-fail-fast
+	$(WORKSPACE_TEST_RUNNER) cargo test --locked --workspace --no-fail-fast
 
 # Optional gates fail when their tools or target toolchains are unavailable.
 deny:

@@ -2,6 +2,33 @@ use super::*;
 use crate::kernel::bootstrap::venv::version::write_bootstrap_version;
 use crate::kernel::bootstrap::EnsureKernelPythonOptions;
 
+#[cfg(unix)]
+use std::os::unix::{fs::MetadataExt, process::ExitStatusExt};
+
+#[cfg(unix)]
+type FixtureSnapshot = Vec<(PathBuf, Vec<u8>, Option<(u64, std::time::SystemTime)>)>;
+
+#[cfg(unix)]
+fn fixture_snapshot(path: &Path) -> FixtureSnapshot {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            entries.push((path.clone(), Vec::new(), None));
+            entries.extend(fixture_snapshot(&path));
+        } else {
+            let metadata = std::fs::metadata(&path).unwrap();
+            entries.push((
+                path.clone(),
+                std::fs::read(&path).unwrap(),
+                Some((metadata.ino(), metadata.modified().unwrap())),
+            ));
+        }
+    }
+    entries.sort();
+    entries
+}
+
 fn identity(c: char) -> String {
     format!("sha256:{}", c.to_string().repeat(64))
 }
@@ -271,7 +298,7 @@ impl Drop for KillGroup {
 // This is process dispatch, not an environment-gated optional test.
 #[cfg(unix)]
 #[tokio::test]
-async fn killed_upgrade_replays_durable_intent_and_keeps_user_packages() {
+async fn killed_upgrade_refuses_reacquisition_requires_offline_recovery() {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncBufReadExt;
     if let Some(root) = std::env::var_os("PA_BOOTSTRAP_CRASH_FIXTURE") {
@@ -295,10 +322,9 @@ async fn killed_upgrade_replays_durable_intent_and_keeps_user_packages() {
         let root = tempfile::tempdir().unwrap();
         let venv = root.path().join("kernel");
         environment(&venv, &identity('a'));
-        let original = std::fs::read(venv.join(".bootstrap-version")).unwrap();
         uv_fixture(root.path(), "printf 'sync-ready\\n'\nkill -STOP $$\nexit 1");
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "kernel::bootstrap::venv::recovery::tests::killed_upgrade_replays_durable_intent_and_keeps_user_packages", "--nocapture"])
+        command.args(["--exact", "kernel::bootstrap::venv::recovery::tests::killed_upgrade_refuses_reacquisition_requires_offline_recovery", "--nocapture"])
             .env("PA_BOOTSTRAP_CRASH_FIXTURE", root.path())
             .env("HOME", root.path()).env("PRIME_AGENT_KERNEL_VENV", &venv)
             .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).process_group(0);
@@ -325,32 +351,43 @@ async fn killed_upgrade_replays_durable_intent_and_keeps_user_packages() {
             std::fs::read_to_string(intent.backup.join("user-package")).unwrap(),
             "keep me"
         );
+        let lock = venv.with_file_name(format!(
+            "{}{}",
+            venv.file_name().unwrap().to_string_lossy(),
+            super::super::BOOTSTRAP_LOCK_NAME
+        ));
+        let lock_bytes = std::fs::read(&lock).unwrap();
+        let lock_metadata = std::fs::metadata(&lock).unwrap();
         drop(group);
-        child.wait().await.unwrap();
-        let _lock = crate::kernel::bootstrap::dir_lock::acquire_bootstrap_lock(&venv)
-            .await
-            .unwrap();
-        recover_interrupted_upgrade(&venv, &identity('b')).unwrap();
-        let uv = uv_fixture(root.path(), "exit 37");
-        assert!(super::super::rebuild_kernel_venv(
-            uv.to_str().unwrap(),
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+        // Snapshot fixture effects only after the owned worker has exited.
+        let before = fixture_snapshot(root.path());
+        let mut waiter = Box::pin(crate::kernel::bootstrap::dir_lock::acquire_bootstrap_lock(
             &venv,
-            root.path(),
-            &identity('b'),
-            &[],
-            &EnsureKernelPythonOptions::default()
-        )
-        .await
-        .is_err());
+        ));
+        assert!(matches!(
+            futures::poll!(&mut waiter),
+            std::task::Poll::Pending
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiter)
+                .await
+                .is_err(),
+            "the retained lock requires offline recovery, not automatic acquisition"
+        );
+        drop(waiter);
+        assert_eq!(std::fs::read(&lock).unwrap(), lock_bytes);
+        let after = std::fs::metadata(&lock).unwrap();
         assert_eq!(
-            std::fs::read(venv.join(".bootstrap-version")).unwrap(),
-            original
+            (after.dev(), after.ino()),
+            (lock_metadata.dev(), lock_metadata.ino())
         );
         assert_eq!(
-            std::fs::read_to_string(venv.join("user-package")).unwrap(),
-            "keep me"
+            fixture_snapshot(root.path()),
+            before,
+            "refused acquisition must not write runtime state"
         );
-        assert!(!intent_path(&venv).exists());
     }
 }
 
@@ -404,7 +441,7 @@ fn checkpoint_skills(root: &Path) -> Vec<super::super::BootstrapPythonSkill> {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn killed_skill_sync_resumes_after_last_durable_checkpoint() {
+async fn killed_skill_sync_refuses_reacquisition_requires_offline_recovery() {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncBufReadExt;
     if let Some(root) = std::env::var_os("PA_BOOTSTRAP_CRASH_FIXTURE") {
@@ -455,7 +492,7 @@ async fn killed_skill_sync_resumes_after_last_durable_checkpoint() {
             .env("RLM_GLOBAL_HARNESS_STATE_DIR", root.path().join("global-harness"))
             .env("PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET", root.path().join("daemon.sock"))
             .env("PRIME_AGENT_KERNEL_VENV", &venv).env("PA_BOOTSTRAP_CRASH_FIXTURE", root.path())
-            .args(["--exact", "kernel::bootstrap::venv::recovery::tests::killed_skill_sync_resumes_after_last_durable_checkpoint", "--nocapture"])
+            .args(["--exact", "kernel::bootstrap::venv::recovery::tests::killed_skill_sync_refuses_reacquisition_requires_offline_recovery", "--nocapture"])
             .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).process_group(0);
         let mut child = tokio::process::Command::from(command).spawn().unwrap();
         let group = KillGroup(i32::try_from(child.id().unwrap()).unwrap());
@@ -478,26 +515,42 @@ async fn killed_skill_sync_resumes_after_last_durable_checkpoint() {
             read_bootstrap_version(&venv).unwrap().python_skills,
             Some(requested[..2].to_vec())
         );
+        let lock = venv.with_file_name(format!(
+            "{}{}",
+            venv.file_name().unwrap().to_string_lossy(),
+            super::super::BOOTSTRAP_LOCK_NAME
+        ));
+        let lock_bytes = std::fs::read(&lock).unwrap();
+        let lock_metadata = std::fs::metadata(&lock).unwrap();
         drop(group);
-        child.wait().await.unwrap();
-        let _lock = crate::kernel::bootstrap::dir_lock::acquire_bootstrap_lock(&venv)
-            .await
-            .unwrap();
-        let uv = uv_fixture(root.path(), "exit 0");
-        super::super::sync_python_skills(
-            uv.to_str().unwrap(),
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+        // Snapshot fixture effects only after the owned worker has exited.
+        let before = fixture_snapshot(root.path());
+        let mut waiter = Box::pin(crate::kernel::bootstrap::dir_lock::acquire_bootstrap_lock(
             &venv,
-            &kernel_venv_python(&venv),
-            root.path(),
-            &identity('a'),
-            &requested,
-            &EnsureKernelPythonOptions::default(),
-        )
-        .await
-        .unwrap();
+        ));
+        assert!(matches!(
+            futures::poll!(&mut waiter),
+            std::task::Poll::Pending
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiter)
+                .await
+                .is_err(),
+            "the retained lock requires offline recovery, not automatic acquisition"
+        );
+        drop(waiter);
+        assert_eq!(std::fs::read(&lock).unwrap(), lock_bytes);
+        let after = std::fs::metadata(&lock).unwrap();
         assert_eq!(
-            read_bootstrap_version(&venv).unwrap().python_skills,
-            Some(requested)
+            (after.dev(), after.ino()),
+            (lock_metadata.dev(), lock_metadata.ino())
+        );
+        assert_eq!(
+            fixture_snapshot(root.path()),
+            before,
+            "refused acquisition must not write runtime state"
         );
         let calls = std::fs::read_to_string(root.path().join("uv.log")).unwrap();
         assert_eq!(
@@ -510,7 +563,7 @@ async fn killed_skill_sync_resumes_after_last_durable_checkpoint() {
         );
         assert_eq!(
             calls.lines().filter(|call| call.contains("gamma")).count(),
-            2
+            1
         );
         assert!(!calls.contains("venv "));
     }

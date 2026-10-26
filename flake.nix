@@ -23,10 +23,10 @@
             };
             devShells.${system}.default = pkgs.mkShell {
                 packages = with pkgs; [
-                    cargo rustc rustfmt clippy pkg-config
+                    cargo rustc rustfmt clippy pkg-config openssl.dev
                     git uv fd ripgrep python3 python311 actionlint shellcheck gnumake
-                    util-linux iproute2
-                ];
+                    util-linux iproute2 procps bash
+                ] ++ lib.optionals stdenv.hostPlatform.isLinux [ tini ];
                 # Cold CI bootstrap must use a Nix-native interpreter, not a uv download.
                 PA_WORKSPACE_BOOTSTRAP_PYTHON = "${pkgs.python311}/bin/python3.11";
                 CARGO_BUILD_JOBS = "2";

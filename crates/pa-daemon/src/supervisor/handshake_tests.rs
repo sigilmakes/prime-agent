@@ -259,7 +259,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
         "version": 2,
         "workerId": "w-wedge",
-        "pid": 4242,
+        "pid": std::process::id(),
         "socketPath": socket_path.to_string_lossy(),
         "recoveryJournalPath": "/tmp/none.jsonl",
         "supervisorSocketPath": "/tmp/none.sock",
@@ -303,7 +303,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         socket_path: socket_path.to_string_lossy().to_string(),
         worker_instance_id: String::new(),
         token: "wedge-token".to_string(),
-        pid: 4242,
+        pid: u64::from(std::process::id()),
         rest: Map::default(),
     };
     let response = supervisor
