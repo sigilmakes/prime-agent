@@ -21,6 +21,7 @@ struct State {
     cursor: CanonicalCursor,
     acks: Vec<CanonicalAckPhase>,
     appends: usize,
+    reject_append: Option<CanonicalStoreError>,
     fail_applied_ack: bool,
     fail_abandon_ack: bool,
     mismatch_abandon_ack: bool,
@@ -67,6 +68,7 @@ impl Owner {
             },
             acks: Vec::new(),
             appends: 0,
+            reject_append: None,
             fail_applied_ack: false,
             fail_abandon_ack: false,
             mismatch_abandon_ack: false,
@@ -217,6 +219,9 @@ impl CanonicalLiveOwner for Owner {
     ) -> CanonicalFuture<CanonicalCommitDisposition> {
         let mut state = self.0.lock().unwrap();
         assert_eq!(request.expected, state.cursor);
+        if let Some(error) = state.reject_append.take() {
+            return Box::pin(async move { Err(error) });
+        }
         state.appends += 1;
         let id = format!("actual-owner-{}", state.appends);
         let entry = if state.catchup {
@@ -502,6 +507,49 @@ async fn live_receipt_adopts_exact_owner_id_and_raw_bytes_before_ready() {
         vec![CanonicalAckPhase::Prepared, CanonicalAckPhase::AppliedReady]
     );
 }
+#[tokio::test]
+async fn rejected_unwritten_append_abandons_exact_ticket_before_next_write() {
+    for fail_abandon_ack in [false, true] {
+        let owner = Owner::new();
+        let session = manager(&owner);
+        let live = CanonicalLiveSession::new(owner.clone(), session);
+        live.observe().await.unwrap();
+        {
+            let mut state = owner.0.lock().unwrap();
+            state.reject_append = Some(CanonicalStoreError {
+                kind: CanonicalFailureKind::InvalidRequest,
+                requested: CanonicalRequestedWrite::NotWritten,
+                source: CanonicalSourceDisposition::Unchanged,
+                detail: "owner rejected draft before I/O".into(),
+            });
+            state.fail_abandon_ack = fail_abandon_ack;
+        }
+        let error = live
+            .append(CanonicalMutationKind::OwnerMetadata, metadata())
+            .await
+            .unwrap_err();
+        assert_eq!(owner.0.lock().unwrap().appends, 0);
+        assert_eq!(
+            owner.0.lock().unwrap().acks,
+            vec![
+                CanonicalAckPhase::Prepared,
+                CanonicalAckPhase::AbandonPreparedOnly
+            ]
+        );
+        if fail_abandon_ack {
+            assert!(live.observe().await.is_err());
+        } else {
+            assert_eq!(error.kind, CanonicalFailureKind::InvalidRequest);
+            assert_eq!(error.detail, "owner rejected draft before I/O");
+            live.ensure_ready().unwrap();
+            live.append(CanonicalMutationKind::OwnerMetadata, metadata())
+                .await
+                .unwrap();
+            assert_eq!(owner.0.lock().unwrap().appends, 1);
+        }
+    }
+}
+
 #[tokio::test]
 async fn lost_applied_ack_keeps_raw_row_but_never_publishes_or_reopens() {
     let owner = Owner::new();

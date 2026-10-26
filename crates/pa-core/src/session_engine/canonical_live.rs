@@ -1465,8 +1465,7 @@ impl CanonicalLiveMutation<'_> {
         let disposition = match disposition {
             Ok(disposition) => disposition,
             Err(error)
-                if error.kind == CanonicalFailureKind::SourceChanged
-                    && error.requested == CanonicalRequestedWrite::NotWritten
+                if error.requested == CanonicalRequestedWrite::NotWritten
                     && error.source == CanonicalSourceDisposition::Unchanged =>
             {
                 self.abandon().await?;

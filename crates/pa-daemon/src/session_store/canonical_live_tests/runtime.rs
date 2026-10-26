@@ -388,6 +388,59 @@ async fn provider_owned_advance_leaves_next_real_owner_prompt_ready() {
 }
 
 #[tokio::test]
+async fn owner_rejected_unwritten_draft_keeps_next_prompt_ready_after_exact_abandon() {
+    for reply in [
+        AbandonReply::Exact,
+        AbandonReply::Lost,
+        AbandonReply::Foreign,
+    ] {
+        let (_dir, owner, engine, provider) = runtime().await;
+        let live = engine.session.canonical_live_session().unwrap();
+        let before = std::fs::read(&owner.store.lock().unwrap().path).unwrap();
+        owner.faults.lock().unwrap().abandon_reply = reply;
+        // The real owner refuses a native terminal submitted without actual run
+        // provenance before admitting any requested mutation or physical write.
+        let entry = serde_json::from_value(json!({
+            "type":"message", "message":{
+                "role":"toolResult", "toolCallId":"unadmitted", "toolName":"test",
+                "content":[{"type":"text","text":"not admitted"}], "isError":false,
+                "timestamp":1
+            }
+        }))
+        .unwrap();
+        let error = live
+            .append(CanonicalMutationKind::OwnerMetadata, entry)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            std::fs::read(&owner.store.lock().unwrap().path).unwrap(),
+            before
+        );
+        assert!(provider.calls().is_empty());
+        match reply {
+            AbandonReply::Lost | AbandonReply::Foreign => assert!(live.ensure_ready().is_err()),
+            AbandonReply::Exact => {
+                assert_eq!(error.kind, CanonicalFailureKind::InvalidRequest);
+                assert_eq!(error.requested, CanonicalRequestedWrite::NotWritten);
+                assert_eq!(error.source, CanonicalSourceDisposition::Unchanged);
+                assert_eq!(
+                    error.detail,
+                    "native terminal request has no actual run provenance"
+                );
+                live.ensure_ready().unwrap();
+                owner.store.lock().unwrap().canonical_snapshot().unwrap();
+                engine
+                    .session
+                    .prompt("next", PromptOptions::default())
+                    .await
+                    .unwrap();
+                assert_eq!(provider.calls().len(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn prepared_context_owned_advance_requires_exact_abandon_before_next_prompt() {
     for reply in [
         AbandonReply::Exact,
