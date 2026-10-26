@@ -781,7 +781,7 @@ async fn goal_source_advance_before_first_write_keeps_real_owner_driver_retryabl
     assert!(engine.goal_driver.lock().await.state().active);
     engine
         .session
-        .prompt("next", Default::default())
+        .prompt("next", PromptOptions::default())
         .await
         .unwrap();
     assert_eq!(provider.calls().len(), 1);
