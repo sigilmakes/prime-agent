@@ -1,0 +1,1 @@
+- CI runs the `check` and `workspace` gates at the same time instead of queueing one behind the other, and each job uses eight build jobs rather than two.

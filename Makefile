@@ -2,7 +2,7 @@
 # Nothing publishes, installs globally, rewrites sources, or stages files.
 .DEFAULT_GOAL := help
 # Bound local and CI compilation without creating incremental/debug caches.
-export CARGO_BUILD_JOBS ?= 2
+export CARGO_BUILD_JOBS ?= 8
 export CARGO_INCREMENTAL := 0
 export CARGO_PROFILE_DEV_DEBUG := 0
 export CARGO_PROFILE_TEST_DEBUG := 0

@@ -16,10 +16,12 @@ permissions:
     contents: read
 
 env:
+    # The runner host has 32 cores and no container limits: a job may use a
+    # quarter of them, and two jobs still leave the host responsive.
     NIX_CONFIG: |
-        max-jobs = 2
-        cores = 2
-    CARGO_BUILD_JOBS: "2"
+        max-jobs = 8
+        cores = 8
+    CARGO_BUILD_JOBS: "8"
     CARGO_INCREMENTAL: "0"
     CARGO_PROFILE_DEV_DEBUG: "0"
     CARGO_PROFILE_TEST_DEBUG: "0"
@@ -43,7 +45,6 @@ jobs:
               run: nix flake check --no-update-lock-file --print-build-logs --keep-going
 
     workspace:
-        needs: check
         runs-on: gaia-runner
         timeout-minutes: 185
         container:
