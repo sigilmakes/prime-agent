@@ -521,8 +521,9 @@ impl Supervisor {
             }
         };
         // The plain-kill gate (TS `isRootKill`): the `rlmCloseReason` marker is a child-close
-        // cascade, not a root kill. A plain kill finalizes only after the worker has
-        // accepted its accounting close.
+        // cascade, not a root kill. A root kill is not a graceful stop — a refused or
+        // unanswered forward cannot cancel it — so its tombstone and its stop run whatever
+        // the route answers.
         let plain_kill = match command {
             DaemonCommand::Kill { rest, .. } => {
                 let no_marker = !rest.contains_key("rlmCloseReason");
@@ -858,6 +859,9 @@ impl Supervisor {
                     }
                 }
                 if let DaemonCommand::Kill { rest, .. } = command {
+                    // TS's root-kill `finally`: the stop completes on an accepted forward; a
+                    // forward the worker refused (accounting) keeps its worker. The unanswered
+                    // arm below carries the rest of the `finally`.
                     if plain_kill && response.success {
                         self.finish_plain_kill_stop(&resident, rest).await;
                     } else if response.success {
@@ -907,15 +911,32 @@ impl Supervisor {
                 }
                 (vec![response_line(&response)], false)
             }
-            Err(error) => (
-                vec![response_line(&response_failure(
-                    Some(&command_id),
-                    &type_name,
-                    &error.to_string(),
-                    None,
-                ))],
-                false,
-            ),
+            Err(error) => {
+                // A forward that never answered refused nothing: a root kill is not cancelled
+                // by silence (TS's root-kill `finally`), so its archival intent persists and the
+                // stop runs, keeping the lease from outliving the command. A forward the worker
+                // *refused* stays a refusal — the success arm above never retires it.
+                if plain_kill {
+                    if let DaemonCommand::Kill { rest, .. } = command {
+                        if let Err(error) = self.persist_stop_tombstone(&resident).await {
+                            self.log_line(&format!(
+                                "session worker {} stop tombstone after an unanswered kill did not persist: {error:#}",
+                                resident.worker_id
+                            ));
+                        }
+                        self.finish_plain_kill_stop(&resident, rest).await;
+                    }
+                }
+                (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &error.to_string(),
+                        None,
+                    ))],
+                    false,
+                )
+            }
         }
     }
 
