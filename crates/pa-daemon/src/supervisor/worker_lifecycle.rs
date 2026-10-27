@@ -756,6 +756,18 @@ impl Supervisor {
         // Idle eviction already owns all admission. Keep that fence through the
         // verdict and retirement; a refusal releases it without retiring the worker.
         let was_intentional = resident.intentional_stop.swap(true, Ordering::SeqCst);
+        // The stop's durable intent persists BEFORE the worker is told (TS
+        // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
+        // survives the escalation, must never be adopted as healthy by a later boot.
+        let prior = match self.persist_stop_tombstone_stop(resident).await {
+            Ok(prior) => prior,
+            Err(error) => {
+                resident
+                    .intentional_stop
+                    .store(was_intentional, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
         let response = if let Some(fence) = fence.as_ref() {
             let cmd_tx = resident.cmd_tx.lock().await.clone();
             match cmd_tx {
@@ -793,14 +805,27 @@ impl Supervisor {
         match response {
             Ok(response) if response.success => {}
             Err(_) if worker_process_gone(pid, start_id).await => {}
+            // An unreachable worker never answered, so nothing was refused: the stop
+            // continues into retirement, which escalates to SIGKILL.
+            Err(error) => self.log_line(&format!(
+                "session worker {} shutdown route failed: {error:#}",
+                resident.worker_id
+            )),
             result => {
+                // The worker refused, so no stop is in flight: the intent comes back out of
+                // the descriptor and the worker stays routable and adoptable.
+                if let Err(error) = self.clear_stop_tombstone(resident, &prior).await {
+                    self.log_line(&format!(
+                        "session worker {} stop tombstone clear failed: {error:#}",
+                        resident.worker_id
+                    ));
+                }
                 resident
                     .intentional_stop
                     .store(was_intentional, Ordering::SeqCst);
                 anyhow::bail!("Worker shutdown refused: {result:?}");
             }
         }
-        self.persist_stop_tombstone_stop(resident).await?;
         resident.note_retired();
         if self.retire_worker_after_stop(resident).await != WorkerRetirement::Retired {
             anyhow::bail!("Worker retirement remains unresolved");

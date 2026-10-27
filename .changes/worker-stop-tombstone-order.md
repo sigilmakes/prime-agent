@@ -1,0 +1,1 @@
+- Stopping a session persists its durable stop intent before the worker is told, so a supervisor that dies mid-stop, or a worker that ignores the shutdown, is never adopted as healthy; a worker that refuses the stop clears the intent again.

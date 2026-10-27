@@ -918,12 +918,18 @@ async fn idle_eviction_fences_racing_client_routes_until_refusal_or_retirement()
         .expect("fenced client gets an immediate refusal")
         .unwrap();
         assert!(!response.success, "idle eviction cannot accept racing work");
-        assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+        // The stop's durable intent precedes the route, so a supervisor that dies mid-stop
+        // adopts a tombstoned worker rather than a healthy one.
+        assert!(resident.descriptor.lock().await.stop_requested_at.is_some());
         assert!(!resident.route_state().retired);
         verdict.send(success).await.unwrap();
         assert_eq!(stopping.await.unwrap().success, success);
         if !success {
             assert_no_retirement(&supervisor, &resident);
+            assert!(
+                resident.descriptor.lock().await.stop_requested_at.is_none(),
+                "a refused stop clears its tombstone"
+            );
             assert_eq!(
                 resident.inflight.available_permits(),
                 crate::backpressure::WORKER_INFLIGHT_CAPACITY,

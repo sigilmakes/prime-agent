@@ -18,6 +18,12 @@ use crate::scheduled_jobs::session_artifact_dir;
 use crate::session_store::{read_session_info, SessionFile};
 use crate::supervisor::Supervisor;
 
+/// A descriptor's stop fields before a stop wrote its tombstone.
+pub(crate) struct PriorStopIntent {
+    stop_requested_at: Option<String>,
+    archive_on_stop: Option<bool>,
+}
+
 /// One tree member of a stopped root: its durable session id and file.
 struct TreeMember {
     session_id: String,
@@ -301,10 +307,13 @@ impl Supervisor {
     /// adoption to the graceful shutdown + schedule-cancel half, never the kill's cascade.
     /// EXCEPT when the durable intent already exists: a re-write failure must not abort
     /// the stop (the worker would run on its lease until the next boot).
+    ///
+    /// Returns the stop fields the descriptor carried first, so a worker that refuses its
+    /// shutdown can put them back ([`Supervisor::clear_stop_tombstone`]).
     pub(crate) async fn persist_stop_tombstone_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PriorStopIntent> {
         let mut descriptor = resident.descriptor.lock().await;
         let old_stop_requested_at = descriptor.stop_requested_at.clone();
         let old_archive_on_stop = descriptor.archive_on_stop;
@@ -330,8 +339,29 @@ impl Supervisor {
         resident
             .intentional_stop
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        Ok(PriorStopIntent {
+            stop_requested_at: old_stop_requested_at,
+            archive_on_stop: old_archive_on_stop,
+        })
     }
+
+    /// The worker refused the shutdown it was told about, so no stop is in flight: the
+    /// tombstone leaves the descriptor and adoption sees the worker it saw before. The
+    /// caller restores `intentional_stop`; a failed persist still clears the in-memory
+    /// fields, because a live worker must not read as stopping.
+    pub(crate) async fn clear_stop_tombstone(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        prior: &PriorStopIntent,
+    ) -> anyhow::Result<()> {
+        let mut descriptor = resident.descriptor.lock().await;
+        descriptor
+            .stop_requested_at
+            .clone_from(&prior.stop_requested_at);
+        descriptor.archive_on_stop = prior.archive_on_stop;
+        crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
+    }
+
     pub(crate) async fn finalize_worker_stop(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
