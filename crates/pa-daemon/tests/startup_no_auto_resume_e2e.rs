@@ -248,14 +248,23 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
     }
 }
 
-fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
+/// The resumed worker refuses reads until its canonical owner holds the
+/// adopted lease, so a probe re-asks through that handshake instead of
+/// failing on it; any other refusal still fails.
+fn messages_once_adopted(client: &mut Client, id: &str, active_session_id: &str) -> Option<String> {
     client.send_command(
         id,
         &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
-    assert_eq!(response["success"], true, "get_messages failed: {response}");
-    serde_json::to_string(&response["data"]).expect("messages json")
+    if response["success"] == true {
+        return Some(serde_json::to_string(&response["data"]).expect("messages json"));
+    }
+    let unresolved = response["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Canonical source is unresolved"));
+    assert!(unresolved, "get_messages failed: {response}");
+    None
 }
 
 /// A TS-era session file (the entry shapes the TypeScript product
@@ -479,7 +488,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         .to_string();
 
     let fired = wait_until(Duration::from_secs(30), || {
-        let text = messages(&mut client, "gm1", &active_id);
+        let text = messages_once_adopted(&mut client, "gm1", &active_id)?;
         (text.contains("the stale heartbeat ping") && text.contains("dormant reply"))
             .then_some(text)
     });
