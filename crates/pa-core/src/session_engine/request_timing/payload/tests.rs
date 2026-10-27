@@ -568,24 +568,20 @@ fn concurrent_producers_drop_at_the_reserve_when_the_queue_is_full() {
     let dir_path = dir.path().join("request-payloads");
     // The ring keeps every body: the count assertions need no eviction.
     let capture = RequestPayloadCapture::at(&dir_path, 4 * REQUEST_PAYLOAD_CAPTURE_KEEP);
-    // The stall body: serialized for far longer than the whole storm
-    // window, so no slot frees mid storm.
-    let stall = json!({
-        "marker": "stall",
-        "messages": (0..100_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
-    });
-    capture.record(&stall, &agent_model(), Some("sess-timing"), 1);
-    let fills = fill_until_saturated(&capture, "fill");
     // The storm: many concurrent producers racing the full queue; none
-    // of their bodies exists anywhere afterwards.
-    let producers = 4 * REQUEST_PAYLOAD_CAPTURE_KEEP;
-    let barrier = Arc::new(std::sync::Barrier::new(producers + 1));
+    // of their bodies exists anywhere afterwards. The producers are already
+    // running and spin on the gate, so the storm costs no thread wakeup inside
+    // the window the writer spends on the stall body.
+    let producers = REQUEST_PAYLOAD_CAPTURE_KEEP;
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut handles = Vec::new();
     for producer in 0..producers {
         let capture = capture.clone();
-        let barrier = Arc::clone(&barrier);
+        let gate = Arc::clone(&gate);
         handles.push(std::thread::spawn(move || {
-            barrier.wait();
+            while !gate.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
             capture.record(
                 &json!({ "marker": format!("storm-{producer}") }),
                 &agent_model(),
@@ -594,7 +590,25 @@ fn concurrent_producers_drop_at_the_reserve_when_the_queue_is_full() {
             );
         }));
     }
-    barrier.wait();
+    // The stall body: serialized for far longer than the whole storm
+    // window, so no slot frees mid storm.
+    let stall = json!({
+        "marker": "stall",
+        "messages": (0..100_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
+    });
+    capture.record(&stall, &agent_model(), Some("sess-timing"), 1);
+    // The stall body must be in the writer's hands before the fill: its slot still counts
+    // in the queue counter until then, so a fill would stop one short of capacity and the
+    // writer's pickup would reopen exactly the one slot the storm probes.
+    while super::CAPTURE_WRITER
+        .get()
+        .and_then(|writer| writer.as_ref())
+        .is_some_and(|writer| writer.queued.load(Ordering::Relaxed) > 0)
+    {
+        std::thread::yield_now();
+    }
+    let fills = fill_until_saturated(&capture, "fill");
+    gate.store(true, Ordering::Release);
     for handle in handles {
         handle.join().expect("the producer finishes");
     }
