@@ -166,7 +166,7 @@ def isolated_environment(repo, state, target, cargo_home, ambient):
         "CARGO_TARGET_DIR": str(target), "CARGO_HOME": str(cargo_home),
         "CARGO_BUILD_JOBS": "8", "CARGO_INCREMENTAL": "0",
         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
-        "RUST_TEST_THREADS": "8", "PYTHONDONTWRITEBYTECODE": "1",
+        "RUST_TEST_THREADS": "4", "PYTHONDONTWRITEBYTECODE": "1",
         "UV_CACHE_DIR": str(cargo_home / "uv-cache"),
         "UV_PYTHON_INSTALL_DIR": str(cargo_home / "uv-python"),
         "UV_PROJECT_ENVIRONMENT": str(kernel),

@@ -54,7 +54,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
             self.assertEqual(Path(env["HOME"]).joinpath(".prime/agent/kernel-venv/bin/python").resolve(),
                              kernel.resolve())
             self.assertNotIn("OPENAI_API_KEY", env)
-            self.assertEqual(env["RUST_TEST_THREADS"], "8")
+            self.assertEqual(env["RUST_TEST_THREADS"], "4")
             self.assertEqual(env["CARGO_HOME"], ambient["CARGO_HOME"])
 
     def test_disabled_and_feature_gated_manifests_fail_closed(self):
