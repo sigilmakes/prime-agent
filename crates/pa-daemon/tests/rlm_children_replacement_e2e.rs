@@ -700,10 +700,7 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
     // Forced: the child is mid-cell, so a graceful terminal shutdown is refused by design
     // (the accounting refusal keeps in-flight work). The restart this test drives is the
     // forced one — the crash the recovery path exists for.
-    client.send_command(
-        "bye",
-        &json!({ "type": "shutdown", "force": true }),
-    );
+    client.send_command("bye", &json!({ "type": "shutdown", "force": true }));
     let deadline = Instant::now() + Duration::from_secs(30);
     while daemon
         .child
