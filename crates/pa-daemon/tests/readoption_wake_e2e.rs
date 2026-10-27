@@ -292,13 +292,22 @@ impl Client {
             .collect()
     }
 
-    fn messages(&mut self, active_session_id: &str) -> String {
+    /// A re-adopted worker refuses reads until its canonical owner holds the
+    /// adopted lease, and that window is the restart handshake rather than a
+    /// verdict on the session: the probe re-asks until the read lands.
+    fn messages_once_adopted(&mut self, active_session_id: &str) -> Option<String> {
         let response = self.request(
             "gm",
             &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
         );
-        assert_eq!(response["success"], true, "get_messages failed: {response}");
-        serde_json::to_string(&response["data"]).expect("messages json")
+        if response["success"] == true {
+            return Some(serde_json::to_string(&response["data"]).expect("messages json"));
+        }
+        let unresolved = response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Canonical source is unresolved"));
+        assert!(unresolved, "get_messages failed: {response}");
+        None
     }
 }
 
@@ -422,7 +431,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     // THE ASSERT: the detached command finishes after the re-adoption and its completion
     // notice WAKES the idle session — the bash-done row lands and the woken turn runs to its reply.
     let messages = wait_until(Duration::from_mins(1), || {
-        let messages = client.messages(&active_id);
+        let messages = client.messages_once_adopted(&active_id)?;
         (messages.contains("bash-done") && messages.contains("woken by the bash-done notice"))
             .then_some(messages)
     });
