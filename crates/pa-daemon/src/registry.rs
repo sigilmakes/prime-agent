@@ -61,6 +61,30 @@ impl WorkerReply {
         }
     }
 
+    /// A worker's canonical owner refuses every write while an adoption is
+    /// unacknowledged; the refusal is a "not yet" the route may re-ask.
+    pub(crate) fn refused_by_adoption_conflict(&self) -> bool {
+        const CONFLICT: &str = "AdoptionConflict";
+        match self {
+            WorkerReply::Typed(response) => {
+                !response.success
+                    && response
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with(CONFLICT))
+            }
+            // The header's success hint is optional: a worker that omits it still
+            // relays its refusal in the payload.
+            WorkerReply::Relayed(relay) => {
+                relay.success != Some(true)
+                    && relay
+                        .payload
+                        .windows(CONFLICT.len())
+                        .any(|window| window == CONFLICT.as_bytes())
+            }
+        }
+    }
+
     pub(crate) fn relayed_active_session_id(&self) -> Option<&str> {
         match self {
             WorkerReply::Relayed(relay) => relay.active_session_id.as_deref(),

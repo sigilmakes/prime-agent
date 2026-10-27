@@ -16,6 +16,11 @@ pub(super) enum WakeRoute {
 }
 
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
+/// How long a kill re-asks a worker whose canonical owner is mid-adoption: the
+/// pending caller's ACK lands within milliseconds, and a hard stop must not fail
+/// on that handshake.
+pub(crate) const KILL_ADOPTION_RETRY: Duration = Duration::from_secs(2);
+pub(crate) const KILL_ADOPTION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) const SUMMARY_TIMEOUT_MS: u64 = 5_000;
 /// The route failure for a worker whose command channel is gone: the request did not
 /// leave the supervisor, so the route may retry it without risking a duplicate landing.
@@ -691,6 +696,31 @@ impl Supervisor {
                         .await
                         .unwrap_or_else(|error| Err(anyhow!(error))),
                     Err(error) => Err(anyhow!(error)),
+                }
+            }
+            DaemonCommand::Kill { .. } => {
+                // A worker whose canonical owner is mid-adoption refuses its close with
+                // `AdoptionConflict` until that caller's ACK lands, milliseconds later.
+                // The refusal is a "not yet", not a verdict on the kill: re-ask while the
+                // transient lasts, then let the answer stand. A refusal that outlives the
+                // window is the worker's own (an owed accounting close) and stays one.
+                let deadline = tokio::time::Instant::now() + KILL_ADOPTION_RETRY;
+                loop {
+                    let response = self
+                        .route_command_ready(
+                            &resident,
+                            worker_command,
+                            payload.clone(),
+                            timeout,
+                            admission,
+                        )
+                        .await;
+                    let transient = matches!(&response, Ok(reply)
+                        if reply.refused_by_adoption_conflict());
+                    if !transient || tokio::time::Instant::now() >= deadline {
+                        break response;
+                    }
+                    tokio::time::sleep(KILL_ADOPTION_RETRY_INTERVAL).await;
                 }
             }
             _ => {
