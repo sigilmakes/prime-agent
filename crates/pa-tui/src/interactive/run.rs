@@ -20,6 +20,44 @@ const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const SPINNER_INTERVAL_MS: u128 = 80;
 /// The input-idle window the quiet tick waits out before materializing parked work.
 const QUIET_TICK_INTERVAL: Duration = Duration::from_millis(50);
+/// The startup theme's read budget before the surface paints. A custom theme file is a
+/// local read, so the wait is normally invisible; the first frame in the fallback palette
+/// is what the user sees as a flash. Past the bound the surface opens with the fallback and
+/// the reader's late result still applies through the loop arm.
+pub(crate) const STARTUP_THEME_WAIT: Duration = Duration::from_millis(250);
+
+/// The startup theme: a builtin resolves here, a custom file within [`STARTUP_THEME_WAIT`]
+/// of the detached read the caller armed.
+///
+/// A read that misses the bound keeps its arm, so the loop still applies it when it lands; a
+/// read that fails reports a warning over the prime fallback. Neither path can hold the
+/// surface or stop it — a misconfigured theme is a diagnostic row, never a stuck TUI.
+pub(crate) async fn resolve_startup_theme(
+    load: &mut Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::theme::Theme>>>,
+    name: &str,
+    mode: crate::theme::ColorMode,
+) -> (crate::theme::Theme, Option<String>) {
+    let Some(receiver) = load.take() else {
+        return (crate::theme::Theme::builtin(name, mode), None);
+    };
+    let mut receiver = receiver;
+    match tokio::time::timeout(STARTUP_THEME_WAIT, &mut receiver).await {
+        Ok(Ok(Ok(theme))) => (theme, None),
+        Ok(Ok(Err(error))) => (
+            crate::theme::Theme::builtin("prime", mode),
+            Some(format!("{error:#}")),
+        ),
+        // The reader thread died before publishing; nothing will land later.
+        Ok(Err(error)) => (
+            crate::theme::Theme::builtin("prime", mode),
+            Some(error.to_string()),
+        ),
+        Err(_) => {
+            *load = Some(receiver);
+            (crate::theme::Theme::builtin("prime", mode), None)
+        }
+    }
+}
 
 /// The animating loader's next phase boundary, the wake the select needs
 /// while a quiet turn waits out its stream: TS `Loader`'s `setInterval`
@@ -242,7 +280,10 @@ async fn run_interactive_surface(
         );
         Some(loaded_rx)
     };
-    let theme = crate::theme::Theme::builtin(theme_name, color_mode);
+    // The theme resolves BEFORE the first paint: a first frame in the fallback palette is
+    // exactly the flash a custom theme must not have.
+    let (theme, startup_theme_warning) =
+        resolve_startup_theme(&mut startup_theme_load, theme_name, color_mode).await;
     let mut startup_theme_retired = false;
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
@@ -704,6 +745,15 @@ async fn run_interactive_surface(
             &session.attach_event_generation,
             session.attach_event_sequence,
         );
+    }
+    // A theme that could not load is a diagnostic row over the fallback palette. It lands
+    // after the attach's rebuild, which replaces the transcript a resumed open starts with.
+    if let Some(error) = startup_theme_warning {
+        view.push_entry(crate::chat::ChatEntry::Status {
+            text: format!("\u{26a0} {error}; using prime theme."),
+            kind: crate::chat::StatusKind::Warning,
+        });
+        session.dirty = true;
     }
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {

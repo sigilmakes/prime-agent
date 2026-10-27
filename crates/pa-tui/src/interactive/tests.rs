@@ -2,6 +2,7 @@
 //! and the exit restore contract.
 
 use super::*;
+use crate::interactive::run::{resolve_startup_theme, STARTUP_THEME_WAIT};
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -30,6 +31,77 @@ async fn headless_error_returns_never_touch_the_terminal() {
         crate::exit_restore::RESTORE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
         before,
         "the headless error return did not attempt a restore"
+    );
+}
+
+/// A custom theme resolves before the first paint: the surface opens in the loaded palette,
+/// not a fallback frame that the reader would repaint over.
+#[tokio::test]
+async fn a_ready_startup_theme_applies_before_the_surface_opens() {
+    let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
+    loaded_tx
+        .send(Ok(crate::theme::Theme::builtin(
+            "dark",
+            crate::theme::ColorMode::TrueColor,
+        )))
+        .unwrap();
+    let mut load = Some(loaded_rx);
+    let (theme, warning) = resolve_startup_theme(
+        &mut load,
+        "terminal-native",
+        crate::theme::ColorMode::TrueColor,
+    )
+    .await;
+    assert_eq!(
+        theme.name, "dark",
+        "the loaded theme is the one that paints"
+    );
+    assert!(warning.is_none(), "a clean load reports nothing");
+    assert!(load.is_none(), "the resolved arm retires");
+}
+
+/// A misconfigured theme is a diagnostic over the fallback, never a stuck surface.
+#[tokio::test]
+async fn a_refused_startup_theme_falls_back_with_a_warning() {
+    let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
+    loaded_tx
+        .send(Err(anyhow::anyhow!("parsing theme: expected hex")))
+        .unwrap();
+    let mut load = Some(loaded_rx);
+    let (theme, warning) = resolve_startup_theme(
+        &mut load,
+        "terminal-native",
+        crate::theme::ColorMode::TrueColor,
+    )
+    .await;
+    assert_eq!(theme.name, "prime");
+    assert!(
+        warning.unwrap().contains("expected hex"),
+        "the warning carries the load error"
+    );
+    assert!(load.is_none(), "a refused read retires its arm");
+}
+
+/// A read that outlives the bound leaves the surface usable and its arm armed: the late
+/// result still applies through the loop.
+#[tokio::test]
+async fn a_stalled_startup_theme_keeps_its_arm_and_paints_the_fallback() {
+    // The sender stays alive without sending: the read is still pending when the bound passes.
+    let (_loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
+    let mut load = Some(loaded_rx);
+    let started = std::time::Instant::now();
+    let (theme, warning) = resolve_startup_theme(
+        &mut load,
+        "terminal-native",
+        crate::theme::ColorMode::TrueColor,
+    )
+    .await;
+    assert_eq!(theme.name, "prime");
+    assert!(warning.is_none(), "a slow read is not an error");
+    assert!(load.is_some(), "the late result keeps its arm");
+    assert!(
+        started.elapsed() < STARTUP_THEME_WAIT * 4,
+        "the surface waits a bounded time, not the read"
     );
 }
 

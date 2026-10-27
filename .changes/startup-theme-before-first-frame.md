@@ -1,0 +1,1 @@
+- A custom theme is loaded before the first frame, so opening the TUI no longer flashes the default palette; a theme that fails to load reports a warning row and keeps the default, and a slow read never holds the surface for more than a quarter second.
