@@ -52,3 +52,16 @@ that block. Unlabeled empty subgraphs are unaffected (never in
 
 Prefer upstreaming this fix to kevinswiber/mmdflux with the same regression
 test; this vendor patch stands until a release carries it.
+
+## Vendored wiring notes
+
+- `Cargo.toml` gets the bare `[workspace]` escape marker appended: the vendored
+  crate sits inside this repository's workspace tree, and the marker lets its
+  own suite (`cargo test` from the vendor directory) run as its separate unit
+  instead of erroring against the parent workspace it is not a member of. No
+  product wiring change; the workspace builds it through
+  `[patch.crates-io] mmdflux = { path = "vendor/mmdflux" }` in the root
+  `Cargo.toml`, and `Cargo.lock` records the path source.
+- `tests/` comes from the upstream `mmdflux-v2.6.1` tag because the crates.io
+  tarball excludes it while `src/internal_tests` compile it with
+  `include_str!`; the published crate's test battery cannot compile without it.
