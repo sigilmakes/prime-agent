@@ -1,0 +1,12 @@
+┌────────┐             ┌─────┐
+│ Client │             │ API │
+└────┬───┘             └──┬──┘
+     │                    │
+     │─10. Login request─>│
+     │                    │
+     │<┄12. Challenge┄┄┄┄┄│
+     │                    │
+     │─Background ping───>│
+     │                    │
+     │<┄14. Session ready┄│
+     │                    │

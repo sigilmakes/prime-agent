@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 435.12 372.00" style="max-width: 435.12px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(-65.34,0.00)">
+    <g class="clusters">
+      <g class="cluster" id="outer" data-id="outer" data-look="classic">
+        <rect class="subgraph" x="73.34" y="114.00" width="419.12" height="250.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="282.89" y="118.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Outer LR</text>
+      </g>
+      <g class="cluster" id="inner" data-id="inner" data-look="classic">
+        <rect class="subgraph" x="88.34" y="145.00" width="100.67" height="204.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="138.67" y="149.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Inner BT</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M138.67,280.00 L138.67,277.22 C138.67,274.44 138.67,268.89 138.67,263.89 C138.67,258.89 138.67,254.44 138.67,249.56 C138.67,244.67 138.67,239.33 138.67,236.67 L138.67,234.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M355.90,247.00 L358.68,247.00 C361.45,247.00 367.01,247.00 372.01,247.00 C377.01,247.00 381.45,247.00 386.34,247.00 C391.23,247.00 396.57,247.00 399.23,247.00 L401.90,247.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M282.89,62.00 L282.89,80.00 L282.89,99.67 C282.89,119.33 282.89,158.67 289.10,178.33 C295.30,198.00 307.71,198.00 313.92,198.00 L320.12,198.00 L320.12,216.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="103.34" y="280.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="138.67" y="307.00" text-anchor="middle" dominant-baseline="middle" fill="#333">A</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="103.34" y="176.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="138.67" y="203.00" text-anchor="middle" dominant-baseline="middle" fill="#333">B</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="284.34" y="220.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="320.12" y="247.00" text-anchor="middle" dominant-baseline="middle" fill="#333">C</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="405.90" y="220.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="441.68" y="247.00" text-anchor="middle" dominant-baseline="middle" fill="#333">D</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="247.56" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="282.89" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">E</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

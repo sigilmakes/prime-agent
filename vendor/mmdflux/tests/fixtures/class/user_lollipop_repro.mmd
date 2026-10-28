@@ -1,0 +1,9 @@
+%% User repro from research 0043: lollipop lines must not drop implicit classes.
+classDiagram
+class Class01 {
+  int amount
+  draw()
+}
+Class01 --() bar
+Class02 --() bar
+foo ()-- Class01

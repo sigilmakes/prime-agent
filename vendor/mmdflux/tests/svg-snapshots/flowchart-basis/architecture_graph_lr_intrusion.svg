@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 619.98 229.00" style="max-width: 619.98px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M442.42,62.00 L445.99,62.00 C449.56,62.00 456.69,62.00 463.83,77.17 C470.96,92.33 478.09,122.67 484.56,137.83 C491.03,153.00 496.83,153.00 499.73,153.00 L502.63,153.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M276.70,166.00 L283.74,169.80 L293.37,175.00 C302.99,180.20 322.25,190.60 357.41,193.34 C392.56,196.08 443.63,191.15 469.16,188.69 L494.69,186.23 L502.65,185.46" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M276.70,112.00 L280.30,112.00 C283.90,112.00 291.10,112.00 298.30,103.67 C305.50,95.33 312.70,78.67 319.23,70.33 C325.77,62.00 331.63,62.00 334.57,62.00 L337.50,62.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M276.70,139.00 L280.30,139.00 C283.90,139.00 291.10,139.00 298.30,139.00 C305.50,139.00 312.70,139.00 319.23,139.00 C325.77,139.00 331.63,139.00 334.57,139.00 L337.50,139.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M286.50,35.00 L289.56,35.00 C292.61,35.00 298.72,35.00 304.83,35.00 C310.94,35.00 317.06,35.00 322.50,35.00 C327.94,35.00 332.72,35.00 335.11,35.00 L337.50,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M286.50,62.00 L289.56,62.00 C292.61,62.00 298.72,62.00 304.83,70.33 C310.94,78.67 317.06,95.33 322.50,103.67 C327.94,112.00 332.72,112.00 335.11,112.00 L337.50,112.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M120.45,155.00 L125.28,161.38 L132.81,171.31 C140.34,181.25 155.40,201.13 191.43,211.06 C227.47,221.00 284.48,221.00 338.55,216.19 C392.61,211.38 443.73,201.76 469.28,196.95 L494.84,192.13 L502.70,190.66" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M120.45,101.00 L123.23,101.00 C126.01,101.00 131.56,101.00 137.12,94.50 C142.68,88.00 148.23,75.00 153.12,68.50 C158.01,62.00 162.23,62.00 164.34,62.00 L166.45,62.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="format" data-id="format" data-look="classic">
+        <rect x="506.63" y="153.00" width="105.34" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="559.30" y="180.00" text-anchor="middle" dominant-baseline="middle" fill="#333">format</text>
+      </g>
+      <g class="node default" id="graph" data-id="graph" data-look="classic">
+        <rect x="341.50" y="8.00" width="100.92" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="391.96" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">graph</text>
+      </g>
+      <g class="node default" id="payload" data-id="payload" data-look="classic">
+        <rect x="170.45" y="8.00" width="116.05" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="228.48" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">payload</text>
+      </g>
+      <g class="node default" id="registry" data-id="registry" data-look="classic">
+        <rect x="8.00" y="101.00" width="112.45" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="64.23" y="128.00" text-anchor="middle" dominant-baseline="middle" fill="#333">registry</text>
+      </g>
+      <g class="node default" id="render" data-id="render" data-look="classic">
+        <rect x="170.45" y="112.00" width="106.25" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="223.58" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">render</text>
+      </g>
+      <g class="node default" id="timeline" data-id="timeline" data-look="classic">
+        <rect x="341.50" y="112.00" width="115.13" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="399.07" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">timeline</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

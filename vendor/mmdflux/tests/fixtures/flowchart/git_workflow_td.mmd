@@ -1,0 +1,6 @@
+graph TD
+    %% A typical git workflow
+    Working[Working Dir] -->|git add| Staging[Staging Area]
+    Staging -->|git commit| Local[Local Repo]
+    Local -->|git push| Remote[Remote Repo]
+    Remote -->|git pull| Working

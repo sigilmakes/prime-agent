@@ -1,0 +1,36 @@
+flowchart TD
+  start((Start)) --> ingest[Ingest Request]
+  ingest --> parse[Parse Payload]
+  parse --> validate{Valid?}
+
+  validate -- no --> reject[Reject]
+  reject -.-> notify[Notify User]
+  reject --> metrics[Emit Metrics]
+
+  validate -- yes --> route{Route Type}
+  route -- sync --> sync[Sync Pipeline]
+  route -- async --> queue[Enqueue Job]
+
+  queue --> worker[Worker Pool]
+  worker --> process[Process Job]
+  process --> success{Success?}
+
+  success -- no --> retry[Retry]
+  retry ==> queue
+
+  success -- yes --> persist[Persist Result]
+  sync --> persist
+  persist --> metrics
+
+  parse --> cache[Lookup Cache]
+  cache -- hit --> fastpath[Serve Cached]
+  fastpath --> metrics
+  cache -- miss --> validate
+
+  ingest --> audit[Audit Log]
+  audit --> metrics
+
+  process -- warn --> alert[Page On-call]
+  alert -.-> metrics
+
+  metrics --> End((Done))

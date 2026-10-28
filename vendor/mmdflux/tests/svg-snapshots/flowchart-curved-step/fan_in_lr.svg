@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 272.24 278.00" style="max-width: 272.24px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M107.12,54.00 L107.12,55.33 C107.12,56.67 107.12,59.33 115.16,69.83 C123.20,80.33 139.28,98.66 147.32,107.83 L155.36,116.99" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M107.12,139.00 L109.94,139.00 C112.77,139.00 118.42,139.00 123.57,139.00 C128.72,139.00 133.36,139.00 138.35,139.00 C143.33,139.00 148.67,139.00 151.33,139.00 L154.00,139.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M108.00,224.00 L108.00,222.67 C108.00,221.33 108.00,218.67 115.90,208.17 C123.80,197.68 139.59,179.35 147.49,170.19 L155.39,161.03" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="8.00" y="8.00" width="99.12" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="57.56" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Src A</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="8.00" y="112.00" width="99.12" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="57.56" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Src B</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="8.00" y="216.00" width="100.00" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="58.00" y="243.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Src C</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="158.00" y="112.00" width="106.24" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="211.12" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Target</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

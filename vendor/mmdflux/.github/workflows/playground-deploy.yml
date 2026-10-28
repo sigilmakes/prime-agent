@@ -1,0 +1,84 @@
+name: Playground Deploy
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "mmdflux-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WASM_PACK_VERSION: 0.14.0
+
+concurrency:
+  group: playground-deploy-${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build & Deploy Playground
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: playground-deploy
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v wasm-pack >/dev/null 2>&1 || [[ "$(wasm-pack --version | awk '{print $2}')" != "${WASM_PACK_VERSION}" ]]; then
+            cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
+          fi
+          wasm-pack --version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Run playground tests
+        working-directory: web
+        run: npm run test
+
+      - name: Build playground
+        working-directory: web
+        run: npm run build:release
+
+      - name: Determine deploy branch
+        id: branch
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "name=main" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # mmdflux-v2.0.0 → mmdflux-v2-0-0
+            echo "name=${GITHUB_REF_NAME//\./-}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=head" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web/dist --project-name=mmdflux-play --branch=${{ steps.branch.outputs.name }}

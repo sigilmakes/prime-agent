@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 555.43 737.41" style="max-width: 555.43px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M251.65,62.00 L251.65,64.78 C251.65,67.56 251.65,73.11 251.65,78.67 C251.65,84.22 251.65,89.78 251.65,94.67 C251.65,99.56 251.65,103.78 251.65,105.89 L251.65,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M290.95,184.52 L298.32,187.64 L322.45,197.83 C346.57,208.03 394.82,228.43 418.95,243.79 C443.07,259.15 443.07,269.49 443.07,276.82 C443.07,284.15 443.07,288.49 443.07,290.65 L443.07,292.82 L443.07,300.82" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M221.16,193.33 L215.01,198.45 L204.94,206.84 C194.87,215.24 174.72,232.03 164.65,245.59 C154.58,259.15 154.58,269.49 154.58,276.82 C154.58,284.15 154.58,288.49 154.58,290.65 L154.58,292.82 L154.58,300.82" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M445.13,358.82 L445.13,361.87 C445.13,364.92 445.13,371.01 445.83,377.11 C446.53,383.21 447.92,389.31 448.62,394.74 C449.31,400.17 449.31,404.93 449.31,407.31 L449.31,409.69" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M522.98,477.62 L530.98,477.62 L531.32,477.62 C531.65,477.62 532.32,477.62 532.65,403.85 C532.98,330.08 532.98,182.54 496.06,108.77 C459.14,35.00 385.29,35.00 348.37,35.00 L311.45,35.00 L303.45,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M132.97,358.82 L132.97,361.60 C132.97,364.38 132.97,369.93 126.30,375.49 C119.63,381.04 106.29,386.60 99.63,391.49 C92.96,396.38 92.96,400.60 92.96,402.71 L92.96,404.82" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M181.96,358.82 L181.96,361.60 C181.96,364.38 181.96,369.93 190.41,375.49 C198.86,381.04 215.76,386.60 224.21,391.49 C232.66,396.38 232.66,400.60 232.66,402.71 L232.66,404.82" stroke="#333" stroke-width="2.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M85.17,462.82 L85.17,468.85 C85.17,474.89 85.17,486.95 94.43,499.02 C103.70,511.08 122.23,523.15 131.49,534.55 C140.76,545.95 140.76,556.68 140.76,562.05 L140.76,567.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M242.53,462.82 L242.53,468.85 C242.53,474.89 242.53,486.95 230.79,499.02 C219.05,511.08 195.57,523.15 183.83,534.55 C172.09,545.95 172.09,556.68 172.09,562.05 L172.09,567.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M179.78,625.41 L179.78,628.19 C179.78,630.97 179.78,636.53 187.56,642.08 C195.34,647.64 210.89,653.19 218.67,658.08 C226.45,662.97 226.45,667.19 226.45,669.30 L226.45,671.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M454.19,546.41 L454.19,554.41 L454.19,557.25 C454.19,560.08 454.19,565.75 454.19,573.75 C454.19,581.75 454.19,592.08 431.23,608.53 C408.27,624.98 362.35,647.55 339.40,658.84 L316.44,670.12 L309.26,673.65" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="203.86" y="8.00" width="95.59" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.65" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Input</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <polygon points="251.65,112.00 307.56,167.91 251.65,223.82 195.74,167.91" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.65" y="167.91" text-anchor="middle" dominant-baseline="middle" fill="#333">Validate</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="384.17" y="304.82" width="117.80" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="443.07" y="331.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Process</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="91.56" y="304.82" width="126.03" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="154.58" y="331.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Error Handler</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <polygon points="454.19,408.82 522.98,477.62 454.19,546.41 385.39,477.62" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="454.19" y="477.62" text-anchor="middle" dominant-baseline="middle" fill="#333">More Data?</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <rect x="197.64" y="675.41" width="108.03" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.65" y="702.41" text-anchor="middle" dominant-baseline="middle" fill="#333">Output</text>
+      </g>
+      <g class="node default" id="G" data-id="G" data-look="classic">
+        <rect x="8.00" y="408.82" width="126.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="71.35" y="435.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Log Error</text>
+      </g>
+      <g class="node default" id="H" data-id="H" data-look="classic">
+        <rect x="184.70" y="408.82" width="150.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="260.04" y="435.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Notify Admin</text>
+      </g>
+      <g class="node default" id="I" data-id="I" data-look="classic">
+        <rect x="94.78" y="571.41" width="119.60" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="154.58" y="598.41" text-anchor="middle" dominant-baseline="middle" fill="#333">Cleanup</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="370.51" y="212.79" width="40.91" height="28.00" fill="white" />
+      <text x="390.96" y="226.79" text-anchor="middle" dominant-baseline="middle" fill="#333">valid</text>
+      <rect x="127.90" y="232.32" width="53.36" height="28.00" fill="white" />
+      <text x="154.58" y="246.32" text-anchor="middle" dominant-baseline="middle" fill="#333">invalid</text>
+      <rect x="514.54" y="130.54" width="32.90" height="28.00" fill="white" />
+      <text x="530.98" y="144.54" text-anchor="middle" dominant-baseline="middle" fill="#333">yes</text>
+      <rect x="392.16" y="612.56" width="25.80" height="28.00" fill="white" />
+      <text x="405.06" y="626.56" text-anchor="middle" dominant-baseline="middle" fill="#333">no</text>
+    </g>
+  </g>
+</svg>

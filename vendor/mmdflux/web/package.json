@@ -1,0 +1,47 @@
+{
+  "name": "mmdflux-web-playground",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm:build": "wasm-pack build ../crates/mmdflux-wasm --target web --dev --out-dir ../../web/src/wasm-pkg",
+    "wasm:build:release": "wasm-pack build ../crates/mmdflux-wasm --target web --release --out-dir ../../web/src/wasm-pkg",
+    "dev": "npm run wasm:build && vite",
+    "build": "npm run wasm:build && tsc --noEmit && vite build",
+    "build:release": "npm run wasm:build:release && tsc --noEmit && vite build",
+    "test": "npm run wasm:build && vitest run",
+    "check": "npx biome check",
+    "fmt": "npx biome check --write",
+    "benchmark:smoke:run": "node --experimental-strip-types scripts/benchmark-smoke.ts",
+    "benchmark:smoke": "npm run wasm:build && npm run benchmark:smoke:run -- --wasm-profile dev",
+    "benchmark:smoke:release": "npm run wasm:build:release && npm run benchmark:smoke:run -- --wasm-profile release",
+    "benchmark:full": "npm run wasm:build && npm run benchmark:smoke:run -- --full --no-thresholds --wasm-profile dev",
+    "benchmark:full:release": "npm run wasm:build:release && npm run benchmark:smoke:run -- --full --no-thresholds --wasm-profile release",
+    "benchmark:compare:run": "node --experimental-strip-types scripts/benchmark-compare.ts",
+    "benchmark:compare": "npm run wasm:build && npm run benchmark:compare:run -- --wasm-profile dev",
+    "benchmark:compare:release": "npm run wasm:build:release && npm run benchmark:compare:run -- --wasm-profile release"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/jsdom": "^27.0.0",
+    "@types/node": "^24.3.1",
+    "jsdom": "^26.0.0",
+    "mermaid": "^11.12.1",
+    "type-fest": "^4.41.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@mmds/browser-text-metrics": "file:../packages/mmds-browser-text-metrics",
+    "@codemirror/commands": "^6.10.2",
+    "@codemirror/language": "^6.12.1",
+    "@codemirror/lint": "^6.9.4",
+    "@codemirror/state": "^6.5.4",
+    "@codemirror/view": "^6.39.14",
+    "@lezer/highlight": "^1.2.3",
+    "@panzoom/panzoom": "^4.6.1",
+    "codemirror": "^6.0.2"
+  }
+}

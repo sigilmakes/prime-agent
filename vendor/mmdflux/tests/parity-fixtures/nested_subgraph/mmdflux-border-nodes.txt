@@ -1,0 +1,21 @@
+[border_nodes] layout positions
+[border_nodes] inner min_rank=Some(3) max_rank=Some(7)
+[border_nodes]   top _bt_inner rank=3 order=2 x=40.25 y=115.50
+[border_nodes]   bottom _bb_inner rank=7 order=2 x=60.50 y=271.50
+[border_nodes]   rank 3: left _bl_inner_3 order=1 x=20.00 y=115.50 right _br_inner_3 order=4 x=101.00 y=115.50
+[border_nodes]   rank 4: left _bl_inner_4 order=1 x=20.00 y=153.00 right _br_inner_4 order=3 x=101.00 y=153.00
+[border_nodes]   rank 5: left _bl_inner_5 order=1 x=20.00 y=193.50 right _br_inner_5 order=3 x=101.00 y=193.50
+[border_nodes]   rank 6: left _bl_inner_6 order=1 x=20.00 y=231.00 right _br_inner_6 order=3 x=101.00 y=231.00
+[border_nodes]   rank 7: left _bl_inner_7 order=1 x=20.00 y=271.50 right _br_inner_7 order=3 x=101.00 y=271.50
+[border_nodes] outer min_rank=Some(0) max_rank=Some(8)
+[border_nodes]   top _bt_outer rank=0 order=1 x=60.50 y=0.00
+[border_nodes]   bottom _bb_outer rank=8 order=2 x=141.00 y=309.00
+[border_nodes]   rank 0: left _bl_outer_0 order=0 x=0.00 y=0.00 right _br_outer_0 order=2 x=121.00 y=0.00
+[border_nodes]   rank 1: left _bl_outer_1 order=0 x=0.00 y=37.50 right _br_outer_1 order=2 x=121.00 y=37.50
+[border_nodes]   rank 2: left _bl_outer_2 order=0 x=0.00 y=78.00 right _br_outer_2 order=2 x=121.00 y=78.00
+[border_nodes]   rank 3: left _bl_outer_3 order=0 x=0.00 y=115.50 right _br_outer_3 order=5 x=121.00 y=115.50
+[border_nodes]   rank 4: left _bl_outer_4 order=0 x=0.00 y=153.00 right _br_outer_4 order=4 x=121.00 y=153.00
+[border_nodes]   rank 5: left _bl_outer_5 order=0 x=0.00 y=193.50 right _br_outer_5 order=4 x=121.00 y=193.50
+[border_nodes]   rank 6: left _bl_outer_6 order=0 x=0.00 y=231.00 right _br_outer_6 order=4 x=121.00 y=231.00
+[border_nodes]   rank 7: left _bl_outer_7 order=0 x=0.00 y=271.50 right _br_outer_7 order=4 x=121.00 y=271.50
+[border_nodes]   rank 8: left _bl_outer_8 order=0 x=0.00 y=309.00 right _br_outer_8 order=1 x=121.00 y=309.00

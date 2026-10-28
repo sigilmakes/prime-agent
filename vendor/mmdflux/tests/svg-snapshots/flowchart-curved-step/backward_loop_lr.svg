@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1636.83 214.00" style="max-width: 1636.83px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M140.91,87.00 L143.68,87.00 C146.46,87.00 152.02,87.00 157.02,87.00 C162.02,87.00 166.46,87.00 171.35,87.00 C176.24,87.00 181.57,87.00 184.24,87.00 L186.91,87.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M354.06,106.00 L356.84,106.00 C359.62,106.00 365.17,106.00 370.17,108.33 C375.17,110.67 379.62,115.33 384.51,117.67 C389.40,120.00 394.73,120.00 397.40,120.00 L400.06,120.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M354.06,68.00 L356.84,68.00 C359.62,68.00 365.17,68.00 370.17,65.49 C375.17,62.97 379.62,57.94 384.51,55.43 C389.40,52.91 394.73,52.91 397.40,52.91 L400.06,52.91" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M542.32,35.00 L546.83,35.00 C551.33,35.00 560.35,35.00 569.36,35.00 C578.38,35.00 587.39,35.00 595.74,35.00 C604.08,35.00 611.76,35.00 615.61,35.00 L619.45,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M573.45,139.00 L668.88,139.00 L676.83,139.00 C684.78,139.00 700.69,139.00 716.59,139.00 C732.50,139.00 748.40,139.00 756.36,139.00 L764.31,139.00 L855.74,139.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M809.74,54.00 L809.74,55.33 C809.74,56.67 809.74,59.33 817.64,69.83 C825.54,80.32 841.33,98.65 849.23,107.81 L857.13,116.97" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M1048.70,128.10 L1085.96,128.10 L1089.06,128.10 C1092.17,128.10 1098.38,128.10 1104.59,128.10 C1110.80,128.10 1117.01,128.10 1120.11,128.10 L1123.22,128.10 L1156.48,128.10" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M1172.48,166.00 L1172.48,190.00 L1161.16,190.00 C1149.85,190.00 1127.22,190.00 1104.59,190.00 C1081.96,190.00 1059.33,190.00 1048.01,190.00 L1036.70,190.00 L1036.70,170.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M1328.07,139.00 L1368.59,139.00 L1371.97,139.00 C1375.35,139.00 1382.10,139.00 1388.86,139.00 C1395.61,139.00 1402.36,139.00 1405.74,139.00 L1409.12,139.00 L1445.64,139.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="8.00" y="60.00" width="132.91" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="74.45" y="87.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Narratives</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="190.91" y="60.00" width="163.16" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="272.48" y="87.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Domain Model</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="404.06" y="112.00" width="169.38" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="488.75" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Server Scaffold</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="404.06" y="8.00" width="138.26" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="473.19" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">IA Schema</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="623.45" y="8.00" width="186.30" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="716.59" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Frontend Scaffold</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <rect x="859.74" y="112.00" width="188.95" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="954.22" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">AI Implementation</text>
+      </g>
+      <g class="node default" id="G" data-id="G" data-look="classic">
+        <rect x="1160.48" y="112.00" width="167.59" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="1244.27" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Quality Checks</text>
+      </g>
+      <g class="node default" id="H" data-id="H" data-look="classic">
+        <rect x="1449.64" y="112.00" width="179.19" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="1539.23" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Production Code</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="1087.70" y="178.00" width="33.78" height="28.00" fill="white" />
+      <text x="1104.59" y="192.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Fail</text>
+      <rect x="1365.07" y="125.00" width="43.57" height="28.00" fill="white" />
+      <text x="1386.86" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Pass</text>
+    </g>
+  </g>
+</svg>

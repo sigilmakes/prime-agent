@@ -1,0 +1,11 @@
+sequenceDiagram
+    participant Alice
+    participant Bob
+    loop Retry until ready
+        Alice->>Bob: Check
+        alt ready
+            Bob->>Alice: Proceed
+        else retry
+            Bob-->>Alice: Wait
+        end
+    end

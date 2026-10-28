@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 559.43 737.41" style="max-width: 559.43px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M251.65,62.00 L251.65,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M296.51,178.97 L438.07,178.97 Q443.07,178.97 443.07,183.97 L443.07,300.82" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M214.03,186.20 L159.58,186.20 Q154.58,186.20 154.58,191.20 L154.58,300.82" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M447.84,358.82 L447.84,408.46" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M522.98,477.62 L529.98,477.62 Q534.98,477.62 534.98,472.62 L534.98,40.00 Q534.98,35.00 529.98,35.00 L303.45,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M96.26,358.82 L96.26,404.82" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M209.60,358.82 L209.60,365.22 Q209.60,370.22 214.60,370.22 L227.66,370.22 Q232.66,370.22 232.66,375.22 L232.66,404.82" stroke="#333" stroke-width="2.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M85.17,462.82 L85.17,475.08 Q85.17,480.08 90.17,480.08 L97.78,480.08 Q102.78,480.08 102.78,485.08 L102.78,567.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M242.53,462.82 L242.53,475.08 Q242.53,480.08 237.53,480.08 L211.38,480.08 Q206.38,480.08 206.38,485.08 L206.38,567.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M179.78,625.41 L179.78,631.81 Q179.78,636.81 184.78,636.81 L200.64,636.81 Q205.64,636.81 205.64,641.81 L205.64,671.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M410.17,502.39 L302.67,502.39 Q297.67,502.39 297.67,507.39 L297.67,671.41" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="203.86" y="8.00" width="95.59" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.65" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Input</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <polygon points="251.65,112.00 307.56,167.91 251.65,223.82 195.74,167.91" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.65" y="167.91" text-anchor="middle" dominant-baseline="middle" fill="#333">Validate</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="384.17" y="304.82" width="117.80" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="443.07" y="331.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Process</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="91.56" y="304.82" width="126.03" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="154.58" y="331.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Error Handler</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <polygon points="454.19,408.82 522.98,477.62 454.19,546.41 385.39,477.62" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="454.19" y="477.62" text-anchor="middle" dominant-baseline="middle" fill="#333">More Data?</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <rect x="197.64" y="675.41" width="108.03" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.65" y="702.41" text-anchor="middle" dominant-baseline="middle" fill="#333">Output</text>
+      </g>
+      <g class="node default" id="G" data-id="G" data-look="classic">
+        <rect x="8.00" y="408.82" width="126.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="71.35" y="435.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Log Error</text>
+      </g>
+      <g class="node default" id="H" data-id="H" data-look="classic">
+        <rect x="184.70" y="408.82" width="150.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="260.04" y="435.82" text-anchor="middle" dominant-baseline="middle" fill="#333">Notify Admin</text>
+      </g>
+      <g class="node default" id="I" data-id="I" data-look="classic">
+        <rect x="94.78" y="571.41" width="119.60" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="154.58" y="598.41" text-anchor="middle" dominant-baseline="middle" fill="#333">Cleanup</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="422.62" y="232.32" width="40.91" height="28.00" fill="white" />
+      <text x="443.07" y="246.32" text-anchor="middle" dominant-baseline="middle" fill="#333">valid</text>
+      <rect x="127.90" y="232.32" width="53.36" height="28.00" fill="white" />
+      <text x="154.58" y="246.32" text-anchor="middle" dominant-baseline="middle" fill="#333">invalid</text>
+      <rect x="518.54" y="132.54" width="32.90" height="28.00" fill="white" />
+      <text x="534.98" y="146.54" text-anchor="middle" dominant-baseline="middle" fill="#333">yes</text>
+      <rect x="284.77" y="516.65" width="25.80" height="28.00" fill="white" />
+      <text x="297.67" y="530.65" text-anchor="middle" dominant-baseline="middle" fill="#333">no</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,5 @@
+graph TD
+    A[Start] -- yes --> B[Next]
+    B -. retry .-> C[Again]
+    C == "final step" ==> D[Done]
+    D -- no --> E[Stop]

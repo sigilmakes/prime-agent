@@ -1,0 +1,9 @@
+sequenceDiagram
+    participant Alice
+    participant Bob
+    Alice->>Bob: Check status
+    alt available
+        Bob->>Alice: Available
+    else busy
+        Bob-->>Alice: Busy
+    end

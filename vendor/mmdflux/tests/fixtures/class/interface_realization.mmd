@@ -1,0 +1,9 @@
+classDiagram
+class Logger {
+  <<interface>>
+  +log(message)
+}
+class ConsoleLogger
+class FileLogger
+Logger <|.. ConsoleLogger
+Logger <|.. FileLogger

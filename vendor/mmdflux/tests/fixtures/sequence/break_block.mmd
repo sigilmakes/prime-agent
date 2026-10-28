@@ -1,0 +1,9 @@
+sequenceDiagram
+    participant Alice
+    participant Bob
+    loop Retries
+        Alice->>Bob: Try
+        break Success
+            Bob->>Alice: Done
+        end
+    end

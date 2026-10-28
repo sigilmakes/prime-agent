@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 824.56 174.00" style="max-width: 824.56px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M356.49,62.00 L356.49,64.78 C356.49,67.56 356.49,73.11 318.64,78.67 C280.78,84.22 205.07,89.78 167.21,94.67 C129.36,99.56 129.36,103.78 129.36,105.89 L129.36,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M367.24,62.00 L367.24,64.78 C367.24,67.56 367.24,73.11 353.47,78.67 C339.71,84.22 312.17,89.78 298.41,94.67 C284.64,99.56 284.64,103.78 284.64,105.89 L284.64,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M411.84,62.00 L411.84,64.78 C411.84,67.56 411.84,73.11 411.84,78.67 C411.84,84.22 411.84,89.78 411.84,94.67 C411.84,99.56 411.84,103.78 411.84,105.89 L411.84,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M456.56,62.00 L456.56,64.78 C456.56,67.56 456.56,73.11 470.36,78.67 C484.16,84.22 511.76,89.78 525.56,94.67 C539.37,99.56 539.37,103.78 539.37,105.89 L539.37,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M467.19,62.00 L467.19,64.78 C467.19,67.56 467.19,73.11 505.19,78.67 C543.19,84.22 619.20,89.78 657.20,94.67 C695.20,99.56 695.20,103.78 695.20,105.89 L695.20,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="356.49" y="8.00" width="110.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="411.84" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Source</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="8.00" y="112.00" width="121.36" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="68.68" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Target A</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="179.36" y="112.00" width="121.36" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="240.04" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Target B</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="350.72" y="112.00" width="122.24" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="411.84" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Target C</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="522.96" y="112.00" width="122.24" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="584.08" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Target D</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <rect x="695.20" y="112.00" width="121.36" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="755.88" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Target E</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

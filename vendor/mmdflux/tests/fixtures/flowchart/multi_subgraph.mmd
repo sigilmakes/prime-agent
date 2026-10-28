@@ -1,0 +1,8 @@
+graph LR
+subgraph sg1[Frontend]
+A[UI] --> B[API]
+end
+subgraph sg2[Backend]
+C[Server] --> D[DB]
+end
+B --> C

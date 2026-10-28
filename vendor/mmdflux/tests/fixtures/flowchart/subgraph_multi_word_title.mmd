@@ -1,0 +1,6 @@
+graph TD
+    subgraph "Data Processing Pipeline"
+        Extract[Extract] --> Transform[Transform] --> Load[Load]
+    end
+    Source --> Extract
+    Load --> Sink

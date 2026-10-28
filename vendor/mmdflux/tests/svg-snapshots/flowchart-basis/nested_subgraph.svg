@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 193.80 389.00" style="max-width: 193.80px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(-25.00,-19.00)">
+    <g class="clusters">
+      <g class="cluster" id="outer" data-id="outer" data-look="classic">
+        <rect class="subgraph" x="33.00" y="27.00" width="177.80" height="373.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="121.90" y="31.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Outer</text>
+      </g>
+      <g class="cluster" id="inner" data-id="inner" data-look="classic">
+        <rect class="subgraph" x="48.00" y="181.00" width="147.80" height="204.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="121.90" y="185.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Inner</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M121.90,266.00 L121.90,268.78 C121.90,271.56 121.90,277.11 121.90,282.67 C121.90,288.22 121.90,293.78 121.90,298.67 C121.90,303.56 121.90,307.78 121.90,309.89 L121.90,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M121.90,112.00 L121.90,120.00 L121.90,127.00 C121.90,134.00 121.90,148.00 121.90,161.33 C121.90,174.67 121.90,187.33 121.90,193.67 L121.90,200.00 L121.90,208.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="75.00" y="58.00" width="93.79" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="121.90" y="85.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Start</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="63.00" y="212.00" width="117.80" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="121.90" y="239.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Process</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="77.66" y="316.00" width="88.47" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="121.90" y="343.00" text-anchor="middle" dominant-baseline="middle" fill="#333">End</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

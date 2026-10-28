@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": { "width": 100.0, "height": 80.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "A",
+      "position": { "x": 10.0, "y": 10.0 },
+      "size": { "width": 40.0, "height": 20.0 }
+    },
+    {
+      "id": "B",
+      "label": "B",
+      "position": { "x": 70.0, "y": 50.0 },
+      "size": { "width": 40.0, "height": 20.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B",
+      "to_subgraph": "missing-subgraph"
+    }
+  ],
+  "subgraphs": []
+}

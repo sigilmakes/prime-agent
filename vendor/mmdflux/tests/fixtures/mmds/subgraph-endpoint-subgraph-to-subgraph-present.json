@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": {
+      "shape": "rectangle"
+    },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": {
+      "width": 104.0,
+      "height": 403.0
+    }
+  },
+  "nodes": [
+    {
+      "id": "API",
+      "label": "API Server",
+      "parent": "backend",
+      "position": {
+        "x": 45.0,
+        "y": 276.5
+      },
+      "size": {
+        "width": 14.0,
+        "height": 3.0
+      }
+    },
+    {
+      "id": "DB",
+      "label": "Database",
+      "parent": "backend",
+      "position": {
+        "x": 46.0,
+        "y": 354.5
+      },
+      "size": {
+        "width": 12.0,
+        "height": 3.0
+      }
+    },
+    {
+      "id": "State",
+      "label": "State Manager",
+      "parent": "frontend",
+      "position": {
+        "x": 43.5,
+        "y": 123.5
+      },
+      "size": {
+        "width": 17.0,
+        "height": 3.0
+      }
+    },
+    {
+      "id": "UI",
+      "label": "User Interface",
+      "parent": "frontend",
+      "position": {
+        "x": 43.0,
+        "y": 45.5
+      },
+      "size": {
+        "width": 18.0,
+        "height": 3.0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "UI",
+      "target": "State"
+    },
+    {
+      "id": "e1",
+      "source": "API",
+      "target": "DB"
+    },
+    {
+      "id": "e2",
+      "source": "State",
+      "target": "API",
+      "from_subgraph": "frontend",
+      "to_subgraph": "backend"
+    }
+  ],
+  "subgraphs": [
+    {
+      "id": "backend",
+      "title": "Backend",
+      "children": [
+        "API",
+        "DB"
+      ]
+    },
+    {
+      "id": "frontend",
+      "title": "Frontend",
+      "children": [
+        "UI",
+        "State"
+      ]
+    }
+  ]
+}

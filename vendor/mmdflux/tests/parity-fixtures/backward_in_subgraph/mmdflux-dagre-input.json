@@ -1,0 +1,20 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "marginx": 8,
+    "marginy": 8,
+    "ranker": "network-simplex"
+  },
+  "nodes": [
+    {"id": "A", "label": "Node", "width": 8, "height": 3, "parent": "sg1", "is_subgraph": false},
+    {"id": "B", "label": "Node2", "width": 9, "height": 3, "parent": "sg1", "is_subgraph": false},
+    {"id": "sg1", "label": "Group", "width": 0, "height": 0, "parent": null, "is_subgraph": true}
+  ],
+  "edges": [
+    {"from": "A", "to": "B", "label": null, "label_width": 0, "label_height": 0, "index": 0},
+    {"from": "B", "to": "A", "label": null, "label_width": 0, "label_height": 0, "index": 1}
+  ]
+}

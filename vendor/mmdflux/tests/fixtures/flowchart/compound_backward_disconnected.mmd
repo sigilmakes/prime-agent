@@ -1,0 +1,16 @@
+graph TD
+    subgraph A[Top]
+        a1[Node A1]
+        a2[Node A2]
+    end
+    subgraph B[Middle]
+        b1[Node B1]
+        b2[Node B2]
+    end
+    subgraph C[Bottom]
+        c1[Node C1]
+        c2[Node C2]
+    end
+    a1 --> b1
+    b1 --> c1
+    c2 -.-> a2

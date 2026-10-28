@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 293.58 523.38" style="max-width: 293.58px; background-color: #ffffff;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M155.91,62.00 L155.91,108.00" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M133.75,229.23 L75.70,353.76" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M178.06,229.23 L236.11,353.76" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M74.01,411.38 L152.49,459.30" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M237.80,411.38 L159.32,459.30" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="check-1" data-id="check-1" data-look="classic">
+        <polygon points="155.91,112.00 225.60,181.69 155.91,251.38 86.21,181.69" fill="#ececff" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="155.91" y="181.69" text-anchor="middle" dominant-baseline="middle" fill="#333333">Check Input</text>
+      </g>
+      <g class="node default" id="end-node" data-id="end-node" data-look="classic">
+        <rect x="106.78" y="461.38" width="98.25" height="54.00" fill="#ececff" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="155.91" y="488.38" text-anchor="middle" dominant-baseline="middle" fill="#333333">Done</text>
+      </g>
+      <g class="node default error" id="error-1" data-id="error-1" data-look="classic">
+        <rect x="190.02" y="357.38" width="95.55" height="54.00" fill="#f00" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="237.80" y="384.38" text-anchor="middle" dominant-baseline="middle" fill="#333333">Error</text>
+      </g>
+      <g class="node default success" id="process-A" data-id="process-A" data-look="classic">
+        <rect x="8.00" y="357.38" width="132.02" height="54.00" fill="#0f0" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="74.01" y="384.38" text-anchor="middle" dominant-baseline="middle" fill="#333333">process-A</text>
+      </g>
+      <g class="node default" id="start-node" data-id="start-node" data-look="classic">
+        <rect x="109.01" y="8.00" width="93.79" height="54.00" fill="#f9f" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="155.91" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333333">Start</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="84.27" y="277.49" width="40.91" height="28.00" fill="#ffffff" />
+      <text x="104.73" y="291.49" text-anchor="middle" dominant-baseline="middle" fill="#333333">valid</text>
+      <rect x="180.41" y="277.49" width="53.36" height="28.00" fill="#ffffff" />
+      <text x="207.09" y="291.49" text-anchor="middle" dominant-baseline="middle" fill="#333333">invalid</text>
+    </g>
+  </g>
+</svg>

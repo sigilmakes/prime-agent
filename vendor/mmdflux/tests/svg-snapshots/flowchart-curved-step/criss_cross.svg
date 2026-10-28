@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 208.67 278.00" style="max-width: 208.67px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M77.00,62.00 L77.00,64.78 C77.00,67.56 77.00,73.11 74.08,78.11 C71.16,83.11 65.33,87.56 62.42,92.44 C59.50,97.33 59.50,102.67 59.50,105.33 L59.50,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M131.67,62.00 L131.67,64.78 C131.67,67.56 131.67,73.11 134.59,78.11 C137.50,83.11 143.34,87.56 146.25,92.44 C149.17,97.33 149.17,102.67 149.17,105.33 L149.17,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M137.11,166.00 L137.11,168.78 C137.11,171.56 137.11,177.11 126.19,182.11 C115.26,187.11 93.41,191.56 82.48,196.44 C71.55,201.33 71.55,206.67 71.55,209.33 L71.55,212.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M16.44,166.00 L16.44,168.78 C16.44,171.56 16.44,177.11 21.00,182.11 C25.55,187.11 34.67,191.56 39.22,196.44 C43.78,201.33 43.78,206.67 43.78,209.33 L43.78,212.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M71.11,166.00 L71.11,168.78 C71.11,171.56 71.11,177.11 82.19,182.11 C93.26,187.11 115.41,191.56 126.48,196.44 C137.55,201.33 137.55,206.67 137.55,209.33 L137.55,212.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M192.67,166.00 L192.67,168.78 C192.67,171.56 192.67,177.11 188.04,182.11 C183.41,187.11 174.15,191.56 169.52,196.44 C164.89,201.33 164.89,206.67 164.89,209.33 L164.89,212.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="69.00" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="104.33" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">A</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="8.44" y="112.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">B</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="129.11" y="112.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="164.89" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">C</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="8.00" y="216.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="243.00" text-anchor="middle" dominant-baseline="middle" fill="#333">D</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="129.55" y="216.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="164.89" y="243.00" text-anchor="middle" dominant-baseline="middle" fill="#333">E</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

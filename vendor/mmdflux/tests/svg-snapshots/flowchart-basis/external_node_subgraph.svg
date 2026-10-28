@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 454.94 408.00" style="max-width: 454.94px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(-25.00,0.00)">
+    <g class="clusters">
+      <g class="cluster" id="Cloud" data-id="Cloud" data-look="classic">
+        <rect class="subgraph" x="33.00" y="150.00" width="438.94" height="250.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="252.47" y="154.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Cloud</text>
+      </g>
+      <g class="cluster" id="us-east" data-id="us-east" data-look="classic">
+        <rect class="subgraph" x="282.47" y="181.00" width="174.47" height="204.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="369.70" y="185.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">US East Region</text>
+      </g>
+      <g class="cluster" id="us-west" data-id="us-west" data-look="classic">
+        <rect class="subgraph" x="48.00" y="181.00" width="174.47" height="204.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="135.23" y="185.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">US West Region</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M369.70,266.00 L369.70,268.78 C369.70,271.56 369.70,277.11 369.70,282.67 C369.70,288.22 369.70,293.78 369.70,298.67 C369.70,303.56 369.70,307.78 369.70,309.89 L369.70,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M135.23,266.00 L135.23,268.78 C135.23,271.56 135.23,277.11 135.23,282.67 C135.23,288.22 135.23,293.78 135.23,298.67 C135.23,303.56 135.23,307.78 135.23,309.89 L135.23,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M293.58,62.00 L300.26,66.39 L311.84,73.99 C323.41,81.59 346.56,96.80 358.13,112.73 C369.70,128.67 369.70,145.33 369.70,160.00 C369.70,174.67 369.70,187.33 369.70,193.67 L369.70,200.00 L369.70,208.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M211.36,62.00 L204.67,66.39 L193.10,73.99 C181.53,81.59 158.38,96.80 146.81,112.73 C135.23,128.67 135.23,145.33 135.23,160.00 C135.23,174.67 135.23,187.33 135.23,193.67 L135.23,200.00 L135.23,208.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="297.47" y="212.00" width="144.47" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="369.70" y="239.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Web Server</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="299.68" y="316.00" width="140.04" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="369.70" y="343.00" text-anchor="middle" dominant-baseline="middle" fill="#333">App Server</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="63.00" y="212.00" width="144.47" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="135.23" y="239.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Web Server</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="65.21" y="316.00" width="140.04" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="135.23" y="343.00" text-anchor="middle" dominant-baseline="middle" fill="#333">App Server</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="170.88" y="8.00" width="163.19" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="252.47" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Load Balancer</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

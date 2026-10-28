@@ -1,0 +1,11 @@
+graph BT
+subgraph sg1[Input]
+A[Data]
+B[Config]
+end
+subgraph sg2[Output]
+C[Result]
+D[Log]
+end
+A --> C
+B --> D

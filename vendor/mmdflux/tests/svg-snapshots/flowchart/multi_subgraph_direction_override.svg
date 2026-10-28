@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 351.80 528.00" style="max-width: 351.80px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(-25.11,-27.00)">
+    <g class="clusters">
+      <g class="cluster" id="A" data-id="A" data-look="classic">
+        <rect class="subgraph" x="33.11" y="35.00" width="335.80" height="100.00" fill="#e9efff" stroke="#1f4fff" stroke-width="1px" />
+        <text x="201.01" y="39.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">a</text>
+      </g>
+      <g class="cluster" id="G" data-id="G" data-look="classic">
+        <rect class="subgraph" x="141.79" y="447.00" width="217.80" height="100.00" fill="#e9efff" stroke="#1f4fff" stroke-width="1px" />
+        <text x="250.68" y="451.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">g</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M80.01,120.00 L80.01,208.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M51.00,266.00 L51.00,286.00 Q51.00,291.00 56.00,291.00 L72.45,291.00 Q77.45,291.00 77.45,296.00 L77.45,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M103.90,266.00 L103.90,272.40 Q103.90,277.40 108.90,277.40 L157.12,277.40 Q162.12,277.40 162.12,282.40 L162.12,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M201.46,120.00 L201.46,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M322.47,120.00 L322.47,208.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M325.02,266.00 L325.02,286.00 Q325.02,291.00 320.02,291.00 L320.02,291.00 Q315.02,291.00 315.02,296.00 L315.02,312.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M162.12,370.00 L162.12,454.00 Q162.12,459.00 167.12,459.00 L186.24,459.00 Q191.24,459.00 191.24,464.00 L191.24,474.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M210.57,370.00 L210.57,382.20 Q210.57,387.20 215.57,387.20 L278.68,387.20 Q283.68,387.20 283.68,392.20 L283.68,474.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M315.02,370.00 L315.02,474.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default node" id="Ab" data-id="Ab" data-look="classic">
+        <rect x="48.11" y="66.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="82.56" y="93.00" text-anchor="middle" dominant-baseline="middle" fill="#000">b</text>
+      </g>
+      <g class="node default node" id="Ac" data-id="Ac" data-look="classic">
+        <rect x="285.91" y="66.00" width="68.00" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="319.91" y="93.00" text-anchor="middle" dominant-baseline="middle" fill="#000">c</text>
+      </g>
+      <g class="node default node" id="Au" data-id="Au" data-look="classic">
+        <rect x="167.01" y="66.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="201.46" y="93.00" text-anchor="middle" dominant-baseline="middle" fill="#000">u</text>
+      </g>
+      <g class="node default node" id="Bmid" data-id="Bmid" data-look="classic">
+        <rect x="43.00" y="212.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="77.45" y="239.00" text-anchor="middle" dominant-baseline="middle" fill="#000">b</text>
+      </g>
+      <g class="node default node" id="Cmid" data-id="Cmid" data-look="classic">
+        <rect x="291.02" y="212.00" width="68.00" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="325.02" y="239.00" text-anchor="middle" dominant-baseline="middle" fill="#000">c</text>
+      </g>
+      <g class="node default node" id="D" data-id="D" data-look="classic">
+        <rect x="43.00" y="316.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="77.45" y="343.00" text-anchor="middle" dominant-baseline="middle" fill="#000">d</text>
+      </g>
+      <g class="node default node" id="E" data-id="E" data-look="classic">
+        <rect x="280.57" y="316.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="315.02" y="343.00" text-anchor="middle" dominant-baseline="middle" fill="#000">e</text>
+      </g>
+      <g class="node default node" id="F" data-id="F" data-look="classic">
+        <rect x="154.12" y="316.00" width="64.45" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="186.35" y="343.00" text-anchor="middle" dominant-baseline="middle" fill="#000">f</text>
+      </g>
+      <g class="node default node" id="Ga" data-id="Ga" data-look="classic">
+        <rect x="275.68" y="478.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="310.13" y="505.00" text-anchor="middle" dominant-baseline="middle" fill="#000">a</text>
+      </g>
+      <g class="node default node" id="Gb" data-id="Gb" data-look="classic">
+        <rect x="156.79" y="478.00" width="68.90" height="54.00" fill="#f7f9ff" stroke="#1f4fff" stroke-width="1px" stroke-linejoin="round" />
+        <text x="191.24" y="505.00" text-anchor="middle" dominant-baseline="middle" fill="#000">b</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

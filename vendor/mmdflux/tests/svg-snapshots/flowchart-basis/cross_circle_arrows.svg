@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 87.55 486.00" style="max-width: 87.55px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="circlehead" viewBox="0 0 12.00 12.00" refX="11.00" refY="6.00" markerWidth="12.00" markerHeight="12.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <circle cx="6" cy="6" r="5" stroke="#333" stroke-width="1" fill="white" />
+    </marker>
+    <marker id="crosshead" viewBox="0 0 11.00 11.00" refX="12.00" refY="5.20" markerWidth="11.00" markerHeight="11.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 1,1 l 9,9 M 10,1 l -9,9" stroke="#333" stroke-width="2" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M43.78,62.00 L43.78,64.78 C43.78,67.56 43.78,73.11 43.78,78.67 C43.78,84.22 43.78,89.78 43.78,95.33 C43.78,100.89 43.78,106.44 43.78,109.22 L43.78,112.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#crosshead)" />
+      <path d="M43.78,166.00 L43.78,168.78 C43.78,171.56 43.78,177.11 43.78,182.67 C43.78,188.22 43.78,193.78 43.78,197.67 C43.78,201.56 43.78,203.78 43.78,204.89 L43.78,206.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#circlehead)" />
+      <path d="M43.78,270.00 L43.78,272.78 C43.78,275.56 43.78,281.11 43.78,286.67 C43.78,292.22 43.78,297.78 43.78,303.33 C43.78,308.89 43.78,314.44 43.78,317.22 L43.78,320.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-start="url(#crosshead)" marker-end="url(#crosshead)" />
+      <path d="M43.78,384.00 L43.78,385.11 C43.78,386.22 43.78,388.44 43.78,392.33 C43.78,396.22 43.78,401.78 43.78,405.67 C43.78,409.56 43.78,411.78 43.78,412.89 L43.78,414.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-start="url(#circlehead)" marker-end="url(#circlehead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="8.44" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">A</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="8.44" y="112.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">B</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="8.00" y="216.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="243.00" text-anchor="middle" dominant-baseline="middle" fill="#333">C</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="8.00" y="320.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="347.00" text-anchor="middle" dominant-baseline="middle" fill="#333">D</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="8.44" y="424.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.78" y="451.00" text-anchor="middle" dominant-baseline="middle" fill="#333">E</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

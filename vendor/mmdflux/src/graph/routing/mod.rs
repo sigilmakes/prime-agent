@@ -1,0 +1,1978 @@
+//! Graph-family routing stage.
+//!
+//! Produces `RoutedGraphGeometry` (Layer 2) from `GraphGeometry` (Layer 1).
+//! Supports four modes:
+//! - `DirectRoute`: Build source→target direct paths.
+//! - `PolylineRoute`: Build edge paths from layout hints + node positions.
+//! - `EngineProvided`: Use engine-provided paths directly.
+//! - `OrthogonalRoute`: Produce axis-aligned (right-angle) edge paths.
+
+mod backward_corridor;
+mod float_core;
+mod label_clamp;
+pub(crate) mod label_gap;
+pub(crate) mod label_lanes;
+mod label_rewrap;
+mod labels;
+mod orthogonal;
+mod stage;
+#[cfg(test)]
+pub(crate) mod trace;
+
+pub use self::float_core::{
+    build_orthogonal_path_float, hexagon_vertices, intersect_convex_polygon,
+};
+pub use self::labels::compute_end_label_positions;
+pub use self::orthogonal::{OrthogonalRoutingOptions, route_edges_orthogonal};
+pub(crate) use self::stage::route_graph_geometry_with_provider;
+pub use self::stage::{EdgeRouting, route_graph_geometry};
+#[cfg(test)]
+use crate::graph::Graph;
+#[cfg(test)]
+use crate::graph::geometry::*;
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::graph::attachment::PortFace;
+    use crate::graph::measure::{
+        GraphTextStyleKey, TextMetricsProvider, default_proportional_text_metrics,
+    };
+    use crate::graph::routing::EdgeRouting;
+    use crate::internal_tests::stub_metrics::WideMProvider;
+
+    fn simple_geometry() -> (Graph, GraphGeometry) {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_edge(crate::graph::Edge::new("A", "B"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(50.0, 25.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(50.0, 75.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+
+        let edges = vec![LayoutEdge {
+            index: 0,
+            from: "A".into(),
+            to: "B".into(),
+            waypoints: vec![],
+            label_position: None,
+            label_side: None,
+            from_subgraph: None,
+            to_subgraph: None,
+            layout_path_hint: Some(vec![FPoint::new(50.0, 35.0), FPoint::new(50.0, 65.0)]),
+            preserve_orthogonal_topology: false,
+            label_geometry: None,
+            effective_wrapped_lines: None,
+        }];
+
+        let geom = GraphGeometry {
+            nodes,
+            edges,
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 100.0, 100.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        (diagram, geom)
+    }
+
+    #[test]
+    fn route_graph_geometry_trace_records_route_input_and_output() {
+        let (diagram, geometry) = simple_geometry();
+
+        trace::begin_capture();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geometry,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        let trace = trace::finish_capture();
+
+        assert!(trace.has_stage(trace::RoutingTraceStage::Input));
+        assert!(trace.has_stage(trace::RoutingTraceStage::Output));
+        assert_eq!(trace.input().unwrap().edges[0].index, 0);
+        assert_eq!(
+            trace.output().unwrap().edges[0].index,
+            routed.edges[0].index
+        );
+    }
+
+    #[test]
+    fn route_input_trace_includes_label_descriptor_dimensions() {
+        let (mut diagram, mut geometry) = simple_geometry();
+        diagram.edges[0].label = Some("validate payload".to_string());
+        geometry.edges[0].label_position = Some(FPoint::new(50.0, 50.0));
+
+        trace::begin_capture();
+        let _ = route_graph_geometry(
+            &diagram,
+            &geometry,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        let trace = trace::finish_capture();
+
+        let input = trace.input().unwrap();
+        assert_eq!(input.labels.len(), 1);
+        assert_eq!(input.labels[0].edge_index, 0);
+        assert!(input.labels[0].width > 0.0);
+        assert!(input.labels[0].height > 0.0);
+    }
+
+    #[test]
+    fn polyline_route_produces_routed_edges() {
+        let (diagram, geom) = simple_geometry();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+
+        assert_eq!(routed.nodes.len(), 2);
+        assert_eq!(routed.edges.len(), 1);
+        assert!(routed.edges[0].path.len() >= 2);
+        assert!(!routed.edges[0].is_backward);
+    }
+
+    #[test]
+    fn engine_provided_uses_layout_path_hints() {
+        let (diagram, geom) = simple_geometry();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::EngineProvided,
+            &default_proportional_text_metrics(),
+        );
+
+        let edge = &routed.edges[0];
+        assert_eq!(edge.path.len(), 2);
+        // Face-snapped: x stays at 50 (clamped within rect), y snapped to faces
+        assert_eq!(edge.path[0].x, 50.0);
+        assert_eq!(edge.path[0].y, 45.0); // A bottom face
+        assert_eq!(edge.path[1].x, 50.0);
+        assert_eq!(edge.path[1].y, 75.0); // B top face
+    }
+
+    #[test]
+    fn self_edges_are_routed() {
+        let (diagram, mut geom) = simple_geometry();
+        geom.self_edges.push(SelfEdgeGeometry {
+            node_id: "A".into(),
+            edge_index: 1,
+            points: vec![
+                FPoint::new(70.0, 15.0),
+                FPoint::new(80.0, 15.0),
+                FPoint::new(80.0, 35.0),
+                FPoint::new(70.0, 35.0),
+            ],
+        });
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert_eq!(routed.self_edges.len(), 1);
+        assert_eq!(routed.self_edges[0].path.len(), 4);
+        assert_eq!(routed.self_edges[0].node_id, "A");
+    }
+
+    #[test]
+    fn backward_edges_are_marked() {
+        let (diagram, mut geom) = simple_geometry();
+        geom.reversed_edges = vec![0];
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert!(routed.edges[0].is_backward);
+    }
+
+    #[test]
+    fn fallback_path_from_node_centers_and_waypoints() {
+        let (diagram, mut geom) = simple_geometry();
+        // Remove layout_path_hint to force fallback
+        geom.edges[0].layout_path_hint = None;
+        geom.edges[0].waypoints = vec![FPoint::new(50.0, 50.0)];
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        let path = &routed.edges[0].path;
+        // Should be: A bottom face → waypoint → B top face (face-snapped)
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].x, 70.0); // A center_x (within rect bounds)
+        assert_eq!(path[0].y, 45.0); // A bottom face
+        assert_eq!(path[1].x, 50.0);
+        assert_eq!(path[1].y, 50.0); // waypoint (unchanged)
+        assert_eq!(path[2].x, 70.0); // B center_x (within rect bounds)
+        assert_eq!(path[2].y, 75.0); // B top face
+    }
+
+    #[test]
+    fn label_positions_are_preserved() {
+        let (diagram, mut geom) = simple_geometry();
+        geom.edges[0].label_position = Some(FPoint::new(55.0, 50.0));
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        let lp = routed.edges[0].label_position.unwrap();
+        assert_eq!(lp.x, 55.0);
+        assert_eq!(lp.y, 50.0);
+    }
+
+    #[test]
+    fn nodes_and_subgraphs_are_preserved() {
+        let (diagram, mut geom) = simple_geometry();
+        geom.subgraphs.insert(
+            "sg1".into(),
+            SubgraphGeometry {
+                id: "sg1".into(),
+                rect: FRect::new(10.0, 5.0, 80.0, 90.0),
+                title: "Group".into(),
+                depth: 0,
+            },
+        );
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert_eq!(routed.nodes.len(), 2);
+        assert_eq!(routed.subgraphs.len(), 1);
+        assert_eq!(routed.subgraphs["sg1"].title, "Group");
+        assert_eq!(routed.direction, crate::graph::Direction::TopDown);
+    }
+
+    #[test]
+    fn direct_route_produces_two_point_path() {
+        let (diagram, geom) = simple_geometry();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::DirectRoute,
+            &default_proportional_text_metrics(),
+        );
+        let path = &routed.edges[0].path;
+        assert_eq!(path.len(), 2);
+        // Face-snapped: A bottom face y=45, B top face y=75
+        assert_eq!(path[0], FPoint::new(70.0, 45.0));
+        assert_eq!(path[1], FPoint::new(70.0, 75.0));
+    }
+
+    #[test]
+    fn direct_route_uses_effective_direction_for_override_nodes() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_edge(crate::graph::Edge::new("A", "B"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(100.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+
+        let mut node_directions = HashMap::new();
+        node_directions.insert("A".into(), crate::graph::Direction::LeftRight);
+        node_directions.insert("B".into(), crate::graph::Direction::LeftRight);
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "A".into(),
+                to: "B".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions,
+            bounds: FRect::new(0.0, 0.0, 140.0, 20.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::DirectRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert_eq!(
+            routed.edges[0].path,
+            vec![FPoint::new(40.0, 10.0), FPoint::new(100.0, 10.0)]
+        );
+    }
+
+    #[test]
+    fn backward_short_offset_uses_effective_direction_for_override_nodes() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_edge(crate::graph::Edge::new("B", "A"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(100.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+
+        let mut node_directions = HashMap::new();
+        node_directions.insert("A".into(), crate::graph::Direction::LeftRight);
+        node_directions.insert("B".into(), crate::graph::Direction::LeftRight);
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "B".into(),
+                to: "A".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions,
+            bounds: FRect::new(0.0, 0.0, 140.0, 20.0),
+            reversed_edges: vec![0],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: true,
+        };
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert_eq!(
+            routed.edges[0].path,
+            vec![
+                FPoint::new(100.0, 18.0),
+                FPoint::new(70.0, 18.0),
+                FPoint::new(40.0, 18.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn orthogonal_backward_override_uses_side_faces() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_edge(crate::graph::Edge::new("B", "A"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(100.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+
+        let mut node_directions = HashMap::new();
+        node_directions.insert("A".into(), crate::graph::Direction::LeftRight);
+        node_directions.insert("B".into(), crate::graph::Direction::LeftRight);
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "B".into(),
+                to: "A".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions,
+            bounds: FRect::new(0.0, 0.0, 140.0, 20.0),
+            reversed_edges: vec![0],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::OrthogonalRoute,
+            &default_proportional_text_metrics(),
+        );
+        let path = &routed.edges[0].path;
+        assert!(path.len() >= 2);
+        assert!(
+            (path[0].x - 100.0).abs() <= 0.001,
+            "source should leave left face"
+        );
+        assert!(
+            (path[path.len() - 1].x - 40.0).abs() <= 0.001,
+            "target should enter right face"
+        );
+        assert!(
+            path[0].y < 20.0 && path[path.len() - 1].y < 20.0,
+            "compact short path should stay below center but on side faces"
+        );
+    }
+
+    #[test]
+    fn backward_channel_path_routes_outside_intermediate_td_nodes() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("Mid"));
+        diagram.add_node(crate::graph::Node::new("C"));
+        diagram.add_edge(crate::graph::Edge::new("C", "A"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "Mid".into(),
+            PositionedNode {
+                id: "Mid".into(),
+                rect: FRect::new(20.0, 45.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "Mid".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "C".into(),
+            PositionedNode {
+                id: "C".into(),
+                rect: FRect::new(0.0, 100.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "C".into(),
+                parent: None,
+            },
+        );
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "C".into(),
+                to: "A".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 80.0, 120.0),
+            reversed_edges: vec![0],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: true,
+        };
+
+        let path = super::orthogonal::backward::build_backward_orthogonal_channel_path(
+            &geom.edges[0],
+            &geom,
+            crate::graph::Direction::TopDown,
+            None,
+            None,
+        )
+        .expect("backward channel path should be constructed");
+
+        assert_eq!(
+            path,
+            vec![
+                FPoint::new(40.0, 110.0),
+                FPoint::new(72.0, 110.0),
+                FPoint::new(72.0, 10.0),
+                FPoint::new(40.0, 10.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn backward_corridor_deconflict_assigns_distinct_lanes_td() {
+        use super::backward_corridor;
+
+        // Two backward edges (C→A and C→B) share the same corridor in TD.
+        // Node Mid sits between source and targets, creating obstructions.
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(60.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "Mid".into(),
+            PositionedNode {
+                id: "Mid".into(),
+                rect: FRect::new(20.0, 45.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "Mid".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "C".into(),
+            PositionedNode {
+                id: "C".into(),
+                rect: FRect::new(30.0, 100.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "C".into(),
+                parent: None,
+            },
+        );
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![
+                LayoutEdge {
+                    index: 0,
+                    from: "C".into(),
+                    to: "A".into(),
+                    waypoints: vec![],
+                    label_position: None,
+                    label_side: None,
+                    from_subgraph: None,
+                    to_subgraph: None,
+                    layout_path_hint: None,
+                    preserve_orthogonal_topology: false,
+                    label_geometry: None,
+                    effective_wrapped_lines: None,
+                },
+                LayoutEdge {
+                    index: 1,
+                    from: "C".into(),
+                    to: "B".into(),
+                    waypoints: vec![],
+                    label_position: None,
+                    label_side: None,
+                    from_subgraph: None,
+                    to_subgraph: None,
+                    layout_path_hint: None,
+                    preserve_orthogonal_topology: false,
+                    label_geometry: None,
+                    effective_wrapped_lines: None,
+                },
+            ],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 120.0, 120.0),
+            reversed_edges: vec![0, 1],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: true,
+        };
+
+        let ctx = backward_corridor::compute_direct_backward_corridor_context(
+            &geom,
+            crate::graph::Direction::TopDown,
+        );
+
+        // Both edges should be in the context with distinct slots.
+        let slot0 = ctx.slot_for(0).expect("edge 0 should have a corridor slot");
+        let slot1 = ctx.slot_for(1).expect("edge 1 should have a corridor slot");
+
+        // They share the same base lane but have different slot indices.
+        assert_eq!(slot0.base_lane, slot1.base_lane);
+        assert_ne!(slot0.slot, slot1.slot);
+
+        // Verify the orthogonal channel paths produce distinct corridors.
+        let path0 = super::orthogonal::backward::build_backward_orthogonal_channel_path(
+            &geom.edges[0],
+            &geom,
+            crate::graph::Direction::TopDown,
+            Some(slot0.slot),
+            Some(slot0.base_lane),
+        )
+        .expect("path for edge 0");
+
+        let path1 = super::orthogonal::backward::build_backward_orthogonal_channel_path(
+            &geom.edges[1],
+            &geom,
+            crate::graph::Direction::TopDown,
+            Some(slot1.slot),
+            Some(slot1.base_lane),
+        )
+        .expect("path for edge 1");
+
+        // The corridor lane x-coordinates (path[1].x) must differ.
+        assert_ne!(
+            path0[1].x, path1[1].x,
+            "backward corridors must have distinct lane positions"
+        );
+    }
+
+    #[test]
+    fn backward_corridor_orthogonal_context_assigns_distinct_lanes_td() {
+        use super::backward_corridor;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(60.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "Mid".into(),
+            PositionedNode {
+                id: "Mid".into(),
+                rect: FRect::new(20.0, 45.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "Mid".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "C".into(),
+            PositionedNode {
+                id: "C".into(),
+                rect: FRect::new(30.0, 100.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "C".into(),
+                parent: None,
+            },
+        );
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![
+                LayoutEdge {
+                    index: 0,
+                    from: "C".into(),
+                    to: "A".into(),
+                    waypoints: vec![],
+                    label_position: None,
+                    label_side: None,
+                    from_subgraph: None,
+                    to_subgraph: None,
+                    layout_path_hint: None,
+                    preserve_orthogonal_topology: false,
+                    label_geometry: None,
+                    effective_wrapped_lines: None,
+                },
+                LayoutEdge {
+                    index: 1,
+                    from: "C".into(),
+                    to: "B".into(),
+                    waypoints: vec![],
+                    label_position: None,
+                    label_side: None,
+                    from_subgraph: None,
+                    to_subgraph: None,
+                    layout_path_hint: None,
+                    preserve_orthogonal_topology: false,
+                    label_geometry: None,
+                    effective_wrapped_lines: None,
+                },
+            ],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 120.0, 120.0),
+            reversed_edges: vec![0, 1],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: true,
+        };
+
+        let ctx = backward_corridor::compute_orthogonal_backward_corridor_context(
+            &geom,
+            crate::graph::Direction::TopDown,
+        );
+        let slot0 = ctx.slot_for(0).expect("edge 0 should have a corridor slot");
+        let slot1 = ctx.slot_for(1).expect("edge 1 should have a corridor slot");
+
+        assert_eq!(slot0.base_lane, slot1.base_lane);
+        assert_ne!(slot0.slot, slot1.slot);
+    }
+
+    #[test]
+    fn backward_corridor_scope_helpers_respect_shared_parent() {
+        use super::backward_corridor;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: Some("sg".into()),
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(60.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: Some("sg".into()),
+            },
+        );
+        nodes.insert(
+            "Outside".into(),
+            PositionedNode {
+                id: "Outside".into(),
+                rect: FRect::new(120.0, 0.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "Outside".into(),
+                parent: None,
+            },
+        );
+
+        let mut subgraphs = HashMap::new();
+        subgraphs.insert(
+            "sg".into(),
+            SubgraphGeometry {
+                id: "sg".into(),
+                rect: FRect::new(-10.0, -10.0, 140.0, 80.0),
+                title: "Group".into(),
+                depth: 0,
+            },
+        );
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "A".into(),
+                to: "B".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs,
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(-10.0, -10.0, 200.0, 120.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: true,
+        };
+
+        assert_eq!(
+            backward_corridor::shared_parent_subgraph_rect(&geom.edges[0], &geom),
+            Some(FRect::new(-10.0, -10.0, 140.0, 80.0))
+        );
+        assert!(backward_corridor::node_in_scope("A", Some("sg"), &geom));
+        assert!(!backward_corridor::node_in_scope(
+            "Outside",
+            Some("sg"),
+            &geom
+        ));
+        assert!(backward_corridor::node_in_scope("Outside", None, &geom));
+    }
+
+    #[test]
+    fn direct_route_uses_hint_when_endpoints_coincide() {
+        let (diagram, mut geom) = simple_geometry();
+        geom.nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(50.0, 25.0, 40.0, 20.0), // same center as A
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        geom.edges[0].layout_path_hint =
+            Some(vec![FPoint::new(60.0, 35.0), FPoint::new(80.0, 35.0)]);
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::DirectRoute,
+            &default_proportional_text_metrics(),
+        );
+        // Hint path is used but face-snapped: A bottom=45, B top=25
+        assert_eq!(
+            routed.edges[0].path,
+            vec![FPoint::new(60.0, 45.0), FPoint::new(80.0, 25.0)]
+        );
+    }
+
+    #[test]
+    fn direct_route_nudges_when_endpoints_coincide_without_hint() {
+        let (diagram, mut geom) = simple_geometry();
+        geom.nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(50.0, 25.0, 40.0, 20.0), // same center as A
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        geom.edges[0].layout_path_hint = None;
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::DirectRoute,
+            &default_proportional_text_metrics(),
+        );
+        let path = &routed.edges[0].path;
+        assert_eq!(path.len(), 2);
+        assert_ne!(path[0], path[1]);
+    }
+
+    #[test]
+    fn direct_route_falls_back_when_straight_segment_crosses_node_interior() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_node(crate::graph::Node::new("C"));
+        diagram.add_edge(crate::graph::Edge::new("A", "C"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 20.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(60.0, 60.0, 40.0, 40.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "C".into(),
+            PositionedNode {
+                id: "C".into(),
+                rect: FRect::new(120.0, 120.0, 20.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "C".into(),
+                parent: None,
+            },
+        );
+
+        let direct_hint = vec![
+            FPoint::new(10.0, 20.0),
+            FPoint::new(170.0, 20.0),
+            FPoint::new(170.0, 120.0),
+            FPoint::new(130.0, 120.0),
+        ];
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "A".into(),
+                to: "C".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: Some(direct_hint.clone()),
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 200.0, 200.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::DirectRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert_eq!(routed.edges[0].path, direct_hint);
+    }
+
+    #[test]
+    fn direct_route_falls_back_when_straight_segment_grazes_node_border() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_node(crate::graph::Node::new("C"));
+        diagram.add_edge(crate::graph::Edge::new("A", "C"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(0.0, 0.0, 20.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        // Left border sits exactly on the direct A->C centerline at x=10.
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(10.0, 60.0, 40.0, 40.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "C".into(),
+            PositionedNode {
+                id: "C".into(),
+                rect: FRect::new(0.0, 120.0, 20.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "C".into(),
+                parent: None,
+            },
+        );
+
+        let fallback_hint = vec![
+            FPoint::new(0.0, 20.0),
+            FPoint::new(0.0, 70.0),
+            FPoint::new(0.0, 120.0),
+        ];
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "A".into(),
+                to: "C".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: Some(fallback_hint.clone()),
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 200.0, 200.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::DirectRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert_eq!(routed.edges[0].path, fallback_hint);
+    }
+
+    #[test]
+    fn orthogonal_router_preview_paths_are_axis_aligned() {
+        let (diagram, geom) = simple_geometry();
+        let orthogonal =
+            route_edges_orthogonal(&diagram, &geom, OrthogonalRoutingOptions::preview());
+
+        assert!(!orthogonal.is_empty());
+        for edge in orthogonal.iter().filter(|edge| !edge.is_backward) {
+            assert!(
+                edge.path
+                    .windows(2)
+                    .all(|seg| seg[0].x == seg[1].x || seg[0].y == seg[1].y)
+            );
+        }
+    }
+
+    #[test]
+    fn snap_path_to_grid_deterministic_and_preserves_endpoints() {
+        let input = vec![
+            FPoint::new(5.4, 8.6),
+            FPoint::new(5.4, 12.3),
+            FPoint::new(14.7, 12.3),
+        ];
+        let snapped = orthogonal::path_utils::snap_path_to_grid(&input, 1.0, 1.0);
+
+        assert_eq!(snapped.first(), Some(&FPoint::new(5.0, 9.0)));
+        assert_eq!(snapped.last(), Some(&FPoint::new(15.0, 12.0)));
+        assert_eq!(
+            snapped,
+            orthogonal::path_utils::snap_path_to_grid(&input, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn build_path_from_hints_falls_back_to_nodes_and_waypoints_when_layout_hint_is_degenerate() {
+        let (_diagram, mut geom) = simple_geometry();
+        geom.edges[0].layout_path_hint =
+            Some(vec![FPoint::new(70.0, 35.0), FPoint::new(70.0, 35.0)]);
+        geom.edges[0].waypoints = vec![FPoint::new(60.0, 55.0)];
+
+        let path = orthogonal::hints::build_path_from_hints(&geom.edges[0], &geom);
+
+        assert_eq!(
+            path,
+            vec![
+                FPoint::new(70.0, 35.0),
+                FPoint::new(60.0, 55.0),
+                FPoint::new(70.0, 85.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn light_normalize_dedupes_and_removes_collinear_points() {
+        let normalized = orthogonal::path_utils::light_normalize(&[
+            FPoint::new(0.0, 0.0),
+            FPoint::new(0.0, 0.0),
+            FPoint::new(0.0, 10.0),
+            FPoint::new(0.0, 20.0),
+            FPoint::new(15.0, 20.0),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                FPoint::new(0.0, 0.0),
+                FPoint::new(0.0, 20.0),
+                FPoint::new(15.0, 20.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn anchor_path_endpoints_to_endpoint_faces_projects_simple_td_route() {
+        let (_diagram, geom) = simple_geometry();
+        let edge = &geom.edges[0];
+        let mut path = vec![
+            FPoint::new(70.0, 35.0),
+            FPoint::new(70.0, 55.0),
+            FPoint::new(70.0, 85.0),
+        ];
+
+        orthogonal::endpoints::anchor_path_endpoints_to_endpoint_faces(
+            &mut path,
+            edge,
+            &geom,
+            crate::graph::Direction::TopDown,
+            false,
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+
+        assert_eq!(path[0], FPoint::new(70.0, 45.0));
+        assert_eq!(path[path.len() - 1], FPoint::new(70.0, 75.0));
+    }
+
+    #[test]
+    fn pairwise_parallel_clearance_measures_criss_cross_channel_spacing() {
+        let path_a = vec![
+            FPoint::new(0.0, 0.0),
+            FPoint::new(0.0, 10.0),
+            FPoint::new(12.0, 10.0),
+        ];
+        let path_b = vec![
+            FPoint::new(4.0, 0.0),
+            FPoint::new(4.0, 10.0),
+            FPoint::new(16.0, 10.0),
+        ];
+
+        assert_eq!(
+            orthogonal::overlap::pairwise_parallel_clearance(&path_a, &path_b),
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn symmetric_side_band_depth_spreads_outer_and_inner_fan_channels() {
+        let outer = orthogonal::fan::symmetric_side_band_depth(0, 3);
+        let middle = orthogonal::fan::symmetric_side_band_depth(1, 3);
+        let inner = orthogonal::fan::symmetric_side_band_depth(2, 3);
+
+        assert!(outer < middle && middle < inner);
+        assert!(outer >= 0.0 && inner <= 1.0);
+    }
+
+    #[test]
+    fn collapse_forward_source_primary_turnback_hooks_flattens_inward_lr_hook() {
+        let mut path = vec![
+            FPoint::new(0.0, 0.0),
+            FPoint::new(10.0, 0.0),
+            FPoint::new(10.0, 5.0),
+            FPoint::new(5.0, 5.0),
+            FPoint::new(5.0, 10.0),
+            FPoint::new(20.0, 10.0),
+        ];
+
+        let changed = orthogonal::forward::collapse_forward_source_primary_turnback_hooks(
+            &mut path,
+            crate::graph::Direction::LeftRight,
+        );
+
+        assert!(changed);
+        assert_eq!(path[3].x, 10.0);
+        assert_eq!(path[4].x, 10.0);
+    }
+
+    #[test]
+    fn head_label_near_path_end() {
+        // Vertical path from (50, 0) to (50, 100)
+        let path = vec![FPoint::new(50.0, 0.0), FPoint::new(50.0, 100.0)];
+        let (head, _tail) = compute_end_label_positions(&path);
+
+        let head = head.unwrap();
+        assert!(head.y > 80.0, "head near end, got y={}", head.y);
+        // Perpendicular offset: for vertical path, offset is in x direction
+        assert!(
+            (head.x - 50.0).abs() > 5.0,
+            "head offset from path, got x={}",
+            head.x
+        );
+    }
+
+    #[test]
+    fn tail_label_near_path_start() {
+        let path = vec![FPoint::new(50.0, 0.0), FPoint::new(50.0, 100.0)];
+        let (_head, tail) = compute_end_label_positions(&path);
+
+        let tail = tail.unwrap();
+        assert!(tail.y < 20.0, "tail near start, got y={}", tail.y);
+    }
+
+    #[test]
+    fn empty_path_returns_none() {
+        let (head, tail) = compute_end_label_positions(&[]);
+        assert!(head.is_none());
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn single_point_path_returns_none() {
+        let (head, tail) = compute_end_label_positions(&[FPoint::new(50.0, 50.0)]);
+        assert!(head.is_none());
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn routing_populates_head_label_position() {
+        let (mut diagram, geom) = simple_geometry();
+        diagram.edges[0].head_label = Some("1..*".to_string());
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert!(
+            routed.edges[0].head_label_position.is_some(),
+            "head_label_position should be populated when edge has head_label"
+        );
+        assert!(
+            routed.edges[0].tail_label_position.is_none(),
+            "tail_label_position should be None when edge has no tail_label"
+        );
+    }
+
+    #[test]
+    fn routing_populates_tail_label_position() {
+        let (mut diagram, geom) = simple_geometry();
+        diagram.edges[0].tail_label = Some("source".to_string());
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert!(
+            routed.edges[0].tail_label_position.is_some(),
+            "tail_label_position should be populated when edge has tail_label"
+        );
+        assert!(
+            routed.edges[0].head_label_position.is_none(),
+            "head_label_position should be None when edge has no head_label"
+        );
+    }
+
+    #[test]
+    fn routing_no_end_labels_by_default() {
+        let (diagram, geom) = simple_geometry();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        assert!(routed.edges[0].head_label_position.is_none());
+        assert!(routed.edges[0].tail_label_position.is_none());
+    }
+
+    #[test]
+    fn route_graph_geometry_includes_ports_polyline() {
+        let (diagram, geom) = simple_geometry();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        let edge = &routed.edges[0];
+        let src = edge
+            .source_port
+            .as_ref()
+            .expect("source_port should be populated");
+        let tgt = edge
+            .target_port
+            .as_ref()
+            .expect("target_port should be populated");
+        assert_eq!(src.face, PortFace::Bottom);
+        assert!((src.fraction - 0.5).abs() < 0.01);
+        assert_eq!(tgt.face, PortFace::Top);
+        assert!((tgt.fraction - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn self_edge_routed_separately_without_ports() {
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_edge(crate::graph::Edge::new("A", "A"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(50.0, 50.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![],
+            subgraphs: HashMap::new(),
+            self_edges: vec![SelfEdgeGeometry {
+                node_id: "A".into(),
+                edge_index: 0,
+                points: vec![
+                    FPoint::new(70.0, 40.0),
+                    FPoint::new(80.0, 40.0),
+                    FPoint::new(80.0, 60.0),
+                    FPoint::new(70.0, 60.0),
+                ],
+            }],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: {
+                let mut m = HashMap::new();
+                m.insert("A".to_string(), crate::graph::Direction::TopDown);
+                m
+            },
+            bounds: FRect::new(0.0, 0.0, 100.0, 100.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+        // Self-edges go to self_edges, not edges
+        assert_eq!(routed.self_edges.len(), 1);
+        assert_eq!(routed.edges.len(), 0);
+        // RoutedSelfEdge has no port fields - confirmed by the type system
+    }
+
+    #[test]
+    fn route_graph_geometry_includes_ports_orthogonal() {
+        let (diagram, geom) = simple_geometry();
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::OrthogonalRoute,
+            &default_proportional_text_metrics(),
+        );
+        let edge = &routed.edges[0];
+        assert!(
+            edge.source_port.is_some(),
+            "source_port should be populated for orthogonal"
+        );
+        assert!(
+            edge.target_port.is_some(),
+            "target_port should be populated for orthogonal"
+        );
+    }
+
+    #[test]
+    fn route_graph_geometry_accepts_metrics_and_populates_label_geometry() {
+        let metrics = default_proportional_text_metrics();
+
+        // Build a diagram with one labeled edge.
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_edge(crate::graph::Edge::new("A", "B").with_label("my label"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(50.0, 25.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(50.0, 75.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+
+        // Singleton compartments (track 0) are no-ops in the lane pass —
+        // the user-supplied label_position is preserved as the geometry
+        // center.
+        let label_center = FPoint::new(70.0, 55.0);
+        let edges = vec![LayoutEdge {
+            index: 0,
+            from: "A".into(),
+            to: "B".into(),
+            waypoints: vec![],
+            label_position: Some(label_center),
+            label_side: None,
+            from_subgraph: None,
+            to_subgraph: None,
+            layout_path_hint: Some(vec![FPoint::new(70.0, 35.0), FPoint::new(70.0, 85.0)]),
+            preserve_orthogonal_topology: false,
+            label_geometry: None,
+            effective_wrapped_lines: None,
+        }];
+
+        let geom = GraphGeometry {
+            nodes,
+            edges,
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 100.0, 100.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry(&diagram, &geom, EdgeRouting::PolylineRoute, &metrics);
+
+        // label_geometry must be populated on the labeled edge.
+        let labeled_edge = &routed.edges[0];
+        assert!(
+            labeled_edge.label_geometry.is_some(),
+            "label_geometry should be populated for labeled edges"
+        );
+        let lg = labeled_edge.label_geometry.unwrap();
+
+        // Verify padded dimensions match what metrics would produce.
+        let (expected_w, expected_h) = metrics.edge_label_dimensions("my label");
+        assert!(
+            (lg.rect.width - expected_w).abs() < 0.01,
+            "width: got {}, expected {}",
+            lg.rect.width,
+            expected_w
+        );
+        assert!(
+            (lg.rect.height - expected_h).abs() < 0.01,
+            "height: got {}, expected {}",
+            lg.rect.height,
+            expected_h
+        );
+
+        // Center must match the label_position.
+        assert!((lg.center.x - label_center.x).abs() < 0.01);
+        assert!((lg.center.y - label_center.y).abs() < 0.01);
+
+        // Rect must be centered on center.
+        assert!((lg.rect.x - (label_center.x - expected_w / 2.0)).abs() < 0.01);
+        assert!((lg.rect.y - (label_center.y - expected_h / 2.0)).abs() < 0.01);
+
+        // Padding snapshot.
+        assert_eq!(
+            lg.padding,
+            (metrics.label_padding_x, metrics.label_padding_y)
+        );
+
+        // Default side.
+        assert_eq!(lg.side, EdgeLabelSide::Center);
+
+        // track: 0 — singleton compartment, no displacement needed.
+        assert_eq!(lg.track, 0);
+    }
+
+    #[test]
+    fn routed_label_geometry_uses_provider_label_dimensions() {
+        let provider = WideMProvider;
+
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_edge(crate::graph::Edge::new("A", "B").with_label("mmmm"));
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(50.0, 25.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(50.0, 95.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![LayoutEdge {
+                index: 0,
+                from: "A".into(),
+                to: "B".into(),
+                waypoints: vec![],
+                label_position: Some(FPoint::new(70.0, 60.0)),
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: Some(vec![FPoint::new(70.0, 35.0), FPoint::new(70.0, 105.0)]),
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            }],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 100.0, 140.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry_with_provider(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &provider,
+        );
+
+        let label_rect = routed.edges[0].label_geometry.as_ref().unwrap().rect;
+        assert!(
+            label_rect.width > 160.0,
+            "provider label width should drive routed label rect, got {label_rect:?}"
+        );
+    }
+
+    #[test]
+    fn routed_edge_label_dimensions_use_each_edge_effective_style() {
+        let provider = StyleRoutingProvider::new()
+            .with_line_width("small", "same", 24.0)
+            .with_line_width("large", "same", 96.0);
+
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_node(crate::graph::Node::new("C"));
+        let mut small = crate::graph::Edge::new("A", "B").with_label("same");
+        small.style.font_family = Some("small".to_string());
+        diagram.add_edge(small);
+        let mut large = crate::graph::Edge::new("A", "C").with_label("same");
+        large.style.font_family = Some("large".to_string());
+        diagram.add_edge(large);
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "A".into(),
+            PositionedNode {
+                id: "A".into(),
+                rect: FRect::new(50.0, 25.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "A".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "B".into(),
+            PositionedNode {
+                id: "B".into(),
+                rect: FRect::new(30.0, 105.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "B".into(),
+                parent: None,
+            },
+        );
+        nodes.insert(
+            "C".into(),
+            PositionedNode {
+                id: "C".into(),
+                rect: FRect::new(90.0, 105.0, 40.0, 20.0),
+                shape: crate::graph::Shape::Rectangle,
+                label: "C".into(),
+                parent: None,
+            },
+        );
+        let geom = GraphGeometry {
+            nodes,
+            edges: vec![
+                LayoutEdge {
+                    index: 0,
+                    from: "A".into(),
+                    to: "B".into(),
+                    waypoints: vec![],
+                    label_position: Some(FPoint::new(50.0, 70.0)),
+                    label_side: None,
+                    from_subgraph: None,
+                    to_subgraph: None,
+                    layout_path_hint: Some(vec![FPoint::new(70.0, 35.0), FPoint::new(50.0, 105.0)]),
+                    preserve_orthogonal_topology: false,
+                    label_geometry: None,
+                    effective_wrapped_lines: None,
+                },
+                LayoutEdge {
+                    index: 1,
+                    from: "A".into(),
+                    to: "C".into(),
+                    waypoints: vec![],
+                    label_position: Some(FPoint::new(90.0, 70.0)),
+                    label_side: None,
+                    from_subgraph: None,
+                    to_subgraph: None,
+                    layout_path_hint: Some(vec![
+                        FPoint::new(70.0, 35.0),
+                        FPoint::new(110.0, 105.0),
+                    ]),
+                    preserve_orthogonal_topology: false,
+                    label_geometry: None,
+                    effective_wrapped_lines: None,
+                },
+            ],
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            bounds: FRect::new(0.0, 0.0, 140.0, 140.0),
+            reversed_edges: vec![],
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: false,
+        };
+
+        let routed = route_graph_geometry_with_provider(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &provider,
+        );
+
+        let small_rect = routed.edges[0].label_geometry.as_ref().unwrap().rect;
+        let large_rect = routed.edges[1].label_geometry.as_ref().unwrap().rect;
+        assert!(
+            large_rect.width > small_rect.width + 50.0,
+            "styled provider should drive routed label rect widths: small={small_rect:?} large={large_rect:?}"
+        );
+    }
+
+    /// Routed bounds must cover all edge path points, even when routing
+    /// pushes paths beyond the original layout bounds (e.g. backward channels).
+    #[test]
+    fn routed_bounds_cover_all_edge_path_points() {
+        // Build a 3-node TD diagram with a backward edge whose channel
+        // extends beyond the tight layout bounds.
+        let mut diagram = Graph::new(crate::graph::Direction::TopDown);
+        diagram.add_node(crate::graph::Node::new("A"));
+        diagram.add_node(crate::graph::Node::new("B"));
+        diagram.add_node(crate::graph::Node::new("C"));
+        diagram.add_edge(crate::graph::Edge::new("A", "B"));
+        diagram.add_edge(crate::graph::Edge::new("B", "C"));
+        diagram.add_edge(crate::graph::Edge::new("C", "A")); // backward
+
+        let mut nodes = HashMap::new();
+        for (id, y) in [("A", 10.0), ("B", 50.0), ("C", 90.0)] {
+            nodes.insert(
+                id.to_string(),
+                PositionedNode {
+                    id: id.to_string(),
+                    rect: FRect::new(10.0, y, 40.0, 20.0), // right edge at 50
+                    shape: crate::graph::Shape::Rectangle,
+                    label: id.to_string(),
+                    parent: None,
+                },
+            );
+        }
+
+        let edges = vec![
+            LayoutEdge {
+                index: 0,
+                from: "A".into(),
+                to: "B".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            },
+            LayoutEdge {
+                index: 1,
+                from: "B".into(),
+                to: "C".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            },
+            LayoutEdge {
+                index: 2,
+                from: "C".into(),
+                to: "A".into(),
+                waypoints: vec![],
+                label_position: None,
+                label_side: None,
+                from_subgraph: None,
+                to_subgraph: None,
+                layout_path_hint: None,
+                preserve_orthogonal_topology: false,
+                label_geometry: None,
+                effective_wrapped_lines: None,
+            },
+        ];
+
+        let geom = GraphGeometry {
+            nodes,
+            edges,
+            subgraphs: HashMap::new(),
+            self_edges: vec![],
+            direction: crate::graph::Direction::TopDown,
+            node_directions: HashMap::new(),
+            // Tight bounds: right edge of nodes is at x=50, channel needs x>=58
+            bounds: FRect::new(0.0, 0.0, 55.0, 120.0),
+            reversed_edges: vec![2], // C->A is backward
+            engine_hints: None,
+            grid_projection: None,
+            rerouted_edges: std::collections::HashSet::new(),
+            enhanced_backward_routing: true,
+        };
+
+        let routed = route_graph_geometry(
+            &diagram,
+            &geom,
+            EdgeRouting::PolylineRoute,
+            &default_proportional_text_metrics(),
+        );
+
+        // Verify all path points are within the recomputed bounds.
+        let b = routed.bounds;
+        let eps = 0.001;
+        for edge in &routed.edges {
+            for p in &edge.path {
+                assert!(
+                    p.x >= b.x - eps
+                        && p.x <= b.x + b.width + eps
+                        && p.y >= b.y - eps
+                        && p.y <= b.y + b.height + eps,
+                    "path point ({:.1}, {:.1}) outside bounds {:?} for edge {}->{}",
+                    p.x,
+                    p.y,
+                    b,
+                    edge.from,
+                    edge.to
+                );
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct StyleRoutingProvider {
+        line_widths: std::collections::BTreeMap<(GraphTextStyleKey, String), f64>,
+    }
+
+    impl StyleRoutingProvider {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn with_line_width(mut self, style: &str, text: &str, width: f64) -> Self {
+            self.line_widths
+                .insert((GraphTextStyleKey::test(style), text.to_string()), width);
+            self
+        }
+    }
+
+    impl TextMetricsProvider for StyleRoutingProvider {
+        fn measure_line_width(&self, _text: &str) -> f64 {
+            0.0
+        }
+
+        fn measure_scalar_width(&self, _ch: char) -> f64 {
+            0.0
+        }
+
+        fn measure_line_width_for_style(&self, style: &GraphTextStyleKey, text: &str) -> f64 {
+            self.line_widths
+                .get(&(style.clone(), text.to_string()))
+                .copied()
+                .unwrap_or(0.0)
+        }
+
+        fn font_size(&self) -> f64 {
+            16.0
+        }
+
+        fn line_height(&self) -> f64 {
+            24.0
+        }
+
+        fn node_padding_x(&self) -> f64 {
+            15.0
+        }
+
+        fn node_padding_y(&self) -> f64 {
+            15.0
+        }
+
+        fn label_padding_x(&self) -> f64 {
+            4.0
+        }
+
+        fn label_padding_y(&self) -> f64 {
+            2.0
+        }
+    }
+}

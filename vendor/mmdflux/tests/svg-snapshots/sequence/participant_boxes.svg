@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 430.50 239.50" style="max-width: 430.50px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="seq-arrowhead" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333" />
+    </marker>
+  </defs>
+  <g class="participant-boxes">
+    <rect x="10.00" y="10.00" width="248.62" height="219.50" fill="lightblue" fill-opacity="0.14" stroke="#8a8a8a" stroke-width="1" />
+    <rect x="90.31" y="12.00" width="88.00" height="20" fill="white" stroke="none" />
+    <text x="134.31" y="24.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Frontend</text>
+    <rect x="302.76" y="10.00" width="117.74" height="219.50" fill="none" stroke="#8a8a8a" stroke-width="1" />
+    <rect x="321.63" y="12.00" width="80.00" height="20" fill="white" stroke="none" />
+    <text x="361.63" y="24.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Backend</text>
+  </g>
+  <g class="lifelines">
+    <line x1="61.63" y1="92.00" x2="61.63" y2="226.00" stroke="#333" stroke-width="1" stroke-dasharray="5,5" />
+    <line x1="211.63" y1="92.00" x2="211.63" y2="226.00" stroke="#333" stroke-width="1" stroke-dasharray="5,5" />
+    <line x1="361.63" y1="92.00" x2="361.63" y2="226.00" stroke="#333" stroke-width="1" stroke-dasharray="5,5" />
+  </g>
+  <g class="participants">
+    <rect x="28.00" y="48.00" width="67.26" height="44.00" fill="white" stroke="#333" stroke-width="1" />
+    <text x="61.63" y="70.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Alice</text>
+    <rect x="182.64" y="48.00" width="57.98" height="44.00" fill="white" stroke="#333" stroke-width="1" />
+    <text x="211.63" y="70.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Bob</text>
+    <circle cx="361.63" cy="60.00" r="8.00" fill="none" stroke="#333" stroke-width="1.5" />
+    <line x1="361.63" y1="68.00" x2="361.63" y2="82.00" stroke="#333" stroke-width="1.5" />
+    <line x1="347.63" y1="74.00" x2="375.63" y2="74.00" stroke="#333" stroke-width="1.5" />
+    <line x1="361.63" y1="82.00" x2="351.63" y2="94.00" stroke="#333" stroke-width="1.5" />
+    <line x1="361.63" y1="82.00" x2="371.63" y2="94.00" stroke="#333" stroke-width="1.5" />
+    <text x="361.63" y="90.00" text-anchor="middle" dominant-baseline="auto" fill="#333">Charlie</text>
+  </g>
+  <g class="events">
+    <line x1="61.63" y1="112.00" x2="361.63" y2="112.00" stroke="#333" stroke-width="1" marker-end="url(#seq-arrowhead)"/>
+    <text x="211.63" y="108.00" text-anchor="middle" dominant-baseline="auto" fill="#333">Request</text>
+    <line x1="361.63" y1="162.00" x2="211.63" y2="162.00" stroke="#333" stroke-width="1" stroke-dasharray="6,4" marker-end="url(#seq-arrowhead)"/>
+    <text x="286.63" y="158.00" text-anchor="middle" dominant-baseline="auto" fill="#333">Response</text>
+  </g>
+</svg>

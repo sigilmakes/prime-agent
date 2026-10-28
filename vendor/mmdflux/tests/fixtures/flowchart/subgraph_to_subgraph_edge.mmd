@@ -1,0 +1,12 @@
+graph TD
+    subgraph frontend[Frontend]
+        UI[User Interface]
+        State[State Manager]
+        UI --> State
+    end
+    subgraph backend[Backend]
+        API[API Server]
+        DB[Database]
+        API --> DB
+    end
+    frontend --> backend

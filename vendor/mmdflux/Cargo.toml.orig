@@ -1,0 +1,63 @@
+[package]
+name = "mmdflux"
+version = "2.6.1"
+edition = "2024"
+default-run = "mmdflux"
+description = "Render Mermaid diagrams as Unicode text, ASCII, SVG, and MMDS JSON."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/kevinswiber/mmdflux"
+exclude = ["tests/", "xtask/font_metrics/fonts/**/*.ttf"]
+homepage = "https://github.com/kevinswiber/mmdflux"
+documentation = "https://docs.rs/mmdflux"
+keywords = ["mermaid", "diagram", "cli", "svg", "text"]
+
+[workspace]
+members = ["crates/mmdflux-wasm", "xtask"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+libc = { version = "0.2", optional = true }
+pest = "2.7"
+pest_derive = "2.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", optional = true, default-features = false, features = ["std", "fmt", "ansi", "env-filter", "json"] }
+unicode-width = "0.2"
+xterm-color = { version = "1", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+], optional = true }
+
+[features]
+# Keep CLI behavior by default while allowing library/Wasm users to opt out.
+default = ["cli"]
+# CLI-only dependency surface.
+cli = ["dep:clap", "dep:libc", "dep:tracing-subscriber", "dep:windows-sys", "dep:xterm-color"]
+engine-elk = []
+# Experimental bridge for callback-backed browser text measurement. This is
+# intentionally disabled by default and only consumed by mmdflux-wasm.
+unstable-text-metrics-provider = []
+
+[[bin]]
+name = "mmdflux"
+path = "src/main.rs"
+# Prevent compiling the CLI binary when `clap` is intentionally excluded.
+required-features = ["cli"]
+
+[dev-dependencies]
+assert_cmd = "2"
+ctor = "0.12.0"
+jsonschema = "0.41"
+predicates = "3"
+regex = "1.12.2"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "ansi", "env-filter"] }

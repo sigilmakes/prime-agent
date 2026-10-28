@@ -1,0 +1,225 @@
+# Architecture Dependency Rules
+
+This document defines the steady-state dependency and ownership rules for the
+mmdflux Rust crate. The module tree should tell one coherent story for
+contributors:
+
+- `frontends.rs` owns source-format detection
+- `mermaid/` owns Mermaid source ingestion
+- `diagrams/` own compilation and instance behavior
+- `payload/` owns the runtime payload contract
+- `builtins/` owns default registry wiring for the supported low-level API
+- `commands.rs` owns synchronous command application over MMDS documents
+- `graph/` owns graph-family IR, float-space geometry, and shared policy/measurement helpers
+- `engines/` own engine adapters and internal algorithm boundaries such as `algorithms::layered::kernel`
+- `render/` owns output production
+- `mmds/` owns the MMDS contract and output helpers
+- `views/` owns materialized read-side views over canonical MMDS payloads
+
+The repo-owned architecture gate should fail when the code drifts away from
+these rules.
+
+The repo-owned architecture gate is `cargo xtask architecture` or
+`just architecture`.
+
+The semantic boundaries guard reads its declarative module-dependency policy
+from the repo-root
+[`boundaries.toml`](/Users/kevin/src/mmdflux-semantic-architecture/boundaries.toml).
+Set `SEMANTIC_BOUNDARIES_CONFIG` to point at a different file when reusing the
+checker outside this repo. The semantic-only command is
+`cargo xtask architecture check` or `just architecture-check`.
+The normal one-shot command always works on its own. If a matching
+`cargo xtask architecture host` process is already running for this worktree,
+the one-shot command may reuse that warm host automatically; otherwise it
+falls back to the local runner with no extra setup. Use
+`cargo xtask architecture check --status` to inspect the local host state
+for this worktree, or `cargo xtask architecture check --fresh` to bypass
+host reuse and force a fresh local run. The watch-hosted architecture host
+uses Unix sockets on macOS/Linux and a named-pipe transport shape on Windows.
+The Windows client path still falls back locally today, so Windows
+contributors do not need any extra socket setup.
+
+## Public Contract Tiers
+
+- The high-level runtime facade is `render_diagram`, `detect_diagram`,
+  `validate_diagram`, plus the flat config/format/error types re-exported from
+  `lib.rs`.
+- The supported low-level API is `builtins`, `registry`, `payload`, `graph`,
+  `timeline`, `mmds`, `commands`, and `views` for adapter-oriented workflows
+  that need explicit payload construction, graph IR inspection, MMDS command
+  application, MMDS replay control, or materialized read-side diagram views.
+- `diagrams`, `engines`, `render`, and `mermaid` are internal implementation modules.
+  They are intentionally documented here for contributors, but they are not part
+  of the supported low-level contract.
+
+The repo also locks in three directory-module shell replacements for former
+mega-files. These shells are part of the steady-state layout and should not be
+collapsed back into singleton roots:
+
+- `src/render/graph/svg/edges/mod.rs` is the directory-module shell replacing
+  the removed `src/render/graph/svg/edges.rs`
+- `src/graph/grid/routing/mod.rs` is the directory-module shell replacing the
+  removed `src/graph/grid/routing.rs`
+- `src/graph/routing/orthogonal/mod.rs` is the directory-module shell
+  replacing the removed `src/graph/routing/orthogonal.rs`
+
+## Core Rules
+
+1. **frontends own input formats** — Source-format detection lives in
+   `src/frontends.rs`. Runtime detects the frontend first (`mermaid`, `mmds`),
+   then resolves the logical diagram type and family pipeline. Mermaid parsing
+   itself lives in the separate top-level `src/mermaid/` namespace.
+
+2. **diagrams do not parse source text directly** — Diagram modules
+   (`src/diagrams/`) consume frontend-owned models and compile them into
+   logical family IR or family-local runtime models.
+
+3. **diagrams do not render** — `src/diagrams/` stop at detection, parse
+   delegation, compilation, and `into_payload()` orchestration. Diagram
+   instances hand runtime a `payload::Diagram` instead of calling
+   renderers directly. Output production lives under `src/render/`, not under
+   diagram modules.
+
+4. **render/ owns output production** — All rendering code lives under
+   `src/render/`. There is no top-level `formats/` ownership boundary and no
+   graph render tree under `src/graph/`. Within `render/`, the shared
+   `render::text` and `render::svg` utility layers stay foundational and
+   independent of each other: `render::graph` and `render::timeline` may
+   depend on them, but not the other way around, and `render::text` and
+   `render::svg` must not directly depend on each other either.
+
+5. **render::graph owns geometry-based graph-family emitters** — Shared
+   graph-family text and SVG emission lives under `src/render/graph/` and
+   consumes `GraphGeometry`, `RoutedGraphGeometry`, or graph-owned
+   `graph::grid` layouts. High-level geometry entrypoints stay at the
+   `render::graph` root, low-level text drawing lives under
+   `render::graph::text`, and routed SVG emission is explicit through
+   `render_svg_from_routed_geometry`. Render code does not take
+   `GraphSolveResult` or instantiate engines.
+
+6. **runtime owns graph-family solve-result dispatch** — `src/runtime/`
+   resolves graph-family output formats from engine solve results and owns the
+   final dispatch to MMDS serialization or geometry-based renderers. Runtime
+   does not own renderer implementations.
+
+7. **render::diagram owns family-local renderers** — Timeline/chart/table
+   renderers that do not use the shared graph-family pipeline live under
+   `src/render/diagram/`.
+
+8. **graph/ owns graph-family IR, float-space geometry, and shared policy/measurement helpers** —
+   `src/graph/` contains reusable graph-family models, solved and routed
+   geometry, direction policy, and shared graph-family grid/proportional
+   measurement and routing helpers. The graph-owned `graph::grid` namespace is
+   the derived grid-space layer for float-to-grid conversion, grid routing, and
+   replay geometry contracts. Output emission does not live under `src/graph/`,
+   but graph-family routing, derived grid geometry, and shared sizing/policy do.
+
+9. **mmds/ is a pure interchange format layer** — `src/mmds/` owns the
+   typed MMDS envelope, profile vocabulary, Mermaid regeneration helpers,
+   hydration to graph IR, and MMDS serialization for graph-family output.
+   mmds must not import from `render` or `engines`. Replay rendering
+   (hydrate→render dispatch) lives in `runtime/mmds.rs`.
+
+   `mmds/` also owns the canonical MMDS string token contract for graph-family
+   enums. The `MmdsToken` trait maps graph-owned typed vocabulary such as
+   `Shape`, `Direction`, `Stroke`, `Arrow`, and `GeometryLevel` to and from
+   MMDS schema tokens via `parse_mmds` / `as_mmds_str`. Rust fields use the
+   graph-owned typed form where the public `Document` contract can expose a
+   closed vocabulary without losing adapter-friendly JSON interchange (for
+   example node shapes and node shape defaults); remaining schema tokens stay
+   string-backed until they are promoted deliberately. Engine IDs are the
+   exception: they stay string-backed at the command boundary because engine
+   selector types live behind the runtime/engine facade, not in graph-owned
+   vocabulary.
+
+10. **MMDS is a frontend, not a logical diagram type** — MMDS input handling
+    is detected through `src/frontends.rs`, while the MMDS parse, hydration,
+    and output helpers live under `src/mmds/`. MMDS is not registered
+    in the logical diagram registry.
+
+11. **views/ owns read-side materialized diagram views** — `src/views/` owns
+    the `ViewSpec`, selector, `ViewEvent`, and `project` contracts for
+    filtering canonical `mmds::Document` payloads into materialized view
+    payloads. In the v1 view slice, `views` depends on `mmds` plus graph-owned
+    typed vocabulary such as `Shape`, and derives any adjacency directly from
+    `Document.edges`; it must not import `render`, `engines`, `runtime`,
+    Mermaid parser modules, or command/diff machinery. Runtime may consume
+    `views` for replay hooks, but `views` does not own rendering or
+    orchestration.
+
+12. **commands.rs owns MMDS command application orchestration** —
+    `src/commands.rs` owns the public `Command`, `EdgeSelector`,
+    `CommandApplyError`, `apply`, and `apply_with_config` contracts. It may
+    depend on `mmds` for the document and diff vocabulary, and on `runtime` for
+    full relayout fallback. `mmds/` stays a pure interchange layer; command
+    application is a separate supported low-level API surface rather than a
+    child of `mmds/`.
+
+    The split between `mmds::events` and top-level `commands` / `views` is
+    intentional: `mmds/` owns the canonical document plus the portable
+    vocabulary that describes it (`Subject`, model events, and snapshot diff
+    changes), while top-level operation surfaces own functions that act on
+    those documents. This keeps MMDS vocabulary reusable by adapters and future
+    bindings without pulling in command processing, projection, runtime,
+    engine, or render infrastructure.
+
+13. **engines do not know about diagram types or output formats** — Engine
+    implementations (`src/engines/`) solve generic graph layout problems and
+    own layout building / measurement adapters. They may use shared
+    graph-family helpers, but they never reference flowchart, class, sequence,
+    or other logical diagram types, and they do not import render-owned
+    modules. Engine solve requests stay in engine-owned vocabulary:
+    grid/proportional measurement plus canonical/visual geometry contracts.
+    Render-format mapping (`Text`, `Svg`, `Mmds`) happens above the engine
+    layer in graph-family orchestration, and path simplification remains a
+    downstream render/MMDS consumer concern. Within graph-family engines,
+    `algorithms::layered::kernel` is the pure graph-agnostic layered engine
+    boundary, while the outer `algorithms::layered` root owns the graph-family
+    bridge code such as layout building / measurement adapters, float layout,
+    and float routing. `layered::kernel` stays internal; it is a contributor
+    boundary, not a supported public contract.
+
+14. **flat top-level contract modules own the stable public contract** —
+    Stable public format and error vocabulary live in `src/format.rs` and
+    `src/errors.rs`. `RenderConfig` lives in `src/runtime/config.rs`
+    (re-exported from `lib.rs`). Diagnostics live in `errors`, family
+    classification in `registry`, and style types in `graph/style`.
+    Adapter orchestration entrypoints are curated runtime facade re-exports
+    from `lib.rs`. Other namespaces are either part of the supported
+    low-level API or internal implementation modules.
+
+15. **runtime/ is orchestration only** — The runtime layer detects input
+    frontends, resolves logical diagram types, manages the registry, consumes
+    runtime payloads, and wires the pipeline. Graph-family runtime
+    dispatch lives under `src/runtime/`; runtime itself does not own Mermaid
+    grammars, layout algorithms, or renderer implementations.
+
+16. **registry is contract-only infrastructure** — `src/registry.rs` defines
+    reusable registry contracts (`DiagramRegistry`, `DiagramDefinition`,
+    `DiagramInstance`) and does not import concrete diagram modules. Built-in
+    diagram wiring lives in the separate public `builtins` namespace.
+
+17. **timeline::sequence owns shared sequence runtime types** — Shared
+    sequence-family model and layout types live under `src/timeline/sequence/`
+    so the final text renderer can depend on a neutral timeline namespace
+    instead of importing `diagrams::sequence`.
+
+## Adapter Rules
+
+18. **web main.ts is composition only** — The web playground's `main.ts` is a
+    composition root that wires stores, services, and controllers. It does not
+    contain application logic, state management, or rendering orchestration.
+
+19. **wasm adapter is a thin boundary** — `crates/mmdflux-wasm` deserializes JS
+    requests, calls the Rust facade, and serializes responses. It does not
+    duplicate config parsing, registry logic, or format selection.
+
+20. **CLI adapter is a thin boundary** — `src/main.rs` maps CLI flags to the
+    Rust facade contract and formats output. It does not contain business logic
+    beyond argument mapping.
+
+## Deferred Friction
+
+See [deferred-friction.md](./deferred-friction.md) for architecture friction items
+that have been reviewed and deliberately deferred, each with a specific trigger
+condition for when to revisit.

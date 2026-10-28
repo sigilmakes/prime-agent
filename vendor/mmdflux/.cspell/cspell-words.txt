@@ -1,0 +1,27 @@
+# CSpell-only words.
+#
+# Keep project/source dictionary words in ../codebook.toml. This list is for
+# Rust std APIs, libc/POSIX symbols, font names, and local constants that CSpell
+# does not currently learn from its bundled dictionaries.
+
+condvar
+deque
+hexdigit
+hypot
+icanon
+jsonschema
+multigraph
+peekable
+rfind
+replacen
+rposition
+rsplit
+signum
+splitn
+subsec
+tcsanow
+timeval
+uninit
+unthemed
+usec
+verdana

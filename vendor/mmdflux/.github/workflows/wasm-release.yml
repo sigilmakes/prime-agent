@@ -1,0 +1,129 @@
+name: WASM Release
+
+on:
+  push:
+    tags:
+      - "mmdflux-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., mmdflux-v2.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  WASM_PACK_VERSION: 0.14.0
+  WASM_CARGO_PROFILE_RELEASE_OPT_LEVEL: z
+  WASM_CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+  WASM_CARGO_PROFILE_RELEASE_LTO: fat
+  WASM_CARGO_PROFILE_RELEASE_PANIC: abort
+
+concurrency:
+  group: wasm-release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish @mmds/wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Resolve tag and versions
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+
+          TAG="${TAG#refs/tags/}"
+          if [[ "$TAG" != mmdflux-v* ]]; then
+            TAG="mmdflux-v${TAG#v}"
+          fi
+          TAG_VERSION="${TAG#mmdflux-v}"
+
+          ROOT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          WASM_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/mmdflux-wasm/Cargo.toml | head -n1)"
+
+          if [[ -z "$ROOT_VERSION" || -z "$WASM_VERSION" ]]; then
+            echo "Could not read crate versions from Cargo.toml files" >&2
+            exit 1
+          fi
+
+          if [[ "$ROOT_VERSION" != "$WASM_VERSION" ]]; then
+            echo "Version mismatch: root=${ROOT_VERSION}, wasm=${WASM_VERSION}" >&2
+            exit 1
+          fi
+
+          if [[ "$TAG_VERSION" != "$WASM_VERSION" ]]; then
+            echo "Tag/version mismatch: tag=${TAG_VERSION}, wasm=${WASM_VERSION}" >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$WASM_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-release
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v wasm-pack >/dev/null 2>&1 || [[ "$(wasm-pack --version | awk '{print $2}')" != "${WASM_PACK_VERSION}" ]]; then
+            cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
+          fi
+          wasm-pack --version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for provenance support
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Build bundler package
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ env.WASM_CARGO_PROFILE_RELEASE_OPT_LEVEL }}
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ env.WASM_CARGO_PROFILE_RELEASE_CODEGEN_UNITS }}
+          CARGO_PROFILE_RELEASE_LTO: ${{ env.WASM_CARGO_PROFILE_RELEASE_LTO }}
+          CARGO_PROFILE_RELEASE_PANIC: ${{ env.WASM_CARGO_PROFILE_RELEASE_PANIC }}
+        run: wasm-pack build crates/mmdflux-wasm --target bundler --release --out-dir ../../target/wasm-pkg-release
+
+      - name: Enforce npm package contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target/wasm-pkg-release
+          npm pkg set name='@mmds/wasm'
+          npm pkg set version='${{ steps.meta.outputs.version }}'
+          npm pkg get name version
+
+      - name: Publish to npm (trusted publisher)
+        working-directory: target/wasm-pkg-release
+        run: npm publish --access=public --provenance

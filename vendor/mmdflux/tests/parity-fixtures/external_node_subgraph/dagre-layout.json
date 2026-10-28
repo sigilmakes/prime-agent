@@ -1,0 +1,224 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "ranker": "network-simplex",
+    "marginx": 8,
+    "marginy": 8,
+    "width": 244,
+    "height": 325
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "x": 63,
+      "y": 161,
+      "width": 14,
+      "height": 3,
+      "center_x": 70,
+      "center_y": 162.5,
+      "parent": "us-east",
+      "is_compound": false
+    },
+    {
+      "id": "B",
+      "x": 63,
+      "y": 239,
+      "width": 14,
+      "height": 3,
+      "center_x": 70,
+      "center_y": 240.5,
+      "parent": "us-east",
+      "is_compound": false
+    },
+    {
+      "id": "C",
+      "x": 167,
+      "y": 161,
+      "width": 14,
+      "height": 3,
+      "center_x": 174,
+      "center_y": 162.5,
+      "parent": "us-west",
+      "is_compound": false
+    },
+    {
+      "id": "Cloud",
+      "x": 8,
+      "y": 86,
+      "width": 228,
+      "height": 231,
+      "center_x": 122,
+      "center_y": 201.5,
+      "parent": null,
+      "is_compound": true
+    },
+    {
+      "id": "D",
+      "x": 167,
+      "y": 239,
+      "width": 14,
+      "height": 3,
+      "center_x": 174,
+      "center_y": 240.5,
+      "parent": "us-west",
+      "is_compound": false
+    },
+    {
+      "id": "E",
+      "x": 113.5,
+      "y": 8,
+      "width": 17,
+      "height": 3,
+      "center_x": 122,
+      "center_y": 9.5,
+      "parent": null,
+      "is_compound": false
+    },
+    {
+      "id": "us-east",
+      "x": 28,
+      "y": 123.5,
+      "width": 84,
+      "height": 156,
+      "center_x": 70,
+      "center_y": 201.5,
+      "parent": "Cloud",
+      "is_compound": true
+    },
+    {
+      "id": "us-west",
+      "x": 132,
+      "y": 123.5,
+      "width": 84,
+      "height": 156,
+      "center_x": 174,
+      "center_y": 201.5,
+      "parent": "Cloud",
+      "is_compound": true
+    }
+  ],
+  "edges": [
+    {
+      "index": 0,
+      "name": "0",
+      "from": "A",
+      "to": "B",
+      "points": [
+        [
+          70,
+          164
+        ],
+        [
+          70,
+          201.5
+        ],
+        [
+          70,
+          239
+        ]
+      ]
+    },
+    {
+      "index": 1,
+      "name": "1",
+      "from": "C",
+      "to": "D",
+      "points": [
+        [
+          174,
+          164
+        ],
+        [
+          174,
+          201.5
+        ],
+        [
+          174,
+          239
+        ]
+      ]
+    },
+    {
+      "index": 2,
+      "name": "2",
+      "from": "E",
+      "to": "A",
+      "points": [
+        [
+          120,
+          11
+        ],
+        [
+          70,
+          48.5
+        ],
+        [
+          70,
+          86
+        ],
+        [
+          70,
+          123.5
+        ],
+        [
+          70,
+          161
+        ]
+      ]
+    },
+    {
+      "index": 3,
+      "name": "3",
+      "from": "E",
+      "to": "C",
+      "points": [
+        [
+          124,
+          11
+        ],
+        [
+          174,
+          48.5
+        ],
+        [
+          174,
+          86
+        ],
+        [
+          174,
+          123.5
+        ],
+        [
+          174,
+          161
+        ]
+      ]
+    }
+  ],
+  "subgraph_bounds": [
+    {
+      "id": "Cloud",
+      "x": 8,
+      "y": 86,
+      "width": 228,
+      "height": 231
+    },
+    {
+      "id": "us-east",
+      "x": 28,
+      "y": 123.5,
+      "width": 84,
+      "height": 156
+    },
+    {
+      "id": "us-west",
+      "x": 132,
+      "y": 123.5,
+      "width": 84,
+      "height": 156
+    }
+  ]
+}

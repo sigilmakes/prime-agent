@@ -1,0 +1,9 @@
+graph TD
+    subgraph cloud[Cloud]
+        subgraph region[US East]
+            Server1
+            Server2
+        end
+    end
+    Client --> cloud
+    cloud --> Monitoring

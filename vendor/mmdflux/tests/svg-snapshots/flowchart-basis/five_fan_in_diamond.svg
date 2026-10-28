@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 571.12 220.24" style="max-width: 571.12px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M78.67,62.00 L78.67,66.65 C78.67,71.31 78.67,80.61 107.45,89.92 C136.24,99.22 193.80,108.53 222.59,117.17 C251.37,125.81 251.37,133.78 251.37,137.77 L251.37,141.75" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M189.73,62.00 L189.73,66.14 C189.73,70.27 189.73,78.55 201.55,86.82 C213.38,95.09 237.02,103.36 248.84,110.97 C260.67,118.58 260.67,125.51 260.67,128.98 L260.67,132.45" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M285.12,62.00 L285.12,64.78 C285.12,67.56 285.12,73.11 285.12,78.67 C285.12,84.22 285.12,89.78 285.12,94.67 C285.12,99.56 285.12,103.78 285.12,105.89 L285.12,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M380.86,62.00 L380.86,66.14 C380.86,70.28 380.86,78.56 368.99,86.83 C357.11,95.11 333.37,103.39 321.49,111.00 C309.62,118.61 309.62,125.56 309.62,129.03 L309.62,132.50" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M492.45,62.00 L492.45,66.66 C492.45,71.31 492.45,80.62 463.53,89.93 C434.61,99.24 376.76,108.56 347.84,117.20 C318.92,125.84 318.92,133.82 318.92,137.81 L318.92,141.80" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="8.00" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.34" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">A</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="128.67" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="164.01" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">B</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="249.34" y="8.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="285.12" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">C</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="370.90" y="8.00" width="71.55" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="406.68" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">D</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="492.45" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="527.79" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">E</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <polygon points="285.12,112.00 335.24,162.12 285.12,212.24 235.00,162.12" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="285.12" y="162.12" text-anchor="middle" dominant-baseline="middle" fill="#333">Target</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

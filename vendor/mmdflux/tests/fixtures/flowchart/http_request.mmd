@@ -1,0 +1,8 @@
+graph TD
+    Client[Client] -->|HTTP Request| Server[Server]
+    Server --> Auth{Authenticated?}
+    Auth -->|Yes| Process[Process Request]
+    Auth -->|No| Reject[401 Unauthorized]
+    Process --> Response[Send Response]
+    Reject --> Response
+    Response -->|HTTP Response| Client

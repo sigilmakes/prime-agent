@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1021.71 98.00" style="max-width: 1021.71px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M151.56,35.00 L159.56,35.00 L162.40,35.00 C165.23,35.00 170.90,35.00 183.57,35.00 C196.24,35.00 215.92,35.00 227.93,35.00 C239.93,35.00 244.27,35.00 246.43,35.00 L248.60,35.00 L256.60,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M413.11,35.00 L421.11,35.00 L423.94,35.00 C426.78,35.00 432.44,35.00 449.26,35.00 C466.08,35.00 494.04,35.00 514.36,35.00 C534.67,35.00 547.34,35.00 553.67,35.00 L560.01,35.00 L568.01,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M712.95,35.00 L720.95,35.00 L723.79,35.00 C726.62,35.00 732.29,35.00 746.29,35.00 C760.30,35.00 782.65,35.00 800.15,35.00 C817.66,35.00 830.33,35.00 836.66,35.00 L842.99,35.00 L850.99,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M934.35,62.00 L934.35,70.00 L934.35,71.00 C934.35,72.00 934.35,74.00 791.92,75.00 C649.49,76.00 364.64,76.00 222.21,75.67 C79.78,75.33 79.78,74.67 79.78,74.33 L79.78,74.00 L79.78,66.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="Local" data-id="Local" data-look="classic">
+        <rect x="572.01" y="8.00" width="140.95" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="642.48" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Local Repo</text>
+      </g>
+      <g class="node default" id="Remote" data-id="Remote" data-look="classic">
+        <rect x="854.99" y="8.00" width="158.72" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="934.35" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Remote Repo</text>
+      </g>
+      <g class="node default" id="Staging" data-id="Staging" data-look="classic">
+        <rect x="260.60" y="8.00" width="152.51" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="336.86" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Staging Area</text>
+      </g>
+      <g class="node default" id="Working" data-id="Working" data-look="classic">
+        <rect x="8.00" y="8.00" width="143.56" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="79.78" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Working Dir</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="178.06" y="21.00" width="56.04" height="28.00" fill="white" />
+      <text x="206.08" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">git add</text>
+      <rect x="452.11" y="21.00" width="80.90" height="28.00" fill="white" />
+      <text x="492.56" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">git commit</text>
+      <rect x="751.95" y="21.00" width="64.04" height="28.00" fill="white" />
+      <text x="783.97" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">git push</text>
+      <rect x="481.94" y="62.00" width="54.25" height="28.00" fill="white" />
+      <text x="509.07" y="76.00" text-anchor="middle" dominant-baseline="middle" fill="#333">git pull</text>
+    </g>
+  </g>
+</svg>

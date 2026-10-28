@@ -1,0 +1,22 @@
+/target
+# Debug dependencies (cloned by setup-debug-deps.sh)
+/deps
+# Gumbo (plans, research, issues tracked separately)
+/.gumbo
+# Stray vitest cache when `vitest run` is invoked from the worktree root
+# (no package.json there). Per-package node_modules under web/ and
+# packages/*/ stay scoped by their own .gitignore.
+/node_modules
+CLAUDE.local.md
+AGENTS.local.md
+
+/.wrangler
+/worktrees
+/scripts/tests/out
+/scripts/out
+/.cursor/worktrees.json
+
+/.claude/scheduled_tasks.lock
+/.codex/environments/
+
+__pycache__

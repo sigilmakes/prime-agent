@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "profiles": [
+    "mmds-core-v1",
+    "mmdflux-text-v1"
+  ],
+  "extensions": {
+    "org.mmdflux.render.text.v1": {
+      "projection": {
+        "edge_waypoints": {
+          "1": [
+            {
+              "rank": 2,
+              "x": 98.5616,
+              "y": 163.0
+            }
+          ],
+          "2": [
+            {
+              "rank": 2,
+              "x": 98.5616,
+              "y": 163.0
+            }
+          ]
+        },
+        "label_positions": {
+          "1": {
+            "rank": 2,
+            "x": 98.5616,
+            "y": 148.5
+          },
+          "2": {
+            "rank": 2,
+            "x": 98.5616,
+            "y": 177.5
+          }
+        },
+        "node_ranks": {
+          "Active": 1,
+          "Idle": 3,
+          "__root_end": 2,
+          "__root_start": 0
+        }
+      }
+    }
+  },
+  "defaults": {
+    "node": {
+      "shape": "rectangle"
+    },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "state",
+    "direction": "TD",
+    "bounds": {
+      "width": 136.8736,
+      "height": 291.0
+    },
+    "engine": "flux-layered"
+  },
+  "nodes": [
+    {
+      "id": "Active",
+      "label": "Active",
+      "shape": "round",
+      "position": {
+        "x": 60.2808,
+        "y": 99.0
+      },
+      "size": {
+        "width": 75.10079999999999,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "Idle",
+      "label": "Idle",
+      "shape": "round",
+      "position": {
+        "x": 98.5616,
+        "y": 256.0
+      },
+      "size": {
+        "width": 60.623999999999995,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "__root_end",
+      "label": "",
+      "shape": "framed_circle",
+      "position": {
+        "x": 22.0,
+        "y": 165.0
+      },
+      "size": {
+        "width": 28.0,
+        "height": 28.0
+      }
+    },
+    {
+      "id": "__root_start",
+      "label": "",
+      "shape": "small_circle",
+      "position": {
+        "x": 60.2808,
+        "y": 15.0
+      },
+      "size": {
+        "width": 14.0,
+        "height": 14.0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "__root_start",
+      "target": "Active"
+    },
+    {
+      "id": "e1",
+      "source": "Active",
+      "target": "Idle",
+      "label": "timeout"
+    },
+    {
+      "id": "e2",
+      "source": "Idle",
+      "target": "Active",
+      "label": "input"
+    },
+    {
+      "id": "e3",
+      "source": "Active",
+      "target": "__root_end"
+    }
+  ]
+}

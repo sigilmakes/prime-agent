@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 293.58 523.38" style="max-width: 293.58px; background-color: #ffffff;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M155.91,62.00 L155.91,64.78 C155.91,67.56 155.91,73.11 155.91,78.11 C155.91,83.11 155.91,87.56 155.91,92.44 C155.91,97.33 155.91,102.67 155.91,105.33 L155.91,108.00" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M114.89,210.36 L108.07,210.36 C101.26,210.36 87.64,210.36 80.82,234.20 C74.01,258.04 74.01,305.71 74.01,329.55 L74.01,353.38" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M196.93,210.36 L203.74,210.36 C210.55,210.36 224.18,210.36 230.99,234.20 C237.80,258.04 237.80,305.71 237.80,329.55 L237.80,353.38" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M95.27,411.38 L95.27,414.16 C95.27,416.94 95.27,422.49 98.52,427.49 C101.78,432.49 108.28,436.94 111.53,441.83 C114.78,446.72 114.78,452.05 114.78,454.72 L114.78,457.38" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M216.54,411.38 L216.54,414.16 C216.54,416.94 216.54,422.49 213.29,427.49 C210.04,432.49 203.53,436.94 200.28,441.83 C197.03,446.72 197.03,452.05 197.03,454.72 L197.03,457.38" stroke="#333333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="check-1" data-id="check-1" data-look="classic">
+        <polygon points="155.91,112.00 225.60,181.69 155.91,251.38 86.21,181.69" fill="#ececff" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="155.91" y="181.69" text-anchor="middle" dominant-baseline="middle" fill="#333333">Check Input</text>
+      </g>
+      <g class="node default" id="end-node" data-id="end-node" data-look="classic">
+        <rect x="106.78" y="461.38" width="98.25" height="54.00" fill="#ececff" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="155.91" y="488.38" text-anchor="middle" dominant-baseline="middle" fill="#333333">Done</text>
+      </g>
+      <g class="node default error" id="error-1" data-id="error-1" data-look="classic">
+        <rect x="190.02" y="357.38" width="95.55" height="54.00" fill="#f00" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="237.80" y="384.38" text-anchor="middle" dominant-baseline="middle" fill="#333333">Error</text>
+      </g>
+      <g class="node default success" id="process-A" data-id="process-A" data-look="classic">
+        <rect x="8.00" y="357.38" width="132.02" height="54.00" fill="#0f0" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="74.01" y="384.38" text-anchor="middle" dominant-baseline="middle" fill="#333333">process-A</text>
+      </g>
+      <g class="node default" id="start-node" data-id="start-node" data-look="classic">
+        <rect x="109.01" y="8.00" width="93.79" height="54.00" fill="#f9f" stroke="#9370db" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="155.91" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333333">Start</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="53.56" y="259.88" width="40.91" height="28.00" fill="#ffffff" />
+      <text x="74.01" y="273.88" text-anchor="middle" dominant-baseline="middle" fill="#333333">valid</text>
+      <rect x="211.12" y="259.88" width="53.36" height="28.00" fill="#ffffff" />
+      <text x="237.80" y="273.88" text-anchor="middle" dominant-baseline="middle" fill="#333333">invalid</text>
+    </g>
+  </g>
+</svg>

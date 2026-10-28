@@ -1,0 +1,8 @@
+graph TD
+    subgraph sg1[Backend]
+        API[API Server]
+        DB[Database]
+        API --> DB
+    end
+    Client --> sg1
+    sg1 --> Logs

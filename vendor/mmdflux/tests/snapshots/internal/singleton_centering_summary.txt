@@ -1,0 +1,103 @@
+# Singleton port-fraction centering report (issue #271)
+#
+# Each fixture: total / survivors / delta histogram / rejected histogram.
+# 'delta_cross' is integer-cell drift on the face-perpendicular-dropped axis
+# between the routed text endpoint and the rect-midpoint a fraction==0.5 port
+# would project to. Detail rows: survivors only.
+#
+# Reviewer flags (per plan risks):
+# - MarkerOrLabelTerminalShift dominating labeled fixtures => gate too coarse.
+# - TextProbeUnavailable >10% of total => probe issues, not the predicate.
+# - TextFaceMismatch firing => routed/observed face disagreement, log on #270.
+#
+
+== bidirectional.mmd ==
+  edges: 3   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {MarkerOrLabelTerminalShift: 3}
+  (no survivors)
+== bottom_top.mmd ==
+  edges: 2   survivors: 2   delta0: 2  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    Foundation -> Structure    delta_cross=0  faces=(top,bottom)  fractions=(0.500,0.500)
+    Structure -> Roof    delta_cross=0  faces=(top,bottom)  fractions=(0.500,0.500)
+== callgraph_feedback_cycle.mmd ==
+  edges: 22   survivors: 10   delta0: 10  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 12}
+  survivors:
+    n0 -> n1    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n1 -> n2    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n11 -> n12    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n13 -> n14    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n14 -> n15    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n15 -> n16    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n16 -> n17    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n17 -> n18    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n18 -> n19    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    n9 -> n10    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+== chain.mmd ==
+  edges: 3   survivors: 3   delta0: 3  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    A -> B    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    B -> C    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    C -> D    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+== ci_pipeline.mmd ==
+  edges: 6   survivors: 4   delta0: 4  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 2}
+  survivors:
+    Build -> Test    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    Lint -> Deploy    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    Push -> Build    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    Test -> Lint    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+== decision.mmd ==
+  edges: 4   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 4}
+  (no survivors)
+== direction_override.mmd ==
+  edges: 4   survivors: 4   delta0: 4  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    A -> B    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    B -> C    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    C -> End    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    Start -> A    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+== edge_styles.mmd ==
+  edges: 4   survivors: 4   delta0: 4  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    A -> B    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    C -> D    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    E -> F    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    G -> H    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+== fan_in.mmd ==
+  edges: 3   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 3}
+  (no survivors)
+== fan_out.mmd ==
+  edges: 3   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 3}
+  (no survivors)
+== labeled_edges.mmd ==
+  edges: 5   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 4, MarkerOrLabelTerminalShift: 1}
+  (no survivors)
+== left_right.mmd ==
+  edges: 2   survivors: 2   delta0: 2  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    Input -> Process    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    Process -> Output    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+== mixed_shape_chain.mmd ==
+  edges: 3   survivors: 3   delta0: 3  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    A -> B    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    B -> C    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    C -> D    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+== multi_edge.mmd ==
+  edges: 2   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 2}
+  (no survivors)
+== simple.mmd ==
+  edges: 1   survivors: 1   delta0: 1  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    A -> B    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+== simple_cycle.mmd ==
+  edges: 3   survivors: 0   delta0: 0  delta1: 0  delta2+: 0   rejected: {GroupSizeNonOne: 3}
+  (no survivors)
+== subgraph_direction_lr.mmd ==
+  edges: 4   survivors: 4   delta0: 4  delta1: 0  delta2+: 0   rejected: {}
+  survivors:
+    A -> B    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    B -> C    delta_cross=0  faces=(right,left)  fractions=(0.500,0.500)
+    C -> End    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+    Start -> A    delta_cross=0  faces=(bottom,top)  fractions=(0.500,0.500)
+
+TOTALS: edges=74 survivors=37 delta0=37 delta1=0 delta2+=0 rejected={GroupSizeNonOne: 33, MarkerOrLabelTerminalShift: 4}

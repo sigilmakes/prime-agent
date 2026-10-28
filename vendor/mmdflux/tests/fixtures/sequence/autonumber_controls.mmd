@@ -1,0 +1,10 @@
+sequenceDiagram
+    participant Client
+    participant API
+    autonumber 10 2
+    Client->>API: Login request
+    API-->>Client: Challenge
+    autonumber off
+    Client->>API: Background ping
+    autonumber
+    API-->>Client: Session ready

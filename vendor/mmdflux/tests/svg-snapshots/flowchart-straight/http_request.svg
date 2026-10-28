@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 505.28 679.75" style="max-width: 505.28px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M257.08,62.00 L257.08,164.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M257.08,222.00 L257.08,268.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M217.29,392.97 L101.72,510.89" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M282.79,407.04 L331.29,510.13" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M98.92,567.75 L253.26,616.54" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M332.99,567.75 L260.42,615.55" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M344.01,644.75 L434.15,644.75 L434.15,35.00 L311.53,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="Auth" data-id="Auth" data-look="classic">
+        <polygon points="257.08,272.00 337.45,352.38 257.08,432.75 176.70,352.38" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="352.38" text-anchor="middle" dominant-baseline="middle" fill="#333">Authenticated?</text>
+      </g>
+      <g class="node default" id="Client" data-id="Client" data-look="classic">
+        <rect x="206.62" y="8.00" width="100.91" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Client</text>
+      </g>
+      <g class="node default" id="Process" data-id="Process" data-look="classic">
+        <rect x="8.00" y="513.75" width="181.84" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="98.92" y="540.75" text-anchor="middle" dominant-baseline="middle" fill="#333">Process Request</text>
+      </g>
+      <g class="node default" id="Reject" data-id="Reject" data-look="classic">
+        <rect x="239.84" y="513.75" width="186.31" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="332.99" y="540.75" text-anchor="middle" dominant-baseline="middle" fill="#333">401 Unauthorized</text>
+      </g>
+      <g class="node default" id="Response" data-id="Response" data-look="classic">
+        <rect x="170.15" y="617.75" width="173.86" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="644.75" text-anchor="middle" dominant-baseline="middle" fill="#333">Send Response</text>
+      </g>
+      <g class="node default" id="Server" data-id="Server" data-look="classic">
+        <rect x="203.52" y="168.00" width="107.12" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="195.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Server</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="200.17" y="101.00" width="113.81" height="28.00" fill="white" />
+      <text x="257.08" y="115.00" text-anchor="middle" dominant-baseline="middle" fill="#333">HTTP Request</text>
+      <rect x="141.72" y="437.93" width="35.57" height="28.00" fill="white" />
+      <text x="159.51" y="451.93" text-anchor="middle" dominant-baseline="middle" fill="#333">Yes</text>
+      <rect x="292.81" y="444.58" width="28.45" height="28.00" fill="white" />
+      <text x="307.04" y="458.58" text-anchor="middle" dominant-baseline="middle" fill="#333">No</text>
+      <rect x="371.02" y="307.64" width="126.27" height="28.00" fill="white" />
+      <text x="434.15" y="321.64" text-anchor="middle" dominant-baseline="middle" fill="#333">HTTP Response</text>
+    </g>
+  </g>
+</svg>

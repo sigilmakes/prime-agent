@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "sequence",
+    "direction": "TD",
+    "bounds": { "width": 120.0, "height": 80.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Start",
+      "position": { "x": 20.0, "y": 20.0 },
+      "size": { "width": 44.0, "height": 24.0 }
+    },
+    {
+      "id": "B",
+      "label": "End",
+      "position": { "x": 80.0, "y": 60.0 },
+      "size": { "width": 44.0, "height": 24.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B"
+    }
+  ],
+  "subgraphs": []
+}

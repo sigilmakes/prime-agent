@@ -1,0 +1,20 @@
+┌───┐               ┌───┐
+│ A │               │ B │
+└─┬─┘               └─┬─┘
+  │                   │
+  │─Solid filled─────>│
+  │                   │
+  │┄Dashed filled┄┄┄┄>│
+  │                   │
+  │─Solid plain───────│
+  │                   │
+  │┄Dashed plain┄┄┄┄┄┄│
+  │                   │
+  │─Solid cross──────x│
+  │                   │
+  │┄Dashed cross┄┄┄┄┄x│
+  │                   │
+  │─Solid async──────)│
+  │                   │
+  │┄Dashed async┄┄┄┄┄)│
+  │                   │

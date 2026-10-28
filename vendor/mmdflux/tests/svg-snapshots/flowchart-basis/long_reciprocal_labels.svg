@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 219.22 318.00" style="max-width: 219.22px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(56.27,0.00)">
+    <g class="edgePaths">
+      <path d="M43.34,62.00 L43.34,70.00 L43.34,72.83 C43.34,75.67 43.34,81.33 43.34,93.33 C43.34,105.33 43.34,123.67 43.34,149.83 C43.34,176.00 43.34,210.00 43.34,227.00 L43.34,244.00 L43.34,252.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M47.69,256.00 L48.96,248.10 L51.36,233.25 C53.76,218.40 58.55,188.70 58.65,159.66 C58.76,130.62 54.18,102.23 51.89,88.04 L49.60,73.85 L48.33,65.95" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="8.00" y="8.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.34" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">A</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="8.00" y="256.00" width="70.67" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="43.34" y="283.00" text-anchor="middle" dominant-baseline="middle" fill="#333">B</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="-48.27" y="161.00" width="183.21" height="52.00" fill="white" />
+      <text x="43.34" y="175.00" text-anchor="middle" dominant-baseline="middle" fill="#333">this is a deliberately long</text>
+      <text x="43.34" y="199.00" text-anchor="middle" dominant-baseline="middle" fill="#333">label</text>
+      <rect x="-28.28" y="105.00" width="183.23" height="52.00" fill="white" />
+      <text x="63.34" y="119.00" text-anchor="middle" dominant-baseline="middle" fill="#333">another deliberately long</text>
+      <text x="63.34" y="143.00" text-anchor="middle" dominant-baseline="middle" fill="#333">reply label</text>
+    </g>
+  </g>
+</svg>

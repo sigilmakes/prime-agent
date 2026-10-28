@@ -17,6 +17,12 @@ members = [
 # but cap the query poll to 250ms (late real-terminal replies still get a chance).
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
+# mmdflux 2.6.1 panics ("no entry found for key", HashMap index) laying out a
+# titled subgraph with no member nodes anywhere in a flowchart that reaches the
+# layered engine - one such assistant diagram killed the whole TUI process.
+# from_digraph now keeps titled empty subgraphs inside compound_nodes so title
+# insertion always has a border_top. See vendor/mmdflux/PRIME_AGENT_PATCH.md.
+mmdflux = { path = "vendor/mmdflux" }
 # mlua 0.11.6: retain hook-suspended frames and resume arity in Future/Stream;
 # route real Rust-future wake debt across hook handoff and task migration.
 # Complete source/test repair is retained in vendor/mlua/PRIME_PATCH.patch.

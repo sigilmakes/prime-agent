@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": { "width": 120.0, "height": 80.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "A",
+      "parent": "sg1",
+      "position": { "x": 20.0, "y": 20.0 },
+      "size": { "width": 30.0, "height": 20.0 }
+    }
+  ],
+  "edges": [],
+  "subgraphs": [
+    {
+      "id": "sg1",
+      "title": "One",
+      "children": ["A"],
+      "parent": "sg2"
+    },
+    {
+      "id": "sg2",
+      "title": "Two",
+      "children": [],
+      "parent": "sg1"
+    }
+  ]
+}

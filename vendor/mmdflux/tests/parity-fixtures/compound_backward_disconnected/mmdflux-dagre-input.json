@@ -1,0 +1,111 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "marginx": 8,
+    "marginy": 8,
+    "ranker": "network-simplex"
+  },
+  "nodes": [
+    {
+      "id": "C",
+      "label": "Bottom",
+      "width": 0,
+      "height": 0,
+      "parent": null,
+      "is_subgraph": true
+    },
+    {
+      "id": "B",
+      "label": "Middle",
+      "width": 0,
+      "height": 0,
+      "parent": null,
+      "is_subgraph": true
+    },
+    {
+      "id": "A",
+      "label": "Top",
+      "width": 0,
+      "height": 0,
+      "parent": null,
+      "is_subgraph": true
+    },
+    {
+      "id": "a1",
+      "label": "Node A1",
+      "width": 120.50559999999999,
+      "height": 54.0,
+      "parent": "A",
+      "is_subgraph": false
+    },
+    {
+      "id": "a2",
+      "label": "Node A2",
+      "width": 120.50559999999999,
+      "height": 54.0,
+      "parent": "A",
+      "is_subgraph": false
+    },
+    {
+      "id": "b1",
+      "label": "Node B1",
+      "width": 120.50559999999999,
+      "height": 54.0,
+      "parent": "B",
+      "is_subgraph": false
+    },
+    {
+      "id": "b2",
+      "label": "Node B2",
+      "width": 120.50559999999999,
+      "height": 54.0,
+      "parent": "B",
+      "is_subgraph": false
+    },
+    {
+      "id": "c1",
+      "label": "Node C1",
+      "width": 120.50559999999999,
+      "height": 54.0,
+      "parent": "C",
+      "is_subgraph": false
+    },
+    {
+      "id": "c2",
+      "label": "Node C2",
+      "width": 120.50559999999999,
+      "height": 54.0,
+      "parent": "C",
+      "is_subgraph": false
+    }
+  ],
+  "edges": [
+    {
+      "from": "a1",
+      "to": "b1",
+      "label": null,
+      "label_width": 0,
+      "label_height": 0,
+      "index": 0
+    },
+    {
+      "from": "b1",
+      "to": "c1",
+      "label": null,
+      "label_width": 0,
+      "label_height": 0,
+      "index": 1
+    },
+    {
+      "from": "c2",
+      "to": "a2",
+      "label": null,
+      "label_width": 0,
+      "label_height": 0,
+      "index": 2
+    }
+  ]
+}

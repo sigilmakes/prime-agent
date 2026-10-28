@@ -1,0 +1,1209 @@
+//! MMDS hydration and validation.
+
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
+
+use serde_json::{Map, Value};
+
+#[cfg(test)]
+use crate::graph::Direction;
+use crate::graph::direction_policy::build_node_directions;
+use crate::graph::geometry::{
+    EdgeLabelGeometry, EdgeLabelSide, GraphGeometry, LayoutEdge, PositionedNode,
+    RoutedGraphGeometry, SelfEdgeGeometry, SubgraphGeometry,
+};
+use crate::graph::measure::{TextMetricsProvider, default_proportional_text_metrics};
+use crate::graph::projection::{GridProjection, OverrideSubgraphProjection};
+use crate::graph::routing::{EdgeRouting, route_graph_geometry_with_provider};
+use crate::graph::space::{FPoint, FRect};
+use crate::graph::style::{ColorToken, EdgeStyle, NodeStyle};
+use crate::graph::{Edge as GraphEdge, GeometryLevel, Graph, Node, Subgraph};
+use crate::mmds::{
+    Document, Edge, NODE_STYLE_EXTENSION_NAMESPACE, TEXT_EXTENSION_NAMESPACE, parse_input,
+};
+
+/// Hydrate a graph `Diagram` from MMDS JSON text.
+pub fn from_str(input: &str) -> Result<Graph, HydrationError> {
+    let output = parse_input(input).map_err(|err| HydrationError::Parse {
+        message: err.to_string(),
+    })?;
+    from_document(&output)
+}
+
+/// Hydrate a graph `Diagram` from a parsed MMDS document.
+pub fn from_document(output: &Document) -> Result<Graph, HydrationError> {
+    validate_output(output)?;
+
+    let direction = output.metadata.direction;
+    let mut diagram = Graph::new(direction);
+
+    for (index, subgraph) in output.subgraphs.iter().enumerate() {
+        if subgraph.id.trim().is_empty() {
+            return Err(HydrationError::MissingSubgraphId { index });
+        }
+        diagram.subgraphs.insert(
+            subgraph.id.clone(),
+            Subgraph {
+                id: subgraph.id.clone(),
+                title: subgraph.title.clone(),
+                nodes: subgraph.children.clone(),
+                parent: subgraph.parent.clone(),
+                dir: subgraph.direction,
+                invisible: subgraph.invisible,
+                concurrent_regions: subgraph.concurrent_regions.clone(),
+                style: Default::default(),
+                class_names: Vec::new(),
+            },
+        );
+        diagram.subgraph_order.push(subgraph.id.clone());
+    }
+
+    for (index, node) in output.nodes.iter().enumerate() {
+        if node.id.trim().is_empty() {
+            return Err(HydrationError::MissingNodeId { index });
+        }
+        let mut hydrated = Node::new(node.id.clone())
+            .with_label(node.label.clone())
+            .with_shape(node.shape);
+        hydrated.parent = node.parent.clone();
+        diagram.add_node(hydrated);
+    }
+
+    hydrate_node_style_extension(&mut diagram, &output.extensions);
+
+    for node in diagram.nodes.values() {
+        if let Some(parent) = &node.parent
+            && !diagram.subgraphs.contains_key(parent)
+        {
+            return Err(HydrationError::DanglingNodeParent {
+                node_id: node.id.clone(),
+                parent: parent.clone(),
+            });
+        }
+    }
+
+    for subgraph in diagram.subgraphs.values() {
+        if let Some(parent) = &subgraph.parent
+            && !diagram.subgraphs.contains_key(parent)
+        {
+            return Err(HydrationError::DanglingSubgraphParent {
+                subgraph_id: subgraph.id.clone(),
+                parent: parent.clone(),
+            });
+        }
+
+        for child in &subgraph.nodes {
+            if !diagram.nodes.contains_key(child) {
+                return Err(HydrationError::DanglingSubgraphChild {
+                    subgraph_id: subgraph.id.clone(),
+                    child: child.clone(),
+                });
+            }
+        }
+    }
+
+    for subgraph_id in diagram.subgraphs.keys() {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = subgraph_id.as_str();
+        while let Some(parent) = diagram
+            .subgraphs
+            .get(current)
+            .and_then(|subgraph| subgraph.parent.as_deref())
+        {
+            if !seen.insert(current) {
+                return Err(HydrationError::CyclicSubgraphParentChain {
+                    subgraph_id: subgraph_id.clone(),
+                });
+            }
+            current = parent;
+        }
+    }
+
+    reconstruct_compound_membership(&mut diagram);
+
+    let edges = sorted_output_edges(output);
+
+    for (index, edge) in edges {
+        if edge.id.trim().is_empty() {
+            return Err(HydrationError::MissingEdgeId { index });
+        }
+        if edge.source.trim().is_empty() {
+            return Err(HydrationError::MissingEdgeSource {
+                edge_id: edge.id.clone(),
+            });
+        }
+        if edge.target.trim().is_empty() {
+            return Err(HydrationError::MissingEdgeTarget {
+                edge_id: edge.id.clone(),
+            });
+        }
+
+        if !diagram.nodes.contains_key(&edge.source) {
+            return Err(HydrationError::DanglingEdgeSource {
+                edge_id: edge.id.clone(),
+                source: edge.source.clone(),
+            });
+        }
+        if !diagram.nodes.contains_key(&edge.target) {
+            return Err(HydrationError::DanglingEdgeTarget {
+                edge_id: edge.id.clone(),
+                target: edge.target.clone(),
+            });
+        }
+        if let Some(from_subgraph) = &edge.from_subgraph
+            && !diagram.subgraphs.contains_key(from_subgraph.as_str())
+        {
+            return Err(HydrationError::DanglingEdgeFromSubgraphIntent {
+                edge_id: edge.id.clone(),
+                subgraph: from_subgraph.clone(),
+            });
+        }
+        if let Some(to_subgraph) = &edge.to_subgraph
+            && !diagram.subgraphs.contains_key(to_subgraph.as_str())
+        {
+            return Err(HydrationError::DanglingEdgeToSubgraphIntent {
+                edge_id: edge.id.clone(),
+                subgraph: to_subgraph.clone(),
+            });
+        }
+
+        let mut hydrated = GraphEdge::new(edge.source.clone(), edge.target.clone())
+            .with_stroke(edge.stroke)
+            .with_arrows(edge.arrow_start, edge.arrow_end)
+            .with_minlen(edge.minlen);
+        if let Some(label) = &edge.label {
+            hydrated = hydrated.with_label(label.clone());
+        }
+        let style = parse_edge_style_from_extension(&output.extensions, &edge.id);
+        if !style.is_empty() {
+            hydrated.style = hydrated.style.merge(&style);
+        }
+        hydrated.from_subgraph = edge.from_subgraph.clone();
+        hydrated.to_subgraph = edge.to_subgraph.clone();
+        diagram.add_edge(hydrated);
+    }
+
+    Ok(diagram)
+}
+
+/// Hydrate a graph `Diagram` from a parsed MMDS document.
+#[doc(hidden)]
+#[deprecated(note = "use from_document instead")]
+pub fn from_output(output: &Document) -> Result<Graph, HydrationError> {
+    from_document(output)
+}
+
+fn hydrate_node_style_extension(
+    diagram: &mut Graph,
+    extensions: &std::collections::BTreeMap<String, Map<String, Value>>,
+) {
+    let Some(extension) = extensions.get(NODE_STYLE_EXTENSION_NAMESPACE) else {
+        return;
+    };
+
+    if let Some(nodes) = extension.get("nodes").and_then(Value::as_object) {
+        for (node_id, raw_style) in nodes {
+            let Some(style_object) = raw_style.as_object() else {
+                continue;
+            };
+            let Some(node) = diagram.nodes.get_mut(node_id) else {
+                continue;
+            };
+
+            let style = parse_node_style_extension(style_object);
+            if !style.is_empty() {
+                node.style = node.style.merge(&style);
+            }
+
+            if let Some(class_names) = style_object.get("classNames").and_then(Value::as_array) {
+                for name in class_names.iter().filter_map(Value::as_str) {
+                    if !node.class_names.iter().any(|existing| existing == name) {
+                        node.class_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(subgraphs) = extension.get("subgraphs").and_then(Value::as_object) {
+        for (subgraph_id, raw_style) in subgraphs {
+            let Some(style_object) = raw_style.as_object() else {
+                continue;
+            };
+            let Some(subgraph) = diagram.subgraphs.get_mut(subgraph_id) else {
+                continue;
+            };
+
+            let style = parse_node_style_extension(style_object);
+            if !style.is_empty() {
+                subgraph.style = subgraph.style.merge(&style);
+            }
+
+            if let Some(class_names) = style_object.get("classNames").and_then(Value::as_array) {
+                for name in class_names.iter().filter_map(Value::as_str) {
+                    if !subgraph.class_names.iter().any(|existing| existing == name) {
+                        subgraph.class_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_node_style_extension(style_object: &Map<String, Value>) -> NodeStyle {
+    NodeStyle {
+        fill: parse_node_style_color(style_object, "fill"),
+        stroke: parse_node_style_color(style_object, "stroke"),
+        color: parse_node_style_color(style_object, "color"),
+        font_family: parse_style_string_with_legacy_key(style_object, "font-family", "font_family"),
+        font_size: parse_style_string_with_legacy_key(style_object, "font-size", "font_size"),
+        font_style: parse_style_string_with_legacy_key(style_object, "font-style", "font_style"),
+        font_weight: parse_style_string_with_legacy_key(style_object, "font-weight", "font_weight"),
+        stroke_width: parse_style_string_with_legacy_key(
+            style_object,
+            "stroke-width",
+            "stroke_width",
+        ),
+        stroke_dasharray: parse_style_string_with_legacy_key(
+            style_object,
+            "stroke-dasharray",
+            "stroke_dasharray",
+        ),
+        rx: parse_style_string(style_object, "rx"),
+        ry: parse_style_string(style_object, "ry"),
+    }
+}
+
+fn parse_edge_style_from_extension(
+    extensions: &std::collections::BTreeMap<String, Map<String, Value>>,
+    edge_id: &str,
+) -> EdgeStyle {
+    let Some(extension) = extensions.get(NODE_STYLE_EXTENSION_NAMESPACE) else {
+        return EdgeStyle::default();
+    };
+    let Some(edges) = extension.get("edges").and_then(Value::as_object) else {
+        return EdgeStyle::default();
+    };
+    let Some(style_object) = edges.get(edge_id).and_then(Value::as_object) else {
+        return EdgeStyle::default();
+    };
+
+    EdgeStyle {
+        stroke: None,
+        stroke_width: parse_style_string_with_legacy_key(
+            style_object,
+            "stroke-width",
+            "stroke_width",
+        ),
+        font_family: parse_style_string_with_legacy_key(style_object, "font-family", "font_family"),
+        font_size: parse_style_string_with_legacy_key(style_object, "font-size", "font_size"),
+        font_style: parse_style_string_with_legacy_key(style_object, "font-style", "font_style"),
+        font_weight: parse_style_string_with_legacy_key(style_object, "font-weight", "font_weight"),
+    }
+}
+
+fn parse_style_string_with_legacy_key(
+    style_object: &Map<String, Value>,
+    key: &str,
+    legacy_key: &str,
+) -> Option<String> {
+    parse_style_string(style_object, key).or_else(|| parse_style_string(style_object, legacy_key))
+}
+
+fn parse_style_string(style_object: &Map<String, Value>, key: &str) -> Option<String> {
+    style_object.get(key)?.as_str().map(|s| s.to_string())
+}
+
+fn parse_node_style_color(style_object: &Map<String, Value>, key: &str) -> Option<ColorToken> {
+    let raw = style_object.get(key)?.as_str()?;
+    ColorToken::parse(raw).ok()
+}
+
+fn reconstruct_compound_membership(diagram: &mut Graph) {
+    let mut node_ids: Vec<&String> = diagram.nodes.keys().collect();
+    node_ids.sort();
+
+    let memberships: Vec<(String, Vec<String>)> = node_ids
+        .into_iter()
+        .map(|node_id| {
+            let mut ancestors = Vec::new();
+            let mut current = diagram
+                .nodes
+                .get(node_id)
+                .and_then(|node| node.parent.as_deref());
+            while let Some(parent) = current {
+                ancestors.push(parent.to_string());
+                current = diagram
+                    .subgraphs
+                    .get(parent)
+                    .and_then(|subgraph| subgraph.parent.as_deref());
+            }
+            (node_id.clone(), ancestors)
+        })
+        .collect();
+
+    for subgraph in diagram.subgraphs.values_mut() {
+        subgraph.nodes.clear();
+    }
+
+    for (node_id, ancestors) in memberships {
+        for subgraph_id in ancestors {
+            if let Some(subgraph) = diagram.subgraphs.get_mut(&subgraph_id) {
+                subgraph.nodes.push(node_id.clone());
+            }
+        }
+    }
+}
+
+/// Hydrate graph geometry IR from MMDS JSON text.
+#[cfg(test)]
+pub(crate) fn hydrate_graph_geometry_from_mmds(
+    input: &str,
+) -> Result<GraphGeometry, HydrationError> {
+    let output = parse_input(input).map_err(|err| HydrationError::Parse {
+        message: err.to_string(),
+    })?;
+    hydrate_graph_geometry_from_document(&output)
+}
+
+/// Hydrate graph geometry IR from a parsed MMDS document.
+#[cfg(test)]
+pub(crate) fn hydrate_graph_geometry_from_document(
+    output: &Document,
+) -> Result<GraphGeometry, HydrationError> {
+    let (_, geometry) = hydrate_geometry_parts(output)?;
+    Ok(geometry)
+}
+
+/// Hydrate graph geometry IR from a parsed MMDS document, using a pre-built diagram.
+pub fn hydrate_graph_geometry_from_document_with_diagram(
+    output: &Document,
+    diagram: &Graph,
+) -> Result<GraphGeometry, HydrationError> {
+    validate_output(output)?;
+    build_graph_geometry(output, diagram)
+}
+
+/// Hydrate graph geometry IR from a parsed MMDS document, using a pre-built diagram.
+#[doc(hidden)]
+#[deprecated(note = "use hydrate_graph_geometry_from_document_with_diagram instead")]
+pub fn hydrate_graph_geometry_from_output_with_diagram(
+    output: &Document,
+    diagram: &Graph,
+) -> Result<GraphGeometry, HydrationError> {
+    hydrate_graph_geometry_from_document_with_diagram(output, diagram)
+}
+
+/// Hydrate routed geometry IR from MMDS JSON text.
+#[cfg(test)]
+pub(crate) fn hydrate_routed_geometry_from_mmds(
+    input: &str,
+) -> Result<RoutedGraphGeometry, HydrationError> {
+    let output = parse_input(input).map_err(|err| HydrationError::Parse {
+        message: err.to_string(),
+    })?;
+    hydrate_routed_geometry_from_document(&output)
+}
+
+/// Hydrate routed geometry IR from a parsed MMDS document.
+pub fn hydrate_routed_geometry_from_document(
+    output: &Document,
+) -> Result<RoutedGraphGeometry, HydrationError> {
+    let metrics = default_proportional_text_metrics();
+    hydrate_routed_geometry_from_document_with_provider(output, &metrics)
+}
+
+/// Hydrate routed geometry IR from a parsed MMDS document with caller-supplied metrics.
+pub(crate) fn hydrate_routed_geometry_from_document_with_provider(
+    output: &Document,
+    metrics: &dyn TextMetricsProvider,
+) -> Result<RoutedGraphGeometry, HydrationError> {
+    let (diagram, geometry) = hydrate_geometry_parts(output)?;
+    let edge_routing = if output.geometry_level == GeometryLevel::Routed {
+        EdgeRouting::EngineProvided
+    } else {
+        EdgeRouting::PolylineRoute
+    };
+    let mut routed = route_graph_geometry_with_provider(&diagram, &geometry, edge_routing, metrics);
+
+    // Preserve authoritative routed label geometry by overwriting
+    // `label_geometry` on routed edges with the semantics carried by the MMDS
+    // payload. `route_graph_geometry` rebuilt `label_geometry` from
+    // `label_position` inside `populate_label_geometry`, which would silently
+    // lose the authoritative `label_rect` whenever `label_position` and
+    // `label_rect` disagree.
+    if output.geometry_level == GeometryLevel::Routed {
+        overlay_authoritative_label_geometry(&mut routed, output, metrics);
+    }
+
+    Ok(routed)
+}
+
+/// Hydrate routed geometry IR from a parsed MMDS document.
+#[doc(hidden)]
+#[deprecated(note = "use hydrate_routed_geometry_from_document instead")]
+pub fn hydrate_routed_geometry_from_output(
+    output: &Document,
+) -> Result<RoutedGraphGeometry, HydrationError> {
+    hydrate_routed_geometry_from_document(output)
+}
+
+/// Replace synthesized `label_geometry` on routed edges with an
+/// authoritative version derived from the MMDS payload's `label_rect`
+/// and `label_side`.
+fn overlay_authoritative_label_geometry(
+    routed: &mut RoutedGraphGeometry,
+    output: &Document,
+    metrics: &dyn TextMetricsProvider,
+) {
+    let edges = sorted_output_edges(output);
+    for (routed_index, (_, mmds_edge)) in edges.into_iter().enumerate() {
+        let Some(mmds_rect) = mmds_edge.label_rect.as_ref() else {
+            continue;
+        };
+        let Some(routed_edge) = routed
+            .edges
+            .iter_mut()
+            .find(|edge| edge.index == routed_index)
+        else {
+            continue;
+        };
+        let side = mmds_edge
+            .label_side
+            .or(routed_edge.label_side)
+            .unwrap_or(EdgeLabelSide::Center);
+        let rect = FRect::new(mmds_rect.x, mmds_rect.y, mmds_rect.width, mmds_rect.height);
+        let center = FPoint::new(
+            mmds_rect.x + mmds_rect.width / 2.0,
+            mmds_rect.y + mmds_rect.height / 2.0,
+        );
+
+        routed_edge.label_side = Some(side);
+        routed_edge.label_position = Some(center);
+        routed_edge.label_geometry = Some(EdgeLabelGeometry {
+            center,
+            rect,
+            padding: (metrics.label_padding_x(), metrics.label_padding_y()),
+            side,
+            // Synthesized trust markers: replay consumers that gate on
+            // `track != 0 || compartment_size > 1` treat the hydrated
+            // center as authoritative, mirroring the direct-render
+            // path's lane-shifted-label trust branch.
+            track: 0,
+            compartment_size: 2,
+        });
+    }
+}
+
+fn hydrate_geometry_parts(output: &Document) -> Result<(Graph, GraphGeometry), HydrationError> {
+    let diagram = from_document(output)?;
+    let geometry = build_graph_geometry(output, &diagram)?;
+    Ok((diagram, geometry))
+}
+
+fn build_graph_geometry(
+    output: &Document,
+    diagram: &Graph,
+) -> Result<GraphGeometry, HydrationError> {
+    let nodes = build_positioned_nodes(output, diagram)?;
+    let (edges, self_edges, reversed_edges) = build_layout_edges(output);
+    let subgraphs = build_subgraph_geometry(output, diagram, &nodes);
+    let grid_projection = hydrate_grid_projection(output);
+
+    Ok(GraphGeometry {
+        nodes,
+        edges,
+        subgraphs,
+        self_edges,
+        direction: diagram.direction,
+        node_directions: build_node_directions(diagram),
+        bounds: FRect::new(
+            0.0,
+            0.0,
+            output.metadata.bounds.width,
+            output.metadata.bounds.height,
+        ),
+        reversed_edges,
+        engine_hints: None,
+        grid_projection,
+        rerouted_edges: std::collections::HashSet::new(),
+        enhanced_backward_routing: false,
+    })
+}
+
+fn hydrate_grid_projection(output: &Document) -> Option<GridProjection> {
+    let projection = output
+        .extensions
+        .get(TEXT_EXTENSION_NAMESPACE)?
+        .get("projection")?;
+
+    let node_ranks = projection
+        .get("node_ranks")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(node_id, value)| {
+                    value
+                        .as_i64()
+                        .and_then(|rank| i32::try_from(rank).ok())
+                        .map(|rank| (node_id.clone(), rank))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let edge_waypoints = projection
+        .get("edge_waypoints")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(edge_idx, value)| {
+                    let edge_idx = edge_idx.parse::<usize>().ok()?;
+                    let waypoints = value
+                        .as_array()?
+                        .iter()
+                        .filter_map(parse_ranked_point_value)
+                        .collect::<Vec<_>>();
+                    Some((edge_idx, waypoints))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let label_positions = projection
+        .get("label_positions")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(edge_idx, value)| {
+                    let edge_idx = edge_idx.parse::<usize>().ok()?;
+                    let point = parse_ranked_point_value(value)?;
+                    Some((edge_idx, point))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let override_subgraphs = parse_override_subgraphs(projection.get("override_subgraphs"));
+
+    Some(GridProjection {
+        node_ranks,
+        edge_waypoints,
+        label_positions,
+        override_subgraphs,
+    })
+}
+
+fn parse_ranked_point_value(value: &Value) -> Option<(FPoint, i32)> {
+    let object = value.as_object()?;
+    let x = object.get("x")?.as_f64()?;
+    let y = object.get("y")?.as_f64()?;
+    let rank = object
+        .get("rank")?
+        .as_i64()
+        .and_then(|rank| i32::try_from(rank).ok())?;
+    Some((FPoint::new(x, y), rank))
+}
+
+fn parse_rect_value(value: &Value) -> Option<FRect> {
+    let object = value.as_object()?;
+    Some(FRect::new(
+        object.get("x")?.as_f64()?,
+        object.get("y")?.as_f64()?,
+        object.get("width")?.as_f64()?,
+        object.get("height")?.as_f64()?,
+    ))
+}
+
+fn parse_rect_map(entries: Option<&Map<String, Value>>) -> HashMap<String, FRect> {
+    entries
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(node_id, node_value)| {
+                    parse_rect_value(node_value).map(|rect| (node_id.clone(), rect))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_override_subgraphs(value: Option<&Value>) -> HashMap<String, OverrideSubgraphProjection> {
+    value
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(subgraph_id, value)| {
+                    (
+                        subgraph_id.clone(),
+                        OverrideSubgraphProjection {
+                            nodes: parse_rect_map(value.as_object()),
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_positioned_nodes(
+    output: &Document,
+    diagram: &Graph,
+) -> Result<HashMap<String, PositionedNode>, HydrationError> {
+    output
+        .nodes
+        .iter()
+        .map(|node| {
+            let hydrated =
+                diagram
+                    .nodes
+                    .get(&node.id)
+                    .ok_or_else(|| HydrationError::MissingGeometryNode {
+                        node_id: node.id.clone(),
+                    })?;
+            // MMDS position is node center; FRect uses top-left origin
+            let left = node.position.x - node.size.width / 2.0;
+            let top = node.position.y - node.size.height / 2.0;
+            Ok((
+                node.id.clone(),
+                PositionedNode {
+                    id: node.id.clone(),
+                    rect: FRect::new(left, top, node.size.width, node.size.height),
+                    shape: hydrated.shape,
+                    label: hydrated.label.clone(),
+                    parent: hydrated.parent.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn build_layout_edges(output: &Document) -> (Vec<LayoutEdge>, Vec<SelfEdgeGeometry>, Vec<usize>) {
+    let routed_level = output.geometry_level == GeometryLevel::Routed;
+    let edges = sorted_output_edges(output);
+
+    let mut layout_edges = Vec::with_capacity(edges.len());
+    let mut self_edges = Vec::new();
+    let mut reversed_edges = Vec::new();
+
+    for (index, (_, edge)) in edges.into_iter().enumerate() {
+        let mut path = routed_level
+            .then(|| parse_path_points(edge.path.as_deref()))
+            .flatten();
+        if edge.source == edge.target
+            && let Some(points) = path.take()
+        {
+            self_edges.push(SelfEdgeGeometry {
+                node_id: edge.source.clone(),
+                edge_index: index,
+                points,
+            });
+        }
+
+        if routed_level && edge.is_backward.unwrap_or(false) {
+            reversed_edges.push(index);
+        }
+
+        let label_position = if routed_level {
+            edge.label_position
+                .as_ref()
+                .map(|position| FPoint::new(position.x, position.y))
+        } else {
+            None
+        };
+        let label_side = edge.label_side;
+
+        layout_edges.push(LayoutEdge {
+            index,
+            from: edge.source.clone(),
+            to: edge.target.clone(),
+            waypoints: Vec::new(),
+            label_position,
+            label_side,
+            from_subgraph: edge.from_subgraph.clone(),
+            to_subgraph: edge.to_subgraph.clone(),
+            layout_path_hint: path,
+            preserve_orthogonal_topology: false,
+            label_geometry: None,
+            effective_wrapped_lines: None,
+        });
+    }
+
+    (layout_edges, self_edges, reversed_edges)
+}
+
+fn sorted_output_edges(output: &Document) -> Vec<(usize, &Edge)> {
+    let mut edges: Vec<(usize, &Edge)> = output.edges.iter().enumerate().collect();
+    edges.sort_by(|(left_index, left), (right_index, right)| {
+        compare_edge_ids(&left.id, &right.id).then(left_index.cmp(right_index))
+    });
+    edges
+}
+
+fn parse_path_points(path: Option<&[[f64; 2]]>) -> Option<Vec<FPoint>> {
+    path.map(|points| points.iter().map(|[x, y]| FPoint::new(*x, *y)).collect())
+}
+
+fn build_subgraph_geometry(
+    output: &Document,
+    diagram: &Graph,
+    nodes: &HashMap<String, PositionedNode>,
+) -> HashMap<String, SubgraphGeometry> {
+    output
+        .subgraphs
+        .iter()
+        .map(|subgraph| {
+            let (center_x, center_y, fallback_width, fallback_height) =
+                derive_subgraph_center_and_extent(&subgraph.id, diagram, nodes);
+
+            let width = subgraph
+                .bounds
+                .as_ref()
+                .map_or(fallback_width, |bounds| bounds.width);
+            let height = subgraph
+                .bounds
+                .as_ref()
+                .map_or(fallback_height, |bounds| bounds.height);
+
+            (
+                subgraph.id.clone(),
+                SubgraphGeometry {
+                    id: subgraph.id.clone(),
+                    rect: FRect::new(
+                        center_x - width / 2.0,
+                        center_y - height / 2.0,
+                        width,
+                        height,
+                    ),
+                    title: subgraph.title.clone(),
+                    depth: diagram.subgraph_depth(&subgraph.id),
+                },
+            )
+        })
+        .collect()
+}
+
+fn derive_subgraph_center_and_extent(
+    subgraph_id: &str,
+    diagram: &Graph,
+    nodes: &HashMap<String, PositionedNode>,
+) -> (f64, f64, f64, f64) {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for node in diagram.nodes.values() {
+        if !node_is_within_subgraph(node, subgraph_id, diagram) {
+            continue;
+        }
+        let Some(placed) = nodes.get(&node.id) else {
+            continue;
+        };
+        // PositionedNode.rect uses FRect top-left semantics (see
+        // build_positioned_nodes); the previous version of this function
+        // shifted by ±width/2 as if rect.x/y were centers, which collapsed
+        // the bbox onto the children's top-left corner and propagated to
+        // the cluster rect during SVG replay.
+        let left = placed.rect.x;
+        let right = placed.rect.x + placed.rect.width;
+        let top = placed.rect.y;
+        let bottom = placed.rect.y + placed.rect.height;
+        min_x = min_x.min(left);
+        max_x = max_x.max(right);
+        min_y = min_y.min(top);
+        max_y = max_y.max(bottom);
+    }
+
+    if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite() {
+        let width = (max_x - min_x).max(0.0);
+        let height = (max_y - min_y).max(0.0);
+        let center_x = min_x + width / 2.0;
+        let center_y = min_y + height / 2.0;
+        (center_x, center_y, width, height)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    }
+}
+
+fn node_is_within_subgraph(node: &Node, subgraph_id: &str, diagram: &Graph) -> bool {
+    let mut current = node.parent.as_deref();
+    while let Some(parent) = current {
+        if parent == subgraph_id {
+            return true;
+        }
+        current = diagram
+            .subgraphs
+            .get(parent)
+            .and_then(|subgraph| subgraph.parent.as_deref());
+    }
+    false
+}
+
+fn validate_output(output: &Document) -> Result<(), HydrationError> {
+    if output.version != 1 {
+        return Err(HydrationError::UnsupportedVersion {
+            version: output.version,
+        });
+    }
+
+    if !matches!(output.metadata.diagram_type.as_str(), "flowchart" | "class") {
+        return Err(HydrationError::UnsupportedDiagramType {
+            value: output.metadata.diagram_type.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+fn compare_edge_ids(left: &str, right: &str) -> Ordering {
+    let left_number = parse_edge_index(left);
+    let right_number = parse_edge_index(right);
+
+    match (left_number, right_number) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn parse_edge_index(value: &str) -> Option<u64> {
+    value.strip_prefix('e')?.parse::<u64>().ok()
+}
+
+/// MMDS hydration and validation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HydrationError {
+    Parse {
+        message: String,
+    },
+    UnsupportedVersion {
+        version: u32,
+    },
+    UnsupportedDiagramType {
+        value: String,
+    },
+    InvalidGeometryLevel {
+        value: String,
+    },
+    InvalidDirection {
+        context: String,
+        value: String,
+    },
+    InvalidShape {
+        node_id: String,
+        value: String,
+    },
+    InvalidStroke {
+        edge_id: String,
+        value: String,
+    },
+    InvalidArrow {
+        edge_id: String,
+        endpoint: String,
+        value: String,
+    },
+    MissingNodeId {
+        index: usize,
+    },
+    MissingGeometryNode {
+        node_id: String,
+    },
+    MissingSubgraphId {
+        index: usize,
+    },
+    MissingEdgeId {
+        index: usize,
+    },
+    MissingEdgeSource {
+        edge_id: String,
+    },
+    MissingEdgeTarget {
+        edge_id: String,
+    },
+    DanglingEdgeSource {
+        edge_id: String,
+        source: String,
+    },
+    DanglingEdgeTarget {
+        edge_id: String,
+        target: String,
+    },
+    DanglingEdgeFromSubgraphIntent {
+        edge_id: String,
+        subgraph: String,
+    },
+    DanglingEdgeToSubgraphIntent {
+        edge_id: String,
+        subgraph: String,
+    },
+    DanglingNodeParent {
+        node_id: String,
+        parent: String,
+    },
+    DanglingSubgraphParent {
+        subgraph_id: String,
+        parent: String,
+    },
+    DanglingSubgraphChild {
+        subgraph_id: String,
+        child: String,
+    },
+    CyclicSubgraphParentChain {
+        subgraph_id: String,
+    },
+}
+
+impl fmt::Display for HydrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HydrationError::Parse { message } => write!(f, "{message}"),
+            HydrationError::UnsupportedVersion { version } => {
+                write!(f, "MMDS validation error: unsupported version {version}")
+            }
+            HydrationError::UnsupportedDiagramType { value } => {
+                write!(
+                    f,
+                    "MMDS validation error: unsupported diagram_type '{value}'"
+                )
+            }
+            HydrationError::InvalidGeometryLevel { value } => {
+                write!(f, "MMDS validation error: invalid geometry_level '{value}'")
+            }
+            HydrationError::InvalidDirection { context, value } => {
+                write!(
+                    f,
+                    "MMDS validation error: invalid direction '{value}' for {context}"
+                )
+            }
+            HydrationError::InvalidShape { node_id, value } => write!(
+                f,
+                "MMDS validation error: node {node_id} has invalid shape '{value}'"
+            ),
+            HydrationError::InvalidStroke { edge_id, value } => write!(
+                f,
+                "MMDS validation error: edge {edge_id} has invalid stroke '{value}'"
+            ),
+            HydrationError::InvalidArrow {
+                edge_id,
+                endpoint,
+                value,
+            } => write!(
+                f,
+                "MMDS validation error: edge {edge_id} has invalid {endpoint} arrow '{value}'"
+            ),
+            HydrationError::MissingNodeId { index } => {
+                write!(
+                    f,
+                    "MMDS validation error: node at index {index} is missing id"
+                )
+            }
+            HydrationError::MissingGeometryNode { node_id } => write!(
+                f,
+                "MMDS validation error: geometry node '{node_id}' not found"
+            ),
+            HydrationError::MissingSubgraphId { index } => write!(
+                f,
+                "MMDS validation error: subgraph at index {index} is missing id"
+            ),
+            HydrationError::MissingEdgeId { index } => {
+                write!(
+                    f,
+                    "MMDS validation error: edge at index {index} is missing id"
+                )
+            }
+            HydrationError::MissingEdgeSource { edge_id } => {
+                write!(f, "MMDS validation error: edge {edge_id} is missing source")
+            }
+            HydrationError::MissingEdgeTarget { edge_id } => {
+                write!(f, "MMDS validation error: edge {edge_id} is missing target")
+            }
+            HydrationError::DanglingEdgeSource { edge_id, source } => write!(
+                f,
+                "MMDS validation error: edge {edge_id} source '{source}' not found"
+            ),
+            HydrationError::DanglingEdgeTarget { edge_id, target } => write!(
+                f,
+                "MMDS validation error: edge {edge_id} target '{target}' not found"
+            ),
+            HydrationError::DanglingEdgeFromSubgraphIntent { edge_id, subgraph } => write!(
+                f,
+                "MMDS validation error: edge {edge_id} from_subgraph '{subgraph}' not found"
+            ),
+            HydrationError::DanglingEdgeToSubgraphIntent { edge_id, subgraph } => write!(
+                f,
+                "MMDS validation error: edge {edge_id} to_subgraph '{subgraph}' not found"
+            ),
+            HydrationError::DanglingNodeParent { node_id, parent } => write!(
+                f,
+                "MMDS validation error: node {node_id} parent subgraph '{parent}' not found"
+            ),
+            HydrationError::DanglingSubgraphParent {
+                subgraph_id,
+                parent,
+            } => write!(
+                f,
+                "MMDS validation error: subgraph {subgraph_id} parent '{parent}' not found"
+            ),
+            HydrationError::DanglingSubgraphChild { subgraph_id, child } => write!(
+                f,
+                "MMDS validation error: subgraph {subgraph_id} child '{child}' not found"
+            ),
+            HydrationError::CyclicSubgraphParentChain { subgraph_id } => write!(
+                f,
+                "MMDS validation error: cyclic subgraph parent chain detected at '{subgraph_id}'"
+            ),
+        }
+    }
+}
+
+impl Error for HydrationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{Arrow, Shape, Stroke};
+    use crate::internal_tests::stub_metrics::PaddedProvider;
+
+    fn routed_document_with_authoritative_label_rect() -> Document {
+        Document {
+            version: 1,
+            profiles: vec![],
+            extensions: Default::default(),
+            defaults: crate::mmds::Defaults::default(),
+            geometry_level: GeometryLevel::Routed,
+            metadata: crate::mmds::Metadata {
+                diagram_type: "flowchart".to_string(),
+                direction: Direction::TopDown,
+                bounds: crate::mmds::Bounds {
+                    width: 130.0,
+                    height: 160.0,
+                },
+                engine: None,
+                diagnostics: None,
+            },
+            nodes: vec![
+                crate::mmds::Node {
+                    id: "A".to_string(),
+                    label: "A".to_string(),
+                    shape: Shape::Rectangle,
+                    parent: None,
+                    position: crate::mmds::Position { x: 65.0, y: 35.0 },
+                    size: crate::mmds::Size {
+                        width: 50.0,
+                        height: 30.0,
+                    },
+                },
+                crate::mmds::Node {
+                    id: "B".to_string(),
+                    label: "B".to_string(),
+                    shape: Shape::Rectangle,
+                    parent: None,
+                    position: crate::mmds::Position { x: 65.0, y: 125.0 },
+                    size: crate::mmds::Size {
+                        width: 50.0,
+                        height: 30.0,
+                    },
+                },
+            ],
+            edges: vec![crate::mmds::Edge {
+                id: "e0".to_string(),
+                source: "A".to_string(),
+                target: "B".to_string(),
+                from_subgraph: None,
+                to_subgraph: None,
+                label: Some("mmmm".to_string()),
+                stroke: Stroke::Solid,
+                arrow_start: Arrow::None,
+                arrow_end: Arrow::Normal,
+                minlen: 1,
+                path: Some(vec![[65.0, 50.0], [65.0, 110.0]]),
+                label_position: Some(crate::mmds::Position { x: 65.0, y: 80.0 }),
+                is_backward: Some(false),
+                source_port: None,
+                target_port: None,
+                label_side: Some(EdgeLabelSide::Center),
+                label_rect: Some(crate::mmds::Rect {
+                    x: 40.0,
+                    y: 70.0,
+                    width: 50.0,
+                    height: 20.0,
+                }),
+            }],
+            subgraphs: vec![],
+        }
+    }
+
+    #[test]
+    fn routed_hydration_uses_supplied_provider_for_authoritative_label_padding() {
+        let output = routed_document_with_authoritative_label_rect();
+        let provider = PaddedProvider;
+
+        let routed = hydrate_routed_geometry_from_document_with_provider(&output, &provider)
+            .expect("routed geometry should hydrate");
+
+        let label_geometry = routed.edges[0]
+            .label_geometry
+            .as_ref()
+            .expect("authoritative label geometry should overlay");
+        assert_eq!(label_geometry.padding, (11.0, 7.0));
+        assert_eq!(label_geometry.rect.width, 50.0);
+    }
+
+    #[test]
+    fn reconstruct_compound_membership_includes_descendants_for_ancestors() {
+        let mut diagram = Graph::new(Direction::TopDown);
+
+        diagram.subgraphs.insert(
+            "outer".to_string(),
+            Subgraph {
+                id: "outer".to_string(),
+                title: "Outer".to_string(),
+                nodes: vec!["A".to_string()],
+                parent: None,
+                dir: None,
+                invisible: false,
+                concurrent_regions: Vec::new(),
+                style: Default::default(),
+                class_names: Vec::new(),
+            },
+        );
+        diagram.subgraphs.insert(
+            "inner".to_string(),
+            Subgraph {
+                id: "inner".to_string(),
+                title: "Inner".to_string(),
+                nodes: vec!["B".to_string()],
+                parent: Some("outer".to_string()),
+                dir: None,
+                invisible: false,
+                concurrent_regions: Vec::new(),
+                style: Default::default(),
+                class_names: Vec::new(),
+            },
+        );
+
+        let mut a = Node::new("A");
+        a.parent = Some("outer".to_string());
+        diagram.add_node(a);
+
+        let mut b = Node::new("B");
+        b.parent = Some("inner".to_string());
+        diagram.add_node(b);
+
+        reconstruct_compound_membership(&mut diagram);
+
+        assert_eq!(
+            diagram.subgraphs["outer"].nodes,
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!(diagram.subgraphs["inner"].nodes, vec!["B".to_string()]);
+    }
+}

@@ -1,0 +1,13 @@
+[border_nodes] layout positions
+[border_nodes] sg1 min_rank=Some(0) max_rank=Some(2)
+[border_nodes]   top _bt_sg1 rank=0 order=1 x=69.50 y=0.00
+[border_nodes]   bottom _bb_sg1 rank=2 order=1 x=20.00 y=78.00
+[border_nodes]   rank 0: left _bl_sg1_0 order=0 x=0.00 y=0.00 right _br_sg1_0 order=2 x=139.00 y=0.00
+[border_nodes]   rank 1: left _bl_sg1_1 order=0 x=0.00 y=37.50 right _br_sg1_1 order=3 x=139.00 y=37.50
+[border_nodes]   rank 2: left _bl_sg1_2 order=0 x=0.00 y=78.00 right _br_sg1_2 order=4 x=139.00 y=78.00
+[border_nodes] sg2 min_rank=Some(4) max_rank=Some(6)
+[border_nodes]   top _bt_sg2 rank=4 order=1 x=20.00 y=153.00
+[border_nodes]   bottom _bb_sg2 rank=6 order=2 x=157.50 y=231.00
+[border_nodes]   rank 4: left _bl_sg2_4 order=0 x=0.00 y=153.00 right _br_sg2_4 order=4 x=137.50 y=153.00
+[border_nodes]   rank 5: left _bl_sg2_5 order=0 x=0.00 y=190.50 right _br_sg2_5 order=3 x=137.50 y=190.50
+[border_nodes]   rank 6: left _bl_sg2_6 order=0 x=0.00 y=231.00 right _br_sg2_6 order=1 x=137.50 y=231.00

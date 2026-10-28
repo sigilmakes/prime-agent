@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 824.56 224.70" style="max-width: 824.56px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M366.12,66.98 L325.33,66.98 C284.54,66.98 202.95,66.98 162.15,82.27 C121.36,97.55 121.36,128.12 121.36,143.41 L121.36,158.70" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M380.40,81.25 L362.98,81.25 C345.56,81.25 310.73,81.25 293.32,94.16 C275.90,107.07 275.90,132.88 275.90,145.79 L275.90,158.70" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M411.84,112.70 L411.84,115.47 C411.84,118.25 411.84,123.81 411.84,128.81 C411.84,133.81 411.84,138.25 411.84,143.14 C411.84,148.03 411.84,153.36 411.84,156.03 L411.84,158.70" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M443.32,81.22 L460.79,81.22 C478.25,81.22 513.19,81.22 530.66,94.13 C548.13,107.04 548.13,132.87 548.13,145.78 L548.13,158.70" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M457.57,66.96 L498.51,66.96 C539.45,66.96 621.33,66.96 662.26,82.25 C703.20,97.54 703.20,128.12 703.20,143.41 L703.20,158.70" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <polygon points="411.84,8.00 464.19,60.35 411.84,112.70 359.49,60.35" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="411.84" y="60.35" text-anchor="middle" dominant-baseline="middle" fill="#333">Source</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="8.00" y="162.70" width="121.36" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="68.68" y="189.70" text-anchor="middle" dominant-baseline="middle" fill="#333">Target A</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="179.36" y="162.70" width="121.36" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="240.04" y="189.70" text-anchor="middle" dominant-baseline="middle" fill="#333">Target B</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="350.72" y="162.70" width="122.24" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="411.84" y="189.70" text-anchor="middle" dominant-baseline="middle" fill="#333">Target C</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="522.96" y="162.70" width="122.24" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="584.08" y="189.70" text-anchor="middle" dominant-baseline="middle" fill="#333">Target D</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <rect x="695.20" y="162.70" width="121.36" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="755.88" y="189.70" text-anchor="middle" dominant-baseline="middle" fill="#333">Target E</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

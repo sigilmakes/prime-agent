@@ -1,0 +1,23 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "marginx": 8,
+    "marginy": 8,
+    "ranker": "network-simplex"
+  },
+  "nodes": [
+    {"id": "A", "label": "Data", "width": 8, "height": 3, "parent": "sg1", "is_subgraph": false},
+    {"id": "B", "label": "Config", "width": 10, "height": 3, "parent": "sg1", "is_subgraph": false},
+    {"id": "C", "label": "Result", "width": 10, "height": 3, "parent": "sg2", "is_subgraph": false},
+    {"id": "D", "label": "Log", "width": 7, "height": 3, "parent": "sg2", "is_subgraph": false},
+    {"id": "sg1", "label": "Input", "width": 0, "height": 0, "parent": null, "is_subgraph": true},
+    {"id": "sg2", "label": "Output", "width": 0, "height": 0, "parent": null, "is_subgraph": true}
+  ],
+  "edges": [
+    {"from": "A", "to": "C", "label": null, "label_width": 0, "label_height": 0, "index": 0},
+    {"from": "B", "to": "D", "label": null, "label_width": 0, "label_height": 0, "index": 1}
+  ]
+}

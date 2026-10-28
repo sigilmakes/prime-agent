@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 417.82 70.00" style="max-width: 417.82px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M99.10,35.00 L145.10,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M263.37,35.00 L309.37,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="1" data-id="1" data-look="classic">
+        <rect x="8.00" y="8.00" width="91.10" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="53.55" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">First</text>
+      </g>
+      <g class="node default" id="2" data-id="2" data-look="classic">
+        <rect x="149.10" y="8.00" width="114.27" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="206.23" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Second</text>
+      </g>
+      <g class="node default" id="3" data-id="3" data-look="classic">
+        <rect x="313.37" y="8.00" width="96.45" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="361.59" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Third</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

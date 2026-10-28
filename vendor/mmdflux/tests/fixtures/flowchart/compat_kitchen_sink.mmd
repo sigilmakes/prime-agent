@@ -1,0 +1,14 @@
+---
+config:
+  theme: default
+---
+%%{init: {"flowchart": {"curve": "basis"}}}%%
+graph TD
+    start-node[Start] --> check-1{Check Input}
+    check-1 -->|valid| process-A:::success
+    check-1 -->|invalid| error-1[Error]:::error
+    process-A --> end-node[Done]
+    error-1 --> end-node
+    style start-node fill:#f9f
+    classDef success fill:#0f0
+    classDef error fill:#f00

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": { "width": 180.0, "height": 120.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "A",
+      "position": { "x": 20.0, "y": 20.0 },
+      "size": { "width": 44.0, "height": 24.0 }
+    },
+    {
+      "id": "B",
+      "label": "B",
+      "position": { "x": 80.0, "y": 20.0 },
+      "size": { "width": 44.0, "height": 24.0 }
+    },
+    {
+      "id": "Decision",
+      "label": "Gate",
+      "shape": "diamond",
+      "position": { "x": 50.0, "y": 80.0 },
+      "size": { "width": 64.0, "height": 32.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B",
+      "stroke": "dotted",
+      "arrow_start": "none",
+      "arrow_end": "normal"
+    }
+  ]
+}

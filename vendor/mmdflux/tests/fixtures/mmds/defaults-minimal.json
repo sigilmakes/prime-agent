@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "round" },
+    "edge": {
+      "stroke": "dotted",
+      "arrow_start": "circle",
+      "arrow_end": "cross",
+      "minlen": 2
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": { "width": 100.0, "height": 80.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Start",
+      "position": { "x": 10.0, "y": 10.0 },
+      "size": { "width": 40.0, "height": 20.0 }
+    },
+    {
+      "id": "B",
+      "label": "End",
+      "position": { "x": 70.0, "y": 50.0 },
+      "size": { "width": 40.0, "height": 20.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B"
+    }
+  ]
+}

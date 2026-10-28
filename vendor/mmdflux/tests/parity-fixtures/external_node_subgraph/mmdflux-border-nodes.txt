@@ -1,0 +1,27 @@
+[border_nodes] layout positions
+[border_nodes] Cloud min_rank=Some(2) max_rank=Some(8)
+[border_nodes]   top _bt_Cloud rank=2 order=1 x=31.00 y=78.00
+[border_nodes]   bottom _bb_Cloud rank=8 order=2 x=248.00 y=309.00
+[border_nodes]   rank 2: left _bl_Cloud_2 order=0 x=0.00 y=78.00 right _br_Cloud_2 order=4 x=228.00 y=78.00
+[border_nodes]   rank 3: left _bl_Cloud_3 order=0 x=0.00 y=115.50 right _br_Cloud_3 order=9 x=228.00 y=115.50
+[border_nodes]   rank 4: left _bl_Cloud_4 order=0 x=0.00 y=153.00 right _br_Cloud_4 order=7 x=228.00 y=153.00
+[border_nodes]   rank 5: left _bl_Cloud_5 order=0 x=0.00 y=193.50 right _br_Cloud_5 order=7 x=228.00 y=193.50
+[border_nodes]   rank 6: left _bl_Cloud_6 order=0 x=0.00 y=231.00 right _br_Cloud_6 order=7 x=228.00 y=231.00
+[border_nodes]   rank 7: left _bl_Cloud_7 order=0 x=0.00 y=271.50 right _br_Cloud_7 order=7 x=228.00 y=271.50
+[border_nodes]   rank 8: left _bl_Cloud_8 order=0 x=0.00 y=309.00 right _br_Cloud_8 order=1 x=228.00 y=309.00
+[border_nodes] us-east min_rank=Some(3) max_rank=Some(7)
+[border_nodes]   top _bt_us-east rank=3 order=6 x=145.00 y=115.50
+[border_nodes]   bottom _bb_us-east rank=7 order=5 x=166.00 y=271.50
+[border_nodes]   rank 3: left _bl_us-east_3 order=5 x=124.00 y=115.50 right _br_us-east_3 order=8 x=208.00 y=115.50
+[border_nodes]   rank 4: left _bl_us-east_4 order=4 x=124.00 y=153.00 right _br_us-east_4 order=6 x=208.00 y=153.00
+[border_nodes]   rank 5: left _bl_us-east_5 order=4 x=124.00 y=193.50 right _br_us-east_5 order=6 x=208.00 y=193.50
+[border_nodes]   rank 6: left _bl_us-east_6 order=4 x=124.00 y=231.00 right _br_us-east_6 order=6 x=208.00 y=231.00
+[border_nodes]   rank 7: left _bl_us-east_7 order=4 x=124.00 y=271.50 right _br_us-east_7 order=6 x=208.00 y=271.50
+[border_nodes] us-west min_rank=Some(3) max_rank=Some(7)
+[border_nodes]   top _bt_us-west rank=3 order=2 x=41.00 y=115.50
+[border_nodes]   bottom _bb_us-west rank=7 order=2 x=62.00 y=271.50
+[border_nodes]   rank 3: left _bl_us-west_3 order=1 x=20.00 y=115.50 right _br_us-west_3 order=4 x=104.00 y=115.50
+[border_nodes]   rank 4: left _bl_us-west_4 order=1 x=20.00 y=153.00 right _br_us-west_4 order=3 x=104.00 y=153.00
+[border_nodes]   rank 5: left _bl_us-west_5 order=1 x=20.00 y=193.50 right _br_us-west_5 order=3 x=104.00 y=193.50
+[border_nodes]   rank 6: left _bl_us-west_6 order=1 x=20.00 y=231.00 right _br_us-west_6 order=3 x=104.00 y=231.00
+[border_nodes]   rank 7: left _bl_us-west_7 order=1 x=20.00 y=271.50 right _br_us-west_7 order=3 x=104.00 y=271.50

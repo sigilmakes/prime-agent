@@ -1,0 +1,155 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "ranker": "network-simplex",
+    "marginx": 8,
+    "marginy": 8,
+    "width": 155,
+    "height": 247
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "x": 44,
+      "y": 45.5,
+      "width": 8,
+      "height": 3,
+      "center_x": 48,
+      "center_y": 47,
+      "parent": "sg1",
+      "is_compound": false
+    },
+    {
+      "id": "B",
+      "x": 102,
+      "y": 45.5,
+      "width": 10,
+      "height": 3,
+      "center_x": 107,
+      "center_y": 47,
+      "parent": "sg1",
+      "is_compound": false
+    },
+    {
+      "id": "C",
+      "x": 43,
+      "y": 198.5,
+      "width": 10,
+      "height": 3,
+      "center_x": 48,
+      "center_y": 200,
+      "parent": "sg2",
+      "is_compound": false
+    },
+    {
+      "id": "D",
+      "x": 103.5,
+      "y": 198.5,
+      "width": 7,
+      "height": 3,
+      "center_x": 107,
+      "center_y": 200,
+      "parent": "sg2",
+      "is_compound": false
+    },
+    {
+      "id": "sg1",
+      "x": 8,
+      "y": 8,
+      "width": 139,
+      "height": 78,
+      "center_x": 77.5,
+      "center_y": 47,
+      "parent": null,
+      "is_compound": true
+    },
+    {
+      "id": "sg2",
+      "x": 8,
+      "y": 161,
+      "width": 137.5,
+      "height": 78,
+      "center_x": 76.75,
+      "center_y": 200,
+      "parent": null,
+      "is_compound": true
+    }
+  ],
+  "edges": [
+    {
+      "index": 0,
+      "name": "0",
+      "from": "A",
+      "to": "C",
+      "points": [
+        [
+          48,
+          48.5
+        ],
+        [
+          48,
+          86
+        ],
+        [
+          48,
+          123.5
+        ],
+        [
+          48,
+          161
+        ],
+        [
+          48,
+          198.5
+        ]
+      ]
+    },
+    {
+      "index": 1,
+      "name": "1",
+      "from": "B",
+      "to": "D",
+      "points": [
+        [
+          107,
+          48.5
+        ],
+        [
+          107,
+          86
+        ],
+        [
+          107,
+          123.5
+        ],
+        [
+          107,
+          161
+        ],
+        [
+          107,
+          198.5
+        ]
+      ]
+    }
+  ],
+  "subgraph_bounds": [
+    {
+      "id": "sg1",
+      "x": 8,
+      "y": 8,
+      "width": 139,
+      "height": 78
+    },
+    {
+      "id": "sg2",
+      "x": 8,
+      "y": 161,
+      "width": 137.5,
+      "height": 78
+    }
+  ]
+}

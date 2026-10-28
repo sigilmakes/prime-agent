@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "profiles": ["mmds-core-v1", "mmdflux-text-v1"],
+  "extensions": {
+    "org.mmdflux.render.text.v1": {
+      "horizontal_spacing": 3,
+      "vertical_spacing": 1,
+      "label_compaction": "balanced"
+    }
+  },
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": { "width": 120.0, "height": 110.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Input",
+      "position": { "x": 60.0, "y": 25.0 },
+      "size": { "width": 50.0, "height": 20.0 }
+    },
+    {
+      "id": "B",
+      "label": "Output",
+      "position": { "x": 60.0, "y": 85.0 },
+      "size": { "width": 52.0, "height": 20.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B"
+    }
+  ]
+}

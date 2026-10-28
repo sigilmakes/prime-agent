@@ -1,0 +1,353 @@
+{
+  "version": 1,
+  "profiles": [
+    "mmds-core-v1",
+    "mmdflux-text-v1",
+    "mmdflux-text-metrics-v1"
+  ],
+  "extensions": {
+    "org.mmdflux.render.text.v1": {
+      "projection": {
+        "edge_waypoints": {
+          "2": [
+            {
+              "rank": 1,
+              "x": 96.12890625,
+              "y": 137.0
+            }
+          ],
+          "3": [
+            {
+              "rank": 3,
+              "x": 286.451171875,
+              "y": 341.0
+            }
+          ]
+        },
+        "label_positions": {},
+        "node_ranks": {
+          "A": 2,
+          "B": 2,
+          "C": 2,
+          "End": 4,
+          "Start": 0
+        },
+        "override_subgraphs": {
+          "sg1": {
+            "A": {
+              "height": 3.0,
+              "width": 10.0,
+              "x": 8.0,
+              "y": 8.0
+            },
+            "B": {
+              "height": 3.0,
+              "width": 10.0,
+              "x": 93.0,
+              "y": 8.0
+            },
+            "C": {
+              "height": 3.0,
+              "width": 10.0,
+              "x": 178.0,
+              "y": 8.0
+            }
+          }
+        }
+      }
+    },
+    "org.mmdflux.text-metrics.v1": {
+      "defaultTextStyle": {
+        "font-family": "\"trebuchet ms\", verdana, arial, sans-serif",
+        "font-size": 16.0,
+        "font-style": "normal",
+        "font-weight": "400",
+        "line-height": 24.0
+      },
+      "layoutText": {
+        "edge-label-max-width": 200.0,
+        "label-padding-x": 4.0,
+        "label-padding-y": 2.0,
+        "node-padding-x": 15.0,
+        "node-padding-y": 15.0
+      },
+      "metricsProfile": {
+        "id": "mmdflux-sans-v1",
+        "source": "recorded",
+        "version": 1
+      }
+    }
+  },
+  "defaults": {
+    "node": {
+      "shape": "rectangle"
+    },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "routed",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": {
+      "width": 469.7734375,
+      "height": 478.0
+    },
+    "engine": "flux-layered"
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Step 1",
+      "parent": "sg1",
+      "position": {
+        "x": 96.12890625,
+        "y": 239.0
+      },
+      "size": {
+        "width": 106.2578125,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "B",
+      "label": "Step 2",
+      "parent": "sg1",
+      "position": {
+        "x": 252.38671875,
+        "y": 239.0
+      },
+      "size": {
+        "width": 106.2578125,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "C",
+      "label": "Step 3",
+      "parent": "sg1",
+      "position": {
+        "x": 408.64453125,
+        "y": 239.0
+      },
+      "size": {
+        "width": 106.2578125,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "End",
+      "label": "End",
+      "position": {
+        "x": 174.2578125,
+        "y": 443.0
+      },
+      "size": {
+        "width": 88.46875,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "Start",
+      "label": "Start",
+      "position": {
+        "x": 174.2578125,
+        "y": 35.0
+      },
+      "size": {
+        "width": 93.7890625,
+        "height": 54.0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B",
+      "path": [
+        [
+          149.2578125,
+          239.0
+        ],
+        [
+          199.2578125,
+          239.0
+        ]
+      ],
+      "label_position": {
+        "x": 174.2578125,
+        "y": 239.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "right",
+        "fraction": 0.5,
+        "position": {
+          "x": 149.2578125,
+          "y": 239.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "left",
+        "fraction": 0.5,
+        "position": {
+          "x": 199.2578125,
+          "y": 239.0
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e1",
+      "source": "B",
+      "target": "C",
+      "path": [
+        [
+          305.515625,
+          239.0
+        ],
+        [
+          355.515625,
+          239.0
+        ]
+      ],
+      "label_position": {
+        "x": 330.515625,
+        "y": 239.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "right",
+        "fraction": 0.5,
+        "position": {
+          "x": 305.515625,
+          "y": 239.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "left",
+        "fraction": 0.5,
+        "position": {
+          "x": 355.515625,
+          "y": 239.0
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e2",
+      "source": "Start",
+      "target": "A",
+      "path": [
+        [
+          174.2578125,
+          62.0
+        ],
+        [
+          174.2578125,
+          137.0
+        ],
+        [
+          96.12890625,
+          137.0
+        ],
+        [
+          96.12890625,
+          212.0
+        ]
+      ],
+      "label_position": {
+        "x": 135.193359375,
+        "y": 137.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.5,
+        "position": {
+          "x": 174.2578125,
+          "y": 62.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 96.12890625,
+          "y": 212.0
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e3",
+      "source": "C",
+      "target": "End",
+      "path": [
+        [
+          376.2992302389706,
+          266.0
+        ],
+        [
+          376.2992302389706,
+          341.0
+        ],
+        [
+          174.2578125,
+          341.0
+        ],
+        [
+          174.2578125,
+          416.0
+        ]
+      ],
+      "label_position": {
+        "x": 275.2785213694853,
+        "y": 341.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.5,
+        "position": {
+          "x": 408.64453125,
+          "y": 266.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 174.2578125,
+          "y": 416.0
+        },
+        "group_size": 1
+      }
+    }
+  ],
+  "subgraphs": [
+    {
+      "id": "sg1",
+      "title": "Horizontal Section",
+      "children": [
+        "A",
+        "B",
+        "C"
+      ],
+      "direction": "LR",
+      "bounds": {
+        "width": 453.7734375,
+        "height": 204.0
+      }
+    }
+  ]
+}

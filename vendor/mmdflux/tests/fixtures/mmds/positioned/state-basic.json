@@ -1,0 +1,614 @@
+{
+  "version": 1,
+  "profiles": [
+    "mmds-core-v1",
+    "mmdflux-text-v1"
+  ],
+  "extensions": {
+    "org.mmdflux.render.text.v1": {
+      "projection": {
+        "edge_waypoints": {
+          "0": [
+            {
+              "rank": 1,
+              "x": 56.61760000000001,
+              "y": 97.0
+            }
+          ],
+          "3": [
+            {
+              "rank": 5,
+              "x": 48.79839999999999,
+              "y": 493.0
+            },
+            {
+              "rank": 6,
+              "x": 48.79839999999999,
+              "y": 568.0
+            },
+            {
+              "rank": 7,
+              "x": 48.79839999999999,
+              "y": 617.5
+            },
+            {
+              "rank": 8,
+              "x": 48.79839999999999,
+              "y": 734.5
+            }
+          ],
+          "4": [
+            {
+              "rank": 3,
+              "x": 278.7904,
+              "y": 261.0
+            },
+            {
+              "rank": 4,
+              "x": 278.7904,
+              "y": 390.0
+            },
+            {
+              "rank": 5,
+              "x": -28.180800000000005,
+              "y": 493.0
+            },
+            {
+              "rank": 6,
+              "x": 206.71439999999998,
+              "y": 568.0
+            },
+            {
+              "rank": 7,
+              "x": 206.71439999999998,
+              "y": 617.5
+            },
+            {
+              "rank": 8,
+              "x": 125.77759999999998,
+              "y": 734.5
+            }
+          ],
+          "5": [
+            {
+              "rank": 5,
+              "x": 56.61760000000001,
+              "y": 493.0
+            },
+            {
+              "rank": 6,
+              "x": 153.5968,
+              "y": 568.0
+            },
+            {
+              "rank": 7,
+              "x": 153.5968,
+              "y": 617.5
+            },
+            {
+              "rank": 8,
+              "x": 153.5968,
+              "y": 734.5
+            }
+          ],
+          "6": [
+            {
+              "rank": 5,
+              "x": 200.672,
+              "y": 493.0
+            },
+            {
+              "rank": 6,
+              "x": 200.672,
+              "y": 568.0
+            }
+          ]
+        },
+        "label_positions": {
+          "3": {
+            "rank": 7,
+            "x": 75.09679999999999,
+            "y": 603.0
+          },
+          "4": {
+            "rank": 7,
+            "x": 233.01279999999997,
+            "y": 617.5
+          },
+          "5": {
+            "rank": 7,
+            "x": 179.8952,
+            "y": 632.0
+          }
+        },
+        "node_ranks": {
+          "Active____note_0": 7,
+          "Active_end": 4,
+          "Active_start": 2,
+          "Paused": 9,
+          "Running": 3,
+          "__root_end": 9,
+          "__root_start": 0
+        },
+        "override_subgraphs": {
+          "Active____note_group_0": {
+            "Active____note_0": {
+              "height": 3.0,
+              "width": 18.0,
+              "x": 8.0,
+              "y": 8.0
+            }
+          }
+        }
+      }
+    }
+  },
+  "defaults": {
+    "node": {
+      "shape": "rectangle"
+    },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "routed",
+  "metadata": {
+    "diagram_type": "state",
+    "direction": "TD",
+    "bounds": {
+      "width": 343.832,
+      "height": 871.5
+    },
+    "engine": "flux-layered"
+  },
+  "nodes": [
+    {
+      "id": "Active____note_0",
+      "label": "Important note",
+      "shape": "note_rect",
+      "parent": "Active____note_group_0",
+      "position": {
+        "x": 200.672,
+        "y": 632.5
+      },
+      "size": {
+        "width": 143.95839999999998,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "Active_end",
+      "label": "",
+      "shape": "framed_circle",
+      "parent": "Active",
+      "position": {
+        "x": 183.896,
+        "y": 404.0
+      },
+      "size": {
+        "width": 28.0,
+        "height": 28.0
+      }
+    },
+    {
+      "id": "Active_start",
+      "label": "",
+      "shape": "small_circle",
+      "parent": "Active",
+      "position": {
+        "x": 56.61760000000001,
+        "y": 179.0
+      },
+      "size": {
+        "width": 14.0,
+        "height": 14.0
+      }
+    },
+    {
+      "id": "Paused",
+      "label": "Paused",
+      "shape": "round",
+      "position": {
+        "x": 101.3952,
+        "y": 836.5
+      },
+      "size": {
+        "width": 81.5968,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "Running",
+      "label": "Running",
+      "shape": "round",
+      "parent": "Active",
+      "position": {
+        "x": 183.89599999999996,
+        "y": 288.0
+      },
+      "size": {
+        "width": 86.23679999999999,
+        "height": 54.0
+      }
+    },
+    {
+      "id": "__root_end",
+      "label": "",
+      "shape": "framed_circle",
+      "position": {
+        "x": 206.1936,
+        "y": 823.5
+      },
+      "size": {
+        "width": 28.0,
+        "height": 28.0
+      }
+    },
+    {
+      "id": "__root_start",
+      "label": "",
+      "shape": "small_circle",
+      "position": {
+        "x": 153.7944,
+        "y": 15.0
+      },
+      "size": {
+        "width": 14.0,
+        "height": 14.0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "__root_start",
+      "target": "Active_start",
+      "to_subgraph": "Active",
+      "path": [
+        [
+          153.7944,
+          22.0
+        ],
+        [
+          153.7944,
+          89.0
+        ],
+        [
+          56.61760000000001,
+          89.0
+        ],
+        [
+          56.61760000000001,
+          97.0
+        ]
+      ],
+      "label_position": {
+        "x": 134.70600000000002,
+        "y": 89.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.5,
+        "position": {
+          "x": 153.7944,
+          "y": 22.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e1",
+      "source": "Active_start",
+      "target": "Running",
+      "path": [
+        [
+          60.81760000000001,
+          186.0
+        ],
+        [
+          60.81760000000001,
+          222.99736640309746
+        ],
+        [
+          152.3683229357798,
+          222.99736640309746
+        ],
+        [
+          152.3683229357798,
+          261.0
+        ]
+      ],
+      "label_position": {
+        "x": 107.09559506479243,
+        "y": 222.99736640309746
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.5,
+        "position": {
+          "x": 56.61760000000001,
+          "y": 186.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 183.89599999999996,
+          "y": 261.0
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e2",
+      "source": "Running",
+      "target": "Active_end",
+      "path": [
+        [
+          183.89599999999996,
+          315.0
+        ],
+        [
+          183.89599999999996,
+          390.0
+        ]
+      ],
+      "label_position": {
+        "x": 183.89599999999996,
+        "y": 352.5
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.5,
+        "position": {
+          "x": 183.89599999999996,
+          "y": 315.0
+        },
+        "group_size": 1
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 183.896,
+          "y": 390.0
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e3",
+      "source": "Active_end",
+      "target": "Paused",
+      "from_subgraph": "Active",
+      "label": "pause",
+      "path": [
+        [
+          16.798399999999987,
+          493.0
+        ],
+        [
+          16.798399999999987,
+          531.05
+        ],
+        [
+          101.39519999999999,
+          531.05
+        ],
+        [
+          101.39519999999999,
+          809.5
+        ]
+      ],
+      "label_position": {
+        "x": 75.09679999999999,
+        "y": 603.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.0,
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "group_size": 4
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.0,
+        "position": {
+          "x": 60.5968,
+          "y": 809.5
+        },
+        "group_size": 2
+      }
+    },
+    {
+      "id": "e4",
+      "source": "Paused",
+      "target": "Active_start",
+      "to_subgraph": "Active",
+      "label": "resume",
+      "path": [
+        [
+          142.1936,
+          822.8919999999999
+        ],
+        [
+          310.7904,
+          822.8919999999999
+        ],
+        [
+          310.7904,
+          181.58357458698814
+        ],
+        [
+          298.7904,
+          181.58357458698814
+        ]
+      ],
+      "label_position": {
+        "x": 310.7904,
+        "y": 580.5361872934941
+      },
+      "is_backward": true,
+      "source_port": {
+        "face": "top",
+        "fraction": 1.0,
+        "position": {
+          "x": 142.1936,
+          "y": 809.5
+        },
+        "group_size": 2
+      },
+      "target_port": {
+        "face": "bottom",
+        "fraction": 0.6666666666666666,
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "group_size": 4
+      }
+    },
+    {
+      "id": "e5",
+      "source": "Active_end",
+      "target": "__root_end",
+      "from_subgraph": "Active",
+      "label": "done",
+      "path": [
+        [
+          290.7904,
+          493.0
+        ],
+        [
+          290.7904,
+          793.5
+        ],
+        [
+          206.1936,
+          793.5
+        ],
+        [
+          206.1936,
+          809.5
+        ]
+      ],
+      "label_position": {
+        "x": 179.8952,
+        "y": 632.0
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 0.3333333333333333,
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "group_size": 4
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 206.1936,
+          "y": 809.5
+        },
+        "group_size": 1
+      }
+    },
+    {
+      "id": "e6",
+      "source": "Active_end",
+      "target": "Active____note_0",
+      "from_subgraph": "Active",
+      "stroke": "dotted",
+      "arrow_end": "none",
+      "path": [
+        [
+          153.79439999999997,
+          493.0
+        ],
+        [
+          200.672,
+          493.0
+        ],
+        [
+          200.672,
+          605.5
+        ]
+      ],
+      "label_position": {
+        "x": 200.672,
+        "y": 525.8112
+      },
+      "is_backward": false,
+      "source_port": {
+        "face": "bottom",
+        "fraction": 1.0,
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "group_size": 4
+      },
+      "target_port": {
+        "face": "top",
+        "fraction": 0.5,
+        "position": {
+          "x": 200.672,
+          "y": 605.5
+        },
+        "group_size": 1
+      }
+    }
+  ],
+  "subgraphs": [
+    {
+      "id": "Active",
+      "title": "Active",
+      "children": [
+        "Active_start",
+        "Running",
+        "Active_end"
+      ],
+      "bounds": {
+        "width": 289.99199999999996,
+        "height": 396.0
+      }
+    },
+    {
+      "id": "Active____note_group_0",
+      "title": "",
+      "children": [
+        "Active____note_0"
+      ],
+      "direction": "LR",
+      "bounds": {
+        "width": 298.8528,
+        "height": 637.5
+      },
+      "invisible": true
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 232.62 184.00" style="max-width: 232.62px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+  </defs>
+  <g class="lifelines">
+    <line x1="43.63" y1="54.00" x2="43.63" y2="174.00" stroke="#333" stroke-width="1" stroke-dasharray="5,5" />
+    <line x1="193.63" y1="54.00" x2="193.63" y2="174.00" stroke="#333" stroke-width="1" stroke-dasharray="5,5" />
+  </g>
+  <g class="participants">
+    <rect x="10.00" y="10.00" width="67.26" height="44.00" fill="white" stroke="#333" stroke-width="1" />
+    <text x="43.63" y="32.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Alice</text>
+    <rect x="164.64" y="10.00" width="57.98" height="44.00" fill="white" stroke="#333" stroke-width="1" />
+    <text x="193.63" y="32.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Bob</text>
+  </g>
+  <g class="events">
+    <line x1="43.63" y1="74.00" x2="193.63" y2="74.00" stroke="#333" stroke-width="1"/>
+    <text x="118.63" y="70.00" text-anchor="middle" dominant-baseline="auto" fill="#333">Sync call</text>
+    <line x1="193.63" y1="124.00" x2="43.63" y2="124.00" stroke="#333" stroke-width="1" stroke-dasharray="6,4"/>
+    <text x="118.63" y="120.00" text-anchor="middle" dominant-baseline="auto" fill="#333">Return</text>
+  </g>
+</svg>

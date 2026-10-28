@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 619.98 229.00" style="max-width: 619.98px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M442.42,54.00 L472.53,54.00 L472.53,161.00 L502.63,161.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M276.70,158.00 L306.10,158.00 L306.10,166.00 L306.10,199.00 L502.63,199.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M276.70,120.00 L280.70,120.00 L280.70,87.00 L325.50,87.00 L325.50,54.00 L337.50,54.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M276.70,139.00 L337.50,139.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M286.50,16.00 L286.50,35.00 L337.50,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M286.50,54.00 L298.40,54.00 L298.40,62.00 L298.40,120.00 L337.50,120.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M120.45,147.00 L120.45,174.00 L308.54,174.00 L308.54,221.00 L341.50,221.00 L341.50,180.00 L502.63,180.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M120.45,109.00 L131.85,109.00 L131.85,101.00 L131.85,54.00 L166.45,54.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="format" data-id="format" data-look="classic">
+        <rect x="506.63" y="153.00" width="105.34" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="559.30" y="180.00" text-anchor="middle" dominant-baseline="middle" fill="#333">format</text>
+      </g>
+      <g class="node default" id="graph" data-id="graph" data-look="classic">
+        <rect x="341.50" y="8.00" width="100.92" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="391.96" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">graph</text>
+      </g>
+      <g class="node default" id="payload" data-id="payload" data-look="classic">
+        <rect x="170.45" y="8.00" width="116.05" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="228.48" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">payload</text>
+      </g>
+      <g class="node default" id="registry" data-id="registry" data-look="classic">
+        <rect x="8.00" y="101.00" width="112.45" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="64.23" y="128.00" text-anchor="middle" dominant-baseline="middle" fill="#333">registry</text>
+      </g>
+      <g class="node default" id="render" data-id="render" data-look="classic">
+        <rect x="170.45" y="112.00" width="106.25" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="223.58" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">render</text>
+      </g>
+      <g class="node default" id="timeline" data-id="timeline" data-look="classic">
+        <rect x="341.50" y="112.00" width="115.13" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="399.07" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">timeline</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 190.74 384.73" style="max-width: 190.74px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M95.37,62.00 L95.37,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M95.37,166.00 L95.37,212.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="diamond" data-id="diamond" data-look="classic">
+        <polygon points="95.37,216.00 175.73,296.36 95.37,376.73 15.01,296.36" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.37" y="296.36" text-anchor="middle" dominant-baseline="middle" fill="#333">Diamond Node</text>
+      </g>
+      <g class="node default" id="rect" data-id="rect" data-look="classic">
+        <rect x="8.00" y="8.00" width="174.74" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.37" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Rectangle Node</text>
+      </g>
+      <g class="node default" id="round" data-id="round" data-look="classic">
+        <rect x="26.55" y="112.00" width="137.64" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.37" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Rounded Node</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

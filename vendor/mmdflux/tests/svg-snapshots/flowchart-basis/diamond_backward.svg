@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 133.80 323.35" style="max-width: 133.80px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M66.90,62.00 L66.90,64.78 C66.90,67.56 66.90,73.11 66.90,78.67 C66.90,84.22 66.90,89.78 66.90,94.67 C66.90,99.56 66.90,103.78 66.90,105.89 L66.90,108.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M66.90,211.35 L66.90,214.13 C66.90,216.91 66.90,222.46 66.90,228.02 C66.90,233.57 66.90,239.13 66.90,244.02 C66.90,248.91 66.90,253.13 66.90,255.24 L66.90,257.35" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M75.42,261.35 L77.83,253.72 L79.34,248.94 C80.85,244.15 83.88,234.58 84.64,227.44 C85.41,220.30 83.92,215.59 83.18,213.23 L82.43,210.87 L80.02,203.24" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="20.00" y="8.00" width="93.79" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="66.90" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Start</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <polygon points="66.90,112.00 116.57,161.68 66.90,211.35 17.22,161.68" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="66.90" y="161.68" text-anchor="middle" dominant-baseline="middle" fill="#333">Check</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="8.00" y="261.35" width="117.80" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="66.90" y="288.35" text-anchor="middle" dominant-baseline="middle" fill="#333">Process</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

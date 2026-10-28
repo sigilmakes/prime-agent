@@ -1,0 +1,12 @@
+graph TD
+    %% Complex diagram with multiple features
+    A[Input] --> B{Validate}
+    B -->|valid| C[Process]
+    B -->|invalid| D(Error Handler)
+    C --> E{More Data?}
+    E -->|yes| A
+    E -->|no| F[Output]
+    D -.-> G[Log Error]
+    D ==> H[Notify Admin]
+    G & H --> I[Cleanup]
+    I --> F

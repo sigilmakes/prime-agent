@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 435.11 1093.97" style="max-width: 435.11px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(-20.00,-19.00)">
+    <g class="clusters">
+      <g class="cluster" id="input" data-id="input" data-look="classic">
+        <rect class="subgraph" x="42.87" y="27.00" width="404.24" height="100.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="244.99" y="31.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Input Layer</text>
+      </g>
+      <g class="cluster" id="output" data-id="output" data-look="classic">
+        <rect class="subgraph" x="162.37" y="823.61" width="149.34" height="281.36" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="237.04" y="827.61" text-anchor="middle" dominant-baseline="hanging" fill="#333">Output Layer</text>
+      </g>
+      <g class="cluster" id="processing" data-id="processing" data-look="classic">
+        <rect class="subgraph" x="28.00" y="287.00" width="415.04" height="376.61" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="235.52" y="291.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Processing</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M133.06,112.00 L133.06,120.00 L133.06,127.00 C133.06,134.00 133.06,148.00 133.06,159.17 C133.06,170.33 133.06,178.67 133.06,188.00 C133.06,197.33 133.06,207.67 133.06,221.17 C133.06,234.67 133.06,251.33 151.28,272.10 C169.50,292.87 205.94,317.74 224.16,330.18 L242.38,342.62 L248.99,347.13" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M345.18,112.00 L345.18,120.00 L345.18,127.00 C345.18,134.00 345.18,148.00 345.18,159.17 C345.18,170.33 345.18,178.67 345.18,188.00 C345.18,197.33 345.18,207.67 345.18,221.17 C345.18,234.67 345.18,251.33 339.25,269.58 C333.32,287.82 321.46,307.64 315.53,317.55 L309.60,327.47 L305.49,334.33" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M263.89,403.81 L259.78,410.67 L255.99,416.99 C252.20,423.31 244.62,435.95 240.83,451.61 C237.04,467.26 237.04,485.93 237.04,500.43 C237.04,514.93 237.04,525.26 237.04,536.43 C237.04,547.59 237.04,559.59 237.04,565.59 L237.04,571.59 L237.04,579.59" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M309.83,397.44 L315.44,403.15 L322.87,410.72 C330.31,418.30 345.18,433.45 352.61,446.19 C360.05,458.93 360.05,469.26 360.05,476.59 C360.05,483.93 360.05,488.26 360.05,490.43 L360.05,492.59 L360.05,500.59" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M247.38,387.30 L240.10,390.61 L218.83,400.27 C197.57,409.94 155.04,429.26 133.78,444.10 C112.52,458.93 112.52,469.26 112.52,476.59 C112.52,483.93 112.52,488.26 112.52,490.43 L112.52,492.59 L112.52,500.59" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M152.30,558.59 L152.30,559.98 C152.30,561.37 152.30,564.15 158.44,566.93 C164.58,569.70 176.86,572.48 183.00,574.59 C189.14,576.70 189.14,578.15 189.14,578.87 L189.14,579.59" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M237.04,648.61 L237.04,656.61 L237.04,659.44 C237.04,662.28 237.04,667.94 237.04,692.61 C237.04,717.28 237.04,760.94 237.04,789.11 C237.04,817.28 237.04,829.94 237.04,836.28 L237.04,842.61 L237.04,850.61" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M360.05,558.59 L360.05,566.59 L360.05,569.43 C360.05,572.26 360.05,577.93 360.05,585.93 C360.05,593.93 360.05,604.26 360.05,619.26 C360.05,634.27 360.05,653.94 360.05,677.27 C360.05,700.61 360.05,727.61 360.05,749.44 C360.05,771.28 360.05,787.94 348.43,803.55 C336.82,819.16 313.58,833.70 301.97,840.97 L290.35,848.24 L283.57,852.49" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M237.04,908.61 L237.04,916.61 L237.04,919.44 C237.04,922.28 237.04,927.94 237.04,935.94 C237.04,943.94 237.04,954.28 236.25,965.79 C235.45,977.31 233.86,990.01 233.06,996.36 L232.27,1002.70 L231.27,1010.64" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M263.73,1052.29 L271.73,1052.29 L284.85,1052.29 C297.98,1052.29 324.22,1052.29 337.35,938.71 C350.47,825.13 350.47,597.96 350.14,484.38 C349.81,370.80 349.14,370.80 348.81,370.80 L348.47,370.80 L340.47,370.80" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="57.87" y="58.00" width="150.38" height="54.00" rx="27.00" ry="27.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="133.06" y="85.00" text-anchor="middle" dominant-baseline="middle" fill="#333">API Gateway</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <polygon points="258.25,58.00 432.11,58.00 397.34,112.00 293.02,112.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="345.18" y="85.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Load Balancer</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <polygon points="283.68,318.00 336.47,370.80 283.68,423.59 230.88,370.80" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="283.68" y="370.80" text-anchor="middle" dominant-baseline="middle" fill="#333">Route?</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <polygon points="70.81,504.59 154.23,504.59 182.03,558.59 43.00,558.59" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="112.52" y="531.59" text-anchor="middle" dominant-baseline="middle" fill="#333">Transform</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <path d="M187.80,594.61 A49.25,11.02 0 0,0 286.29,594.61 A49.25,11.02 0 0,0 187.80,594.61 L187.80,637.59 A49.25,11.02 0 0,0 286.29,637.59 L286.29,594.61" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <path d="M187.80,594.61 A49.25,11.02 0 0,1 286.29,594.61" fill="none" stroke="#333" stroke-width="1.00" />
+        <text x="237.04" y="621.61" text-anchor="middle" dominant-baseline="middle" fill="#333">Database</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <polygon points="319.25,504.59 428.04,504.59 428.04,558.59 319.25,558.59 292.06,531.59" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="360.05" y="531.59" text-anchor="middle" dominant-baseline="middle" fill="#333">Cache Hit</text>
+      </g>
+      <g class="node default" id="G" data-id="G" data-look="classic">
+        <ellipse cx="226.05" cy="1052.29" rx="37.68" ry="37.68" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="226.05" y="1052.29" text-anchor="middle" dominant-baseline="middle" fill="#333">Status</text>
+      </g>
+      <g class="node default" id="H" data-id="H" data-look="classic">
+        <rect x="177.37" y="854.61" width="119.34" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <line x1="185.37" y1="854.61" x2="185.37" y2="908.61" stroke="#333" stroke-width="1.00" />
+        <line x1="288.72" y1="854.61" x2="288.72" y2="908.61" stroke="#333" stroke-width="1.00" />
+        <text x="237.04" y="881.61" text-anchor="middle" dominant-baseline="middle" fill="#333">Formatter</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="102.38" y="170.50" width="61.37" height="28.00" fill="white" />
+      <text x="133.06" y="184.50" text-anchor="middle" dominant-baseline="middle" fill="#333">request</text>
+      <rect x="319.38" y="205.13" width="51.59" height="28.00" fill="white" />
+      <text x="345.18" y="219.13" text-anchor="middle" dominant-baseline="middle" fill="#333">health</text>
+      <rect x="217.03" y="488.09" width="40.02" height="28.00" fill="white" />
+      <text x="237.04" y="502.09" text-anchor="middle" dominant-baseline="middle" fill="#333">read</text>
+      <rect x="325.36" y="432.09" width="69.38" height="28.00" fill="white" />
+      <text x="360.05" y="446.09" text-anchor="middle" dominant-baseline="middle" fill="#333">fast path</text>
+      <rect x="135.39" y="414.70" width="41.78" height="28.00" fill="white" />
+      <text x="156.28" y="428.70" text-anchor="middle" dominant-baseline="middle" fill="#333">write</text>
+      <rect x="213.48" y="657.11" width="47.12" height="28.00" fill="white" />
+      <text x="237.04" y="671.11" text-anchor="middle" dominant-baseline="middle" fill="#333">result</text>
+      <rect x="347.60" y="740.32" width="24.90" height="28.00" fill="white" />
+      <text x="360.05" y="754.32" text-anchor="middle" dominant-baseline="middle" fill="#333">hit</text>
+      <rect x="200.13" y="917.11" width="73.82" height="28.00" fill="white" />
+      <text x="237.04" y="931.11" text-anchor="middle" dominant-baseline="middle" fill="#333">response</text>
+      <rect x="324.47" y="708.32" width="40.00" height="28.00" fill="white" />
+      <text x="344.47" y="722.32" text-anchor="middle" dominant-baseline="middle" fill="#333">retry</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,12 @@
+classDiagram
+    class User {
+        +String name
+        +String email
+        +login()
+        +logout()
+    }
+    class Session {
+        +String token
+        +isValid()
+    }
+    User --> Session : creates

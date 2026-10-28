@@ -1,0 +1,167 @@
+{
+  "graph": {
+    "rankdir": "LR",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "ranker": "network-simplex",
+    "marginx": 8,
+    "marginy": 8,
+    "width": 420,
+    "height": 92.5
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "x": 45.5,
+      "y": 46.5,
+      "width": 6,
+      "height": 3,
+      "center_x": 48.5,
+      "center_y": 48,
+      "parent": "sg1",
+      "is_compound": false
+    },
+    {
+      "id": "B",
+      "x": 126.5,
+      "y": 46.5,
+      "width": 7,
+      "height": 3,
+      "center_x": 130,
+      "center_y": 48,
+      "parent": "sg1",
+      "is_compound": false
+    },
+    {
+      "id": "C",
+      "x": 283.5,
+      "y": 46.5,
+      "width": 10,
+      "height": 3,
+      "center_x": 288.5,
+      "center_y": 48,
+      "parent": "sg2",
+      "is_compound": false
+    },
+    {
+      "id": "D",
+      "x": 368.5,
+      "y": 46.5,
+      "width": 6,
+      "height": 3,
+      "center_x": 371.5,
+      "center_y": 48,
+      "parent": "sg2",
+      "is_compound": false
+    },
+    {
+      "id": "sg1",
+      "x": 8,
+      "y": 8,
+      "width": 163,
+      "height": 76.5,
+      "center_x": 89.5,
+      "center_y": 46.25,
+      "parent": null,
+      "is_compound": true
+    },
+    {
+      "id": "sg2",
+      "x": 246,
+      "y": 8,
+      "width": 166,
+      "height": 76.5,
+      "center_x": 329,
+      "center_y": 46.25,
+      "parent": null,
+      "is_compound": true
+    }
+  ],
+  "edges": [
+    {
+      "index": 0,
+      "name": "0",
+      "from": "A",
+      "to": "B",
+      "points": [
+        [
+          51.5,
+          48
+        ],
+        [
+          89,
+          48
+        ],
+        [
+          126.5,
+          48
+        ]
+      ]
+    },
+    {
+      "index": 1,
+      "name": "1",
+      "from": "C",
+      "to": "D",
+      "points": [
+        [
+          293.5,
+          48
+        ],
+        [
+          331,
+          48
+        ],
+        [
+          368.5,
+          48
+        ]
+      ]
+    },
+    {
+      "index": 2,
+      "name": "2",
+      "from": "B",
+      "to": "C",
+      "points": [
+        [
+          133.5,
+          48
+        ],
+        [
+          171,
+          48
+        ],
+        [
+          208.5,
+          48
+        ],
+        [
+          246,
+          48
+        ],
+        [
+          283.5,
+          48
+        ]
+      ]
+    }
+  ],
+  "subgraph_bounds": [
+    {
+      "id": "sg1",
+      "x": 8,
+      "y": 8,
+      "width": 163,
+      "height": 76.5
+    },
+    {
+      "id": "sg2",
+      "x": 246,
+      "y": 8,
+      "width": 166,
+      "height": 76.5
+    }
+  ]
+}

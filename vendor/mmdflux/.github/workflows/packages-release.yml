@@ -1,0 +1,134 @@
+name: Packages Release
+
+on:
+  push:
+    tags:
+      - "mmds-core-v*"
+      - "mmds-excalidraw-v*"
+      - "mmds-tldraw-v*"
+      - "mmds-browser-text-metrics-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., mmds-core-v0.2.0 or mmds-browser-text-metrics-v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: packages-release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Resolve package and version from tag
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+
+          if [[ "$TAG" == mmds-core-v* ]]; then
+            echo "pkg_dir=packages/mmds-core" >> "$GITHUB_OUTPUT"
+            echo "npm_name=@mmds/core" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#mmds-core-v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" == mmds-excalidraw-v* ]]; then
+            echo "pkg_dir=packages/mmds-excalidraw" >> "$GITHUB_OUTPUT"
+            echo "npm_name=@mmds/excalidraw" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#mmds-excalidraw-v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" == mmds-tldraw-v* ]]; then
+            echo "pkg_dir=packages/mmds-tldraw" >> "$GITHUB_OUTPUT"
+            echo "npm_name=@mmds/tldraw" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#mmds-tldraw-v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" == mmds-browser-text-metrics-v* ]]; then
+            echo "pkg_dir=packages/mmds-browser-text-metrics" >> "$GITHUB_OUTPUT"
+            echo "npm_name=@mmds/browser-text-metrics" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#mmds-browser-text-metrics-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unknown tag format: $TAG" >&2
+            exit 1
+          fi
+
+      - name: Verify version matches package.json
+        env:
+          PKG_DIR: ${{ steps.meta.outputs.pkg_dir }}
+          TAG_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./${PKG_DIR}/package.json').version")
+          if [[ "$PKG_VERSION" != "$TAG_VERSION" ]]; then
+            echo "Version mismatch: tag=${TAG_VERSION}, package.json=${PKG_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: packages/package-lock.json
+
+      - name: Upgrade npm for provenance support
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Wait for @mmds/wasm peer dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          RANGE=$(node -p "require('./packages/mmds-browser-text-metrics/package.json').peerDependencies['@mmds/wasm'] || ''" 2>/dev/null || echo "")
+          if [[ -z "$RANGE" ]]; then
+            echo "No @mmds/wasm peer declared in mmds-browser-text-metrics; skipping wait."
+            exit 0
+          fi
+          echo "Waiting for @mmds/wasm matching ${RANGE} on npm registry..."
+          for i in $(seq 1 60); do
+            if npm view "@mmds/wasm@${RANGE}" version >/dev/null 2>&1; then
+              echo "@mmds/wasm@${RANGE} is available."
+              exit 0
+            fi
+            echo "Attempt ${i}/60: not yet available, sleeping 10s..."
+            sleep 10
+          done
+          echo "Timed out waiting for @mmds/wasm matching ${RANGE}" >&2
+          exit 1
+
+      - name: Sync lockfile with peer range
+        working-directory: packages
+        run: npm install --package-lock-only --no-audit --no-fund
+
+      - name: Install dependencies
+        working-directory: packages
+        run: npm ci
+
+      - name: Build all packages
+        working-directory: packages
+        run: npm run build -ws
+
+      - name: Run tests
+        working-directory: packages
+        run: npm test -ws
+
+      - name: Publish to npm
+        working-directory: ${{ steps.meta.outputs.pkg_dir }}
+        run: npm publish --access=public --provenance

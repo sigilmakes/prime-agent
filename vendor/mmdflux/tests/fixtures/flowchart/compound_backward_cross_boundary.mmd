@@ -1,0 +1,28 @@
+graph TD
+    subgraph input[Input Layer]
+        A([API Gateway])
+        B[\Load Balancer/]
+    end
+
+    subgraph processing[Processing]
+        C{Route?}
+        D[/Transform\]
+        E[(Database)]
+        F>Cache Hit]
+    end
+
+    subgraph output[Output Layer]
+        G((Status))
+        H[[Formatter]]
+    end
+
+    A -->|request| C
+    B -->|health| C
+    C -->|read| E
+    C -->|fast path| F
+    C -.->|write| D
+    D --> E
+    E -->|result| H
+    F -->|hit| H
+    H -->|response| G
+    G -.->|retry| C

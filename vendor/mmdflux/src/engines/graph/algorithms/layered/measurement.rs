@@ -1,0 +1,214 @@
+//! Measurement mode selection and layout construction for the layered algorithm.
+
+use super::kernel::{LayoutConfig, Ranker};
+use super::layout_building::{
+    build_layered_layout_with_config, compute_sublayouts, layered_config_for_layout,
+};
+use super::layout_subgraph_ops::{
+    center_override_subgraphs, expand_parent_bounds, rearrange_concurrent_regions,
+};
+use crate::engines::graph::EngineConfig;
+use crate::engines::graph::contracts::MeasurementMode;
+use crate::errors::RenderError;
+use crate::graph::geometry::GraphGeometry;
+use crate::graph::grid::{GridLayoutConfig, GridRanker};
+use crate::graph::measure::{
+    TextMetricsProvider, edge_label_dimensions_for_provider_and_style,
+    edge_label_dimensions_wrapped_for_provider_and_style, edge_text_style_key,
+    grid_edge_label_dimensions, grid_edge_label_dimensions_wrapped, grid_node_dimensions,
+    proportional_node_dimensions_with_provider,
+};
+use crate::graph::projection::{GridProjection, OverrideSubgraphProjection};
+use crate::graph::{Direction, Edge, Graph, Node};
+
+/// Build a flowchart `GridLayoutConfig` from layered-engine settings.
+///
+/// This bridges the engine-facing layered config back to the render-facing
+/// config used by shared graph-family layout construction.
+pub(crate) fn layout_config_from_layered(
+    layered_cfg: &LayoutConfig,
+    diagram: &Graph,
+) -> GridLayoutConfig {
+    let defaults = GridLayoutConfig::default();
+    let extra_padding = if diagram.has_subgraphs() {
+        diagram
+            .subgraphs
+            .keys()
+            .map(|id| diagram.subgraph_depth(id))
+            .max()
+            .unwrap_or(0)
+            * 2
+    } else {
+        0
+    };
+
+    GridLayoutConfig {
+        node_sep: layered_cfg.node_sep,
+        edge_sep: layered_cfg.edge_sep,
+        rank_sep: layered_cfg.rank_sep,
+        margin: layered_cfg.margin,
+        ranker: Some(match layered_cfg.ranker {
+            Ranker::NetworkSimplex => GridRanker::NetworkSimplex,
+            Ranker::LongestPath => GridRanker::LongestPath,
+        }),
+        padding: defaults.padding + extra_padding,
+        ..defaults
+    }
+}
+
+fn grid_node_layout_dimensions(node: &Node, direction: Direction) -> (f64, f64) {
+    let (width, height) = grid_node_dimensions(node, direction);
+    (width as f64, height as f64)
+}
+
+fn edge_label_dims_proportional_for_run(
+    metrics: &dyn TextMetricsProvider,
+    edge: &Edge,
+) -> Option<(f64, f64)> {
+    let style = edge_text_style_key(metrics, edge);
+    if let Some(lines) = edge.wrapped_label_lines.as_deref() {
+        return Some(edge_label_dimensions_wrapped_for_provider_and_style(
+            metrics, &style, lines,
+        ));
+    }
+    edge.label
+        .as_deref()
+        .map(|label| edge_label_dimensions_for_provider_and_style(metrics, &style, label))
+}
+
+fn grid_edge_label_layout_dimensions(edge: &Edge) -> Option<(f64, f64)> {
+    // Honor the pre-engine wrap artifact when present so Grid-mode
+    // measurement reserves the same vertical space that SVG and routing
+    // assume.
+    if let Some(lines) = edge.wrapped_label_lines.as_deref() {
+        return Some(grid_edge_label_dimensions_wrapped(lines));
+    }
+    edge.label
+        .as_ref()
+        .map(|label| grid_edge_label_dimensions(label))
+}
+
+fn override_subgraph_projections(
+    diagram: &Graph,
+    layered_cfg: &super::LayoutConfig,
+) -> std::collections::HashMap<String, OverrideSubgraphProjection> {
+    let grid_config = layout_config_from_layered(layered_cfg, diagram);
+    let layered_config = layered_config_for_layout(diagram, &grid_config);
+    let direction = diagram.direction;
+
+    compute_sublayouts(
+        diagram,
+        &layered_config,
+        |node| grid_node_layout_dimensions(node, direction),
+        grid_edge_label_layout_dimensions,
+        false,
+    )
+    .into_iter()
+    .map(|(subgraph_id, sublayout)| {
+        (
+            subgraph_id,
+            OverrideSubgraphProjection {
+                nodes: sublayout
+                    .result
+                    .nodes
+                    .into_iter()
+                    .map(|(node_id, rect)| (node_id.0, rect.into()))
+                    .collect(),
+            },
+        )
+    })
+    .collect()
+}
+
+/// Run layered layout with a given measurement mode.
+///
+/// Shared by the Flux and Mermaid-compatible engines. Both use the same
+/// layered kernel; they diverge in adapter policy and routing behavior.
+pub fn run_layered_layout(
+    mode: &MeasurementMode,
+    diagram: &Graph,
+    config: &EngineConfig,
+) -> Result<GraphGeometry, RenderError> {
+    use super::from_layered_layout;
+
+    let EngineConfig::Layered(layered_cfg) = config;
+    let override_subgraphs = override_subgraph_projections(diagram, layered_cfg);
+    let grid_config = layout_config_from_layered(layered_cfg, diagram);
+    let mut lc = layered_config_for_layout(diagram, &grid_config);
+    lc.acyclic_policy = layered_cfg.acyclic_policy;
+    lc.greedy_switch = layered_cfg.greedy_switch;
+    lc.model_order_tiebreak = layered_cfg.model_order_tiebreak;
+    lc.variable_rank_spacing = layered_cfg.variable_rank_spacing;
+    lc.always_compound_ordering = layered_cfg.always_compound_ordering;
+    lc.track_reversed_chains = layered_cfg.track_reversed_chains;
+    lc.per_edge_label_spacing = layered_cfg.per_edge_label_spacing;
+    lc.edge_label_spacing = layered_cfg.edge_label_spacing;
+    lc.label_side_selection = layered_cfg.label_side_selection;
+    lc.label_side_strategy = layered_cfg.label_side_strategy;
+    lc.label_dummy_placement = layered_cfg.label_dummy_placement;
+    lc.label_dummy_routing = layered_cfg.label_dummy_routing;
+    lc.backward_edge_side_grouping = layered_cfg.backward_edge_side_grouping;
+    lc.subgraph_title_margin = layered_cfg.subgraph_title_margin;
+
+    let direction = diagram.direction;
+    let edge_label_spacing = lc.edge_label_spacing;
+    // This deref-match relies on `MeasurementMode` staying `Copy` (currently
+    // a unit variant or provider reference). If a future variant stores
+    // non-Copy data, switch the match arms to borrow patterns.
+    let mut result = match *mode {
+        // Grid-mode label-dummy dims are padded in whole-cell increments
+        // via `pad_edge_label_dims_grid` so the Text renderer honors
+        // `edge_label_spacing`. Default spacing 2.0 + default thickness 1.0
+        // round to 0 extra cells — existing Text snapshots are
+        // byte-identical; above-default spacings widen the gap between
+        // labeled ranks by `round((spacing + thickness - 3) /
+        // GRID_CELL_PX)` cells.
+        MeasurementMode::Grid => build_layered_layout_with_config(
+            diagram,
+            &lc,
+            |node| grid_node_layout_dimensions(node, direction),
+            |edge| {
+                grid_edge_label_layout_dimensions(edge).map(|dims| {
+                    super::float_layout::pad_edge_label_dims_grid(
+                        dims,
+                        edge_label_spacing,
+                        super::float_layout::edge_thickness(edge),
+                        direction,
+                    )
+                })
+            },
+        ),
+        MeasurementMode::Proportional(metrics) => build_layered_layout_with_config(
+            diagram,
+            &lc,
+            |node| proportional_node_dimensions_with_provider(metrics, node, direction),
+            |edge| {
+                edge_label_dims_proportional_for_run(metrics, edge).map(|dims| {
+                    super::float_layout::pad_edge_label_dims(
+                        dims,
+                        edge_label_spacing,
+                        super::float_layout::edge_thickness(edge),
+                        direction,
+                    )
+                })
+            },
+        ),
+    };
+
+    center_override_subgraphs(diagram, &mut result);
+    expand_parent_bounds(diagram, &mut result, 0.0, 0.0);
+    rearrange_concurrent_regions(diagram, &mut result, lc.node_sep);
+
+    let mut geom = from_layered_layout(&result, diagram);
+    if !override_subgraphs.is_empty() {
+        let projection = geom
+            .grid_projection
+            .get_or_insert_with(GridProjection::default);
+        projection.override_subgraphs = override_subgraphs;
+    }
+    let has_enhancements = layered_cfg.greedy_switch
+        || layered_cfg.model_order_tiebreak
+        || layered_cfg.variable_rank_spacing;
+    geom.enhanced_backward_routing = has_enhancements;
+    Ok(geom)
+}

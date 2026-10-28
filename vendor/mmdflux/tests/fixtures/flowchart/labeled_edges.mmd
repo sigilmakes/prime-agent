@@ -1,0 +1,6 @@
+graph TD
+    Start[Begin] -->|initialize| Setup[Setup]
+    Setup -->|configure| Config{Valid?}
+    Config -->|yes| Run[Execute]
+    Config -->|no| Error[Handle Error]
+    Error -.->|retry| Setup

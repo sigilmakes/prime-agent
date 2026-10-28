@@ -1,0 +1,4 @@
+personality = "pragmatic"
+
+[features]
+hooks = true

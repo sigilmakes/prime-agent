@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 214.68 552.00" style="max-width: 214.68px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(-20.00,0.00)">
+    <g class="clusters">
+      <g class="cluster" id="Active" data-id="Active" data-look="classic">
+        <rect class="subgraph" x="28.00" y="91.00" width="180.00" height="340.00" fill="none" stroke="#888" stroke-width="1.00" />
+        <text x="118.00" y="95.00" text-anchor="middle" dominant-baseline="hanging" fill="#333">Active</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M118.00,22.00 L118.00,87.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M87.80,136.00 L87.80,182.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M124.60,240.00 L124.60,253.60 Q124.60,258.60 129.60,258.60 L145.14,258.60 Q150.14,258.60 150.14,263.60 L150.14,358.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M193.00,389.00 L194.50,389.00 Q196.00,389.00 196.00,387.50 L196.00,218.00 Q196.00,213.00 191.00,213.00 L136.60,213.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M51.00,240.00 L51.00,243.00 Q51.00,246.00 54.00,246.00 L70.67,246.00 Q75.67,246.00 75.67,251.00 L75.67,261.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M118.00,431.00 L118.00,512.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="Active_end" data-id="Active_end" data-look="classic">
+        <circle cx="72.40" cy="279.00" r="14.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <circle cx="72.40" cy="279.00" r="9.00" fill="#333" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="72.40" y="279.00" text-anchor="middle" dominant-baseline="middle" fill="#333"></text>
+      </g>
+      <g class="node default" id="Active_start" data-id="Active_start" data-look="classic">
+        <circle cx="87.80" cy="129.00" r="7.00" fill="#333" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="87.80" y="129.00" text-anchor="middle" dominant-baseline="middle" fill="#333"></text>
+      </g>
+      <g class="node default" id="Paused" data-id="Paused" data-look="classic">
+        <rect x="108.73" y="362.00" width="84.27" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="150.87" y="389.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Paused</text>
+      </g>
+      <g class="node default" id="Running" data-id="Running" data-look="classic">
+        <rect x="43.00" y="186.00" width="89.60" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="87.80" y="213.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Running</text>
+      </g>
+      <g class="node default" id="__root_end" data-id="__root_end" data-look="classic">
+        <circle cx="118.00" cy="530.00" r="14.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <circle cx="118.00" cy="530.00" r="9.00" fill="#333" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="118.00" y="530.00" text-anchor="middle" dominant-baseline="middle" fill="#333"></text>
+      </g>
+      <g class="node default" id="__root_start" data-id="__root_start" data-look="classic">
+        <circle cx="118.00" cy="15.00" r="7.00" fill="#333" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="118.00" y="15.00" text-anchor="middle" dominant-baseline="middle" fill="#333"></text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="124.34" y="281.52" width="51.59" height="28.00" fill="white" />
+      <text x="150.14" y="295.52" text-anchor="middle" dominant-baseline="middle" fill="#333">pause</text>
+      <rect x="165.32" y="250.00" width="61.35" height="28.00" fill="white" />
+      <text x="196.00" y="264.00" text-anchor="middle" dominant-baseline="middle" fill="#333">resume</text>
+    </g>
+  </g>
+</svg>

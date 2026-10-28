@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 190.93 372.00" style="max-width: 190.93px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M95.46,22.00 L95.46,68.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M95.46,126.00 L95.46,228.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M95.46,286.00 L95.46,332.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="Active" data-id="Active" data-look="classic">
+        <rect x="8.00" y="72.00" width="174.93" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.46" y="99.00" text-anchor="middle" dominant-baseline="middle" fill="#333">The system is active</text>
+      </g>
+      <g class="node default" id="Idle" data-id="Idle" data-look="classic">
+        <rect x="22.66" y="232.00" width="145.61" height="54.00" rx="5.00" ry="5.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.46" y="259.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Waiting for input</text>
+      </g>
+      <g class="node default" id="__root_end" data-id="__root_end" data-look="classic">
+        <circle cx="95.46" cy="350.00" r="14.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <circle cx="95.46" cy="350.00" r="9.00" fill="#333" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.46" y="350.00" text-anchor="middle" dominant-baseline="middle" fill="#333"></text>
+      </g>
+      <g class="node default" id="__root_start" data-id="__root_start" data-look="classic">
+        <circle cx="95.46" cy="15.00" r="7.00" fill="#333" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="95.46" y="15.00" text-anchor="middle" dominant-baseline="middle" fill="#333"></text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="65.23" y="134.50" width="60.47" height="28.00" fill="white" />
+      <text x="95.46" y="148.50" text-anchor="middle" dominant-baseline="middle" fill="#333">timeout</text>
+    </g>
+  </g>
+</svg>

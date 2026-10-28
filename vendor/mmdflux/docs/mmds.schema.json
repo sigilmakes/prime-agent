@@ -1,0 +1,977 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mmdflux.dev/mmds/v1",
+  "title": "MMDS — Machine-Mediated Diagram Specification",
+  "description": "Structured JSON output for graph-family Mermaid diagrams produced by mmdflux.",
+  "type": "object",
+  "required": [
+    "version",
+    "defaults",
+    "geometry_level",
+    "metadata",
+    "nodes",
+    "edges"
+  ],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Integer schema version. Incremented on breaking MMDS changes."
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Optional behavior bundles used for profile negotiation (for example 'mmds-core-v1', 'mmdflux-svg-v1', 'mmdflux-node-style-v1', or 'mmdflux-text-metrics-v1')."
+    },
+    "extensions": {
+      "type": "object",
+      "default": {},
+      "propertyNames": {
+        "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?:\\.[a-z0-9]+(?:[.-][a-z0-9]+)*)*\\.v[0-9]+$",
+        "description": "Namespaced extension key ending with '.v{number}', for example 'org.mmdflux.render.svg.v1'."
+      },
+      "properties": {
+        "org.mmdflux.node-style.v1": {
+          "$ref": "#/$defs/NodeStyleExtension"
+        },
+        "org.mmdflux.text-metrics.v1": {
+          "$ref": "#/$defs/TextMetricsExtension"
+        },
+        "org.mmdflux.text-measurements.v1": {
+          "$ref": "#/$defs/TextMeasurementsExtension"
+        },
+        "org.mmdflux.view.v1": {
+          "$ref": "#/$defs/ViewExtension"
+        }
+      },
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "Optional namespaced extension payloads keyed by versioned namespace ID."
+    },
+    "defaults": {
+      "$ref": "#/$defs/Defaults",
+      "description": "Document-level defaults for omitted node/edge fields."
+    },
+    "geometry_level": {
+      "enum": ["layout", "routed"],
+      "description": "Geometry detail level. 'layout' includes node geometry + edge topology only. 'routed' adds edge paths, bounds, and routing metadata."
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Node"
+      },
+      "description": "Node inventory, sorted by ID."
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
+      "description": "Edge inventory in declaration order."
+    },
+    "subgraphs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Subgraph"
+      },
+      "default": [],
+      "description": "Subgraph inventory, sorted by ID."
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Participant"
+      },
+      "description": "Sequence diagram participants (timeline family only)."
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Message"
+      },
+      "description": "Sequence diagram messages (timeline family only)."
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Note"
+      },
+      "description": "Sequence diagram notes (timeline family only)."
+    },
+    "activations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Activation"
+      },
+      "description": "Sequence diagram activation bars (timeline family only)."
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Block"
+      },
+      "description": "Sequence diagram interaction frames (timeline family only)."
+    },
+    "participant_boxes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ParticipantBox"
+      },
+      "description": "Sequence diagram participant groupings (timeline family only)."
+    }
+  },
+  "$defs": {
+    "Defaults": {
+      "type": "object",
+      "required": ["node", "edge"],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeDefaults"
+        },
+        "edge": {
+          "$ref": "#/$defs/EdgeDefaults"
+        }
+      }
+    },
+    "NodeDefaults": {
+      "type": "object",
+      "required": ["shape"],
+      "properties": {
+        "shape": {
+          "type": "string",
+          "description": "Default node shape used when a node omits the shape field."
+        }
+      }
+    },
+    "EdgeDefaults": {
+      "type": "object",
+      "required": ["stroke", "arrow_start", "arrow_end", "minlen"],
+      "properties": {
+        "stroke": {
+          "enum": ["solid", "dotted", "thick", "invisible"],
+          "description": "Default edge stroke used when an edge omits stroke."
+        },
+        "arrow_start": {
+          "enum": [
+            "none",
+            "normal",
+            "cross",
+            "circle",
+            "open_triangle",
+            "diamond",
+            "open_diamond"
+          ],
+          "description": "Default source-end marker used when an edge omits arrow_start."
+        },
+        "arrow_end": {
+          "enum": [
+            "none",
+            "normal",
+            "cross",
+            "circle",
+            "open_triangle",
+            "diamond",
+            "open_diamond"
+          ],
+          "description": "Default target-end marker used when an edge omits arrow_end."
+        },
+        "minlen": {
+          "type": "integer",
+          "description": "Default minimum rank separation used when an edge omits minlen."
+        }
+      }
+    },
+    "Metadata": {
+      "type": "object",
+      "required": ["diagram_type", "bounds"],
+      "properties": {
+        "diagram_type": {
+          "type": "string",
+          "description": "Diagram type identifier (e.g., 'flowchart', 'class')."
+        },
+        "direction": {
+          "enum": ["TD", "TB", "BT", "LR", "RL"],
+          "description": "Layout direction."
+        },
+        "bounds": {
+          "$ref": "#/$defs/Bounds",
+          "description": "Overall diagram canvas extents in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned. Not guaranteed to be a tight content bounding box."
+        },
+        "engine": {
+          "type": "string",
+          "description": "Engine+algorithm identifier that produced this output (e.g., 'flux-layered', 'mermaid-layered'). Present when the output was produced via the solve pipeline."
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/MetadataDiagnostics",
+          "description": "Optional routed diagnostics emitted by mmdflux. Present only when routed geometry detected reportable conditions."
+        }
+      }
+    },
+    "MetadataDiagnostics": {
+      "type": "object",
+      "properties": {
+        "unfit_label_overlaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnfitLabelOverlapDiagnostic"
+          },
+          "default": [],
+          "description": "Labels that could not fit in the available edge gap after marker avoidance. Routed level only."
+        }
+      }
+    },
+    "UnfitLabelOverlapDiagnostic": {
+      "type": "object",
+      "required": [
+        "edge_id",
+        "label",
+        "gap_pixels",
+        "label_span_pixels",
+        "attempted_side"
+      ],
+      "properties": {
+        "edge_id": {
+          "type": "string",
+          "description": "MMDS edge ID whose label could not fit."
+        },
+        "label": {
+          "type": "string",
+          "description": "Rendered edge label text."
+        },
+        "gap_pixels": {
+          "type": "number",
+          "description": "Available gap along the edge-parallel axis in current mmdflux output coordinates."
+        },
+        "label_span_pixels": {
+          "type": "number",
+          "description": "Padded label span along the edge-parallel axis in current mmdflux output coordinates."
+        },
+        "attempted_side": {
+          "enum": ["above", "below", "center"],
+          "description": "Label side attempted by the routed layout."
+        }
+      }
+    },
+    "Node": {
+      "type": "object",
+      "required": ["id", "label", "position", "size"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Node identifier from Mermaid source."
+        },
+        "label": {
+          "type": "string",
+          "description": "Display label."
+        },
+        "shape": {
+          "type": "string",
+          "default": "rectangle",
+          "description": "Shape name in snake_case. If omitted, consumers should use defaults.node.shape."
+        },
+        "parent": {
+          "type": "string",
+          "description": "Parent subgraph ID, if any."
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "description": "Node center position in unitless MMDS coordinate space, not top-left anchor. In current mmdflux output, values are SVG-pixel-aligned."
+        },
+        "size": {
+          "$ref": "#/$defs/Size",
+          "description": "Node bounding box dimensions in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned."
+        }
+      }
+    },
+    "Edge": {
+      "type": "object",
+      "required": ["id", "source", "target"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic edge identifier (e.g., 'e0', 'e1') in declaration order."
+        },
+        "source": {
+          "type": "string",
+          "description": "Source node ID."
+        },
+        "target": {
+          "type": "string",
+          "description": "Target node ID."
+        },
+        "from_subgraph": {
+          "type": "string",
+          "description": "Original source subgraph ID when this edge represented a subgraph-as-source endpoint intent."
+        },
+        "to_subgraph": {
+          "type": "string",
+          "description": "Original target subgraph ID when this edge represented a subgraph-as-target endpoint intent."
+        },
+        "label": {
+          "type": "string",
+          "description": "Edge label text."
+        },
+        "stroke": {
+          "enum": ["solid", "dotted", "thick", "invisible"],
+          "default": "solid",
+          "description": "Stroke style. If omitted, consumers should use defaults.edge.stroke."
+        },
+        "arrow_start": {
+          "enum": [
+            "none",
+            "normal",
+            "cross",
+            "circle",
+            "open_triangle",
+            "diamond",
+            "open_diamond"
+          ],
+          "default": "none",
+          "description": "Arrow at source end. If omitted, consumers should use defaults.edge.arrow_start."
+        },
+        "arrow_end": {
+          "enum": [
+            "none",
+            "normal",
+            "cross",
+            "circle",
+            "open_triangle",
+            "diamond",
+            "open_diamond"
+          ],
+          "default": "normal",
+          "description": "Arrow at target end. If omitted, consumers should use defaults.edge.arrow_end."
+        },
+        "minlen": {
+          "type": "integer",
+          "default": 1,
+          "description": "Minimum rank separation. If omitted, consumers should use defaults.edge.minlen."
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "description": "Authoritative visible routed edge path as [x, y] coordinate pairs in unitless MMDS coordinate space. Consumers should use this path for visible edge shape and endpoints. In current mmdflux output, values are SVG-pixel-aligned. Routed level only."
+        },
+        "label_position": {
+          "$ref": "#/$defs/Position",
+          "description": "Label center position in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned. Routed level only."
+        },
+        "is_backward": {
+          "type": "boolean",
+          "description": "Whether this edge flows backward in the layout direction. Routed level only."
+        },
+        "source_port": {
+          "$ref": "#/$defs/Port",
+          "description": "Logical source port anchor metadata describing route intent. This may differ from the visible path endpoint. Routed level only."
+        },
+        "target_port": {
+          "$ref": "#/$defs/Port",
+          "description": "Logical target port anchor metadata describing route intent. This may differ from the visible path endpoint. Routed level only."
+        },
+        "label_side": {
+          "enum": ["above", "below", "center"],
+          "description": "Label side relative to the edge. Appears at both layout and routed geometry levels when the engine assigned a side; omitted otherwise."
+        },
+        "label_rect": {
+          "$ref": "#/$defs/Rect",
+          "description": "Padded label rectangle in MMDS coordinate space. Includes label_padding_x / label_padding_y on each side. Routed level only."
+        }
+      }
+    },
+    "Subgraph": {
+      "type": "object",
+      "required": ["id", "title", "children"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Subgraph identifier."
+        },
+        "title": {
+          "type": "string",
+          "description": "Display title."
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "IDs of nodes directly in this subgraph."
+        },
+        "parent": {
+          "type": "string",
+          "description": "Parent subgraph ID, if nested."
+        },
+        "direction": {
+          "enum": ["TD", "TB", "BT", "LR", "RL"],
+          "description": "Subgraph direction override."
+        },
+        "bounds": {
+          "$ref": "#/$defs/Bounds",
+          "description": "Subgraph bounding box. Routed level only."
+        }
+      }
+    },
+    "Port": {
+      "type": "object",
+      "required": ["face", "fraction", "position", "group_size"],
+      "properties": {
+        "face": {
+          "enum": ["top", "bottom", "left", "right"],
+          "description": "Logical node boundary face for route intent."
+        },
+        "fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fractional position along the face (0.0 = start, 1.0 = end). For top/bottom faces, 0.0 is left and 1.0 is right. For left/right faces, 0.0 is top and 1.0 is bottom."
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "description": "Logical anchor coordinate derived from face, fraction, and node bounds in MMDS coordinate space. Not guaranteed to equal the visible path endpoint."
+        },
+        "group_size": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of edges attached to this face of this node."
+        }
+      }
+    },
+    "NodeStyleExtension": {
+      "type": "object",
+      "properties": {
+        "nodes": {
+          "type": "object",
+          "description": "Node-ID keyed style overrides replayed into renderer-visible node fill/stroke/text colors, plus any user-applied class names from Mermaid `class`/`:::` annotations.",
+          "additionalProperties": {
+            "$ref": "#/$defs/NodeStyle"
+          }
+        },
+        "edges": {
+          "type": "object",
+          "description": "Edge-ID keyed style overrides replayed into renderer-visible edge label font properties.",
+          "additionalProperties": {
+            "$ref": "#/$defs/EdgeLabelStyle"
+          }
+        },
+        "subgraphs": {
+          "type": "object",
+          "description": "Subgraph-ID keyed style overrides replayed into renderer-visible subgraph container and title properties, plus any user-applied class names from Mermaid `class`/`:::` annotations.",
+          "additionalProperties": {
+            "$ref": "#/$defs/SubgraphStyle"
+          }
+        }
+      },
+      "anyOf": [
+        { "required": ["nodes"] },
+        { "required": ["edges"] },
+        { "required": ["subgraphs"] }
+      ],
+      "additionalProperties": false
+    },
+    "TextMetricsExtension": {
+      "type": "object",
+      "required": ["metricsProfile", "defaultTextStyle", "layoutText"],
+      "properties": {
+        "metricsProfile": {
+          "$ref": "#/$defs/TextMetricsProfile"
+        },
+        "defaultTextStyle": {
+          "$ref": "#/$defs/DefaultTextStyle"
+        },
+        "layoutText": {
+          "$ref": "#/$defs/LayoutTextMetrics"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Graph-family text metrics identity and layout-time values used for deterministic MMDS replay."
+    },
+    "TextMeasurementsExtension": {
+      "type": "object",
+      "required": ["profileRef", "textStyles", "lineWidths", "scalarWidths"],
+      "properties": {
+        "profileRef": {
+          "$ref": "#/$defs/TextMeasurementsProfileRef"
+        },
+        "textStyles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/TextMeasurementTextStyle"
+          },
+          "description": "Dynamic text style identities used by measurement cache entries."
+        },
+        "lineWidths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TextMeasurementLineWidth"
+          },
+          "description": "Measured widths returned by dynamic measure_line_width(text) calls."
+        },
+        "scalarWidths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TextMeasurementScalarWidth"
+          },
+          "description": "Measured widths returned by dynamic measure_scalar_width(ch) calls."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Provider-free replay cache for dynamic graph-family text measurement queries."
+    },
+    "TextMeasurementsProfileRef": {
+      "type": "object",
+      "required": ["id", "source", "version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Dynamic text metrics profile identifier this measurement cache belongs to."
+        },
+        "source": {
+          "const": "dynamic",
+          "description": "Text measurements sidecars are only valid for dynamic profile provenance."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Dynamic text metrics profile version this measurement cache belongs to."
+        }
+      },
+      "additionalProperties": false
+    },
+    "TextMeasurementTextStyle": {
+      "type": "object",
+      "required": ["id", "fontFamily", "fontSize", "fontStyle", "fontWeight", "lineHeight", "cssFont"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Style id referenced by lineWidths and scalarWidths entries."
+        },
+        "fontFamily": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS font-family identity for this text style."
+        },
+        "fontSize": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Font size in pixels for this text style."
+        },
+        "fontStyle": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS font-style identity for this text style."
+        },
+        "fontWeight": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS font-weight identity for this text style."
+        },
+        "lineHeight": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Line height in pixels for this text style."
+        },
+        "cssFont": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical CSS font shorthand measured by the dynamic provider."
+        }
+      },
+      "additionalProperties": false
+    },
+    "EdgeLabelStyle": {
+      "type": "object",
+      "properties": {
+        "stroke-width": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Raw Mermaid linkStyle stroke-width token."
+        },
+        "font-family": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Raw Mermaid linkStyle font-family token for the edge label."
+        },
+        "font-size": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Raw Mermaid linkStyle font-size token for the edge label."
+        },
+        "font-style": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Raw Mermaid linkStyle font-style token for the edge label."
+        },
+        "font-weight": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Raw Mermaid linkStyle font-weight token for the edge label."
+        }
+      },
+      "additionalProperties": false
+    },
+    "TextMeasurementLineWidth": {
+      "type": "object",
+      "required": ["style", "text", "width"],
+      "properties": {
+        "style": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Style id from textStyles for this measured line query."
+        },
+        "text": {
+          "type": "string",
+          "description": "Exact text passed to measure_line_width."
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Measured line width in pixels."
+        }
+      },
+      "additionalProperties": false
+    },
+    "TextMeasurementScalarWidth": {
+      "type": "object",
+      "required": ["style", "text", "width"],
+      "properties": {
+        "style": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Style id from textStyles for this measured scalar query."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1,
+          "description": "Exact single Unicode scalar passed to measure_scalar_width; runtime validates with Rust char semantics."
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Measured scalar width in pixels."
+        }
+      },
+      "additionalProperties": false
+    },
+    "TextMetricsProfile": {
+      "type": "object",
+      "required": ["id", "source", "version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Text metrics profile identifier, e.g. direct default 'mmdflux-sans-v1' or compatibility 'mmdflux-heuristic-proportional-v1'."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["heuristic", "recorded", "dynamic"],
+          "description": "Profile provenance category: 'heuristic' for compatibility estimates, 'recorded' for generated static metrics, or 'dynamic' for provider-bound live measurement."
+        },
+        "version": {
+          "type": "integer",
+          "description": "Profile payload version."
+        }
+      },
+      "additionalProperties": false
+    },
+    "DefaultTextStyle": {
+      "type": "object",
+      "required": ["font-family", "font-size", "font-style", "font-weight", "line-height"],
+      "properties": {
+        "font-family": {
+          "type": "string",
+          "description": "CSS font-family stack used by the profile."
+        },
+        "font-size": {
+          "type": "number",
+          "description": "Default font size in pixels."
+        },
+        "font-style": {
+          "type": "string",
+          "description": "CSS font-style value."
+        },
+        "font-weight": {
+          "type": "string",
+          "description": "CSS font-weight value."
+        },
+        "line-height": {
+          "type": "number",
+          "description": "Line height in pixels."
+        }
+      },
+      "additionalProperties": false
+    },
+    "LayoutTextMetrics": {
+      "type": "object",
+      "required": [
+        "node-padding-x",
+        "node-padding-y",
+        "label-padding-x",
+        "label-padding-y",
+        "edge-label-max-width"
+      ],
+      "properties": {
+        "node-padding-x": {
+          "type": "number",
+          "description": "Horizontal node padding used for proportional graph-family layout."
+        },
+        "node-padding-y": {
+          "type": "number",
+          "description": "Vertical node padding used for proportional graph-family layout."
+        },
+        "label-padding-x": {
+          "type": "number",
+          "description": "Horizontal edge-label padding used for layout and SVG label backgrounds."
+        },
+        "label-padding-y": {
+          "type": "number",
+          "description": "Vertical edge-label padding used for layout and SVG label backgrounds."
+        },
+        "edge-label-max-width": {
+          "type": ["number", "null"],
+          "description": "Maximum edge-label wrap width in pixels, or null when wrapping is disabled."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ViewExtension": {
+      "type": "object",
+      "required": ["layout_mode", "boundary_policy"],
+      "properties": {
+        "layout_mode": {
+          "const": "shared_coordinates",
+          "description": "Materialized view layout policy. V1 preserves canonical shared coordinates."
+        },
+        "boundary_policy": {
+          "const": "omit",
+          "description": "Materialized view boundary policy. V1 omits edges connected to nodes outside the view."
+        }
+      },
+      "additionalProperties": true,
+      "description": "Marker for MMDS payloads materialized by the Rust views API."
+    },
+    "SubgraphStyle": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Per-subgraph extension entry: any subset of NodeStyle fields and/or an array of user-applied class names from Mermaid `class`/`:::` statements on the subgraph id.",
+      "properties": {
+        "fill": { "type": "string", "description": "Raw color token for subgraph fill." },
+        "stroke": { "type": "string", "description": "Raw color token for subgraph border stroke." },
+        "color": { "type": "string", "description": "Raw color token for subgraph title text." },
+        "font-family": { "type": "string", "description": "CSS font-family value for subgraph title text." },
+        "font-size": { "type": "string", "description": "CSS font-size value for subgraph title text." },
+        "font-style": { "type": "string", "description": "CSS font-style value (e.g. italic)." },
+        "font-weight": { "type": "string", "description": "CSS font-weight value (e.g. bold, 700)." },
+        "stroke-width": { "type": "string", "description": "CSS stroke-width value (e.g. 4px)." },
+        "stroke-dasharray": { "type": "string", "description": "SVG stroke-dasharray value (e.g. 5,3)." },
+        "rx": { "type": "string", "description": "SVG rx (horizontal border-radius) value." },
+        "ry": { "type": "string", "description": "SVG ry (vertical border-radius) value. When omitted, SVG falls back to rx." },
+        "classNames": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Original Mermaid class names applied to this subgraph (preserves application order)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "NodeStyle": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "fill": {
+          "type": "string",
+          "description": "Raw color token for node fill."
+        },
+        "stroke": {
+          "type": "string",
+          "description": "Raw color token for node border stroke."
+        },
+        "color": {
+          "type": "string",
+          "description": "Raw color token for node label text."
+        },
+        "font-family": {
+          "type": "string",
+          "description": "CSS font-family value for node label text."
+        },
+        "font-size": {
+          "type": "string",
+          "description": "CSS font-size value for node label text."
+        },
+        "font-style": {
+          "type": "string",
+          "description": "CSS font-style value (e.g. italic)."
+        },
+        "font-weight": {
+          "type": "string",
+          "description": "CSS font-weight value (e.g. bold, 700)."
+        },
+        "stroke-width": {
+          "type": "string",
+          "description": "CSS stroke-width value (e.g. 4px)."
+        },
+        "stroke-dasharray": {
+          "type": "string",
+          "description": "SVG stroke-dasharray value (e.g. 5,3)."
+        },
+        "rx": {
+          "type": "string",
+          "description": "SVG rx (horizontal border-radius) value."
+        },
+        "ry": {
+          "type": "string",
+          "description": "SVG ry (vertical border-radius) value. When omitted, SVG falls back to rx."
+        },
+        "classNames": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Original Mermaid class names applied to this node (preserves application order)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "Position": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": {
+          "type": "number",
+          "description": "X coordinate in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned."
+        },
+        "y": {
+          "type": "number",
+          "description": "Y coordinate in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned."
+        }
+      }
+    },
+    "Size": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": {
+          "type": "number",
+          "description": "Width in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned."
+        },
+        "height": {
+          "type": "number",
+          "description": "Height in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned."
+        }
+      }
+    },
+    "Bounds": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": {
+          "type": "number",
+          "description": "Overall width in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned."
+        },
+        "height": {
+          "type": "number",
+          "description": "Overall height in unitless MMDS coordinate space. In current mmdflux output, values are SVG-pixel-aligned. Consumers should preserve width/height aspect ratio when scaling."
+        }
+      }
+    },
+    "Rect": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      }
+    },
+    "Participant": {
+      "type": "object",
+      "required": ["id", "label", "kind", "position", "size", "lifeline_x"],
+      "properties": {
+        "id": { "type": "string", "description": "Participant identifier from source." },
+        "label": { "type": "string", "description": "Display label (alias if provided, otherwise id)." },
+        "kind": { "enum": ["participant", "actor"], "description": "Participant visual kind." },
+        "position": { "$ref": "#/$defs/Position", "description": "Top-left of header box." },
+        "size": { "$ref": "#/$defs/Size", "description": "Header box dimensions." },
+        "lifeline_x": { "type": "number", "description": "Center x of the vertical lifeline." }
+      }
+    },
+    "Message": {
+      "type": "object",
+      "required": ["id", "from", "to", "line_style", "arrow_head", "text", "y"],
+      "properties": {
+        "id": { "type": "string", "description": "Deterministic message ID (m0, m1, ...)." },
+        "from": { "type": "integer", "minimum": 0, "description": "Source participant index." },
+        "to": { "type": "integer", "minimum": 0, "description": "Target participant index." },
+        "line_style": { "enum": ["solid", "dashed"], "description": "Line style." },
+        "arrow_head": { "enum": ["filled", "none", "cross", "async"], "description": "Arrowhead shape." },
+        "text": { "type": "string", "description": "Message label text." },
+        "y": { "type": "number", "description": "Vertical position of the arrow." }
+      }
+    },
+    "Note": {
+      "type": "object",
+      "required": ["placement", "participants", "text", "position", "size"],
+      "properties": {
+        "placement": { "enum": ["left_of", "right_of", "over"], "description": "Note placement relative to participants." },
+        "participants": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Participant indices the note relates to." },
+        "text": { "type": "string", "description": "Note text." },
+        "position": { "$ref": "#/$defs/Position", "description": "Top-left of note box." },
+        "size": { "$ref": "#/$defs/Size", "description": "Note box dimensions." }
+      }
+    },
+    "Activation": {
+      "type": "object",
+      "required": ["participant", "y_start", "y_end", "depth"],
+      "properties": {
+        "participant": { "type": "integer", "minimum": 0, "description": "Participant index." },
+        "y_start": { "type": "number", "description": "Top of the activation bar." },
+        "y_end": { "type": "number", "description": "Bottom of the activation bar." },
+        "depth": { "type": "integer", "minimum": 0, "description": "Nesting depth (0 = outermost)." }
+      }
+    },
+    "BlockDivider": {
+      "type": "object",
+      "required": ["y", "kind", "label"],
+      "properties": {
+        "y": { "type": "number", "description": "Vertical position of the divider." },
+        "kind": { "enum": ["else", "and", "option"], "description": "Divider kind." },
+        "label": { "type": "string", "description": "Divider label." }
+      }
+    },
+    "Block": {
+      "type": "object",
+      "required": ["kind", "label", "rect"],
+      "properties": {
+        "kind": { "enum": ["loop", "alt", "opt", "par", "critical", "break", "rect"], "description": "Interaction operator." },
+        "label": { "type": "string", "description": "Block header label." },
+        "rect": { "$ref": "#/$defs/Rect", "description": "Bounding rectangle." },
+        "dividers": { "type": "array", "items": { "$ref": "#/$defs/BlockDivider" }, "default": [], "description": "Interior dividers (else, and, option)." }
+      }
+    },
+    "ParticipantBox": {
+      "type": "object",
+      "required": ["participants", "rect"],
+      "properties": {
+        "label": { "type": "string", "description": "Optional grouping label." },
+        "color": { "type": "string", "description": "Optional fill color." },
+        "participants": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Participant indices in this grouping." },
+        "rect": { "$ref": "#/$defs/Rect", "description": "Bounding rectangle." }
+      }
+    }
+  }
+}

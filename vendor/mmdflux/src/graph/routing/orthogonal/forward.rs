@@ -1,0 +1,1619 @@
+use super::constants::MIN_PORT_CORNER_INSET_FORWARD;
+use super::endpoints::{
+    RectFace, boundary_face_excluding_corners, boundary_face_including_corners,
+    clamp_face_coordinate_with_corner_inset, clip_point_to_rect_face_with_inset,
+    endpoint_rect_and_shape, project_endpoint_to_shape,
+};
+use super::path_utils::{collapse_collinear_interior_points, points_match};
+use crate::graph::geometry::{GraphGeometry, LayoutEdge};
+use crate::graph::space::FPoint;
+use crate::graph::{Direction, Shape};
+
+pub(super) fn avoid_forward_td_bt_primary_lane_node_intrusion(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+    target_primary_channel_depth: Option<f64>,
+) {
+    const EPS: f64 = 0.000_001;
+    const INTRUSION_MARGIN: f64 = -0.5;
+    const NODE_CLEARANCE: f64 = 8.0;
+    const MIN_SOURCE_STEM: f64 = 8.0;
+    const MIN_TARGET_STEM: f64 = 16.0;
+
+    if !matches!(direction, Direction::TopDown | Direction::BottomTop) || path.len() != 4 {
+        return;
+    }
+
+    let p0 = path[0];
+    let p1 = path[1];
+    let p2 = path[2];
+    let p3 = path[3];
+
+    let first_vertical = (p0.x - p1.x).abs() <= EPS && (p0.y - p1.y).abs() > EPS;
+    let middle_horizontal = (p1.y - p2.y).abs() <= EPS && (p1.x - p2.x).abs() > EPS;
+    let terminal_vertical = (p2.x - p3.x).abs() <= EPS && (p2.y - p3.y).abs() > EPS;
+    if !(first_vertical && middle_horizontal && terminal_vertical) {
+        return;
+    }
+
+    let flow_sign = if p3.y >= p0.y { 1.0 } else { -1.0 };
+    let mut candidate_lane_y = p1.y;
+    let mut saw_primary_intrusion = false;
+
+    for (node_id, node) in &geometry.nodes {
+        if node_id == &edge.from || node_id == &edge.to {
+            continue;
+        }
+        let rect = node.rect;
+        let first_crosses = super::collision::axis_aligned_segment_crosses_rect_interior(
+            p0,
+            p1,
+            rect,
+            INTRUSION_MARGIN,
+        );
+        let middle_crosses = super::collision::axis_aligned_segment_crosses_rect_interior(
+            p1,
+            p2,
+            rect,
+            INTRUSION_MARGIN,
+        );
+        if !first_crosses && !middle_crosses {
+            continue;
+        }
+
+        saw_primary_intrusion = true;
+        if flow_sign > 0.0 {
+            candidate_lane_y = candidate_lane_y.min(rect.y - NODE_CLEARANCE);
+        } else {
+            candidate_lane_y = candidate_lane_y.max(rect.y + rect.height + NODE_CLEARANCE);
+        }
+    }
+
+    if saw_primary_intrusion {
+        let min_lane = p0.y + flow_sign * MIN_SOURCE_STEM;
+        let max_lane = p3.y - flow_sign * MIN_TARGET_STEM;
+        let lane_y = if flow_sign > 0.0 {
+            if max_lane < min_lane {
+                return;
+            }
+            candidate_lane_y.clamp(min_lane, max_lane)
+        } else {
+            if min_lane < max_lane {
+                return;
+            }
+            candidate_lane_y.clamp(max_lane, min_lane)
+        };
+
+        if (lane_y - p1.y).abs() > EPS {
+            let new_p1 = FPoint::new(p1.x, lane_y);
+            let new_p2 = FPoint::new(p2.x, lane_y);
+            if (new_p1.y - p0.y).abs() > EPS
+                && (new_p2.x - new_p1.x).abs() > EPS
+                && (p3.y - new_p2.y).abs() > EPS
+            {
+                path[1] = new_p1;
+                path[2] = new_p2;
+            }
+        }
+    }
+
+    if let Some(detoured) = reroute_forward_td_bt_terminal_intrusion_with_safe_vertical_corridor(
+        path, edge, geometry, direction,
+    ) {
+        *path = detoured;
+    }
+
+    stagger_forward_td_bt_terminal_horizontal_support(path, target_primary_channel_depth);
+    collapse_tiny_forward_td_bt_lateral_jog(path, edge, geometry, direction);
+}
+
+/// General-purpose forward node-intrusion avoidance for any direction and path
+/// length.  Scans all interior segments for non-endpoint node crossings and
+/// inserts cross-axis jogs to detour around blockers.
+///
+/// This complements the TD/BT-specific 4-point avoidance above: it handles
+/// LR/RL directions and multi-bend paths that the canonical function skips.
+pub(super) fn avoid_forward_node_intrusions(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+) {
+    // Margin 0.0 means only segments strictly inside the node rect interior
+    // trigger avoidance.  -0.5 was too aggressive and caught boundary-touching
+    // segments (e.g. shared column edges) causing unnecessary reroutes that
+    // worsened the visual result.
+    const INTRUSION_MARGIN: f64 = 0.0;
+    const NODE_CLEARANCE: f64 = 8.0;
+    const EPS: f64 = 0.000_001;
+    const MAX_PASSES: usize = 4;
+
+    if path.len() < 3 {
+        return;
+    }
+
+    for _pass in 0..MAX_PASSES {
+        // Find the first segment that crosses a non-endpoint node.
+        let intrusion = (0..path.len() - 1).find(|&i| {
+            let a = path[i];
+            let b = path[i + 1];
+            geometry.nodes.iter().any(|(nid, node)| {
+                nid != &edge.from
+                    && nid != &edge.to
+                    && super::collision::axis_aligned_segment_crosses_rect_interior(
+                        a,
+                        b,
+                        node.rect,
+                        INTRUSION_MARGIN,
+                    )
+            })
+        });
+        let Some(seg_idx) = intrusion else {
+            return; // No more intrusions — done.
+        };
+
+        let a = path[seg_idx];
+        let b = path[seg_idx + 1];
+
+        // Collect the bounding envelope of all blockers on this segment.
+        let mut env_min_x = f64::INFINITY;
+        let mut env_max_x = f64::NEG_INFINITY;
+        let mut env_min_y = f64::INFINITY;
+        let mut env_max_y = f64::NEG_INFINITY;
+        for (nid, node) in &geometry.nodes {
+            if nid == &edge.from || nid == &edge.to {
+                continue;
+            }
+            if !super::collision::axis_aligned_segment_crosses_rect_interior(
+                a,
+                b,
+                node.rect,
+                INTRUSION_MARGIN,
+            ) {
+                continue;
+            }
+            env_min_x = env_min_x.min(node.rect.x);
+            env_max_x = env_max_x.max(node.rect.x + node.rect.width);
+            env_min_y = env_min_y.min(node.rect.y);
+            env_max_y = env_max_y.max(node.rect.y + node.rect.height);
+        }
+
+        let is_horizontal = (a.y - b.y).abs() <= EPS;
+        let is_vertical = (a.x - b.x).abs() <= EPS;
+
+        if is_horizontal {
+            // Horizontal segment at y = a.y crosses blockers.
+            // Choose safe y: above or below the blocker envelope.
+            let above_y = env_min_y - NODE_CLEARANCE;
+            let below_y = env_max_y + NODE_CLEARANCE;
+            let safe_y = if (a.y - above_y).abs() <= (a.y - below_y).abs() {
+                above_y
+            } else {
+                below_y
+            };
+
+            // Verify the detour horizontal at safe_y is itself clear.
+            let ja = FPoint::new(a.x, safe_y);
+            let jb = FPoint::new(b.x, safe_y);
+            let detour_clear = !geometry.nodes.iter().any(|(nid, node)| {
+                nid != &edge.from
+                    && nid != &edge.to
+                    && super::collision::axis_aligned_segment_crosses_rect_interior(
+                        ja,
+                        jb,
+                        node.rect,
+                        INTRUSION_MARGIN,
+                    )
+            });
+            if !detour_clear {
+                // Try the other side.
+                let alt_y = if safe_y == above_y { below_y } else { above_y };
+                let ja2 = FPoint::new(a.x, alt_y);
+                let jb2 = FPoint::new(b.x, alt_y);
+                let alt_clear = !geometry.nodes.iter().any(|(nid, node)| {
+                    nid != &edge.from
+                        && nid != &edge.to
+                        && super::collision::axis_aligned_segment_crosses_rect_interior(
+                            ja2,
+                            jb2,
+                            node.rect,
+                            INTRUSION_MARGIN,
+                        )
+                });
+                if !alt_clear {
+                    continue; // Both sides blocked — skip this segment.
+                }
+                // Use the alternative.
+                splice_horizontal_jog(path, seg_idx, alt_y, EPS);
+            } else {
+                splice_horizontal_jog(path, seg_idx, safe_y, EPS);
+            }
+        } else if is_vertical {
+            // Vertical segment at x = a.x crosses blockers.
+            let left_x = env_min_x - NODE_CLEARANCE;
+            let right_x = env_max_x + NODE_CLEARANCE;
+            let preferred_safe_x = preferred_lr_source_perimeter_x(
+                path,
+                seg_idx,
+                edge,
+                geometry,
+                direction,
+                INTRUSION_MARGIN,
+                EPS,
+            );
+            let (safe_x, safe_x_validated_clear) = if let Some(preferred_safe_x) = preferred_safe_x
+            {
+                (preferred_safe_x, true)
+            } else if (a.x - left_x).abs() <= (a.x - right_x).abs() {
+                (left_x, false)
+            } else {
+                (right_x, false)
+            };
+
+            let ja = FPoint::new(safe_x, a.y);
+            let jb = FPoint::new(safe_x, b.y);
+            let detour_clear = if safe_x_validated_clear {
+                debug_assert!(
+                    !super::collision::segment_crosses_any_other_node_interior(
+                        edge,
+                        geometry,
+                        ja,
+                        jb,
+                        INTRUSION_MARGIN,
+                    ),
+                    "preferred LR perimeter detour must be node-clear"
+                );
+                true
+            } else {
+                !super::collision::segment_crosses_any_other_node_interior(
+                    edge,
+                    geometry,
+                    ja,
+                    jb,
+                    INTRUSION_MARGIN,
+                )
+            };
+            if !detour_clear {
+                let alt_x = if safe_x == left_x { right_x } else { left_x };
+                let ja2 = FPoint::new(alt_x, a.y);
+                let jb2 = FPoint::new(alt_x, b.y);
+                let alt_clear = !super::collision::segment_crosses_any_other_node_interior(
+                    edge,
+                    geometry,
+                    ja2,
+                    jb2,
+                    INTRUSION_MARGIN,
+                );
+                if !alt_clear {
+                    continue;
+                }
+                splice_vertical_jog(path, seg_idx, alt_x, EPS);
+            } else {
+                splice_vertical_jog(path, seg_idx, safe_x, EPS);
+            }
+        }
+        // After a splice, collapse any collinear interior points and continue
+        // scanning from the top.
+        collapse_collinear_interior_points(path);
+    }
+}
+
+fn preferred_lr_source_perimeter_x(
+    path: &[FPoint],
+    seg_idx: usize,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+    intrusion_margin: f64,
+    eps: f64,
+) -> Option<f64> {
+    if !matches!(direction, Direction::LeftRight | Direction::RightLeft) || seg_idx != 0 {
+        return None;
+    }
+
+    let a = path[seg_idx];
+    let b = path[seg_idx + 1];
+    if (a.x - b.x).abs() > eps {
+        return None;
+    }
+
+    let next = *path.get(seg_idx + 2)?;
+    if (b.y - next.y).abs() > eps {
+        return None;
+    }
+
+    let candidate_x = next.x;
+    let advances_with_flow = match direction {
+        Direction::LeftRight => candidate_x > a.x + eps,
+        Direction::RightLeft => candidate_x < a.x - eps,
+        _ => false,
+    };
+    if !advances_with_flow {
+        return None;
+    }
+
+    // When a source-side vertical fan-in leg crosses a peer source node, the
+    // local nearest-clear detour can thread through peer approach lanes. If the
+    // route already has a downstream perimeter column and the two replacement
+    // segments are node-clear, use that column instead.
+    let jog_start = FPoint::new(candidate_x, a.y);
+    let jog_end = FPoint::new(candidate_x, b.y);
+    if super::collision::segment_crosses_any_other_node_interior(
+        edge,
+        geometry,
+        a,
+        jog_start,
+        intrusion_margin,
+    ) || super::collision::segment_crosses_any_other_node_interior(
+        edge,
+        geometry,
+        jog_start,
+        jog_end,
+        intrusion_margin,
+    ) {
+        return None;
+    }
+
+    Some(candidate_x)
+}
+
+/// Prevent forward edges from transiting through their own target node
+/// interior.  Detects non-terminal segments that cross the target rect and
+/// splices detours around it.  Also handles the terminal segment when the
+/// penultimate-to-endpoint approach passes through the target interior
+/// (e.g. a vertical drop from above to the bottom face).
+///
+/// Returns `true` if the path was modified, signaling that the caller
+/// should set `preserve_orthogonal_topology` to prevent the SVG renderer
+/// from collapsing the detour.
+pub(super) fn avoid_forward_target_transit(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+    rank_span: usize,
+) -> bool {
+    use super::endpoints::endpoint_rect_and_shape;
+
+    const INTRUSION_MARGIN: f64 = -0.5;
+    const NODE_CLEARANCE: f64 = 8.0;
+    const EPS: f64 = 0.000_001;
+    const MAX_PASSES: usize = 4;
+
+    if path.len() < 3 {
+        return false;
+    }
+
+    let Some((target_rect, _shape)) =
+        endpoint_rect_and_shape(geometry, &edge.to, edge.to_subgraph.as_deref())
+    else {
+        return false;
+    };
+
+    let mut modified = false;
+
+    // Fix non-terminal segments that cross the target interior.
+    for _pass in 0..MAX_PASSES {
+        let last_seg = path.len().saturating_sub(2);
+
+        let problem = (0..last_seg).find(|&i| {
+            let a = path[i];
+            let b = path[i + 1];
+            super::collision::axis_aligned_segment_crosses_rect_interior(
+                a,
+                b,
+                target_rect,
+                INTRUSION_MARGIN,
+            )
+        });
+        let Some(seg_idx) = problem else {
+            break;
+        };
+
+        let a = path[seg_idx];
+        let b = path[seg_idx + 1];
+        let is_horizontal = (a.y - b.y).abs() <= EPS;
+        let is_vertical = (a.x - b.x).abs() <= EPS;
+
+        if is_horizontal {
+            let above_y = target_rect.y - NODE_CLEARANCE;
+            let below_y = target_rect.y + target_rect.height + NODE_CLEARANCE;
+            let safe_y = if (a.y - above_y).abs() <= (a.y - below_y).abs() {
+                above_y
+            } else {
+                below_y
+            };
+            splice_horizontal_jog(path, seg_idx, safe_y, EPS);
+        } else if is_vertical {
+            let left_x = target_rect.x - NODE_CLEARANCE;
+            let right_x = target_rect.x + target_rect.width + NODE_CLEARANCE;
+            let safe_x = if (a.x - left_x).abs() <= (a.x - right_x).abs() {
+                left_x
+            } else {
+                right_x
+            };
+            splice_vertical_jog(path, seg_idx, safe_x, EPS);
+        }
+        collapse_collinear_interior_points(path);
+        modified = true;
+    }
+
+    // Fix terminal segment: if the penultimate-to-endpoint segment crosses
+    // the target interior AND approaches from the wrong side of the endpoint
+    // face, splice a detour that approaches from outside the target.
+    //
+    // Normal approaches (e.g. horizontal to the left face in LR) naturally
+    // enter the target at the endpoint boundary — those are correct and must
+    // not be modified.
+    if path.len() >= 3 {
+        let last = path.len() - 1;
+        let pen = path[last - 1];
+        let end = path[last];
+
+        let terminal_crosses = super::collision::axis_aligned_segment_crosses_rect_interior(
+            pen,
+            end,
+            target_rect,
+            INTRUSION_MARGIN,
+        );
+
+        // Determine if the approach comes from the wrong side of the face.
+        let wrong_side_approach = terminal_crosses && {
+            let face_tol = 2.0;
+            let near_top = (end.y - target_rect.y).abs() <= face_tol;
+            let near_bottom = (end.y - (target_rect.y + target_rect.height)).abs() <= face_tol;
+            let near_left = (end.x - target_rect.x).abs() <= face_tol;
+            let near_right = (end.x - (target_rect.x + target_rect.width)).abs() <= face_tol;
+
+            if near_top {
+                pen.y > end.y + EPS // approaching top from below = wrong
+            } else if near_bottom {
+                pen.y < end.y - EPS // approaching bottom from above = wrong
+            } else if near_left {
+                pen.x > end.x + EPS // approaching left from right = wrong
+            } else if near_right {
+                pen.x < end.x - EPS // approaching right from left = wrong
+            } else {
+                // Endpoint not near any face — treat as wrong-side.
+                true
+            }
+        };
+
+        if wrong_side_approach {
+            let is_v = (pen.x - end.x).abs() <= EPS;
+            let is_h = (pen.y - end.y).abs() <= EPS;
+
+            if is_v {
+                let left_x = target_rect.x - NODE_CLEARANCE;
+                let right_x = target_rect.x + target_rect.width + NODE_CLEARANCE;
+                let safe_x = if (pen.x - left_x).abs() <= (pen.x - right_x).abs() {
+                    left_x
+                } else {
+                    right_x
+                };
+                let approach_y = if end.y > target_rect.y + target_rect.height / 2.0 {
+                    target_rect.y + target_rect.height + NODE_CLEARANCE
+                } else {
+                    target_rect.y - NODE_CLEARANCE
+                };
+                let jog1 = FPoint::new(safe_x, pen.y);
+                let jog2 = FPoint::new(safe_x, approach_y);
+                let jog3 = FPoint::new(end.x, approach_y);
+                path.insert(last, jog3);
+                path.insert(last, jog2);
+                path.insert(last, jog1);
+                collapse_collinear_interior_points(path);
+                modified = true;
+            } else if is_h {
+                let above_y = target_rect.y - NODE_CLEARANCE;
+                let below_y = target_rect.y + target_rect.height + NODE_CLEARANCE;
+                let safe_y = if (pen.y - above_y).abs() <= (pen.y - below_y).abs() {
+                    above_y
+                } else {
+                    below_y
+                };
+                let approach_x = if end.x > target_rect.x + target_rect.width / 2.0 {
+                    target_rect.x + target_rect.width + NODE_CLEARANCE
+                } else {
+                    target_rect.x - NODE_CLEARANCE
+                };
+                let jog1 = FPoint::new(pen.x, safe_y);
+                let jog2 = FPoint::new(approach_x, safe_y);
+                let jog3 = FPoint::new(approach_x, end.y);
+                path.insert(last, jog3);
+                path.insert(last, jog2);
+                path.insert(last, jog1);
+                collapse_collinear_interior_points(path);
+                modified = true;
+            }
+        }
+    }
+
+    // Only preserve unmodified terminal elbows when the edge approaches the
+    // target from a non-flow face. Benign LR/RL fan-out edges that already end
+    // on the normal left/right target face should not be forced through the
+    // topology-preservation path because the text router can consume their
+    // simplified H-V-H draw path directly.
+    if !modified && rank_span >= 2 && path.len() >= 5 {
+        let flow_face = match direction {
+            Direction::LeftRight => RectFace::Left,
+            Direction::RightLeft => RectFace::Right,
+            _ => return modified,
+        };
+        let end = *path.last().expect("path len checked");
+        let end_face = boundary_face_including_corners(end, target_rect, 2.0);
+        if end_face.is_none_or(|face| face != flow_face) {
+            let n = path.len();
+            let before_pre = path[n - 4];
+            let elbow = path[n - 2];
+            let end = path[n - 1];
+            let terminal_leg = ((elbow.x - end.x).powi(2) + (elbow.y - end.y).powi(2)).sqrt();
+            if terminal_leg < 14.0 && terminal_leg > EPS {
+                let elbow_a = FPoint::new(end.x, before_pre.y);
+                let elbow_b = FPoint::new(before_pre.x, end.y);
+                let crosses_a = super::collision::axis_aligned_segment_crosses_rect_interior(
+                    before_pre,
+                    elbow_a,
+                    target_rect,
+                    INTRUSION_MARGIN,
+                ) || super::collision::axis_aligned_segment_crosses_rect_interior(
+                    elbow_a,
+                    end,
+                    target_rect,
+                    INTRUSION_MARGIN,
+                );
+                let crosses_b = super::collision::axis_aligned_segment_crosses_rect_interior(
+                    before_pre,
+                    elbow_b,
+                    target_rect,
+                    INTRUSION_MARGIN,
+                ) || super::collision::axis_aligned_segment_crosses_rect_interior(
+                    elbow_b,
+                    end,
+                    target_rect,
+                    INTRUSION_MARGIN,
+                );
+                if crosses_a || crosses_b {
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    modified
+}
+
+/// Collapse primary-axis reversals (overshoot hairpins) in forward orthogonal
+/// paths.
+///
+/// Detects segments where the primary-axis coordinate goes backward, then
+/// removes the overshooting loop by connecting the pre-overshoot point
+/// directly to the post-backtrack continuation at the backtrack coordinate.
+///
+/// Example for LR (primary axis = x):
+///   (a, 16) → (1908, 16) → (1908, -5) → (1864, -5) → (1864, 262) → (target, 262)
+/// becomes:
+///   (a, 16) → (1864, 16) → (1864, 262) → (target, 262)
+pub(super) fn collapse_forward_primary_axis_reversals(
+    path: &mut Vec<FPoint>,
+    direction: Direction,
+) {
+    const EPS: f64 = 0.5;
+    const MAX_PASSES: usize = 4;
+
+    let primary_is_x = matches!(direction, Direction::LeftRight | Direction::RightLeft);
+    let forward_sign: f64 = match direction {
+        Direction::LeftRight | Direction::TopDown => 1.0,
+        Direction::RightLeft | Direction::BottomTop => -1.0,
+    };
+
+    for _pass in 0..MAX_PASSES {
+        if path.len() < 4 {
+            return;
+        }
+
+        // Find the first segment where the primary axis goes backward.
+        let reversal_seg = (0..path.len() - 1).find(|&i| {
+            let delta = if primary_is_x {
+                path[i + 1].x - path[i].x
+            } else {
+                path[i + 1].y - path[i].y
+            };
+            delta * forward_sign < -EPS
+        });
+        let Some(rev_idx) = reversal_seg else {
+            return; // No more reversals.
+        };
+
+        // The overshoot point is path[rev_idx]: the path went too far in the
+        // primary axis, and path[rev_idx]→path[rev_idx+1] goes backward.
+        // Find the backtrack target: the coordinate the path settles at after
+        // the reversal.
+        let backtrack_coord = if primary_is_x {
+            path[rev_idx + 1].x
+        } else {
+            path[rev_idx + 1].y
+        };
+
+        // Find where the path resumes forward progress after the backtrack.
+        // This is the first point after rev_idx whose primary coordinate
+        // is at or past the backtrack coordinate in the forward direction.
+        let resume_idx = (rev_idx + 1..path.len()).find(|&i| {
+            let coord = if primary_is_x { path[i].x } else { path[i].y };
+            let past_backtrack = (coord - backtrack_coord) * forward_sign >= -EPS;
+            // Also must have a DIFFERENT cross-axis from the overshoot point
+            // (otherwise we're still in the reversal loop).
+            let cross_differs = if primary_is_x {
+                (path[i].y - path[rev_idx].y).abs() > EPS
+            } else {
+                (path[i].x - path[rev_idx].x).abs() > EPS
+            };
+            past_backtrack && cross_differs
+        });
+        let Some(resume_idx) = resume_idx else {
+            return; // Can't find resumption point — leave as-is.
+        };
+
+        // Need a pre-reversal point to anchor the collapsed segment.
+        if rev_idx == 0 {
+            return; // First segment reverses — can't collapse without a predecessor.
+        }
+
+        // Collapse: replace path[rev_idx..resume_idx] with a single point
+        // at (backtrack_coord, path[rev_idx-1].cross_axis).
+        let collapsed_point = if primary_is_x {
+            FPoint::new(backtrack_coord, path[rev_idx - 1].y)
+        } else {
+            FPoint::new(path[rev_idx - 1].x, backtrack_coord)
+        };
+
+        // Build the collapsed segment: keep everything before rev_idx,
+        // insert the collapsed point, then continue from resume_idx.
+        let mut new_path: Vec<FPoint> = Vec::with_capacity(path.len());
+        new_path.extend_from_slice(&path[..rev_idx]);
+        if !new_path
+            .last()
+            .is_some_and(|p| points_match(*p, collapsed_point))
+        {
+            new_path.push(collapsed_point);
+        }
+        // Add a connector from the collapsed point to resume point's
+        // cross-axis if needed.
+        let resume_point = path[resume_idx];
+        let connect_point = if primary_is_x {
+            FPoint::new(backtrack_coord, resume_point.y)
+        } else {
+            FPoint::new(resume_point.x, backtrack_coord)
+        };
+        if !new_path
+            .last()
+            .is_some_and(|p| points_match(*p, connect_point))
+        {
+            new_path.push(connect_point);
+        }
+        new_path.extend_from_slice(&path[resume_idx..]);
+
+        // Dedup adjacent identical points.
+        new_path.dedup_by(|a, b| points_match(*a, *b));
+        *path = new_path;
+        collapse_collinear_interior_points(path);
+    }
+}
+
+/// Replace a horizontal segment `path[idx]→path[idx+1]` with a 3-segment
+/// detour that jogs to `safe_y`, runs horizontally, then returns.  Subsequent
+/// collinear points at the same x as `path[idx+1]` are pruned so the detour
+/// doesn't create an immediate turnback.
+fn splice_horizontal_jog(path: &mut Vec<FPoint>, idx: usize, safe_y: f64, eps: f64) {
+    let a = path[idx];
+    let b = path[idx + 1];
+    // Build: a → (a.x, safe_y) → (b.x, safe_y)
+    // The point at b is replaced by (b.x, safe_y); the vertical continuation
+    // from (b.x, safe_y) to the next waypoint happens naturally.
+    let mut replacement: Vec<FPoint> = Vec::with_capacity(3);
+    replacement.push(a);
+    let jog_start = FPoint::new(a.x, safe_y);
+    if !points_match(a, jog_start) {
+        replacement.push(jog_start);
+    }
+    let jog_end = FPoint::new(b.x, safe_y);
+    if !points_match(*replacement.last().unwrap(), jog_end) {
+        replacement.push(jog_end);
+    }
+    let jog_end_idx = idx + replacement.len() - 1;
+    path.splice(idx..idx + 2, replacement);
+
+    // Prune subsequent points that are collinear at the same x as jog_end,
+    // preventing a V-shaped hairpin when the detour y overshoots.
+    while path.len() > jog_end_idx + 1 {
+        let cur = path[jog_end_idx]; // jog_end
+        let next = path[jog_end_idx + 1];
+        if (cur.x - next.x).abs() <= eps && between_inclusive(safe_y, cur.y, next.y, eps) {
+            // next is on the same vertical but between jog_end and a further
+            // point — remove it so the vertical runs straight through.
+            // But only if there's a point AFTER next that continues the path.
+            if path.len() > jog_end_idx + 2 {
+                path.remove(jog_end_idx + 1);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+/// Replace a vertical segment `path[idx]→path[idx+1]` with a 3-segment
+/// detour that jogs to `safe_x`, runs vertically, then returns.
+fn splice_vertical_jog(path: &mut Vec<FPoint>, idx: usize, safe_x: f64, eps: f64) {
+    let a = path[idx];
+    let b = path[idx + 1];
+    let mut replacement: Vec<FPoint> = Vec::with_capacity(3);
+    replacement.push(a);
+    let jog_start = FPoint::new(safe_x, a.y);
+    if !points_match(a, jog_start) {
+        replacement.push(jog_start);
+    }
+    let jog_end = FPoint::new(safe_x, b.y);
+    if !points_match(*replacement.last().unwrap(), jog_end) {
+        replacement.push(jog_end);
+    }
+    let jog_end_idx = idx + replacement.len() - 1;
+    path.splice(idx..idx + 2, replacement);
+
+    while path.len() > jog_end_idx + 1 {
+        let cur = path[jog_end_idx];
+        let next = path[jog_end_idx + 1];
+        if (cur.y - next.y).abs() <= eps && between_inclusive(safe_x, cur.x, next.x, eps) {
+            if path.len() > jog_end_idx + 2 {
+                path.remove(jog_end_idx + 1);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+/// True if `v` lies between `a` and `b` (inclusive, within tolerance).
+fn between_inclusive(v: f64, a: f64, b: f64, eps: f64) -> bool {
+    let lo = a.min(b) - eps;
+    let hi = a.max(b) + eps;
+    v >= lo && v <= hi
+}
+
+fn reroute_forward_td_bt_terminal_intrusion_with_safe_vertical_corridor(
+    path: &[FPoint],
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+) -> Option<Vec<FPoint>> {
+    const MIN_TARGET_STEM: f64 = 16.0;
+    const NODE_CLEARANCE: f64 = 8.0;
+    const INTRUSION_MARGIN: f64 = -0.5;
+    const EPS: f64 = 0.000_001;
+
+    if !matches!(direction, Direction::TopDown | Direction::BottomTop) || path.len() != 4 {
+        return None;
+    }
+
+    let p0 = path[0];
+    let p1 = path[1];
+    let p2 = path[2];
+    let p3 = path[3];
+
+    let first_vertical = (p0.x - p1.x).abs() <= EPS && (p0.y - p1.y).abs() > EPS;
+    let middle_horizontal = (p1.y - p2.y).abs() <= EPS && (p1.x - p2.x).abs() > EPS;
+    let terminal_vertical = (p2.x - p3.x).abs() <= EPS && (p2.y - p3.y).abs() > EPS;
+    if !(first_vertical && middle_horizontal && terminal_vertical) {
+        return None;
+    }
+
+    if !super::collision::segment_crosses_any_other_node_interior(
+        edge,
+        geometry,
+        p2,
+        p3,
+        INTRUSION_MARGIN,
+    ) {
+        return None;
+    }
+
+    let flow_sign = if p3.y >= p0.y { 1.0 } else { -1.0 };
+    let terminal_support_y = p3.y - flow_sign * MIN_TARGET_STEM;
+    if (terminal_support_y - p0.y).abs() <= EPS {
+        return None;
+    }
+    if flow_sign > 0.0 && terminal_support_y <= p0.y + EPS {
+        return None;
+    }
+    if flow_sign < 0.0 && terminal_support_y >= p0.y - EPS {
+        return None;
+    }
+
+    let y_min = p0.y.min(terminal_support_y);
+    let y_max = p0.y.max(terminal_support_y);
+    let mut candidates = vec![p0.x];
+    for (node_id, node) in &geometry.nodes {
+        if node_id == &edge.from || node_id == &edge.to {
+            continue;
+        }
+        let rect = node.rect;
+        if !super::path_utils::ranges_overlap(y_min, y_max, rect.y, rect.y + rect.height) {
+            continue;
+        }
+        candidates.push(rect.x - NODE_CLEARANCE);
+        candidates.push(rect.x + rect.width + NODE_CLEARANCE);
+    }
+
+    candidates.sort_by(|a, b| a.total_cmp(b));
+    candidates.dedup_by(|a, b| (*a - *b).abs() <= 0.5);
+
+    let mut best: Option<(f64, Vec<FPoint>)> = None;
+    for corridor_x in candidates {
+        if (corridor_x - p3.x).abs() < MIN_TARGET_STEM {
+            continue;
+        }
+
+        let mut route: Vec<FPoint> = Vec::with_capacity(5);
+        route.push(p0);
+        if (corridor_x - p0.x).abs() > EPS {
+            route.push(FPoint::new(corridor_x, p0.y));
+        }
+        route.push(FPoint::new(corridor_x, terminal_support_y));
+        route.push(FPoint::new(p3.x, terminal_support_y));
+        route.push(p3);
+
+        let mut deduped: Vec<FPoint> = Vec::with_capacity(route.len());
+        for point in route {
+            if deduped
+                .last()
+                .is_none_or(|prev| !points_match(*prev, point))
+            {
+                deduped.push(point);
+            }
+        }
+
+        if deduped.len() < 4 {
+            continue;
+        }
+
+        let segments_clear = deduped.windows(2).all(|segment| {
+            !super::collision::segment_crosses_any_other_node_interior(
+                edge,
+                geometry,
+                segment[0],
+                segment[1],
+                INTRUSION_MARGIN,
+            )
+        });
+        if !segments_clear {
+            continue;
+        }
+
+        let score = (corridor_x - p0.x).abs();
+        match &best {
+            Some((best_score, _)) if score >= *best_score => {}
+            _ => best = Some((score, deduped)),
+        }
+    }
+
+    best.map(|(_, route)| route)
+}
+
+fn stagger_forward_td_bt_terminal_horizontal_support(
+    path: &mut [FPoint],
+    target_primary_channel_depth: Option<f64>,
+) {
+    const EPS: f64 = 0.000_001;
+    const MIN_TARGET_STEM: f64 = 8.0;
+    const MIN_SOURCE_STEM: f64 = 8.0;
+    const MAX_TERMINAL_STAGGER: f64 = 24.0;
+    const MIN_TOTAL_SPAN_FOR_STAGGER: f64 = 200.0;
+    let Some(depth) = target_primary_channel_depth else {
+        return;
+    };
+    if path.len() < 4 {
+        return;
+    }
+
+    let n = path.len();
+    let p0 = path[0];
+    let p_prev = path[n - 4];
+    let p_mid = path[n - 3];
+    let p_support = path[n - 2];
+    let p_end = path[n - 1];
+
+    let pre_segment_vertical =
+        (p_prev.x - p_mid.x).abs() <= EPS && (p_prev.y - p_mid.y).abs() > EPS;
+    let support_segment_horizontal =
+        (p_mid.y - p_support.y).abs() <= EPS && (p_mid.x - p_support.x).abs() > EPS;
+    let tail_segment_vertical =
+        (p_support.x - p_end.x).abs() <= EPS && (p_support.y - p_end.y).abs() > EPS;
+    if !(pre_segment_vertical && support_segment_horizontal && tail_segment_vertical) {
+        return;
+    }
+
+    let flow_sign = if p_end.y >= p0.y { 1.0 } else { -1.0 };
+    if (p_end.y - p0.y).abs() < MIN_TOTAL_SPAN_FOR_STAGGER {
+        return;
+    }
+    let source_anchor = p0.y + flow_sign * MIN_SOURCE_STEM;
+    let target_anchor = p_end.y - flow_sign * MIN_TARGET_STEM;
+    if (target_anchor - source_anchor).abs() <= EPS {
+        return;
+    }
+
+    let desired = target_anchor - flow_sign * MAX_TERMINAL_STAGGER * (1.0 - depth.clamp(0.0, 1.0));
+    let clamped = if flow_sign > 0.0 {
+        desired.clamp(
+            source_anchor.min(target_anchor),
+            source_anchor.max(target_anchor),
+        )
+    } else {
+        desired.clamp(
+            target_anchor.min(source_anchor),
+            target_anchor.max(source_anchor),
+        )
+    };
+
+    if (clamped - p_support.y).abs() <= 1.0 {
+        return;
+    }
+
+    path[n - 3].y = clamped;
+    path[n - 2].y = clamped;
+}
+
+fn collapse_tiny_forward_td_bt_lateral_jog(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+) {
+    const EPS: f64 = 0.000_001;
+    const MAX_TINY_JOG: f64 = 3.0;
+    const INTRUSION_MARGIN: f64 = 1.0;
+
+    if !matches!(direction, Direction::TopDown | Direction::BottomTop) || path.len() != 4 {
+        return;
+    }
+
+    let p0 = path[0];
+    let p1 = path[1];
+    let p2 = path[2];
+    let p3 = path[3];
+    let first_vertical = (p0.x - p1.x).abs() <= EPS && (p0.y - p1.y).abs() > EPS;
+    let middle_horizontal = (p1.y - p2.y).abs() <= EPS && (p1.x - p2.x).abs() > EPS;
+    let terminal_vertical = (p2.x - p3.x).abs() <= EPS && (p2.y - p3.y).abs() > EPS;
+    if !(first_vertical && middle_horizontal && terminal_vertical) {
+        return;
+    }
+
+    let jog = (p2.x - p1.x).abs();
+    if jog <= EPS || jog > MAX_TINY_JOG {
+        return;
+    }
+
+    let Some((target_rect, _)) =
+        endpoint_rect_and_shape(geometry, &edge.to, edge.to_subgraph.as_deref())
+    else {
+        return;
+    };
+    let Some(target_face) = boundary_face_excluding_corners(p3, target_rect, 0.5)
+        .or_else(|| boundary_face_including_corners(p3, target_rect, 0.5))
+    else {
+        return;
+    };
+    if !matches!(target_face, RectFace::Top | RectFace::Bottom) {
+        return;
+    }
+
+    let aligned_x = clamp_face_coordinate_with_corner_inset(
+        p0.x,
+        target_rect.x,
+        target_rect.x + target_rect.width,
+        MIN_PORT_CORNER_INSET_FORWARD,
+    );
+    let aligned_terminal = FPoint::new(aligned_x, p3.y);
+    if super::collision::segment_crosses_any_other_node_interior(
+        edge,
+        geometry,
+        p1,
+        aligned_terminal,
+        INTRUSION_MARGIN,
+    ) {
+        return;
+    }
+
+    path[2].x = aligned_x;
+    path[3].x = aligned_x;
+    collapse_collinear_interior_points(path);
+}
+
+pub(super) fn prefer_secondary_axis_departure_for_angular_sources(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+) {
+    const EPS: f64 = 0.000_001;
+    const OFF_CENTER_MIN: f64 = 2.0;
+    const MIN_SECONDARY_DEPARTURE: f64 = 2.0;
+    const MIN_SECONDARY_DEPARTURE_DIAMOND: f64 = 0.1;
+    const INTRUSION_MARGIN: f64 = 1.0;
+
+    if path.len() != 4 {
+        return;
+    }
+
+    let Some((source_rect, source_shape)) =
+        endpoint_rect_and_shape(geometry, &edge.from, edge.from_subgraph.as_deref())
+    else {
+        return;
+    };
+    if !matches!(source_shape, Shape::Diamond | Shape::Hexagon) {
+        return;
+    }
+
+    let p0 = path[0];
+    let p1 = path[1];
+    let p2 = path[2];
+    let p3 = path[3];
+    let primary_vertical = matches!(direction, Direction::TopDown | Direction::BottomTop);
+    let (first_primary, middle_secondary, terminal_primary) = if primary_vertical {
+        (
+            (p0.x - p1.x).abs() <= EPS && (p0.y - p1.y).abs() > EPS,
+            (p1.y - p2.y).abs() <= EPS && (p1.x - p2.x).abs() > EPS,
+            (p2.x - p3.x).abs() <= EPS && (p2.y - p3.y).abs() > EPS,
+        )
+    } else {
+        (
+            (p0.y - p1.y).abs() <= EPS && (p0.x - p1.x).abs() > EPS,
+            (p1.x - p2.x).abs() <= EPS && (p1.y - p2.y).abs() > EPS,
+            (p2.y - p3.y).abs() <= EPS && (p2.x - p3.x).abs() > EPS,
+        )
+    };
+    if !(first_primary && middle_secondary && terminal_primary) {
+        return;
+    }
+
+    let source_cross_center = if primary_vertical {
+        source_rect.x + source_rect.width / 2.0
+    } else {
+        source_rect.y + source_rect.height / 2.0
+    };
+    let start_offset = if primary_vertical {
+        p0.x - source_cross_center
+    } else {
+        p0.y - source_cross_center
+    };
+    let target_offset = if primary_vertical {
+        p3.x - source_cross_center
+    } else {
+        p3.y - source_cross_center
+    };
+    let allow_centered_diamond_departure = matches!(source_shape, Shape::Diamond);
+    if (!allow_centered_diamond_departure && start_offset.abs() < OFF_CENTER_MIN)
+        || target_offset.abs() < OFF_CENTER_MIN
+    {
+        return;
+    }
+    let secondary_delta = if primary_vertical {
+        p3.x - p0.x
+    } else {
+        p3.y - p0.y
+    };
+    if secondary_delta.abs() < MIN_SECONDARY_DEPARTURE {
+        return;
+    }
+
+    let flow_sign = match direction {
+        Direction::TopDown | Direction::LeftRight => 1.0,
+        Direction::BottomTop | Direction::RightLeft => -1.0,
+    };
+    let primary_delta = if primary_vertical {
+        p3.y - p0.y
+    } else {
+        p3.x - p0.x
+    };
+    if primary_delta * flow_sign <= EPS {
+        return;
+    }
+
+    let departure_face = if primary_vertical {
+        if target_offset < 0.0 {
+            RectFace::Left
+        } else {
+            RectFace::Right
+        }
+    } else if target_offset < 0.0 {
+        RectFace::Top
+    } else {
+        RectFace::Bottom
+    };
+    let preferred_primary_lane = if primary_vertical { p1.y } else { p1.x };
+    let rect_face_anchor = if primary_vertical {
+        clip_point_to_rect_face_with_inset(
+            FPoint::new(p0.x, preferred_primary_lane),
+            source_rect,
+            departure_face,
+            MIN_PORT_CORNER_INSET_FORWARD,
+        )
+    } else {
+        clip_point_to_rect_face_with_inset(
+            FPoint::new(preferred_primary_lane, p0.y),
+            source_rect,
+            departure_face,
+            MIN_PORT_CORNER_INSET_FORWARD,
+        )
+    };
+    let provisional_elbow = if primary_vertical {
+        FPoint::new(p3.x, preferred_primary_lane)
+    } else {
+        FPoint::new(preferred_primary_lane, p3.y)
+    };
+    let start = project_endpoint_to_shape(
+        rect_face_anchor,
+        provisional_elbow,
+        source_rect,
+        source_shape,
+    );
+    let elbow = if primary_vertical {
+        FPoint::new(p3.x, start.y)
+    } else {
+        FPoint::new(start.x, p3.y)
+    };
+    if points_match(elbow, start) || points_match(elbow, p3) {
+        return;
+    }
+
+    let secondary_departure = if primary_vertical {
+        elbow.x - start.x
+    } else {
+        elbow.y - start.y
+    };
+    let min_secondary_departure = if matches!(source_shape, Shape::Diamond) {
+        MIN_SECONDARY_DEPARTURE_DIAMOND
+    } else {
+        MIN_SECONDARY_DEPARTURE
+    };
+    if secondary_departure.abs() < min_secondary_departure {
+        return;
+    }
+    let remaining_primary = if primary_vertical {
+        p3.y - elbow.y
+    } else {
+        p3.x - elbow.x
+    };
+    if remaining_primary * flow_sign <= EPS {
+        return;
+    }
+
+    let segments_clear = !super::collision::segment_crosses_any_other_node_interior(
+        edge,
+        geometry,
+        start,
+        elbow,
+        INTRUSION_MARGIN,
+    ) && !super::collision::segment_crosses_any_other_node_interior(
+        edge,
+        geometry,
+        elbow,
+        p3,
+        INTRUSION_MARGIN,
+    );
+    if !segments_clear {
+        return;
+    }
+
+    path.clear();
+    path.push(start);
+    path.push(elbow);
+    path.push(p3);
+    collapse_collinear_interior_points(path);
+}
+
+pub(super) fn ensure_primary_stem_for_flat_off_center_fanout_sources(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+    is_backward: bool,
+) {
+    const MIN_OFF_CENTER_ABS: f64 = 1.0;
+    const MIN_PRIMARY_STEM: f64 = 8.0;
+    const FANOUT_LANE_EPS: f64 = 1.0;
+    const SEG_EPS: f64 = 0.000_001;
+
+    if is_backward || path.len() < 3 {
+        return;
+    }
+
+    let fanout_outbound: Vec<&LayoutEdge> = geometry
+        .edges
+        .iter()
+        .filter(|candidate| candidate.from == edge.from)
+        .collect();
+    if fanout_outbound.len() < 2 {
+        return;
+    }
+    if fanout_outbound
+        .iter()
+        .any(|candidate| geometry.reversed_edges.contains(&candidate.index))
+    {
+        return;
+    }
+
+    let Some((source_rect, source_shape)) =
+        endpoint_rect_and_shape(geometry, &edge.from, edge.from_subgraph.as_deref())
+    else {
+        return;
+    };
+    let primary_vertical = matches!(direction, Direction::TopDown | Direction::BottomTop);
+    let source_cross_center = if primary_vertical {
+        source_rect.x + source_rect.width / 2.0
+    } else {
+        source_rect.y + source_rect.height / 2.0
+    };
+    let start = path[0];
+    let first = path[1];
+    let second = path[2];
+    let source_offset = if primary_vertical {
+        start.x - source_cross_center
+    } else {
+        start.y - source_cross_center
+    };
+    let angular_source = matches!(source_shape, Shape::Diamond | Shape::Hexagon);
+    if source_offset.abs() < MIN_OFF_CENTER_ABS && !angular_source {
+        return;
+    }
+
+    let (first_is_lateral, second_is_primary) = if primary_vertical {
+        (
+            (start.y - first.y).abs() <= SEG_EPS && (start.x - first.x).abs() > SEG_EPS,
+            (first.x - second.x).abs() <= SEG_EPS && (first.y - second.y).abs() > SEG_EPS,
+        )
+    } else {
+        (
+            (start.x - first.x).abs() <= SEG_EPS && (start.y - first.y).abs() > SEG_EPS,
+            (first.y - second.y).abs() <= SEG_EPS && (first.x - second.x).abs() > SEG_EPS,
+        )
+    };
+    if !first_is_lateral || !second_is_primary {
+        return;
+    }
+
+    let progresses_along_primary = match direction {
+        Direction::TopDown => second.y > start.y + SEG_EPS,
+        Direction::BottomTop => second.y < start.y - SEG_EPS,
+        Direction::LeftRight => second.x > start.x + SEG_EPS,
+        Direction::RightLeft => second.x < start.x - SEG_EPS,
+    };
+    if !progresses_along_primary {
+        return;
+    }
+
+    let lateral_delta = if primary_vertical {
+        first.x - start.x
+    } else {
+        first.y - start.y
+    };
+    if lateral_delta.abs() <= SEG_EPS {
+        return;
+    }
+    if source_offset.abs() >= MIN_OFF_CENTER_ABS && lateral_delta.signum() != source_offset.signum()
+    {
+        return;
+    }
+
+    let mut outbound_target_primary_axis: Vec<f64> = Vec::with_capacity(fanout_outbound.len());
+    for candidate in fanout_outbound {
+        let Some((target_rect, _)) =
+            endpoint_rect_and_shape(geometry, &candidate.to, candidate.to_subgraph.as_deref())
+        else {
+            return;
+        };
+        outbound_target_primary_axis.push(if primary_vertical {
+            target_rect.y
+        } else {
+            target_rect.x
+        });
+    }
+    let baseline_primary = outbound_target_primary_axis[0];
+    if outbound_target_primary_axis
+        .iter()
+        .any(|primary| (primary - baseline_primary).abs() > FANOUT_LANE_EPS)
+    {
+        return;
+    }
+
+    let (stem, sweep) = match direction {
+        Direction::TopDown => {
+            let stem_y = start.y + MIN_PRIMARY_STEM;
+            (FPoint::new(start.x, stem_y), FPoint::new(first.x, stem_y))
+        }
+        Direction::BottomTop => {
+            let stem_y = start.y - MIN_PRIMARY_STEM;
+            (FPoint::new(start.x, stem_y), FPoint::new(first.x, stem_y))
+        }
+        Direction::LeftRight => {
+            let stem_x = start.x + MIN_PRIMARY_STEM;
+            (FPoint::new(stem_x, start.y), FPoint::new(stem_x, first.y))
+        }
+        Direction::RightLeft => {
+            let stem_x = start.x - MIN_PRIMARY_STEM;
+            (FPoint::new(stem_x, start.y), FPoint::new(stem_x, first.y))
+        }
+    };
+    if primary_vertical {
+        if (stem.y - start.y).abs() <= SEG_EPS
+            || (sweep.x - stem.x).abs() <= SEG_EPS
+            || (second.y - sweep.y).abs() <= SEG_EPS
+        {
+            return;
+        }
+    } else if (stem.x - start.x).abs() <= SEG_EPS
+        || (sweep.y - stem.y).abs() <= SEG_EPS
+        || (second.x - sweep.x).abs() <= SEG_EPS
+    {
+        return;
+    }
+
+    let stem_stays_before_terminal_drop = match direction {
+        Direction::TopDown => stem.y < second.y - SEG_EPS,
+        Direction::BottomTop => stem.y > second.y + SEG_EPS,
+        Direction::LeftRight => stem.x < second.x - SEG_EPS,
+        Direction::RightLeft => stem.x > second.x + SEG_EPS,
+    };
+    if !stem_stays_before_terminal_drop {
+        return;
+    }
+
+    path[1] = stem;
+    path.insert(2, sweep);
+}
+
+pub(super) fn ensure_primary_stem_for_td_bt_angular_fanout_source(
+    path: &mut Vec<FPoint>,
+    edge: &LayoutEdge,
+    geometry: &GraphGeometry,
+    direction: Direction,
+    is_backward: bool,
+) {
+    const SEG_EPS: f64 = 0.000_001;
+    const MIN_PRIMARY_STEM: f64 = 8.0;
+    const TERMINAL_CLEARANCE: f64 = 1.0;
+
+    if is_backward
+        || path.len() < 3
+        || !matches!(direction, Direction::TopDown | Direction::BottomTop)
+    {
+        return;
+    }
+
+    let Some((_, source_shape)) =
+        endpoint_rect_and_shape(geometry, &edge.from, edge.from_subgraph.as_deref())
+    else {
+        return;
+    };
+    if !matches!(source_shape, Shape::Diamond | Shape::Hexagon) {
+        return;
+    }
+
+    let p0 = path[0];
+    let p1 = path[1];
+    let p2 = path[2];
+    let first_is_horizontal = (p0.y - p1.y).abs() <= SEG_EPS && (p0.x - p1.x).abs() > SEG_EPS;
+    let second_is_vertical = (p1.x - p2.x).abs() <= SEG_EPS && (p1.y - p2.y).abs() > SEG_EPS;
+    if !first_is_horizontal || !second_is_vertical {
+        return;
+    }
+
+    let flow_sign = match direction {
+        Direction::TopDown => 1.0,
+        Direction::BottomTop => -1.0,
+        _ => 0.0,
+    };
+    if (p2.y - p0.y) * flow_sign <= SEG_EPS {
+        return;
+    }
+
+    let desired_stem_y = p0.y + flow_sign * MIN_PRIMARY_STEM;
+    let max_stem_y = p2.y - flow_sign * TERMINAL_CLEARANCE;
+    let stem_y = if flow_sign > 0.0 {
+        desired_stem_y.min(max_stem_y)
+    } else {
+        desired_stem_y.max(max_stem_y)
+    };
+
+    if (stem_y - p0.y).abs() <= SEG_EPS || (p2.y - stem_y) * flow_sign <= SEG_EPS {
+        return;
+    }
+
+    path[1].y = stem_y;
+    path.insert(1, FPoint::new(p0.x, stem_y));
+}
+
+pub(super) fn collapse_source_turnback_spikes(path: &mut Vec<FPoint>) {
+    const SEG_EPS: f64 = 0.000_001;
+    if path.len() < 4 {
+        return;
+    }
+
+    let start = path[0];
+    let step = path[1];
+    let back = path[2];
+
+    let out_is_axis = (start.x - step.x).abs() <= SEG_EPS || (start.y - step.y).abs() <= SEG_EPS;
+    let back_is_axis = (step.x - back.x).abs() <= SEG_EPS || (step.y - back.y).abs() <= SEG_EPS;
+    if !out_is_axis || !back_is_axis {
+        return;
+    }
+    if points_match(start, back) {
+        let resume = path[3];
+        let collapsed_is_axis =
+            (start.x - resume.x).abs() <= SEG_EPS || (start.y - resume.y).abs() <= SEG_EPS;
+        if collapsed_is_axis && !points_match(start, resume) {
+            path.drain(1..3);
+        }
+    }
+}
+
+pub(super) fn has_immediate_axial_turnback(path: &[FPoint]) -> bool {
+    const EPS: f64 = 0.000_001;
+    path.windows(3).any(|triple| {
+        let a = triple[0];
+        let b = triple[1];
+        let c = triple[2];
+
+        let first_vertical = (a.x - b.x).abs() <= EPS && (a.y - b.y).abs() > EPS;
+        let second_vertical = (b.x - c.x).abs() <= EPS && (b.y - c.y).abs() > EPS;
+        if first_vertical && second_vertical {
+            let dy1 = b.y - a.y;
+            let dy2 = c.y - b.y;
+            return dy1.abs() > EPS && dy2.abs() > EPS && dy1.signum() != dy2.signum();
+        }
+
+        let first_horizontal = (a.y - b.y).abs() <= EPS && (a.x - b.x).abs() > EPS;
+        let second_horizontal = (b.y - c.y).abs() <= EPS && (b.x - c.x).abs() > EPS;
+        if first_horizontal && second_horizontal {
+            let dx1 = b.x - a.x;
+            let dx2 = c.x - b.x;
+            return dx1.abs() > EPS && dx2.abs() > EPS && dx1.signum() != dx2.signum();
+        }
+
+        false
+    })
+}
+
+pub(super) fn has_forward_primary_axis_reversal(path: &[FPoint], direction: Direction) -> bool {
+    const EPS: f64 = 0.000_001;
+    path.windows(2).any(|segment| {
+        let a = segment[0];
+        let b = segment[1];
+        match direction {
+            Direction::TopDown => {
+                (a.x - b.x).abs() <= EPS && (b.y - a.y) < -EPS && (a.y - b.y).abs() > EPS
+            }
+            Direction::BottomTop => {
+                (a.x - b.x).abs() <= EPS && (b.y - a.y) > EPS && (a.y - b.y).abs() > EPS
+            }
+            Direction::LeftRight => {
+                (a.y - b.y).abs() <= EPS && (b.x - a.x) < -EPS && (a.x - b.x).abs() > EPS
+            }
+            Direction::RightLeft => {
+                (a.y - b.y).abs() <= EPS && (b.x - a.x) > EPS && (a.x - b.x).abs() > EPS
+            }
+        }
+    })
+}
+
+pub(crate) fn collapse_forward_source_primary_turnback_hooks(
+    path: &mut [FPoint],
+    direction: Direction,
+) -> bool {
+    const EPS: f64 = 0.000_001;
+    if path.len() < 5 {
+        return false;
+    }
+
+    let p0 = path[0];
+    let p1 = path[1];
+    let p2 = path[2];
+    let p3 = path[3];
+    let p4 = path[4];
+
+    let mut changed = false;
+    match direction {
+        Direction::LeftRight => {
+            let first_primary = (p0.y - p1.y).abs() <= EPS && (p1.x - p0.x) > EPS;
+            let first_secondary = (p1.x - p2.x).abs() <= EPS && (p1.y - p2.y).abs() > EPS;
+            let hook_primary = (p2.y - p3.y).abs() <= EPS && (p2.x - p3.x).abs() > EPS;
+            let second_secondary = (p3.x - p4.x).abs() <= EPS && (p3.y - p4.y).abs() > EPS;
+            let has_hook = first_primary
+                && first_secondary
+                && hook_primary
+                && second_secondary
+                && (p3.x - p2.x) < -EPS;
+            if has_hook {
+                if path.len() > 5 {
+                    path[3].x = p2.x;
+                    path[4].x = p2.x;
+                } else {
+                    path[1].x = p3.x;
+                    path[2].x = p3.x;
+                }
+                changed = true;
+            }
+        }
+        Direction::RightLeft => {
+            let first_primary = (p0.y - p1.y).abs() <= EPS && (p1.x - p0.x) < -EPS;
+            let first_secondary = (p1.x - p2.x).abs() <= EPS && (p1.y - p2.y).abs() > EPS;
+            let hook_primary = (p2.y - p3.y).abs() <= EPS && (p2.x - p3.x).abs() > EPS;
+            let second_secondary = (p3.x - p4.x).abs() <= EPS && (p3.y - p4.y).abs() > EPS;
+            let has_hook = first_primary
+                && first_secondary
+                && hook_primary
+                && second_secondary
+                && (p3.x - p2.x) > EPS;
+            if has_hook {
+                if path.len() > 5 {
+                    path[3].x = p2.x;
+                    path[4].x = p2.x;
+                } else {
+                    path[1].x = p3.x;
+                    path[2].x = p3.x;
+                }
+                changed = true;
+            }
+        }
+        Direction::TopDown => {
+            let first_primary = (p0.x - p1.x).abs() <= EPS && (p1.y - p0.y) > EPS;
+            let first_secondary = (p1.y - p2.y).abs() <= EPS && (p1.x - p2.x).abs() > EPS;
+            let hook_primary = (p2.x - p3.x).abs() <= EPS && (p2.y - p3.y).abs() > EPS;
+            let second_secondary = (p3.y - p4.y).abs() <= EPS && (p3.x - p4.x).abs() > EPS;
+            let has_hook = first_primary
+                && first_secondary
+                && hook_primary
+                && second_secondary
+                && (p3.y - p2.y) < -EPS;
+            if has_hook {
+                if path.len() > 5 {
+                    path[3].y = p2.y;
+                    path[4].y = p2.y;
+                } else {
+                    path[1].y = p3.y;
+                    path[2].y = p3.y;
+                }
+                changed = true;
+            }
+        }
+        Direction::BottomTop => {
+            let first_primary = (p0.x - p1.x).abs() <= EPS && (p1.y - p0.y) < -EPS;
+            let first_secondary = (p1.y - p2.y).abs() <= EPS && (p1.x - p2.x).abs() > EPS;
+            let hook_primary = (p2.x - p3.x).abs() <= EPS && (p2.y - p3.y).abs() > EPS;
+            let second_secondary = (p3.y - p4.y).abs() <= EPS && (p3.x - p4.x).abs() > EPS;
+            let has_hook = first_primary
+                && first_secondary
+                && hook_primary
+                && second_secondary
+                && (p3.y - p2.y) > EPS;
+            if has_hook {
+                if path.len() > 5 {
+                    path[3].y = p2.y;
+                    path[4].y = p2.y;
+                } else {
+                    path[1].y = p3.y;
+                    path[2].y = p3.y;
+                }
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}

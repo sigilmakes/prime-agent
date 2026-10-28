@@ -1,0 +1,27 @@
+$schema: https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json
+version: "0.2"
+language: en
+useGitignore: true
+dictionaries:
+  - rust
+  - rust-crates
+  - mmdflux-codebook
+  - mmdflux-cspell
+dictionaryDefinitions:
+  - name: mmdflux-codebook
+    path: ./.cspell/codebook.txt
+  - name: mmdflux-cspell
+    path: ./.cspell/cspell-words.txt
+ignorePaths:
+  - .cspell/codebook.txt
+  - .cspell/cspell-words.txt
+  - "**/Cargo.lock"
+  - "**/package-lock.json"
+  - docs/architecture/*.mmd
+  - docs/gallery.md
+  - packages/package.json
+  - scripts/**
+  - tests/fixtures/**
+  - tests/parity-fixtures/**
+  - tests/snapshots/**
+  - tests/svg-snapshots/**

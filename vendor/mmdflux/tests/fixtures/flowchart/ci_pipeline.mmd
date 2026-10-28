@@ -1,0 +1,7 @@
+graph LR
+    Push[Git Push] --> Build[Build]
+    Build --> Test[Run Tests]
+    Test --> Lint[Lint Check]
+    Lint --> Deploy{Deploy?}
+    Deploy -->|staging| Staging[Staging Env]
+    Deploy -->|production| Prod[Production]

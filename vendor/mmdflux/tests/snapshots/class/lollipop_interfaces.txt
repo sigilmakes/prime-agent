@@ -1,0 +1,14 @@
+               ┌────────┐
+InterfaceB     │ Client │
+     ○         └────────┘
+     │              │
+     │              │
+     │              │
+┌─────────┐         ○
+│ Service │    InterfaceA
+└─────────┘
+     │
+     │
+     │
+     ○
+InterfaceA

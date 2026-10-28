@@ -1,0 +1,293 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "mmdflux-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., mmdflux-v2.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x86_64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_suffix: darwin-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_suffix: darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_suffix: windows-x86_64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+
+          TAG="${TAG#refs/tags/}"
+          if [[ "$TAG" != mmdflux-v* ]]; then
+            TAG="mmdflux-v${TAG#v}"
+          fi
+
+          VERSION="${TAG#mmdflux-v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          cache: false
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          # macos-15 images (rolled out 2026-05-11) ship rustup state that
+          # collides with cached ~/.cargo/bin contents, leaving `cargo` as
+          # the rustup-init installer. Don't cache rustup binaries.
+          # See Swatinem/rust-cache#341, actions/runner-images#14099.
+          cache-bin: false
+
+      - name: Build binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          ARCHIVE="mmdflux-v${{ steps.meta.outputs.version }}-${{ matrix.artifact_suffix }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/$ARCHIVE" mmdflux
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/mmdflux.exe" "dist/mmdflux.exe" -Force
+          $Archive = "mmdflux-v${{ steps.meta.outputs.version }}-${{ matrix.artifact_suffix }}.zip"
+          Compress-Archive -Path "dist/mmdflux.exe" -DestinationPath "dist/$Archive" -Force
+          Remove-Item "dist/mmdflux.exe" -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.artifact_suffix }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+
+          TAG="${TAG#refs/tags/}"
+          if [[ "$TAG" != mmdflux-v* ]]; then
+            TAG="mmdflux-v${TAG#v}"
+          fi
+
+          VERSION="${TAG#mmdflux-v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: mmdflux v${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            dist/*
+
+  homebrew:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    needs: publish
+    steps:
+      - name: Check for tap token
+        id: check
+        env:
+          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not configured, skipping formula update"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve tag and version
+        if: steps.check.outputs.skip != 'true'
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+
+          TAG="${TAG#refs/tags/}"
+          if [[ "$TAG" != mmdflux-v* ]]; then
+            TAG="mmdflux-v${TAG#v}"
+          fi
+
+          VERSION="${TAG#mmdflux-v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download checksums
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Parse checksums
+        if: steps.check.outputs.skip != 'true'
+        id: checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+          for suffix in darwin-arm64 darwin-x86_64 linux-x86_64; do
+            sha=$(grep "${suffix}.tar.gz" checksums.txt | awk '{print $1}')
+            key=$(echo "$suffix" | tr '-' '_')
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Clone Homebrew tap
+        if: steps.check.outputs.skip != 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/kevinswiber/homebrew-mmdflux.git" tap
+
+      - name: Update formula
+        if: steps.check.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA_DARWIN_ARM64: ${{ steps.checksums.outputs.darwin_arm64 }}
+          SHA_DARWIN_X86_64: ${{ steps.checksums.outputs.darwin_x86_64 }}
+          SHA_LINUX_X86_64: ${{ steps.checksums.outputs.linux_x86_64 }}
+        shell: bash
+        run: |
+          cat > tap/Formula/mmdflux.rb << FORMULA
+          class Mmdflux < Formula
+            desc "Render Mermaid diagrams as Unicode text, ASCII, SVG, and MMDS JSON"
+            homepage "https://github.com/kevinswiber/mmdflux"
+            version "${VERSION}"
+            license "MIT"
+
+            if OS.mac?
+              if Hardware::CPU.arm?
+                url "https://github.com/kevinswiber/mmdflux/releases/download/${TAG}/mmdflux-v${VERSION}-darwin-arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "https://github.com/kevinswiber/mmdflux/releases/download/${TAG}/mmdflux-v${VERSION}-darwin-x86_64.tar.gz"
+                sha256 "${SHA_DARWIN_X86_64}"
+              end
+            elsif OS.linux?
+              if Hardware::CPU.intel?
+                url "https://github.com/kevinswiber/mmdflux/releases/download/${TAG}/mmdflux-v${VERSION}-linux-x86_64.tar.gz"
+                sha256 "${SHA_LINUX_X86_64}"
+              else
+                odie "Linux ARM64 binaries are not published yet."
+              end
+            end
+
+            def install
+              bin.install "mmdflux"
+            end
+
+            test do
+              assert_match "Usage: mmdflux", shell_output("#{bin}/mmdflux --help")
+            end
+          end
+          FORMULA
+
+          # Heredoc indents with spaces — strip them to match the original format
+          sed -i 's/^          //' tap/Formula/mmdflux.rb
+
+      - name: Commit and push
+        if: steps.check.outputs.skip != 'true'
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/mmdflux.rb
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Update mmdflux to v${{ steps.meta.outputs.version }}"
+          git push

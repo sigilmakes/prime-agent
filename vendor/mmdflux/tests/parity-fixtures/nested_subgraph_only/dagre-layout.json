@@ -1,0 +1,97 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "ranker": "network-simplex",
+    "marginx": 8,
+    "marginy": 8,
+    "width": 131,
+    "height": 247
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "x": 63,
+      "y": 83,
+      "width": 5,
+      "height": 3,
+      "center_x": 65.5,
+      "center_y": 84.5,
+      "parent": "inner",
+      "is_compound": false
+    },
+    {
+      "id": "B",
+      "x": 63,
+      "y": 161,
+      "width": 5,
+      "height": 3,
+      "center_x": 65.5,
+      "center_y": 162.5,
+      "parent": "inner",
+      "is_compound": false
+    },
+    {
+      "id": "inner",
+      "x": 28,
+      "y": 45.5,
+      "width": 75,
+      "height": 156,
+      "center_x": 65.5,
+      "center_y": 123.5,
+      "parent": "outer",
+      "is_compound": true
+    },
+    {
+      "id": "outer",
+      "x": 8,
+      "y": 8,
+      "width": 115,
+      "height": 231,
+      "center_x": 65.5,
+      "center_y": 123.5,
+      "parent": null,
+      "is_compound": true
+    }
+  ],
+  "edges": [
+    {
+      "index": 0,
+      "name": "0",
+      "from": "A",
+      "to": "B",
+      "points": [
+        [
+          65.5,
+          86
+        ],
+        [
+          65.5,
+          123.5
+        ],
+        [
+          65.5,
+          161
+        ]
+      ]
+    }
+  ],
+  "subgraph_bounds": [
+    {
+      "id": "inner",
+      "x": 28,
+      "y": 45.5,
+      "width": 75,
+      "height": 156
+    },
+    {
+      "id": "outer",
+      "x": 8,
+      "y": 8,
+      "width": 115,
+      "height": 231
+    }
+  ]
+}

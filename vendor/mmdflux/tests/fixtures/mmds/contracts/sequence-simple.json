@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "sequence",
+    "bounds": {
+      "width": 291.5392,
+      "height": 374.0
+    }
+  },
+  "nodes": [],
+  "edges": [],
+  "participants": [
+    {
+      "id": "Alice",
+      "label": "Alice",
+      "kind": "participant",
+      "position": {
+        "x": 10.0,
+        "y": 10.0
+      },
+      "size": {
+        "width": 67.264,
+        "height": 44.0
+      },
+      "lifeline_x": 43.632
+    },
+    {
+      "id": "Bob",
+      "label": "Bob",
+      "kind": "participant",
+      "position": {
+        "x": 164.64000000000001,
+        "y": 10.0
+      },
+      "size": {
+        "width": 57.983999999999995,
+        "height": 44.0
+      },
+      "lifeline_x": 193.632
+    }
+  ],
+  "messages": [
+    {
+      "id": "m0",
+      "from": 0,
+      "to": 1,
+      "line_style": "solid",
+      "arrow_head": "filled",
+      "text": "hello",
+      "y": 74.0
+    },
+    {
+      "id": "m1",
+      "from": 1,
+      "to": 0,
+      "line_style": "dashed",
+      "arrow_head": "filled",
+      "text": "world",
+      "y": 124.0
+    },
+    {
+      "id": "m2",
+      "from": 0,
+      "to": 1,
+      "line_style": "solid",
+      "arrow_head": "filled",
+      "text": "request",
+      "y": 264.0
+    },
+    {
+      "id": "m3",
+      "from": 1,
+      "to": 0,
+      "line_style": "dashed",
+      "arrow_head": "filled",
+      "text": "response",
+      "y": 314.0
+    }
+  ],
+  "notes": [
+    {
+      "placement": "right_of",
+      "participants": [
+        1
+      ],
+      "text": "thinking",
+      "position": {
+        "x": 203.632,
+        "y": 174.0
+      },
+      "size": {
+        "width": 77.90719999999999,
+        "height": 40.0
+      }
+    }
+  ],
+  "activations": [
+    {
+      "participant": 1,
+      "y_start": 264.0,
+      "y_end": 314.0,
+      "depth": 0
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": { "width": 240.0, "height": 160.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Build",
+      "parent": "sg1",
+      "position": { "x": 20.0, "y": 20.0 },
+      "size": { "width": 44.0, "height": 24.0 }
+    },
+    {
+      "id": "B",
+      "label": "Test",
+      "parent": "sg2",
+      "position": { "x": 100.0, "y": 60.0 },
+      "size": { "width": 44.0, "height": 24.0 }
+    },
+    {
+      "id": "C",
+      "label": "Deploy",
+      "parent": "sg1",
+      "position": { "x": 180.0, "y": 100.0 },
+      "size": { "width": 52.0, "height": 24.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B"
+    },
+    {
+      "id": "e1",
+      "source": "B",
+      "target": "C"
+    }
+  ],
+  "subgraphs": [
+    {
+      "id": "sg2",
+      "title": "Checks",
+      "children": ["B"],
+      "parent": "sg1"
+    },
+    {
+      "id": "sg1",
+      "title": "Pipeline",
+      "children": ["A", "C"],
+      "direction": "LR"
+    }
+  ]
+}

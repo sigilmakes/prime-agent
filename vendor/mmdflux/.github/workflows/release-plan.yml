@@ -1,0 +1,314 @@
+name: Release Plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Plan (preview only) or Release (execute bumps)"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - release
+      package:
+        description: "Package to release (empty = all with changes)"
+        required: false
+        type: choice
+        options:
+          - ""
+          - mmdflux
+          - mmds-core
+          - mmds-excalidraw
+          - mmds-tldraw
+          - mmds-browser-text-metrics
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release-plan
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Release Plan
+    if: inputs.mode == 'plan'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cocogitto
+        run: cargo binstall --no-confirm cocogitto@6.5.0
+
+      - name: Generate release plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          PLAN_FILE="${RUNNER_TEMP}/release-plan.md"
+
+          # Write to both step summary and artifact file
+          out() { tee -a "$PLAN_FILE" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # Package definitions: name:tag_prefix
+          PACKAGES="mmdflux:mmdflux-v mmds-core:mmds-core-v mmds-excalidraw:mmds-excalidraw-v mmds-tldraw:mmds-tldraw-v mmds-browser-text-metrics:mmds-browser-text-metrics-v"
+
+          HEAD_SHA=$(git rev-parse HEAD)
+          HEAD_SHORT=$(git rev-parse --short HEAD)
+          REPO="${GITHUB_REPOSITORY}"
+          BRANCH="${GITHUB_REF_NAME}"
+
+          # --- Header ---
+          {
+            echo "# Release Plan"
+            echo ""
+            echo "## Branch Status"
+            echo ""
+            echo "**Commit:** [\`${HEAD_SHORT}\`](https://github.com/${REPO}/commit/${HEAD_SHA}) on \`${BRANCH}\`"
+            echo ""
+            echo "### CI Workflows"
+            echo ""
+            echo "| Workflow | Status | Commit |"
+            echo "|----------|--------|--------|"
+          } | out
+
+          # Show only the most recent run per workflow name
+          gh run list --branch "${BRANCH}" --limit 20 \
+            --json name,conclusion,headSha,status \
+            --jq '[group_by(.name)[] | sort_by(.headSha) | last] | sort_by(.name)[] | "| \(.name) | \(if .conclusion != "" and .conclusion != null then .conclusion else .status end) | `\(.headSha[0:7])` |"' \
+            | out
+
+          # --- Package Reports ---
+          {
+            echo ""
+            echo "## Packages"
+            echo ""
+          } | out
+
+          bump_commands=""
+
+          for entry in $PACKAGES; do
+            pkg="${entry%%:*}"
+            tag_prefix="${entry##*:}"
+
+            {
+              echo "### ${pkg}"
+              echo ""
+            } | out
+
+            # Find latest tag for this package that is an ancestor of HEAD.
+            # An empty result is a first-release case — Cocogitto handles
+            # that path; we just adjust the header and skip the (rangeless)
+            # changelog preview.
+            latest_tag=$(git describe --tags --match "${tag_prefix}*" --abbrev=0 2>/dev/null || echo "")
+
+            current_version=""
+            if [ -n "$latest_tag" ]; then
+              current_version="${latest_tag#"${tag_prefix}"}"
+            fi
+
+            # Dry-run to check for a pending bump. Keep Cocogitto failures
+            # visible so error text cannot be mistaken for a version number.
+            if dry_output=$(cog bump --package "$pkg" --auto --dry-run --skip-untracked 2>&1); then
+              true
+            elif echo "$dry_output" | grep -q "No conventional commit found"; then
+              if [ -n "$current_version" ]; then
+                {
+                  echo "**Current version:** ${current_version}"
+                  echo ""
+                  echo "No unreleased changes."
+                  echo ""
+                } | out
+              else
+                {
+                  echo "No previous release tag found and no conventional commits to publish."
+                  echo ""
+                } | out
+              fi
+              continue
+            else
+              if [ -n "$current_version" ]; then
+                {
+                  echo "**Current version:** ${current_version}"
+                  echo ""
+                } | out
+              else
+                {
+                  echo "**First release**"
+                  echo ""
+                } | out
+              fi
+              {
+                echo "Could not determine next version."
+                echo ""
+                echo '```'
+                echo "$dry_output"
+                echo '```'
+                echo ""
+              } | out
+              exit 1
+            fi
+
+            # Extract next version from dry-run output
+            next_version=$(echo "$dry_output" | sed -nE "s/^${pkg}-v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p" | tail -1)
+            if [ -z "$next_version" ]; then
+              if [ -n "$current_version" ]; then
+                {
+                  echo "**Current version:** ${current_version}"
+                  echo ""
+                } | out
+              else
+                {
+                  echo "**First release**"
+                  echo ""
+                } | out
+              fi
+              {
+                echo "Could not parse next version from Cocogitto dry-run output."
+                echo ""
+                echo '```'
+                echo "$dry_output"
+                echo '```'
+                echo ""
+              } | out
+              exit 1
+            fi
+
+            if [ -n "$current_version" ]; then
+              {
+                echo "**Current version:** ${current_version} **-->** ${next_version}"
+                echo ""
+              } | out
+            else
+              {
+                echo "**First release:** ${next_version}"
+                echo ""
+              } | out
+            fi
+
+            bump_commands="${bump_commands}cog bump --package ${pkg} --auto\n"
+
+            # Changelog preview — only when there's a prior tag to bound the
+            # range; first releases would otherwise dump the entire history.
+            if [ -n "$latest_tag" ]; then
+              changelog=$(cog changelog "${latest_tag}..HEAD" 2>&1 || echo "(changelog generation failed)")
+
+              if [ -n "$changelog" ]; then
+                {
+                  echo "<details>"
+                  echo "<summary>Changelog preview</summary>"
+                  echo ""
+                  echo "$changelog"
+                  echo ""
+                  echo "</details>"
+                  echo ""
+                } | out
+              fi
+            fi
+          done
+
+          # --- Next Steps ---
+          {
+            echo "---"
+            echo ""
+          } | out
+
+          if [ -n "$bump_commands" ]; then
+            {
+              echo "## Next Steps"
+              echo ""
+              echo "To execute this release, re-run this workflow with **mode: release**."
+              echo ""
+              echo "Or run locally:"
+              echo ""
+              echo '```bash'
+              echo -e "$bump_commands"
+              echo '```'
+            } | out
+          else
+            echo "No packages have unreleased changes." | out
+          fi
+
+      - name: Upload release plan
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-plan
+          path: ${{ runner.temp }}/release-plan.md
+          retention-days: 90
+
+  release:
+    name: Execute Release
+    if: inputs.mode == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install tools
+        run: cargo binstall --no-confirm cocogitto@6.5.0 cargo-edit
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+          git_config_global: true
+          git_tag_gpgsign: true
+          git_committer_name: "Kevin Swiber"
+          git_committer_email: "kswiber@gmail.com"
+
+      - name: Execute release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+
+          PLAN_FILE="${RUNNER_TEMP}/release-plan.md"
+          out() { tee -a "$PLAN_FILE" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # The CI bump profile (defined in cog.toml) skips lint/test and
+          # handles git push + workflow dispatch via per-package post_bump_hooks.
+          if [ -n "${INPUT_PACKAGE}" ]; then
+            cog bump --package "${INPUT_PACKAGE}" --auto --hook-profile ci
+          else
+            cog bump --auto --hook-profile ci
+          fi
+
+          {
+            echo "# Release Complete"
+            echo ""
+            echo "Release executed via \`cog bump --auto --hook-profile ci\`."
+            echo "See workflow logs for details on which packages were bumped and which workflows were dispatched."
+          } | out
+
+      - name: Upload release report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-plan
+          path: ${{ runner.temp }}/release-plan.md
+          retention-days: 90

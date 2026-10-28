@@ -1,0 +1,7 @@
+sequenceDiagram
+    participant Alice
+    participant Bob
+    loop Every 5 seconds
+        Alice->>Bob: Heartbeat
+        Bob-->>Alice: Ack
+    end

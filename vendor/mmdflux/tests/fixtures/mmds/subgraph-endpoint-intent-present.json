@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": {
+      "shape": "rectangle"
+    },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": {
+      "width": 100.0,
+      "height": 328.0
+    }
+  },
+  "nodes": [
+    {
+      "id": "API",
+      "label": "API Server",
+      "parent": "sg1",
+      "position": {
+        "x": 43.0,
+        "y": 123.5
+      },
+      "size": {
+        "width": 14.0,
+        "height": 3.0
+      }
+    },
+    {
+      "id": "Client",
+      "label": "Client",
+      "position": {
+        "x": 45.0,
+        "y": 8.0
+      },
+      "size": {
+        "width": 10.0,
+        "height": 3.0
+      }
+    },
+    {
+      "id": "DB",
+      "label": "Database",
+      "parent": "sg1",
+      "position": {
+        "x": 44.0,
+        "y": 201.5
+      },
+      "size": {
+        "width": 12.0,
+        "height": 3.0
+      }
+    },
+    {
+      "id": "Logs",
+      "label": "Logs",
+      "position": {
+        "x": 46.0,
+        "y": 317.0
+      },
+      "size": {
+        "width": 8.0,
+        "height": 3.0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "API",
+      "target": "DB"
+    },
+    {
+      "id": "e1",
+      "source": "Client",
+      "target": "API",
+      "to_subgraph": "sg1"
+    },
+    {
+      "id": "e2",
+      "source": "DB",
+      "target": "Logs",
+      "from_subgraph": "sg1"
+    }
+  ],
+  "subgraphs": [
+    {
+      "id": "sg1",
+      "title": "Backend",
+      "children": [
+        "API",
+        "DB"
+      ]
+    }
+  ]
+}

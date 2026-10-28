@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 366.52 569.48" style="max-width: 366.52px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M106.92,62.00 L106.92,164.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M95.27,222.00 L95.27,299.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M68.02,379.03 L68.02,503.48" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M128.33,364.72 L227.12,364.72 L227.12,503.48" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M326.52,534.48 L338.52,534.48 L338.52,195.00 L161.82,195.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="Config" data-id="Config" data-look="classic">
+        <polygon points="91.58,303.00 140.82,352.24 91.58,401.48 42.34,352.24" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="91.58" y="352.24" text-anchor="middle" dominant-baseline="middle" fill="#333">Valid?</text>
+      </g>
+      <g class="node default" id="Error" data-id="Error" data-look="classic">
+        <rect x="175.81" y="507.48" width="150.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="251.16" y="534.48" text-anchor="middle" dominant-baseline="middle" fill="#333">Handle Error</text>
+      </g>
+      <g class="node default" id="Run" data-id="Run" data-look="classic">
+        <rect x="8.00" y="507.48" width="117.81" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="66.91" y="534.48" text-anchor="middle" dominant-baseline="middle" fill="#333">Execute</text>
+      </g>
+      <g class="node default" id="Setup" data-id="Setup" data-look="classic">
+        <rect x="56.01" y="168.00" width="101.81" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="106.92" y="195.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Setup</text>
+      </g>
+      <g class="node default" id="Start" data-id="Start" data-look="classic">
+        <rect x="56.46" y="8.00" width="100.92" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="106.92" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Begin</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="74.46" y="101.00" width="64.91" height="28.00" fill="white" />
+      <text x="106.92" y="115.00" text-anchor="middle" dominant-baseline="middle" fill="#333">initialize</text>
+      <rect x="58.36" y="248.50" width="73.82" height="28.00" fill="white" />
+      <text x="95.27" y="262.50" text-anchor="middle" dominant-baseline="middle" fill="#333">configure</text>
+      <rect x="51.57" y="429.26" width="32.90" height="28.00" fill="white" />
+      <text x="68.02" y="443.26" text-anchor="middle" dominant-baseline="middle" fill="#333">yes</text>
+      <rect x="214.22" y="370.71" width="25.80" height="28.00" fill="white" />
+      <text x="227.12" y="384.71" text-anchor="middle" dominant-baseline="middle" fill="#333">no</text>
+      <rect x="318.52" y="268.39" width="40.00" height="28.00" fill="white" />
+      <text x="338.52" y="282.39" text-anchor="middle" dominant-baseline="middle" fill="#333">retry</text>
+    </g>
+  </g>
+</svg>

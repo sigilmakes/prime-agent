@@ -1,0 +1,27 @@
+{
+  "graph": {
+    "rankdir": "TB",
+    "nodesep": 50,
+    "edgesep": 20,
+    "ranksep": 75,
+    "marginx": 8,
+    "marginy": 8,
+    "ranker": "network-simplex"
+  },
+  "nodes": [
+    {"id": "A", "label": "Web Server", "width": 14, "height": 3, "parent": "us-east", "is_subgraph": false},
+    {"id": "B", "label": "App Server", "width": 14, "height": 3, "parent": "us-east", "is_subgraph": false},
+    {"id": "C", "label": "Web Server", "width": 14, "height": 3, "parent": "us-west", "is_subgraph": false},
+    {"id": "Cloud", "label": "Cloud", "width": 0, "height": 0, "parent": null, "is_subgraph": true},
+    {"id": "D", "label": "App Server", "width": 14, "height": 3, "parent": "us-west", "is_subgraph": false},
+    {"id": "E", "label": "Load Balancer", "width": 17, "height": 3, "parent": null, "is_subgraph": false},
+    {"id": "us-east", "label": "US East Region", "width": 0, "height": 0, "parent": "Cloud", "is_subgraph": true},
+    {"id": "us-west", "label": "US West Region", "width": 0, "height": 0, "parent": "Cloud", "is_subgraph": true}
+  ],
+  "edges": [
+    {"from": "A", "to": "B", "label": null, "label_width": 0, "label_height": 0, "index": 0},
+    {"from": "C", "to": "D", "label": null, "label_width": 0, "label_height": 0, "index": 1},
+    {"from": "E", "to": "A", "label": null, "label_width": 0, "label_height": 0, "index": 2},
+    {"from": "E", "to": "C", "label": null, "label_width": 0, "label_height": 0, "index": 3}
+  ]
+}

@@ -1,0 +1,205 @@
+// Mermaid Flowchart Grammar
+// Phase 1: Headers
+// Phase 2: Nodes (identifiers, shapes)
+// Phase 3: Edges (arrows, labels)
+// Phase 4: Chains, ampersands, multi-line
+
+WHITESPACE = _{ " " | "\t" }
+
+// Header keywords
+graph_keyword = { ^"graph" }
+flowchart_keyword = { ^"flowchart" }
+
+// Layout directions
+direction = {
+    ^"TD" |  // Top-Down
+    ^"TB" |  // Top-Bottom (synonym for TD)
+    ^"BT" |  // Bottom-Top
+    ^"LR" |  // Left-Right
+    ^"RL"    // Right-Left
+}
+
+// Graph header: "graph TD" or "flowchart LR"
+header = {
+    (graph_keyword | flowchart_keyword) ~ direction?
+}
+
+// Node identifiers: alphanumeric (Unicode) with underscores, hyphens, and dots.
+// Can start with letter, underscore, or digit.
+// Hyphens must not be followed by another hyphen or arrow chars to avoid
+// consuming edge syntax like --> or ---.
+identifier = @{
+    (LETTER | NUMBER | "_") ~
+    (LETTER | NUMBER | "_" | "." | ("-" ~ !("-" | ">" | ".")))*
+}
+
+// Text content inside shapes (any chars except shape delimiters)
+// Rectangle labels can include `]` when that text is wrapped in quotes.
+quoted_text_chunk = { "\"" ~ ("\\\"" | !("\"") ~ ANY)* ~ "\"" }
+text_rect = @{ (quoted_text_chunk | (!"]" ~ ANY))+ }
+text_round = @{ (!")" ~ ANY)+ }
+text_diamond = @{ (!"}" ~ ANY)+ }
+text_stadium = @{ (!"])" ~ ANY)+ }
+text_subroutine = @{ (!"]]" ~ ANY)+ }
+text_cylinder = @{ (!")]" ~ ANY)+ }
+text_circle = @{ (!"))" ~ ANY)+ }
+text_double_circle = @{ (!")" ~ ANY)+ }
+text_hexagon = @{ (!"}}" ~ ANY)+ }
+text_asymmetric = @{ (!"]" ~ ANY)+ }
+text_trapezoid = @{ (!"\\]" ~ ANY)+ }
+text_inv_trapezoid = @{ (!"/]" ~ ANY)+ }
+shape_config_body = @{ (!"}" ~ ANY)* }
+
+// Node shapes (order matters: more specific delimiters first)
+shape_double_circle = { "(((" ~ text_double_circle ~ ")))" }
+shape_circle = { "((" ~ text_circle ~ "))" }
+shape_stadium = { "([" ~ text_stadium ~ "])" }
+shape_subroutine = { "[[" ~ text_subroutine ~ "]]" }
+shape_cylinder = { "[(" ~ text_cylinder ~ ")]" }
+shape_hexagon = { "{{" ~ text_hexagon ~ "}}" }
+shape_trapezoid = { "[/" ~ text_trapezoid ~ "\\]" }
+shape_inv_trapezoid = { "[\\" ~ text_inv_trapezoid ~ "/]" }
+shape_asymmetric = { ">" ~ text_asymmetric ~ "]" }
+shape_rect = { "[" ~ text_rect ~ "]" }       // Rectangle [text]
+shape_round = { "(" ~ text_round ~ ")" }     // Rounded (text)
+shape_diamond = { "{" ~ text_diamond ~ "}" }  // Diamond {text}
+shape_config = { "@{" ~ shape_config_body ~ "}" }
+
+shape = {
+    shape_double_circle | shape_circle | shape_stadium |
+    shape_subroutine | shape_cylinder | shape_hexagon |
+    shape_trapezoid | shape_inv_trapezoid | shape_asymmetric |
+    shape_rect | shape_round | shape_diamond | shape_config
+}
+
+// Class annotation: :::className
+class_name = @{ (LETTER | NUMBER | "_" | "-")+ }
+class_annotation = { ":::" ~ class_name }
+
+// Node definition: identifier with optional shape and optional class annotation
+node = { identifier ~ shape? ~ class_annotation? }
+
+// Node group: A & B & C (multiple source/target nodes)
+node_group = { node ~ ("&" ~ node)* }
+
+// Edge label text (inside |...|)
+edge_label_text = @{ (!"|" ~ ANY)+ }
+edge_label = { "|" ~ edge_label_text ~ "|" }
+
+// Inline edge label text (between link start/end)
+edge_label_inline_text_solid = @{ (!NEWLINE ~ !link_solid_end ~ ANY)+ }
+edge_label_inline_text_dotted = @{ (!NEWLINE ~ !link_dotted_end ~ ANY)+ }
+edge_label_inline_text_thick = @{ (!NEWLINE ~ !link_thick_end ~ ANY)+ }
+
+// Arrow heads (left and right ends)
+arrow_left = { "<" | "x" | "o" }
+arrow_right = { ">" | "x" | "o" }
+
+// Solid edges: optional_left -- dashes -- optional_right
+// Minimum: --- (3 chars: dash-dash-dash for open) or --> (dash-dash-right for arrow)
+// Variable length: ----> (more dashes = longer)
+solid_dashes = @{ "-"+ }
+link_solid = { arrow_left? ~ "-" ~ solid_dashes ~ arrow_right? }
+link_solid_start = @{ arrow_left? ~ "-" ~ "-" ~ !("-" | ">" | "x" | "o") }
+link_solid_end = { "-" ~ solid_dashes ~ arrow_right? }
+link_solid_labeled = { link_solid_start ~ edge_label_inline_text_solid ~ link_solid_end }
+
+// Dotted edges: optional_left -. dots .- optional_right
+// Minimum: -.-> or -..-> (variable dots)
+dotted_dots = @{ "."+ }
+link_dotted = { arrow_left? ~ "-" ~ dotted_dots ~ "-" ~ arrow_right? }
+link_dotted_start = @{ arrow_left? ~ "-" ~ "." ~ !("." | "-" | ">" | "x" | "o") }
+link_dotted_end = { "-"? ~ dotted_dots ~ "-" ~ arrow_right? }
+link_dotted_labeled = { link_dotted_start ~ edge_label_inline_text_dotted ~ link_dotted_end }
+
+// Thick edges: optional_left == equals == optional_right
+// Minimum: ==> or ===> (variable equals)
+thick_equals = @{ "="+ }
+link_thick = { arrow_left? ~ "=" ~ thick_equals ~ arrow_right? }
+link_thick_start = @{ arrow_left? ~ "=" ~ "=" ~ !("=" | ">" | "x" | "o") }
+link_thick_end = { "=" ~ thick_equals ~ arrow_right? }
+link_thick_labeled = { link_thick_start ~ edge_label_inline_text_thick ~ link_thick_end }
+
+// Invisible edges: ~~~ (layout-only, not rendered)
+link_invisible = { "~" ~ "~" ~ "~"+ }
+
+// Edge connector with optional label (label comes after the link)
+edge_connector = {
+    (link_dotted_labeled | link_thick_labeled | link_solid_labeled)
+    | (link_invisible | link_dotted | link_thick | link_solid) ~ edge_label?
+}
+
+// Edge segment: connector followed by node_group
+edge_segment = { edge_connector ~ node_group }
+
+// Vertex statement: node_group optionally followed by chain of edges
+// Supports: A --> B --> C and A & B --> C & D
+vertex_statement = { node_group ~ edge_segment* }
+
+// Subgraph support
+subgraph_keyword = { ^"subgraph" }
+end_keyword = { ^"end" }
+
+subgraph_id = @{ (LETTER | NUMBER | "_") ~ (LETTER | NUMBER | "_" | "-" | ".")* }
+subgraph_title_text = @{ (!"]" ~ ANY)+ }
+subgraph_title_bracket = { "[" ~ subgraph_title_text ~ "]" }
+
+// Quoted title for multi-word subgraph titles
+subgraph_quoted_title_text = @{ (!"\"" ~ ANY)+ }
+subgraph_quoted_title = { "\"" ~ subgraph_quoted_title_text ~ "\"" }
+
+// subgraph_spec supports:
+//   subgraph id[Title]      -- existing bracket syntax
+//   subgraph id "Title"     -- explicit ID + quoted title
+//   subgraph "Title"        -- quoted title only (auto-ID)
+//   subgraph id             -- ID only (title = ID)
+subgraph_spec = {
+    subgraph_id ~ subgraph_title_bracket
+    | subgraph_id ~ subgraph_quoted_title
+    | subgraph_quoted_title
+    | subgraph_id
+}
+
+subgraph_body_line = { !(end_keyword ~ (NEWLINE | ";" | EOI)) ~ (statement | comment) }
+
+subgraph_stmt = {
+    subgraph_keyword ~ subgraph_spec ~ (NEWLINE | ";") ~
+    (subgraph_body_line ~ separator?)* ~
+    end_keyword
+}
+
+// Style/class passthrough statements.
+// The Rust parser preserves flowchart node `style` declarations after grammar capture;
+// the other statement families remain permissive passthroughs for now.
+// These consume everything up to end-of-line/semicolon after the keyword.
+// Word boundary: keyword+boundary is atomic to prevent implicit whitespace insertion
+// between the keyword and the lookahead.
+style_rest = _{ (!NEWLINE ~ !";" ~ ANY)* }
+style_kw = @{ ^"style" ~ !(LETTER | NUMBER | "_") }
+classdef_kw = @{ ^"classDef" ~ !(LETTER | NUMBER | "_") }
+class_kw = @{ ^"class" ~ !(LETTER | NUMBER | "_") }
+click_kw = @{ ^"click" ~ !(LETTER | NUMBER | "_") }
+linkstyle_kw = @{ ^"linkStyle" ~ !(LETTER | NUMBER | "_") }
+direction_kw = @{ ^"direction" ~ !(LETTER | NUMBER | "_") }
+direction_value = @{ (^"TD" | ^"TB" | ^"BT" | ^"LR" | ^"RL") }
+
+style_stmt = _{ style_kw ~ style_rest }
+classdef_stmt = { classdef_kw ~ style_rest }
+class_stmt = { class_kw ~ style_rest }
+click_stmt = _{ click_kw ~ style_rest }
+linkstyle_stmt = _{ linkstyle_kw ~ style_rest }
+direction_stmt = { direction_kw ~ direction_value }
+
+// Statement: subgraph, passthrough keyword statement, or vertex statement
+statement = { subgraph_stmt | style_stmt | classdef_stmt | class_stmt | click_stmt | linkstyle_stmt | direction_stmt | vertex_statement }
+
+// Comment line
+comment = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// Statement separator: newline or semicolon (one or more)
+separator = _{ (NEWLINE | ";")+ }
+
+// Complete flowchart
+flowchart = {
+    SOI ~ header ~ separator ~ ((statement | comment) ~ separator?)* ~ EOI
+}

@@ -1,0 +1,43 @@
+flowchart TB
+
+%% --- Top container (A) ---
+subgraph A["a"]
+  direction LR
+  Ab["b"]
+  Au["u"]
+  Ac["c"]
+end
+ 
+%% --- Middle (outside containers) ---
+Bmid["b"]
+D["d"]
+F["f"]
+
+Cmid["c"]
+E["e"]
+
+%% --- Bottom container (G) ---
+subgraph G["g"]
+  direction LR
+  Gb["b"]
+  Ga["a"]
+end
+
+%% --- Edges (match the figure) ---
+Ab --> Bmid
+Bmid --> D
+Bmid --> F
+Au --> F
+
+Ac --> Cmid
+Cmid --> E
+
+F --> Gb
+F --> Ga
+E --> Ga
+
+%% --- Light styling to resemble container shading (optional) ---
+style A fill:#e9efff,stroke:#1f4fff,stroke-width:1px
+style G fill:#e9efff,stroke:#1f4fff,stroke-width:1px
+classDef node fill:#f7f9ff,stroke:#1f4fff,stroke-width:1px,color:#000
+class Ab,Au,Ac,Bmid,Cmid,D,E,F,Gb,Ga node

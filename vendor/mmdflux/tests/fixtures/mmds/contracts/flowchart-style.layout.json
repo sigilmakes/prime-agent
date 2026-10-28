@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "profiles": [
+    "mmds-core-v1",
+    "mmdflux-text-v1",
+    "mmdflux-node-style-v1",
+    "mmdflux-text-metrics-v1"
+  ],
+  "extensions": {
+    "org.mmdflux.node-style.v1": {
+      "nodes": {
+        "A": {
+          "color": "#111",
+          "fill": "#ffeeaa",
+          "stroke": "#333"
+        }
+      }
+    },
+    "org.mmdflux.render.text.v1": {
+      "projection": {
+        "edge_waypoints": {},
+        "label_positions": {},
+        "node_ranks": {
+          "A": 0
+        }
+      }
+    },
+    "org.mmdflux.text-metrics.v1": {
+      "metricsProfile": {
+        "id": "mmdflux-sans-v1",
+        "source": "recorded",
+        "version": 1
+      },
+      "defaultTextStyle": {
+        "font-family": "\"trebuchet ms\", verdana, arial, sans-serif",
+        "font-size": 16.0,
+        "font-style": "normal",
+        "font-weight": "400",
+        "line-height": 24.0
+      },
+      "layoutText": {
+        "node-padding-x": 15.0,
+        "node-padding-y": 15.0,
+        "label-padding-x": 4.0,
+        "label-padding-y": 2.0,
+        "edge-label-max-width": 200.0
+      }
+    }
+  },
+  "defaults": {
+    "node": {
+      "shape": "rectangle"
+    },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "TD",
+    "bounds": {
+      "width": 116.921875,
+      "height": 70.0
+    },
+    "engine": "flux-layered"
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Alpha",
+      "position": {
+        "x": 58.4609375,
+        "y": 35.0
+      },
+      "size": {
+        "width": 100.921875,
+        "height": 54.0
+      }
+    }
+  ],
+  "edges": []
+}

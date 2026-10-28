@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "defaults": {
+    "node": { "shape": "rectangle" },
+    "edge": {
+      "stroke": "solid",
+      "arrow_start": "none",
+      "arrow_end": "normal",
+      "minlen": 1
+    }
+  },
+  "geometry_level": "layout",
+  "metadata": {
+    "diagram_type": "flowchart",
+    "direction": "LR",
+    "bounds": { "width": 160.0, "height": 120.0 }
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "label": "Start",
+      "shape": "round",
+      "position": { "x": 10.0, "y": 20.0 },
+      "size": { "width": 50.0, "height": 24.0 }
+    },
+    {
+      "id": "B",
+      "label": "Work",
+      "parent": "sg1",
+      "position": { "x": 80.0, "y": 40.0 },
+      "size": { "width": 50.0, "height": 24.0 }
+    },
+    {
+      "id": "C",
+      "label": "Done",
+      "parent": "sg2",
+      "position": { "x": 120.0, "y": 90.0 },
+      "size": { "width": 50.0, "height": 24.0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "A",
+      "target": "B",
+      "label": "go",
+      "minlen": 2
+    },
+    {
+      "id": "e1",
+      "source": "B",
+      "target": "C",
+      "stroke": "thick"
+    }
+  ],
+  "subgraphs": [
+    {
+      "id": "sg1",
+      "title": "Phase 1",
+      "children": ["B"],
+      "direction": "BT"
+    },
+    {
+      "id": "sg2",
+      "title": "Phase 2",
+      "children": ["C"],
+      "parent": "sg1"
+    }
+  ]
+}

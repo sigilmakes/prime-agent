@@ -1,0 +1,8 @@
+classDiagram
+    class User
+    class Order
+    class Product
+    class Service
+    User --> Order : places
+    Order *-- Product : contains
+    Service ..> User : authenticates

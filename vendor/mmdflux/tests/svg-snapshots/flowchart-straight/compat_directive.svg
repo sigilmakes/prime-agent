@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 272.27 395.36" style="max-width: 272.27px; background-color: #333333;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#d3d3d3" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M143.46,62.00 L143.46,108.00" stroke="#d3d3d3" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M125.08,208.98 L68.59,329.74" stroke="#d3d3d3" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M161.85,208.98 L218.34,329.74" stroke="#d3d3d3" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="96.57" y="8.00" width="93.79" height="54.00" fill="#1f2020" stroke="#cccccc" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="143.46" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#cccccc">Start</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <polygon points="143.46,112.00 201.14,169.68 143.46,227.36 85.79,169.68" fill="#1f2020" stroke="#cccccc" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="143.46" y="169.68" text-anchor="middle" dominant-baseline="middle" fill="#cccccc">Decision</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="8.00" y="333.36" width="117.80" height="54.00" fill="#1f2020" stroke="#cccccc" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="66.90" y="360.36" text-anchor="middle" dominant-baseline="middle" fill="#cccccc">Process</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="175.80" y="333.36" width="88.47" height="54.00" fill="#1f2020" stroke="#cccccc" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="220.03" y="360.36" text-anchor="middle" dominant-baseline="middle" fill="#cccccc">End</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="79.05" y="255.36" width="35.57" height="28.00" fill="#333333" />
+      <text x="96.84" y="269.36" text-anchor="middle" dominant-baseline="middle" fill="#cccccc">Yes</text>
+      <rect x="175.87" y="255.36" width="28.45" height="28.00" fill="#333333" />
+      <text x="190.09" y="269.36" text-anchor="middle" dominant-baseline="middle" fill="#cccccc">No</text>
+    </g>
+  </g>
+</svg>

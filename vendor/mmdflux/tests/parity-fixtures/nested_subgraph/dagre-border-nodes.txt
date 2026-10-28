@@ -1,0 +1,211 @@
+[layer_matrix] start
+[layer_matrix] rank 0
+[layer_matrix]   pos 0 node=_bl19 order=0 dummy=border borderType=borderLeft preds=[]
+[layer_matrix]   pos 1 node=_bt2 order=1 dummy=border borderType=- preds=[]
+[layer_matrix]   pos 2 node=_br20 order=2 dummy=border borderType=borderRight preds=[]
+[layer_matrix] rank 1
+[layer_matrix]   pos 0 node=_bl21 order=0 dummy=border borderType=borderLeft preds=[_bl19(order=0)]
+[layer_matrix]   pos 1 node=A order=1 dummy=- borderType=- preds=[]
+[layer_matrix]   pos 2 node=_br22 order=2 dummy=border borderType=borderRight preds=[_br20(order=2)]
+[layer_matrix] rank 2
+[layer_matrix]   pos 0 node=_bl23 order=0 dummy=border borderType=borderLeft preds=[_bl21(order=0)]
+[layer_matrix]   pos 1 node=_d7 order=1 dummy=edge borderType=- preds=[A(order=1)]
+[layer_matrix]   pos 2 node=_br24 order=2 dummy=border borderType=borderRight preds=[_br22(order=2)]
+[layer_matrix] rank 3
+[layer_matrix]   pos 0 node=_bl25 order=0 dummy=border borderType=borderLeft preds=[_bl23(order=0)]
+[layer_matrix]   pos 1 node=_bl9 order=1 dummy=border borderType=borderLeft preds=[]
+[layer_matrix]   pos 2 node=_bt4 order=2 dummy=border borderType=- preds=[]
+[layer_matrix]   pos 3 node=_d8 order=3 dummy=edge borderType=- preds=[_d7(order=1)]
+[layer_matrix]   pos 4 node=_br10 order=4 dummy=border borderType=borderRight preds=[]
+[layer_matrix]   pos 5 node=_br26 order=5 dummy=border borderType=borderRight preds=[_br24(order=2)]
+[layer_matrix] rank 4
+[layer_matrix]   pos 0 node=_bl27 order=0 dummy=border borderType=borderLeft preds=[_bl25(order=0)]
+[layer_matrix]   pos 1 node=_bl11 order=1 dummy=border borderType=borderLeft preds=[_bl9(order=1)]
+[layer_matrix]   pos 2 node=B order=2 dummy=- borderType=- preds=[_d8(order=3)]
+[layer_matrix]   pos 3 node=_br12 order=3 dummy=border borderType=borderRight preds=[_br10(order=4)]
+[layer_matrix]   pos 4 node=_br28 order=4 dummy=border borderType=borderRight preds=[_br26(order=5)]
+[layer_matrix] rank 5
+[layer_matrix]   pos 0 node=_bl29 order=0 dummy=border borderType=borderLeft preds=[_bl27(order=0)]
+[layer_matrix]   pos 1 node=_bl13 order=1 dummy=border borderType=borderLeft preds=[_bl11(order=1)]
+[layer_matrix]   pos 2 node=_d6 order=2 dummy=edge borderType=- preds=[B(order=2)]
+[layer_matrix]   pos 3 node=_br14 order=3 dummy=border borderType=borderRight preds=[_br12(order=3)]
+[layer_matrix]   pos 4 node=_br30 order=4 dummy=border borderType=borderRight preds=[_br28(order=4)]
+[layer_matrix] rank 6
+[layer_matrix]   pos 0 node=_bl31 order=0 dummy=border borderType=borderLeft preds=[_bl29(order=0)]
+[layer_matrix]   pos 1 node=_bl15 order=1 dummy=border borderType=borderLeft preds=[_bl13(order=1)]
+[layer_matrix]   pos 2 node=C order=2 dummy=- borderType=- preds=[_d6(order=2)]
+[layer_matrix]   pos 3 node=_br16 order=3 dummy=border borderType=borderRight preds=[_br14(order=3)]
+[layer_matrix]   pos 4 node=_br32 order=4 dummy=border borderType=borderRight preds=[_br30(order=4)]
+[layer_matrix] rank 7
+[layer_matrix]   pos 0 node=_bl33 order=0 dummy=border borderType=borderLeft preds=[_bl31(order=0)]
+[layer_matrix]   pos 1 node=_bl17 order=1 dummy=border borderType=borderLeft preds=[_bl15(order=1)]
+[layer_matrix]   pos 2 node=_bb5 order=2 dummy=border borderType=- preds=[]
+[layer_matrix]   pos 3 node=_br18 order=3 dummy=border borderType=borderRight preds=[_br16(order=3)]
+[layer_matrix]   pos 4 node=_br34 order=4 dummy=border borderType=borderRight preds=[_br32(order=4)]
+[layer_matrix] rank 8
+[layer_matrix]   pos 0 node=_bl35 order=0 dummy=border borderType=borderLeft preds=[_bl33(order=0)]
+[layer_matrix]   pos 1 node=_br36 order=1 dummy=border borderType=borderRight preds=[_br34(order=4)]
+[layer_matrix]   pos 2 node=_bb3 order=2 dummy=border borderType=- preds=[]
+[layer_matrix] end
+[border_blocks] block roots
+[border_blocks] UL
+[border_blocks]   inner
+[border_blocks]     _bl9 rank=3 order=1 root=_bl9
+[border_blocks]     _bt4 rank=3 order=2 root=_bt4
+[border_blocks]     _br10 rank=3 order=4 root=_br10
+[border_blocks]     _bl11 rank=4 order=1 root=_bl9
+[border_blocks]     _br12 rank=4 order=3 root=_br10
+[border_blocks]     _bl13 rank=5 order=1 root=_bl9
+[border_blocks]     _br14 rank=5 order=3 root=_br10
+[border_blocks]     _bl15 rank=6 order=1 root=_bl9
+[border_blocks]     _br16 rank=6 order=3 root=_br10
+[border_blocks]     _bl17 rank=7 order=1 root=_bl9
+[border_blocks]     _bb5 rank=7 order=2 root=_bb5
+[border_blocks]     _br18 rank=7 order=3 root=_br10
+[border_blocks]   outer
+[border_blocks]     _bl19 rank=0 order=0 root=_bl19
+[border_blocks]     _bt2 rank=0 order=1 root=_bt2
+[border_blocks]     _br20 rank=0 order=2 root=_br20
+[border_blocks]     _bl21 rank=1 order=0 root=_bl19
+[border_blocks]     _br22 rank=1 order=2 root=_br20
+[border_blocks]     _bl23 rank=2 order=0 root=_bl19
+[border_blocks]     _br24 rank=2 order=2 root=_br20
+[border_blocks]     _bl25 rank=3 order=0 root=_bl19
+[border_blocks]     _br26 rank=3 order=5 root=_br20
+[border_blocks]     _bl27 rank=4 order=0 root=_bl19
+[border_blocks]     _br28 rank=4 order=4 root=_br20
+[border_blocks]     _bl29 rank=5 order=0 root=_bl19
+[border_blocks]     _br30 rank=5 order=4 root=_br20
+[border_blocks]     _bl31 rank=6 order=0 root=_bl19
+[border_blocks]     _br32 rank=6 order=4 root=_br20
+[border_blocks]     _bl33 rank=7 order=0 root=_bl19
+[border_blocks]     _br34 rank=7 order=4 root=_br20
+[border_blocks]     _bl35 rank=8 order=0 root=_bl19
+[border_blocks]     _br36 rank=8 order=1 root=_br20
+[border_blocks]     _bb3 rank=8 order=2 root=_bb3
+[border_blocks] UR
+[border_blocks]   inner
+[border_blocks]     _bl9 rank=3 order=1 root=_bl9
+[border_blocks]     _bt4 rank=3 order=2 root=_bt4
+[border_blocks]     _br10 rank=3 order=4 root=_br10
+[border_blocks]     _bl11 rank=4 order=1 root=_bl9
+[border_blocks]     _br12 rank=4 order=3 root=_br10
+[border_blocks]     _bl13 rank=5 order=1 root=_bl9
+[border_blocks]     _br14 rank=5 order=3 root=_br10
+[border_blocks]     _bl15 rank=6 order=1 root=_bl9
+[border_blocks]     _br16 rank=6 order=3 root=_br10
+[border_blocks]     _bl17 rank=7 order=1 root=_bl9
+[border_blocks]     _bb5 rank=7 order=2 root=_bb5
+[border_blocks]     _br18 rank=7 order=3 root=_br10
+[border_blocks]   outer
+[border_blocks]     _bl19 rank=0 order=0 root=_bl19
+[border_blocks]     _bt2 rank=0 order=1 root=_bt2
+[border_blocks]     _br20 rank=0 order=2 root=_br20
+[border_blocks]     _bl21 rank=1 order=0 root=_bl19
+[border_blocks]     _br22 rank=1 order=2 root=_br20
+[border_blocks]     _bl23 rank=2 order=0 root=_bl19
+[border_blocks]     _br24 rank=2 order=2 root=_br20
+[border_blocks]     _bl25 rank=3 order=0 root=_bl19
+[border_blocks]     _br26 rank=3 order=5 root=_br20
+[border_blocks]     _bl27 rank=4 order=0 root=_bl19
+[border_blocks]     _br28 rank=4 order=4 root=_br20
+[border_blocks]     _bl29 rank=5 order=0 root=_bl19
+[border_blocks]     _br30 rank=5 order=4 root=_br20
+[border_blocks]     _bl31 rank=6 order=0 root=_bl19
+[border_blocks]     _br32 rank=6 order=4 root=_br20
+[border_blocks]     _bl33 rank=7 order=0 root=_bl19
+[border_blocks]     _br34 rank=7 order=4 root=_br20
+[border_blocks]     _bl35 rank=8 order=0 root=_bl19
+[border_blocks]     _br36 rank=8 order=1 root=_br20
+[border_blocks]     _bb3 rank=8 order=2 root=_bb3
+[border_blocks] DL
+[border_blocks]   inner
+[border_blocks]     _bl9 rank=3 order=1 root=_bl17
+[border_blocks]     _bt4 rank=3 order=2 root=_bt4
+[border_blocks]     _br10 rank=3 order=4 root=_br18
+[border_blocks]     _bl11 rank=4 order=1 root=_bl17
+[border_blocks]     _br12 rank=4 order=3 root=_br18
+[border_blocks]     _bl13 rank=5 order=1 root=_bl17
+[border_blocks]     _br14 rank=5 order=3 root=_br18
+[border_blocks]     _bl15 rank=6 order=1 root=_bl17
+[border_blocks]     _br16 rank=6 order=3 root=_br18
+[border_blocks]     _bl17 rank=7 order=1 root=_bl17
+[border_blocks]     _bb5 rank=7 order=2 root=_bb5
+[border_blocks]     _br18 rank=7 order=3 root=_br18
+[border_blocks]   outer
+[border_blocks]     _bl19 rank=0 order=0 root=_bl35
+[border_blocks]     _bt2 rank=0 order=1 root=_bt2
+[border_blocks]     _br20 rank=0 order=2 root=_br36
+[border_blocks]     _bl21 rank=1 order=0 root=_bl35
+[border_blocks]     _br22 rank=1 order=2 root=_br36
+[border_blocks]     _bl23 rank=2 order=0 root=_bl35
+[border_blocks]     _br24 rank=2 order=2 root=_br36
+[border_blocks]     _bl25 rank=3 order=0 root=_bl35
+[border_blocks]     _br26 rank=3 order=5 root=_br36
+[border_blocks]     _bl27 rank=4 order=0 root=_bl35
+[border_blocks]     _br28 rank=4 order=4 root=_br36
+[border_blocks]     _bl29 rank=5 order=0 root=_bl35
+[border_blocks]     _br30 rank=5 order=4 root=_br36
+[border_blocks]     _bl31 rank=6 order=0 root=_bl35
+[border_blocks]     _br32 rank=6 order=4 root=_br36
+[border_blocks]     _bl33 rank=7 order=0 root=_bl35
+[border_blocks]     _br34 rank=7 order=4 root=_br36
+[border_blocks]     _bl35 rank=8 order=0 root=_bl35
+[border_blocks]     _br36 rank=8 order=1 root=_br36
+[border_blocks]     _bb3 rank=8 order=2 root=_bb3
+[border_blocks] DR
+[border_blocks]   inner
+[border_blocks]     _bl9 rank=3 order=1 root=_bl17
+[border_blocks]     _bt4 rank=3 order=2 root=_bt4
+[border_blocks]     _br10 rank=3 order=4 root=_br18
+[border_blocks]     _bl11 rank=4 order=1 root=_bl17
+[border_blocks]     _br12 rank=4 order=3 root=_br18
+[border_blocks]     _bl13 rank=5 order=1 root=_bl17
+[border_blocks]     _br14 rank=5 order=3 root=_br18
+[border_blocks]     _bl15 rank=6 order=1 root=_bl17
+[border_blocks]     _br16 rank=6 order=3 root=_br18
+[border_blocks]     _bl17 rank=7 order=1 root=_bl17
+[border_blocks]     _bb5 rank=7 order=2 root=_bb5
+[border_blocks]     _br18 rank=7 order=3 root=_br18
+[border_blocks]   outer
+[border_blocks]     _bl19 rank=0 order=0 root=_bl35
+[border_blocks]     _bt2 rank=0 order=1 root=_bt2
+[border_blocks]     _br20 rank=0 order=2 root=_br36
+[border_blocks]     _bl21 rank=1 order=0 root=_bl35
+[border_blocks]     _br22 rank=1 order=2 root=_br36
+[border_blocks]     _bl23 rank=2 order=0 root=_bl35
+[border_blocks]     _br24 rank=2 order=2 root=_br36
+[border_blocks]     _bl25 rank=3 order=0 root=_bl35
+[border_blocks]     _br26 rank=3 order=5 root=_br36
+[border_blocks]     _bl27 rank=4 order=0 root=_bl35
+[border_blocks]     _br28 rank=4 order=4 root=_br36
+[border_blocks]     _bl29 rank=5 order=0 root=_bl35
+[border_blocks]     _br30 rank=5 order=4 root=_br36
+[border_blocks]     _bl31 rank=6 order=0 root=_bl35
+[border_blocks]     _br32 rank=6 order=4 root=_br36
+[border_blocks]     _bl33 rank=7 order=0 root=_bl35
+[border_blocks]     _br34 rank=7 order=4 root=_br36
+[border_blocks]     _bl35 rank=8 order=0 root=_bl35
+[border_blocks]     _br36 rank=8 order=1 root=_br36
+[border_blocks]     _bb3 rank=8 order=2 root=_bb3
+[border_nodes] layout positions
+[border_nodes] inner min_rank=3 max_rank=7
+[border_nodes]   top _bt4 rank=3 order=2 x=40.25 y=115.50
+[border_nodes]   bottom _bb5 rank=7 order=2 x=60.50 y=271.50
+[border_nodes]   rank 3: left _bl9 order=1 x=20.00 y=115.50 right _br10 order=4 x=101.00 y=115.50
+[border_nodes]   rank 4: left _bl11 order=1 x=20.00 y=154.50 right _br12 order=3 x=101.00 y=154.50
+[border_nodes]   rank 5: left _bl13 order=1 x=20.00 y=193.50 right _br14 order=3 x=101.00 y=193.50
+[border_nodes]   rank 6: left _bl15 order=1 x=20.00 y=232.50 right _br16 order=3 x=101.00 y=232.50
+[border_nodes]   rank 7: left _bl17 order=1 x=20.00 y=271.50 right _br18 order=3 x=101.00 y=271.50
+[border_nodes] outer min_rank=0 max_rank=8
+[border_nodes]   top _bt2 rank=0 order=1 x=60.50 y=0.00
+[border_nodes]   bottom _bb3 rank=8 order=2 x=141.00 y=309.00
+[border_nodes]   rank 0: left _bl19 order=0 x=0.00 y=0.00 right _br20 order=2 x=121.00 y=0.00
+[border_nodes]   rank 1: left _bl21 order=0 x=0.00 y=39.00 right _br22 order=2 x=121.00 y=39.00
+[border_nodes]   rank 2: left _bl23 order=0 x=0.00 y=78.00 right _br24 order=2 x=121.00 y=78.00
+[border_nodes]   rank 3: left _bl25 order=0 x=0.00 y=115.50 right _br26 order=5 x=121.00 y=115.50
+[border_nodes]   rank 4: left _bl27 order=0 x=0.00 y=154.50 right _br28 order=4 x=121.00 y=154.50
+[border_nodes]   rank 5: left _bl29 order=0 x=0.00 y=193.50 right _br30 order=4 x=121.00 y=193.50
+[border_nodes]   rank 6: left _bl31 order=0 x=0.00 y=232.50 right _br32 order=4 x=121.00 y=232.50
+[border_nodes]   rank 7: left _bl33 order=0 x=0.00 y=271.50 right _br34 order=4 x=121.00 y=271.50
+[border_nodes]   rank 8: left _bl35 order=0 x=0.00 y=309.00 right _br36 order=1 x=121.00 y=309.00

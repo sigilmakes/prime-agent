@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1041.26 1958.59" style="max-width: 1041.26px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M514.85,71.79 L514.85,74.57 C514.85,77.34 514.85,82.90 514.85,88.46 C514.85,94.01 514.85,99.57 514.85,104.46 C514.85,109.34 514.85,113.57 514.85,115.68 L514.85,117.79" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M489.43,175.79 L489.43,178.57 C489.43,181.34 489.43,186.90 481.58,192.46 C473.73,198.01 458.04,203.57 450.20,208.46 C442.35,213.34 442.35,217.57 442.35,219.68 L442.35,221.79" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M498.96,279.79 L506.89,280.88 L565.99,289.03 C625.10,297.18 743.32,313.49 802.43,336.47 C861.53,359.46 861.53,389.12 810.31,422.77 C759.08,456.41 656.63,494.04 605.40,512.85 L554.17,531.67 L546.66,534.42" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M470.56,561.92 L463.02,564.60 L430.77,576.04 C398.52,587.49 334.02,610.38 301.78,626.99 C269.53,643.60 269.53,653.93 269.53,665.43 C269.53,676.93 269.53,689.60 269.53,695.93 L269.53,702.27 L269.53,710.27" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M264.22,768.27 L264.22,775.92 C264.22,783.57 264.22,798.87 259.71,814.17 C255.20,829.47 246.17,844.77 241.66,859.41 C237.15,874.04 237.15,888.01 237.15,894.99 L237.15,901.98" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M280.49,768.27 L283.50,775.68 L292.32,797.39 C301.13,819.11 318.77,862.54 327.59,901.59 C336.40,940.64 336.40,975.31 336.40,1010.81 C336.40,1046.31 336.40,1082.64 336.40,1118.98 C336.40,1155.31 336.40,1191.64 336.40,1229.64 C336.40,1267.64 336.40,1307.31 336.40,1360.20 C336.40,1413.10 336.40,1479.22 336.40,1533.78 C336.40,1588.34 336.40,1631.34 345.09,1668.43 C353.78,1705.52 371.16,1736.69 379.84,1752.28 L388.53,1767.86 L392.43,1774.85" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M534.72,570.44 L541.06,575.32 L553.61,584.98 C566.16,594.64 591.25,613.95 603.80,628.77 C616.35,643.60 616.35,653.93 616.35,665.43 C616.35,676.93 616.35,689.60 616.35,695.93 L616.35,702.27 L616.35,710.27" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M577.13,811.76 L570.71,816.53 L550.65,831.44 C530.58,846.34 490.45,876.16 470.38,896.24 C450.31,916.31 450.31,926.64 450.31,941.98 C450.31,957.31 450.31,977.64 450.31,987.81 L450.31,997.98 L450.31,1005.98" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M647.42,819.90 L652.55,826.05 L663.65,839.37 C674.75,852.69 696.96,879.33 708.06,897.82 C719.16,916.31 719.16,926.64 719.16,941.98 C719.16,957.31 719.16,977.64 719.16,987.81 L719.16,997.98 L719.16,1005.98" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M705.39,1063.98 L705.39,1067.03 C705.39,1070.09 705.39,1076.20 700.71,1082.31 C696.03,1088.42 686.67,1094.53 682.00,1099.98 C677.32,1105.42 677.32,1110.20 677.32,1112.59 L677.32,1114.98" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M663.54,1172.98 L663.54,1176.03 C663.54,1179.09 663.54,1185.20 663.54,1191.31 C663.54,1197.42 663.54,1203.53 663.54,1208.98 C663.54,1214.42 663.54,1219.20 663.54,1221.59 L663.54,1223.98" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M652.64,1281.98 L652.64,1286.57 C652.64,1291.17 652.64,1300.36 647.07,1309.56 C641.50,1318.75 630.36,1327.95 624.79,1336.47 C619.21,1345.00 619.21,1352.86 619.21,1356.79 L619.21,1360.72" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M610.90,1460.91 L612.32,1468.78 L614.63,1481.54 C616.93,1494.30 621.54,1519.82 623.84,1537.75 C626.14,1555.68 626.14,1566.01 640.10,1586.05 C654.05,1606.09 681.96,1635.84 695.92,1650.72 L709.87,1665.59 L715.34,1671.43" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M792.52,1701.34 L800.52,1701.34 L806.19,1701.34 C811.86,1701.34 823.20,1701.34 828.86,1590.62 C834.53,1479.89 834.53,1258.43 830.16,1147.70 C825.79,1036.98 817.06,1036.98 812.69,1036.98 L808.32,1036.98 L800.32,1036.98" stroke="#333" stroke-width="2.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M590.33,1459.21 L588.61,1467.02 L585.73,1480.07 C582.86,1493.13 577.10,1519.24 574.23,1537.46 C571.35,1555.68 571.35,1566.01 559.19,1585.97 C547.02,1605.92 522.70,1635.50 510.53,1650.29 L498.37,1665.08 L493.29,1671.25" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M450.31,1063.98 L450.31,1071.98 L450.31,1079.81 C450.31,1087.64 450.31,1103.31 450.31,1129.31 C450.31,1155.31 450.31,1191.64 450.31,1229.64 C450.31,1267.64 450.31,1307.31 450.31,1360.20 C450.31,1413.10 450.31,1479.22 452.59,1531.80 C454.87,1584.37 459.43,1623.40 461.71,1642.91 L463.99,1662.42 L464.92,1670.37" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M453.19,1728.34 L453.19,1731.12 C453.19,1733.90 453.19,1739.45 448.46,1745.01 C443.72,1750.57 434.25,1756.12 429.51,1761.01 C424.77,1765.90 424.77,1770.12 424.77,1772.23 L424.77,1774.34" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M334.90,279.79 L334.90,282.57 C334.90,285.34 334.90,290.90 307.61,296.46 C280.33,302.01 225.76,307.57 198.47,312.46 C171.19,317.34 171.19,321.57 171.19,323.68 L171.19,325.79" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M89.59,383.79 L89.59,391.79 L89.59,396.29 C89.59,400.79 89.59,409.79 89.59,419.46 C89.59,429.12 89.59,439.46 89.59,450.96 C89.59,462.46 89.59,475.12 89.59,481.46 L89.59,487.79 L89.59,495.79" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M89.59,553.79 L89.59,561.79 L89.59,573.70 C89.59,585.61 89.59,609.44 89.59,634.85 C89.59,660.27 89.59,687.27 89.59,732.72 C89.59,778.17 89.59,842.07 89.59,891.36 C89.59,940.64 89.59,975.31 89.59,1010.81 C89.59,1046.31 89.59,1082.64 89.59,1118.98 C89.59,1155.31 89.59,1191.64 89.59,1229.64 C89.59,1267.64 89.59,1307.31 89.59,1360.20 C89.59,1413.10 89.59,1479.22 89.59,1533.78 C89.59,1588.34 89.59,1631.34 130.06,1669.42 C170.53,1707.49 251.47,1740.64 291.93,1757.22 L332.40,1773.80 L339.80,1776.83" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M140.29,383.79 L147.35,387.55 L157.13,392.76 C166.90,397.96 186.45,408.38 196.23,418.75 C206.01,429.12 206.01,439.46 248.08,458.50 C290.16,477.54 374.32,505.30 416.40,519.18 L458.47,533.06 L466.07,535.56" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M598.66,175.79 L598.66,178.57 C598.66,181.34 598.66,186.90 649.82,192.46 C700.99,198.01 803.32,203.57 854.48,208.46 C905.65,213.34 905.65,217.57 905.65,219.68 L905.65,221.79" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M969.45,279.79 L969.45,287.79 L969.45,294.79 C969.45,301.79 969.45,315.79 969.45,337.62 C969.45,359.46 969.45,389.12 969.45,417.46 C969.45,445.79 969.45,472.79 969.45,508.54 C969.45,544.28 969.45,588.77 969.45,624.52 C969.45,660.27 969.45,687.27 969.45,732.72 C969.45,778.17 969.45,842.07 969.45,891.36 C969.45,940.64 969.45,975.31 969.45,1010.81 C969.45,1046.31 969.45,1082.64 969.45,1118.98 C969.45,1155.31 969.45,1191.64 969.45,1229.64 C969.45,1267.64 969.45,1307.31 969.45,1360.20 C969.45,1413.10 969.45,1479.22 969.45,1533.78 C969.45,1588.34 969.45,1631.34 890.40,1669.76 C811.35,1708.17 653.26,1742.00 574.21,1758.92 L495.16,1775.83 L487.34,1777.51" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M689.00,1281.98 L694.49,1287.80 L703.79,1297.66 C713.09,1307.52 731.69,1327.25 740.99,1342.28 C750.29,1357.31 750.29,1367.64 750.29,1398.70 C750.29,1429.77 750.29,1481.55 750.29,1507.45 L750.29,1533.34 L750.29,1541.34" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M776.14,1599.34 L781.68,1605.12 L792.73,1616.66 C803.77,1628.20 825.87,1651.27 778.08,1679.59 C730.30,1707.91 612.63,1741.48 553.80,1758.27 L494.97,1775.05 L487.27,1777.25" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M409.43,1832.34 L409.43,1835.12 C409.43,1837.90 409.43,1843.45 409.43,1849.01 C409.43,1854.57 409.43,1860.12 409.43,1865.01 C409.43,1869.90 409.43,1874.12 409.43,1876.23 L409.43,1878.34" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="End" data-id="End" data-look="classic">
+        <ellipse cx="409.43" cy="1916.47" rx="34.12" ry="34.12" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="409.43" y="1916.47" text-anchor="middle" dominant-baseline="middle" fill="#333">Done</text>
+      </g>
+      <g class="node default" id="alert" data-id="alert" data-look="classic">
+        <rect x="674.04" y="1545.34" width="152.49" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="750.29" y="1572.34" text-anchor="middle" dominant-baseline="middle" fill="#333">Page On-call</text>
+      </g>
+      <g class="node default" id="audit" data-id="audit" data-look="classic">
+        <rect x="905.65" y="225.79" width="127.61" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="969.45" y="252.79" text-anchor="middle" dominant-baseline="middle" fill="#333">Audit Log</text>
+      </g>
+      <g class="node default" id="cache" data-id="cache" data-look="classic">
+        <rect x="8.00" y="329.79" width="163.19" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="89.59" y="356.79" text-anchor="middle" dominant-baseline="middle" fill="#333">Lookup Cache</text>
+      </g>
+      <g class="node default" id="fastpath" data-id="fastpath" data-look="classic">
+        <rect x="8.90" y="499.79" width="161.39" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="89.59" y="526.79" text-anchor="middle" dominant-baseline="middle" fill="#333">Serve Cached</text>
+      </g>
+      <g class="node default" id="ingest" data-id="ingest" data-look="classic">
+        <rect x="431.04" y="121.79" width="167.62" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="514.85" y="148.79" text-anchor="middle" dominant-baseline="middle" fill="#333">Ingest Request</text>
+      </g>
+      <g class="node default" id="metrics" data-id="metrics" data-look="classic">
+        <rect x="335.43" y="1778.34" width="148.00" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="409.43" y="1805.34" text-anchor="middle" dominant-baseline="middle" fill="#333">Emit Metrics</text>
+      </g>
+      <g class="node default" id="notify" data-id="notify" data-look="classic">
+        <rect x="162.28" y="905.98" width="139.12" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="231.84" y="932.98" text-anchor="middle" dominant-baseline="middle" fill="#333">Notify User</text>
+      </g>
+      <g class="node default" id="parse" data-id="parse" data-look="classic">
+        <rect x="334.90" y="225.79" width="164.06" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="416.93" y="252.79" text-anchor="middle" dominant-baseline="middle" fill="#333">Parse Payload</text>
+      </g>
+      <g class="node default" id="persist" data-id="persist" data-look="classic">
+        <rect x="389.19" y="1674.34" width="158.70" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="468.54" y="1701.34" text-anchor="middle" dominant-baseline="middle" fill="#333">Persist Result</text>
+      </g>
+      <g class="node default" id="process" data-id="process" data-look="classic">
+        <rect x="589.52" y="1227.98" width="148.04" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="663.54" y="1254.98" text-anchor="middle" dominant-baseline="middle" fill="#333">Process Job</text>
+      </g>
+      <g class="node default" id="queue" data-id="queue" data-look="classic">
+        <rect x="642.01" y="1009.98" width="154.30" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="719.16" y="1036.98" text-anchor="middle" dominant-baseline="middle" fill="#333">Enqueue Job</text>
+      </g>
+      <g class="node default" id="reject" data-id="reject" data-look="classic">
+        <rect x="216.85" y="714.27" width="105.35" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="269.53" y="741.27" text-anchor="middle" dominant-baseline="middle" fill="#333">Reject</text>
+      </g>
+      <g class="node default" id="retry" data-id="retry" data-look="classic">
+        <rect x="694.30" y="1674.34" width="98.23" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="743.41" y="1701.34" text-anchor="middle" dominant-baseline="middle" fill="#333">Retry</text>
+      </g>
+      <g class="node default" id="route" data-id="route" data-look="classic">
+        <polygon points="616.35,714.27 684.71,782.62 616.35,850.98 548.00,782.62" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="616.35" y="782.62" text-anchor="middle" dominant-baseline="middle" fill="#333">Route Type</text>
+      </g>
+      <g class="node default" id="start" data-id="start" data-look="classic">
+        <ellipse cx="514.85" cy="39.89" rx="31.89" ry="31.89" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="514.85" y="39.89" text-anchor="middle" dominant-baseline="middle" fill="#333">Start</text>
+      </g>
+      <g class="node default" id="success" data-id="success" data-look="classic">
+        <polygon points="601.47,1346.98 663.15,1408.66 601.47,1470.34 539.79,1408.66" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="601.47" y="1408.66" text-anchor="middle" dominant-baseline="middle" fill="#333">Success?</text>
+      </g>
+      <g class="node default" id="sync" data-id="sync" data-look="classic">
+        <rect x="371.84" y="1009.98" width="156.95" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="450.31" y="1036.98" text-anchor="middle" dominant-baseline="middle" fill="#333">Sync Pipeline</text>
+      </g>
+      <g class="node default" id="validate" data-id="validate" data-look="classic">
+        <polygon points="506.90,499.79 556.13,549.03 506.90,598.27 457.66,549.03" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="506.90" y="549.03" text-anchor="middle" dominant-baseline="middle" fill="#333">Valid?</text>
+      </g>
+      <g class="node default" id="worker" data-id="worker" data-look="classic">
+        <rect x="589.53" y="1118.98" width="148.02" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="663.54" y="1145.98" text-anchor="middle" dominant-baseline="middle" fill="#333">Worker Pool</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="320.86" y="596.47" width="25.80" height="28.00" fill="white" />
+      <text x="333.76" y="610.47" text-anchor="middle" dominant-baseline="middle" fill="#333">no</text>
+      <rect x="599.90" y="624.94" width="32.90" height="28.00" fill="white" />
+      <text x="616.35" y="638.94" text-anchor="middle" dominant-baseline="middle" fill="#333">yes</text>
+      <rect x="453.14" y="874.69" width="40.90" height="28.00" fill="white" />
+      <text x="473.59" y="888.69" text-anchor="middle" dominant-baseline="middle" fill="#333">sync</text>
+      <rect x="694.27" y="908.18" width="49.80" height="28.00" fill="white" />
+      <text x="719.16" y="922.18" text-anchor="middle" dominant-baseline="middle" fill="#333">async</text>
+      <rect x="622.54" y="1572.25" width="25.80" height="28.00" fill="white" />
+      <text x="635.43" y="1586.25" text-anchor="middle" dominant-baseline="middle" fill="#333">no</text>
+      <rect x="554.90" y="1528.84" width="32.90" height="28.00" fill="white" />
+      <text x="571.35" y="1542.84" text-anchor="middle" dominant-baseline="middle" fill="#333">yes</text>
+      <rect x="77.14" y="402.29" width="24.90" height="28.00" fill="white" />
+      <text x="89.59" y="416.29" text-anchor="middle" dominant-baseline="middle" fill="#333">hit</text>
+      <rect x="265.52" y="462.16" width="40.88" height="28.00" fill="white" />
+      <text x="285.96" y="476.16" text-anchor="middle" dominant-baseline="middle" fill="#333">miss</text>
+      <rect x="728.95" y="1387.49" width="42.68" height="28.00" fill="white" />
+      <text x="750.29" y="1401.49" text-anchor="middle" dominant-baseline="middle" fill="#333">warn</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 509.28 679.75" style="max-width: 509.28px; background-color: transparent;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#333" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M257.08,62.00 L257.08,97.33 L257.08,100.28 C257.08,103.22 257.08,109.11 257.08,115.00 C257.08,120.89 257.08,126.78 257.08,129.72 L257.08,132.67 L257.08,164.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M257.08,222.00 L257.08,224.78 C257.08,227.56 257.08,233.11 257.08,238.11 C257.08,243.11 257.08,247.56 257.08,252.44 C257.08,257.33 257.08,262.67 257.08,265.33 L257.08,268.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M198.97,374.64 L182.29,374.64 C165.62,374.64 132.27,374.64 115.59,397.16 C98.92,419.68 98.92,464.71 98.92,487.23 L98.92,509.75" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M301.77,388.05 L306.98,388.05 C312.18,388.05 322.59,388.05 327.79,408.34 C332.99,428.62 332.99,469.18 332.99,489.47 L332.99,509.75" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M139.98,567.75 L139.98,570.53 C139.98,573.31 139.98,578.86 146.34,583.86 C152.70,588.86 165.43,593.31 171.79,598.19 C178.15,603.08 178.15,608.42 178.15,611.08 L178.15,613.75" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M313.28,567.75 L313.28,570.53 C313.28,573.31 313.28,578.86 316.57,583.86 C319.85,588.86 326.42,593.31 329.71,598.19 C332.99,603.08 332.99,608.42 332.99,611.08 L332.99,613.75" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+      <path d="M344.01,644.75 L438.15,644.75 L438.15,593.94 C438.15,543.12 438.15,441.50 438.15,339.88 C438.15,238.25 438.15,136.62 438.15,85.81 L438.15,35.00 L311.53,35.00" stroke="#333" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="Auth" data-id="Auth" data-look="classic">
+        <polygon points="257.08,272.00 337.45,352.38 257.08,432.75 176.70,352.38" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="352.38" text-anchor="middle" dominant-baseline="middle" fill="#333">Authenticated?</text>
+      </g>
+      <g class="node default" id="Client" data-id="Client" data-look="classic">
+        <rect x="206.62" y="8.00" width="100.91" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Client</text>
+      </g>
+      <g class="node default" id="Process" data-id="Process" data-look="classic">
+        <rect x="8.00" y="513.75" width="181.84" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="98.92" y="540.75" text-anchor="middle" dominant-baseline="middle" fill="#333">Process Request</text>
+      </g>
+      <g class="node default" id="Reject" data-id="Reject" data-look="classic">
+        <rect x="239.84" y="513.75" width="186.31" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="332.99" y="540.75" text-anchor="middle" dominant-baseline="middle" fill="#333">401 Unauthorized</text>
+      </g>
+      <g class="node default" id="Response" data-id="Response" data-look="classic">
+        <rect x="170.15" y="617.75" width="173.86" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="644.75" text-anchor="middle" dominant-baseline="middle" fill="#333">Send Response</text>
+      </g>
+      <g class="node default" id="Server" data-id="Server" data-look="classic">
+        <rect x="203.52" y="168.00" width="107.12" height="54.00" fill="white" stroke="#333" stroke-width="1.00" stroke-linejoin="round" />
+        <text x="257.08" y="195.00" text-anchor="middle" dominant-baseline="middle" fill="#333">Server</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="200.17" y="70.50" width="113.81" height="28.00" fill="white" />
+      <text x="257.08" y="84.50" text-anchor="middle" dominant-baseline="middle" fill="#333">HTTP Request</text>
+      <rect x="81.13" y="441.25" width="35.57" height="28.00" fill="white" />
+      <text x="98.92" y="455.25" text-anchor="middle" dominant-baseline="middle" fill="#333">Yes</text>
+      <rect x="318.77" y="441.25" width="28.45" height="28.00" fill="white" />
+      <text x="332.99" y="455.25" text-anchor="middle" dominant-baseline="middle" fill="#333">No</text>
+      <rect x="375.02" y="309.64" width="126.27" height="28.00" fill="white" />
+      <text x="438.15" y="323.64" text-anchor="middle" dominant-baseline="middle" fill="#333">HTTP Response</text>
+    </g>
+  </g>
+</svg>
