@@ -1,0 +1,1 @@
+- A new attach-path e2e regression covers the titled-empty-subgraph poison end to end: the scripted engine sends the poisoning fence, the headless verifier attaches to the settled turn (the report's manual in-session check, now automated), and asserts the surviving clusters draw, the empty cluster is omitted, and a follow-up turn still settles.
