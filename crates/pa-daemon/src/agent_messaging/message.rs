@@ -214,7 +214,7 @@ impl AgentMessageController for LinkAgentMessageController {
             children.observe_child_usage(&input.target).await;
         }
         let receipt = match self.deliver_direct(&input).await {
-            DirectDelivery::Delivered(receipt) => receipt,
+            DirectDelivery::Delivered(receipt) => *receipt,
             DirectDelivery::Unavailable => self.deliver_via_supervisor(input.clone()).await?,
             DirectDelivery::Failed(error) => return Err(anyhow::anyhow!(error)),
         };
@@ -224,8 +224,9 @@ impl AgentMessageController for LinkAgentMessageController {
 
 /// The outcome of the direct-delivery attempt.
 enum DirectDelivery {
-    /// The target answered with a receipt.
-    Delivered(AgentMessageReceipt),
+    /// The target answered with a receipt. Boxed: the receipt is much larger
+    /// than the other variants (`clippy::large_enum_variant`).
+    Delivered(Box<AgentMessageReceipt>),
     /// No direct link could be established; the supervisor route may take
     /// over.
     Unavailable,
@@ -286,7 +287,7 @@ impl LinkAgentMessageController {
                     .as_ref()
                     .and_then(|data| receipt_from_wire(data, input.clone()))
                 {
-                    Some(receipt) => DirectDelivery::Delivered(receipt),
+                    Some(receipt) => DirectDelivery::Delivered(Box::new(receipt)),
                     None => DirectDelivery::Failed(
                         "Target session returned an invalid agent-message receipt".to_string(),
                     ),

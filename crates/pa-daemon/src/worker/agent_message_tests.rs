@@ -603,7 +603,7 @@ async fn deliver_message_releases_a_stale_suspension_on_an_idle_target() {
 
 /// A suspension that holds parked work IS a hold: the delivery parks behind
 /// it instead of failing, and the receipt says queued plus why. The next
-/// resume boundary (an explicit resume_queue here) delivers the park.
+/// resume boundary (an explicit `resume_queue` here) delivers the park.
 #[tokio::test]
 async fn deliver_message_parks_under_a_held_suspension_with_receipt_truth() {
     let worker = created_worker().await;
