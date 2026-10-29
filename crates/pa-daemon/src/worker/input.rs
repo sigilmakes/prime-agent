@@ -61,6 +61,11 @@ impl Worker {
         // prompt carrying `streamingBehavior` resumes the suspension
         // (TS `_prompt`'s `_resumeSessionInputAdmission()` +
         // `_assertSessionActionAdmissionAvailable()` pair).
+        //
+        // A gate that holds no parked work protects nothing, so it is released
+        // before the admission read (issue #33): a stop or a compaction that
+        // finished with nothing parked cannot deafen the session.
+        self.release_unprotected_suspension();
         {
             let mut core = self.core.lock().unwrap();
             if core.queued_input_suspended && !core.busy {
@@ -275,21 +280,11 @@ impl Worker {
         if let Err(response) = self.refuse_delivery_if_paused() {
             return response;
         }
-        // On a suspended idle session the delivery is rejected with the same
-        // admission error as a plain prompt; only the busy carve-out queues it
-        // parked.
-        {
-            let core = self.core.lock().unwrap();
-            if core.queued_input_suspended && !core.busy && !core.compacting {
-                drop(core);
-                return response_failure(
-                    None,
-                    "worker_deliver_message",
-                    QUEUED_INPUT_SUSPENDED,
-                    None,
-                );
-            }
-        }
+        // A gate with nothing parked protects nothing: release it and deliver.
+        // A gate that still holds parked work never refuses the delivery either —
+        // the message parks behind the hold and the receipt reports `queued` plus
+        // the reason, so a caller always learns what happened (issue #33).
+        self.release_unprotected_suspension();
         let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
         // A delivery from one of this session's RLM children counts as the
         // child's reply: the settle watcher withholds the no-reply notice.
@@ -329,7 +324,7 @@ impl Worker {
         } else {
             Lane::Steering
         };
-        let (id, queued, snapshot, target) = {
+        let (id, queued, suspended_hold, compacting_hold, snapshot, target) = {
             let (mut core, inputs) = self.summary_inputs();
             let pending = core.steering.len() + core.follow_up.len();
             if let Err(error) =
@@ -342,7 +337,12 @@ impl Worker {
                 return response_failure(None, "worker_deliver_message", &error.to_string(), None);
             }
             let id = pa_core::session_engine::agent_messaging::create_agent_session_message_id();
-            let queued = core.busy;
+            // `queued` is the receipt truth: the delivery cannot run now while
+            // the target is busy, a compaction window is open, or a hold with
+            // parked work stands.
+            let suspended_hold = core.queued_input_suspended && !core.busy && !core.compacting;
+            let compacting_hold = core.compacting;
+            let queued = core.busy || compacting_hold || suspended_hold;
             let summary = self.summary_locked(&core, inputs);
             // The receiving session's endpoint: the receipt's `target`
             // and the delivered row's `details.target` share the one
@@ -399,7 +399,14 @@ impl Worker {
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
             let snapshot = Self::snapshot_locked(&core);
-            (id, queued, snapshot, target)
+            (
+                id,
+                queued,
+                suspended_hold,
+                compacting_hold,
+                snapshot,
+                target,
+            )
         };
         // The queued agent message is admitted live work — a restart must revive
         // the worker to deliver it (no client reopens the session).
@@ -424,6 +431,11 @@ impl Worker {
         if queued {
             receipt["deliveryStatus"] = json!("queued");
             receipt["queuedAt"] = json!(timestamp);
+            if suspended_hold {
+                receipt["queuedReason"] = json!("input_admission_suspended");
+            } else if compacting_hold {
+                receipt["queuedReason"] = json!("compaction_in_progress");
+            }
         } else {
             receipt["deliveryStatus"] = json!("delivered");
             receipt["deliveredAt"] = json!(timestamp);

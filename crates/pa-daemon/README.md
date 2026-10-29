@@ -143,13 +143,22 @@ immediately and the aborted turn settles on its zero-usage aborted message
 half is pa-core's provider-adapter cancellation token).
 Queued-input suspension (TS `_sessionInputPumpSuspended`, the #227/#233
 ruling): `abort`/`abort_and_clear_queue`/manual
-`compact` suspend queued-input admission indefinitely; while suspended a
-plain `prompt`/`prompt_and_wait` is rejected with the TS admission error
-and the lanes park. Resume sites: a prompt carrying `streamingBehavior`,
+`compact` suspend queued-input admission; while the hold stands over parked
+work a plain `prompt`/`prompt_and_wait` is rejected with the TS admission
+error and the lanes park. Resume sites: a prompt carrying `streamingBehavior`,
 `steer`/`follow_up`, `resume_queue` (even on the empty queue), an applied
 `mutate_queued_message`, a cron/heartbeat fire, and a successful compact
-with an active goal. Agent-message delivery is rejected while suspended
-and idle (TS `acceptAgentMessagePrompt` runs with `resumeIfIdle: false`).
+with an active goal. A suspension with nothing parked (both lanes empty, no
+compaction window, worker idle) protects nothing and is released
+automatically at the admission checks, the turn boundary, and every
+compaction outcome, so an idle session is never left deaf to later input
+(issue #33). Agent-message delivery follows that same rule: it releases a
+stale gate, and under a hold that has parked work it parks behind the hold
+and answers `queued` with `queuedReason: "input_admission_suspended"` rather
+than the admission error (divergence from TS `acceptAgentMessagePrompt`'s
+`resumeIfIdle: false`, operator ruling 2026-10-29). A family broadcast runs
+the same per-member `send_agent_message` path, so it inherits these semantics
+exactly; per-member failures stay receipt-level entries.
 The compact-with-active-goal resume is also the TS post-compaction
 continue (agent-session.ts `compact()`'s `didCompact` branch): with no
 queued work parked, the worker mints the owed goal continuation through

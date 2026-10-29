@@ -1,9 +1,9 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
-    json, queue_lanes, response_failure, response_success, session_snapshot, AgentSessionEngine,
-    DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value,
-    Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
+    hold_is_protected, json, queue_lanes, response_failure, response_success, session_snapshot,
+    AgentSessionEngine, DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile,
+    TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 use crate::engine::SessionEngine;
 
@@ -404,6 +404,31 @@ impl Worker {
         Ok(())
     }
 
+    /// Release a suspension that has nothing left to hold. The gate exists to
+    /// keep queued user work from firing across an abort/compaction boundary, so
+    /// a hold with no such row (an agent-message delivery never counts) and no
+    /// compacting window protects nothing; leaving it set wedges an idle session
+    /// against every later prompt and agent message (issue #33). The
+    /// caller-visible resume sites stay authoritative for a hold that DOES have
+    /// parked work.
+    pub(crate) fn release_unprotected_suspension(&self) -> bool {
+        let unprotected = {
+            let mut core = self.core.lock().unwrap();
+            let unprotected = core.queued_input_suspended
+                && !core.busy
+                && !core.compacting
+                && !hold_is_protected(&core);
+            if unprotected {
+                core.queued_input_suspended = false;
+            }
+            unprotected
+        };
+        if unprotected {
+            self.resume_queued_input();
+        }
+        unprotected
+    }
+
     /// Clear the queued-input suspension and wake the turn runner so parked
     /// lanes drain; an owed continuation re-evaluates here too.
     pub(crate) fn resume_queued_input(&self) {
@@ -430,9 +455,10 @@ impl Worker {
             .and_then(Value::as_str)
             .map(str::to_string);
         {
-            // `compact()` aborts first, which suspends queued-input admission: the
-            // suspension outlives skip/failure/abort outcomes and is cleared below
-            // only for the didCompact + active-goal branch.
+            // `compact()` aborts first, which suspends queued-input admission. A
+            // compaction that ends with nothing parked has nothing left to hold,
+            // so the suspension is released at every outcome (issue #33); the
+            // active-goal branch below resumes again to admit its continuation.
             let mut core = self.core.lock().unwrap();
             core.queued_input_suspended = true;
         }
@@ -444,6 +470,10 @@ impl Worker {
         // suspension MID-window left its item parked behind the compacting gate;
         // without this wake the parked steer would strand forever.
         self.work_notify.notify_one();
+        // Skip/failure/abort leave no turn to hit the runner's own release, so
+        // the empty hold is dropped here; a hold over parked work stays and its
+        // resume site remains the way out.
+        self.release_unprotected_suspension();
         // Mint the owed goal continuation only when nothing is queued;
         // the resume site below clears the suspension gate and wakes
         // the runner (TS `compact()` goal branch).

@@ -2,10 +2,10 @@
 //! engine, and settles the result.
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
-    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
-    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
-    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
+    gather_delivery_batch, hold_is_protected, json, oneshot, session_snapshot, AssistantSnapshot,
+    DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest,
+    QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine,
+    TurnSettle, Value, WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -52,6 +52,13 @@ impl TurnRunner {
                     // disposing the kernel; the runner's last chance to fire it.
                     self.idle_notify.notify_waiters();
                     return;
+                }
+                // Between turns a suspension with both lanes empty protects
+                // nothing (issue #33): release it instead of parking the session
+                // deaf. A gate that still holds a parked row, or a compaction
+                // window, stays.
+                if core.queued_input_suspended && !core.compacting && !hold_is_protected(&core) {
+                    core.queued_input_suspended = false;
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.

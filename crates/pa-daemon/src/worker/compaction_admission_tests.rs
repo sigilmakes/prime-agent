@@ -10,7 +10,7 @@ use super::*;
 
 /// A created worker carrying one compaction script (the `delayMs`
 /// sleep IS the mid-compaction window).
-async fn compaction_admission_worker(compaction: Value) -> Arc<Worker> {
+pub(super) async fn compaction_admission_worker(compaction: Value) -> Arc<Worker> {
     let dir = std::env::temp_dir().join(format!("pa-compacting-gate-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = WorkerConfig {

@@ -28,6 +28,17 @@ pub(crate) const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3)
 pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
     "Cannot admit a session action while queued session input is suspended.";
 
+/// Whether a queued-input suspension still has work it is meant to hold. The
+/// gate parks the rows that existed when it was set (user work); an agent-message
+/// delivery that arrives during the hold rides it but never extends it, so agent
+/// traffic cannot keep a session deaf on its own (issue #33).
+pub(crate) fn hold_is_protected(core: &SessionCore) -> bool {
+    core.steering
+        .iter()
+        .chain(core.follow_up.iter())
+        .any(|item| item.agent_message.is_none())
+}
+
 /// The item's turn-execution class: items co-deliver as one batched turn only
 /// within the same class; the direct-prompt hand-off never joins a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -258,6 +258,7 @@ impl AgentMessageController for RecordingMessageController {
             receiver_role: input.receiver_role,
             delivered_at: Some("2024-01-01T00:00:00.000Z".to_string()),
             queued_at: None,
+            queued_reason: None,
         }))
     }
 }
@@ -438,4 +439,62 @@ async fn broadcast_without_family_is_empty_and_failures_settle() {
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0]["target"], "sib-1");
     assert_eq!(receipts[0]["error"], "peer unreachable");
+}
+
+/// Admission truth is the same for a direct send and the same member inside a
+/// broadcast: both shapes carry the target, the delivery status, and the
+/// queued reason (issue #33). A caller can decide from either receipt.
+#[tokio::test]
+async fn broadcast_and_direct_report_the_same_admission_receipt() {
+    struct HeldTargetController;
+    impl AgentMessageController for HeldTargetController {
+        fn family(
+            &self,
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+            std::future::ready(Ok(vec![AgentFamilyMember {
+                relationship: AgentFamilyRelationship::Sibling,
+                id: "sib-1".to_string(),
+                name: Some("scout".to_string()),
+                aliases: Vec::new(),
+            }]))
+        }
+        fn send_agent_message(
+            &self,
+            input: AgentMessageSendInput,
+        ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+            std::future::ready(Ok(AgentMessageReceipt {
+                id: "agentmsg_held".to_string(),
+                target: input.target,
+                target_session_id: Some("sib-1-session".to_string()),
+                target_session_name: Some("scout".to_string()),
+                target_runtime_kind: Some("top-level".to_string()),
+                message: input.message,
+                delivery_status: AgentMessageDeliveryStatus::Queued,
+                delivery_mode: Some("steer"),
+                receiver_role: input.receiver_role,
+                delivered_at: None,
+                queued_at: Some("2024-01-01T00:00:00.000Z".to_string()),
+                queued_reason: Some("input_admission_suspended".to_string()),
+            }))
+        }
+    }
+    let mut handlers = HostRequestHandlers::default();
+    register_agent_message_host_handlers(std::sync::Arc::new(HeldTargetController), &mut handlers);
+    let send = handlers.get("agent_message.send").unwrap().clone();
+    let direct = send_request(
+        &send,
+        json!({ "message": "hold this", "receiver_role": "sibling", "receiver_name": "scout" }),
+    )
+    .unwrap();
+    let broadcast =
+        send_request(&send, json!({ "target": "all", "message": "hold this" })).unwrap();
+    let member = &broadcast["receipts"][0];
+    for receipt in [&direct, member] {
+        assert_eq!(receipt["deliveryStatus"], "queued");
+        assert_eq!(receipt["queuedReason"], "input_admission_suspended");
+        assert!(receipt["queuedAt"].as_str().is_some());
+        assert!(receipt["deliveredAt"].is_null());
+        assert_eq!(receipt["target"]["activeSessionId"], "sib-1");
+        assert_eq!(receipt["receiverRole"], "sibling");
+    }
 }

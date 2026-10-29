@@ -712,9 +712,9 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
         ],
         "the follow-up row must deliver exactly once: {texts:?}"
     );
-    // A bare `abort` ends the follow-up's turn cleanly and parks the emptied
-    // queue behind the suspension (the TS plain-abort park the Ctrl+C
-    // funnel deliberately does not take).
+    // A bare `abort` ends the follow-up's turn cleanly. The queue is empty, so
+    // the boundary holds nothing and releases the suspension (issue #33): a
+    // later prompt or agent message is not left waiting on a resume site.
     let aborted_again = worker.dispatch("abort", &json!({})).await;
     assert!(
         aborted_again.success,
@@ -735,8 +735,8 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
             "the queue must stay drained"
         );
         assert!(
-            core.queued_input_suspended,
-            "the bare abort parks the queue behind the suspension"
+            !core.queued_input_suspended,
+            "a bare abort with an empty queue must release the empty hold"
         );
     }
     let messages = worker.dispatch("get_messages", &json!({})).await;
