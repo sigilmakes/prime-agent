@@ -55,7 +55,21 @@ impl AgentView {
         screen_height: usize,
         mode: FlushMode,
     ) -> std::io::Result<()> {
+        // `layout_pass` is a measurement pass with one mode-flag side effect: it
+        // sets `sparse_enabled = false` so the measurement's cache invalidation
+        // is dense. A measurement on a live fullscreen view must not keep that
+        // false: the flag's contract couples it to a consumed window (`sparse_window`
+        // is `None` whenever the flag rests false), and leaving the live window
+        // in place wedges the next compose's tail re-anchor behind the
+        // `sparse_enabled` gate - every later streaming frame renders the
+        // stale pre-edit anchor until a full view rebuild (the Ctrl+G
+        // external-editor freeze, 2026-10-28). The in-tree measurement
+        // brackets (view/lazy.rs) save and restore around the pass; the
+        // flush streamer runs on the live view for the suspend handoff and
+        // the replay restore, so it brackets too.
+        let sparse_was = self.sparse_enabled;
         let layout = self.layout_pass(width);
+        self.sparse_enabled = sparse_was;
         let previous = std::mem::take(&mut self.flushed_frame);
         let mut sink = FlushSink {
             flushed: match mode {

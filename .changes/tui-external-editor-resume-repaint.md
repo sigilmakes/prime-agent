@@ -1,0 +1,2 @@
+- The terminal is no longer frozen on a pre-edit transcript slice after a Ctrl+G external-editor handoff that started during a streaming turn: the suspend flush's measurement pass now brackets its mode-flag side effect, so the fullscreen compose keeps re-anchoring at the live tail, and the next turn paints on return.
+- A PTY regression test drives the real supervisor and TUI end to end (paced faux streaming, a scripted editor that appends a marker mid-turn) and asserts the tail still paints after the handoff plus a follow-up turn.
