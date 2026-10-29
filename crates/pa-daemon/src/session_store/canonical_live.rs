@@ -53,9 +53,29 @@ fn failure(detail: impl std::fmt::Display) -> CanonicalStoreError {
 }
 
 fn unresolved(detail: impl std::fmt::Display) -> CanonicalStoreError {
+    unresolved_with(detail, None)
+}
+
+/// One refusal whose outcome is unresolved. `reason` overrides the fixed-detail
+/// lookup with the caller's own fixed source-check label.
+fn unresolved_with(
+    detail: impl std::fmt::Display,
+    reason: Option<&'static str>,
+) -> CanonicalStoreError {
     let detail = detail.to_string();
     // Report only fixed source-check labels, never the dynamic error payload.
-    let reason = match detail.as_str() {
+    let reason = reason.unwrap_or_else(|| label_of(&detail));
+    eprintln!("pa-daemon: canonical refusal phase=owner reason={reason}");
+    CanonicalStoreError {
+        kind: CanonicalFailureKind::AdoptionConflict,
+        requested: CanonicalRequestedWrite::Unknown,
+        source: CanonicalSourceDisposition::NeedsReconcile,
+        detail,
+    }
+}
+
+fn label_of(detail: &str) -> &'static str {
+    match detail {
         "canonical owner adoption abandoned" => "canonical_owner_abandoned_pending_adoption",
         "canonical owner invalidated" => "canonical_owner_invalidated",
         "canonical owner authority poisoned" => "canonical_owner_authority_poisoned",
@@ -67,6 +87,12 @@ fn unresolved(detail: impl std::fmt::Display) -> CanonicalStoreError {
         "canonical owner path/header/lease changed" => "canonical_owner_path_header_lease_changed",
         "canonical serving epoch is poisoned" => "canonical_serving_epoch_is_poisoned",
         "canonical owner mutex poisoned" => "canonical_owner_mutex_poisoned",
+        "canonical owner has prepared mutations" => "canonical_owner_prepared_mutations",
+        "canonical owner has admitted tools" => "canonical_owner_admitted_tools",
+        "canonical serving run is live" => "canonical_serving_run_live",
+        "canonical run has no terminal ACK" => "canonical_run_terminal_unacknowledged",
+        "canonical child usage I/O is unresolved" => "canonical_child_usage_unresolved",
+        "canonical caller has not completed" => "canonical_caller_incomplete",
         "actual tool executions still lack terminal adoption" => {
             "actual_tool_executions_still_lack_terminal_adoption"
         }
@@ -103,6 +129,23 @@ fn unresolved(detail: impl std::fmt::Display) -> CanonicalStoreError {
         detail if detail.starts_with("delivery write start: ") => "delivery_write_start",
         detail if detail.starts_with("delivery finish: ") => "delivery_finish",
         "canonical source advanced outside owner" => "unowned_source_advance",
+        "canonical source changed outside owner" => "unowned_source_change",
+        "canonical Custom source changed outside owner" => "unowned_custom_source_change",
+        "canonical Custom admission source CAS conflict" => "custom_admission_source_changed",
+        "canonical user admission source CAS conflict" => "user_admission_source_changed",
+        "canonical prepare source/branch CAS conflict" => "prepare_source_branch_changed",
+        "canonical Custom write lacks exact single physical suffix" => {
+            "custom_write_physical_suffix"
+        }
+        "delivered Custom FIFO head differs from exact accepted intent" => {
+            "delivered_custom_intent_mismatch"
+        }
+        detail if detail.starts_with("Custom write admission: ") => "custom_write_admission",
+        detail if detail.starts_with("Custom write start: ") => "custom_write_start",
+        detail if detail.starts_with("Custom write finish: ") => "custom_write_finish",
+        detail if detail.starts_with("Custom preflight: ") => "custom_preflight",
+        detail if detail.starts_with("Custom delivery barrier: ") => "custom_delivery_barrier",
+        detail if detail.starts_with("Custom ledger: ") => "custom_ledger",
         "actual AgentStart belongs to another certified source" => "actual_run_source_mismatch",
         "actual AgentStart source changed outside owner" => "actual_run_external_source_change",
         "actual run was already registered" => "actual_run_duplicate_registration",
@@ -110,13 +153,6 @@ fn unresolved(detail: impl std::fmt::Display) -> CanonicalStoreError {
             "actual_run_terminal_unacknowledged"
         }
         _ => "unclassified_owner_error",
-    };
-    eprintln!("pa-daemon: canonical refusal phase=owner reason={reason}");
-    CanonicalStoreError {
-        kind: CanonicalFailureKind::AdoptionConflict,
-        requested: CanonicalRequestedWrite::Unknown,
-        source: CanonicalSourceDisposition::NeedsReconcile,
-        detail,
     }
 }
 
@@ -200,6 +236,36 @@ impl LiveCanonicalOwner {
     }
 }
 
+/// Why a refused request is not a certified unstarted prior source. Each variant
+/// is a fixed log label: the refusal must name the actual cause, never the
+/// generic unclassified fallback.
+#[derive(Clone, Copy)]
+enum UnstartedRefusal {
+    Unavailable,
+    PreparedWork,
+    OwnerScope,
+    Session,
+    Path,
+    Header,
+    Branch,
+    Revision,
+}
+
+impl UnstartedRefusal {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "refused_unstarted_owner_unavailable",
+            Self::PreparedWork => "refused_unstarted_prepared_work",
+            Self::OwnerScope => "refused_unstarted_owner_scope_changed",
+            Self::Session => "refused_unstarted_session_changed",
+            Self::Path => "refused_unstarted_path_changed",
+            Self::Header => "refused_unstarted_header_changed",
+            Self::Branch => "refused_unstarted_branch_changed",
+            Self::Revision => "refused_unstarted_revision_ahead",
+        }
+    }
+}
+
 impl State {
     // Called only inside the verified lease mutation, before this request creates
     // an operation. A stale SDK source is not permission to ignore existing debt.
@@ -208,31 +274,65 @@ impl State {
         expected: &pa_core::session::canonical::CanonicalCursor,
         detail: &str,
     ) -> CanonicalStoreError {
-        if self.certifies_unstarted_source(expected) {
-            CanonicalStoreError {
+        match self.certify_unstarted(expected) {
+            Ok(()) => CanonicalStoreError {
                 kind: CanonicalFailureKind::SourceChanged,
                 requested: CanonicalRequestedWrite::NotRequested,
                 source: CanonicalSourceDisposition::ReadyForObservation,
                 detail: detail.to_owned(),
-            }
-        } else {
-            unresolved(detail)
+            },
+            Err(refusal) => unresolved_with(detail, Some(refusal.label())),
         }
     }
 
+    /// Certify that `expected` is a previous source of this same owned journal and
+    /// that this request wrote nothing, so Core can re-observe and retry.
+    ///
+    /// Only the refusal's own debt matters: an unacknowledged write
+    /// (`available`), or a prepared mutation whose adoption Core never
+    /// committed. Unrelated work that is still settling — an admitted tool
+    /// awaiting its terminal, a live run, an unfinished caller — does not make
+    /// this unwritten refusal uncertain, because it is reached before any
+    /// operation, barrier or write exists.
+    fn certify_unstarted(
+        &self,
+        expected: &CanonicalCursor,
+    ) -> std::result::Result<(), UnstartedRefusal> {
+        self.available()
+            .map_err(|_| UnstartedRefusal::Unavailable)?;
+        if !self.prepared.is_empty() {
+            return Err(UnstartedRefusal::PreparedWork);
+        }
+        let raw = &self.raw.cursor;
+        if expected.owner != raw.owner {
+            return Err(UnstartedRefusal::OwnerScope);
+        }
+        if expected.session_id != raw.session_id {
+            return Err(UnstartedRefusal::Session);
+        }
+        if expected.source_path != raw.source_path {
+            return Err(UnstartedRefusal::Path);
+        }
+        if expected.header_certificate != raw.header_certificate {
+            return Err(UnstartedRefusal::Header);
+        }
+        if expected.branch_revision != raw.branch_revision {
+            return Err(UnstartedRefusal::Branch);
+        }
+        if expected.canonical_revision > raw.canonical_revision {
+            return Err(UnstartedRefusal::Revision);
+        }
+        Ok(())
+    }
+
+    /// The strict run-opening form: no adoption, mutation, tool or caller debt may
+    /// remain. An `AgentStart` may only open on such a fully settled source.
     fn certifies_unstarted_source(&self, expected: &CanonicalCursor) -> bool {
-        self.available().is_ok()
-            && self.prepared.is_empty()
+        self.certify_unstarted(expected).is_ok()
             && self.tools.is_empty()
             && self.callers.iter().all(|signal| {
                 signal.state() == pa_core::session::canonical::CanonicalCallerState::Completed
             })
-            && expected.owner == self.raw.cursor.owner
-            && expected.session_id == self.raw.cursor.session_id
-            && expected.source_path == self.raw.cursor.source_path
-            && expected.header_certificate == self.raw.cursor.header_certificate
-            && expected.branch_revision == self.raw.cursor.branch_revision
-            && expected.canonical_revision <= self.raw.cursor.canonical_revision
     }
 
     fn terminal_metadata_suffix(
@@ -2138,6 +2238,35 @@ impl SessionFile {
             return true;
         };
         lease.with_owned_mutation(&self.path, || Ok(())).is_err()
+    }
+
+    /// Retire the actual owner at a certified boundary after a quarantined SDK
+    /// view blocked every later projection.
+    ///
+    /// The source must still equal the owner's last certified cursor and no
+    /// receipt may remain: no prepared mutation, admitted tool, unfinished
+    /// caller, live run, or child usage I/O. The next build then attaches a
+    /// successor epoch that re-reads the same durable rows; history is never
+    /// rewritten and no unknown physical owner is reused.
+    pub(crate) fn retire_quarantined_canonical_owner(&mut self) -> Result<()> {
+        let owner = self
+            .canonical_live
+            .clone()
+            .ok_or_else(|| failure("canonical owner not attached"))?;
+        {
+            let state = owner
+                .0
+                .lock()
+                .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+            state.available()?;
+            if state.callers.iter().any(|signal| {
+                signal.state() != pa_core::session::canonical::CanonicalCallerState::Completed
+            }) {
+                return Err(unresolved("canonical caller has not completed"));
+            }
+        }
+        let cursor = self.canonical_snapshot()?.checkpoint.cursor;
+        self.retire_completed_canonical_runtime(&cursor)
     }
 }
 

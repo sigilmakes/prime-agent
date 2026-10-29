@@ -37,6 +37,7 @@ struct Faults {
     run_start: RunStartFault,
     tool_attribution: ToolAttribution,
     advance_at_provider: bool,
+    advance_at_custom: bool,
     lose_append_reply: bool,
     lose_applied_ack: bool,
     abandon_reply: AbandonReply,
@@ -223,7 +224,13 @@ impl CanonicalLiveOwner for RealOwner {
         &self,
         request: CanonicalLiveCustomRequest,
     ) -> CanonicalFuture<CanonicalLiveCustomPrepared> {
-        let result = self.store.lock().unwrap().admit_canonical_custom(request);
+        let mut store = self.store.lock().unwrap();
+        if std::mem::take(&mut self.faults.lock().unwrap().advance_at_custom) {
+            store
+                .persist_owner_metadata("custom", json!({"customType":"child_finished", "data":{}}))
+                .unwrap();
+        }
+        let result = store.admit_canonical_custom(request);
         Box::pin(async move { result })
     }
     fn begin_provider_step(
@@ -985,4 +992,114 @@ async fn goal_source_advance_before_first_write_keeps_real_owner_driver_retryabl
         .await
         .unwrap();
     assert_eq!(provider.calls().len(), 1);
+}
+
+/// The production incident shape: child-usage attribution or a staged delivery
+/// appends a legitimate owner row between Core's observation and the owner's
+/// Custom admission check, while a tool execution is still outstanding. The
+/// requested Custom row was never written, so the refusal must stay
+/// recoverable instead of quarantining the live view.
+#[tokio::test]
+async fn custom_admission_behind_owner_append_during_tool_execution_stays_recoverable() {
+    struct CustomDuringTool {
+        live: Arc<pa_core::session_engine::canonical_live::CanonicalLiveSession>,
+        outcome: Arc<Mutex<Option<Result<(), CanonicalStoreError>>>>,
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl pa_agent::types::AgentTool for CustomDuringTool {
+        fn name(&self) -> &'static str {
+            "send_custom"
+        }
+        fn description(&self) -> &'static str {
+            "admit one Custom message while this tool runs"
+        }
+        fn parameters(&self) -> &serde_json::Value {
+            static PARAMETERS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            PARAMETERS.get_or_init(|| json!({"type":"object"}))
+        }
+        fn execute(
+            self: Arc<Self>,
+            _tool_call_id: String,
+            _params: serde_json::Value,
+            _signal: pa_agent::abort::AbortSignal,
+            _on_update: pa_agent::types::AgentToolUpdateCallback,
+        ) -> pa_agent::BoxFut<'static, anyhow::Result<pa_agent::types::AgentToolResult>> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                let message: pa_types::session::AgentMessage = serde_json::from_value(json!({
+                    "role":"custom", "customType":"agent_message",
+                    "content":[{"type":"text","text":"queued while the tool runs"}],
+                    "display":false, "timestamp":9
+                }))?;
+                let pa_types::session::AgentMessage::Custom(message) = message else {
+                    unreachable!("fixture must contain a tagged Custom")
+                };
+                let result = self
+                    .live
+                    .persist_message(pa_types::session::AgentMessage::Custom(message))
+                    .await;
+                *self.outcome.lock().unwrap() = Some(result);
+                Ok(pa_agent::types::AgentToolResult::text("custom attempted"))
+            })
+        }
+    }
+
+    let (_dir, owner, engine, provider) = runtime().await;
+    // Consume both scripted text turns seeded by the runtime fixture so the next
+    // scripted turn is the actual tool call.
+    engine
+        .session
+        .prompt("warmup one", PromptOptions::default())
+        .await
+        .unwrap();
+    engine
+        .session
+        .prompt("warmup two", PromptOptions::default())
+        .await
+        .unwrap();
+    let live = engine.session.canonical_live_session().unwrap();
+    let outcome = Arc::new(Mutex::new(None));
+    let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    engine
+        .session
+        .agent()
+        .set_tools(vec![Arc::new(CustomDuringTool {
+            live: live.clone(),
+            outcome: outcome.clone(),
+            executions: executions.clone(),
+        })])
+        .await;
+    provider.push_tool_call_turn(None, vec![("custom-tool", "send_custom", json!({}))]);
+    provider.push_text_turn("tool finished");
+    owner.faults.lock().unwrap().advance_at_custom = true;
+    engine
+        .session
+        .prompt("call tool", PromptOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let error = outcome
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the tool must attempt one Custom admission")
+        .expect_err("the owner must refuse the raced Custom admission");
+    assert_eq!(error.kind, CanonicalFailureKind::SourceChanged);
+    assert_eq!(error.requested, CanonicalRequestedWrite::NotRequested);
+    assert_eq!(
+        error.source,
+        CanonicalSourceDisposition::ReadyForObservation
+    );
+    assert_eq!(
+        error.detail,
+        "canonical Custom admission source CAS conflict"
+    );
+    live.ensure_ready().unwrap();
+    provider.push_text_turn("next prompt succeeds");
+    engine
+        .session
+        .prompt("next", PromptOptions::default())
+        .await
+        .unwrap();
 }

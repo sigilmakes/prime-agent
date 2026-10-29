@@ -1121,3 +1121,28 @@ fn completed_owner_retirement_refuses_unacknowledged_mutation() {
     assert!(store.retire_completed_canonical_runtime(&cursor).is_err());
     assert!(store.attach_canonical_owner().is_err());
 }
+
+#[test]
+fn accepted_delivery_refuses_external_rewrite_without_overwriting_history() {
+    let (_dir, mut store) = fixture();
+    store
+        .persist_entry("custom", json!({"customType":"before", "data":"original"}))
+        .unwrap();
+    store.attach_canonical_owner().unwrap();
+    let original = std::fs::read_to_string(&store.path).unwrap();
+    let rewritten = original.replace("original", "modified");
+    assert_ne!(original, rewritten);
+    std::fs::write(&store.path, &rewritten).unwrap();
+    let error = store
+        .persist_delivered_user(json!({"role":"user", "content":"must not append", "timestamp":1}))
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        pa_core::session::canonical::CanonicalFailureKind::AdoptionConflict
+    );
+    assert_eq!(
+        error.detail,
+        "accepted delivery source changed outside owner"
+    );
+    assert_eq!(std::fs::read_to_string(&store.path).unwrap(), rewritten);
+}

@@ -1001,9 +1001,6 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
         });
-        if let Some(children) = &self.children {
-            children.notify_turn_done();
-        }
     }
 
     fn run_side_question(
@@ -1455,6 +1452,11 @@ impl SessionEngine for AgentSessionEngine {
                 "timestamp": now_millis(),
             }))
         };
+        // A blocked canonical view is a quarantined mirror, not lost history:
+        // a new prompt certifies the owner boundary once and reopens cold
+        // before its accepted row persists. A refused certification keeps the
+        // view, and the prompt refuses exactly once like before.
+        self.reopen_blocked_canonical_runtime();
         // A create-owned warmup may still be adopting/ACKing metadata. Hold
         // its existing gate through accepted-row persistence, without holding
         // any SDK/owner/core guard or triggering a truly lazy build.

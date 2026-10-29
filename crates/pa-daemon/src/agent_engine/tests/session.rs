@@ -551,3 +551,152 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
     );
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
+
+#[test]
+fn quarantined_runtime_settles_later_prompts_without_rewriting_history() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        session_file: Some(path.clone()),
+        faux_script: Some(json!({"responses": [{"text": "warm"}]}).to_string()),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let _owner = own_canonical_store(&engine, store);
+    let mut events = Vec::new();
+    admit(&engine, "warm".to_string(), &mut events);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
+    let built = engine.session.blocking_lock().clone().unwrap();
+    let live = built.session.canonical_live_session().unwrap();
+    engine.runtime.block_on(async {
+        // An interrupted receipt cannot be declared reconciled by terminal cleanup.
+        let prepared = live
+            .prepare_mutation(pa_core::session::canonical::CanonicalMutationKind::OwnerMetadata)
+            .await
+            .unwrap();
+        drop(prepared);
+    });
+    let before = std::fs::read(&path).unwrap();
+    for _ in 0..2 {
+        events.clear();
+        admit(&engine, "must refuse".to_string(), &mut events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::Done(Err(_))))
+                .count(),
+            1,
+            "each rejected prompt must settle exactly once: {events:?}",
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::AssistantMessage(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(live.ensure_ready().is_err());
+        assert!(std::sync::Arc::ptr_eq(
+            &built,
+            engine.session.blocking_lock().as_ref().unwrap(),
+        ));
+    }
+}
+
+#[test]
+fn a_blocked_view_reopens_cold_at_a_certified_owner_boundary() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        session_file: Some(path.clone()),
+        faux_script: Some(
+            json!({"responses": [{"text": "warm"}, {"text": "reopened"}]}).to_string(),
+        ),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let _owner = own_canonical_store(&engine, store);
+    let mut events = Vec::new();
+    admit(&engine, "warm".to_string(), &mut events);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
+    let blocked = engine.session.blocking_lock().clone().unwrap();
+    let live = blocked.session.canonical_live_session().unwrap();
+    // Seal the runtime's canonical admission exactly like the replacement
+    // seam does: the view refuses every projection, the owner owes nothing.
+    blocked.session.close_runtime_admission_for_replacement();
+    assert!(live.projection_blocked());
+    let before = std::fs::read(&path).unwrap();
+    // A new prompt is a new demand, not a retry. The certified reopen retires
+    // the actual owner at its unchanged cursor and rebuilds the mirror from
+    // the same durable rows before the prompt is admitted.
+    events.clear();
+    admit(&engine, "reopened".to_string(), &mut events);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Done(Ok(())))),
+        "the next prompt must be served after the certified reopen: {events:?}",
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Err(_)))));
+    let current = engine.session.blocking_lock().clone().unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&blocked, &current),
+        "the blocked runtime is retired, never reused",
+    );
+    // The blocked view stays closed: it can never serve the successor epoch.
+    assert!(live.projection_blocked());
+    assert!(live.ensure_ready().is_err());
+    // A cold reopen re-reads history: the pre-reopen bytes are an exact prefix
+    // and the new turn appended exactly one user and one assistant row.
+    let after = std::fs::read(&path).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "a cold reopen must not rewrite committed history",
+    );
+    let appended = std::str::from_utf8(&after[before.len()..]).unwrap();
+    assert_eq!(
+        appended
+            .lines()
+            .filter(|line| line.contains("\"role\":\"user\""))
+            .count(),
+        1,
+        "the refused prompt is never retried; only the new prompt is recorded: {appended}",
+    );
+}

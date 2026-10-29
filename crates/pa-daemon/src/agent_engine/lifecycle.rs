@@ -887,6 +887,50 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Reopen a quarantined session runtime at a certified owner boundary.
+    ///
+    /// The actual owner must prove its last certified source unchanged and no
+    /// outstanding receipt before the cached SDK mirror is discarded. A refusal
+    /// keeps the cached runtime and its blocked view; nothing is retried.
+    pub(crate) async fn reopen_quarantined_session_runtime(&self) -> anyhow::Result<()> {
+        let mut completion_state = self.session_build.lock().await;
+        let store = self
+            .initial_context_selection_store
+            .lock()
+            .expect("initial context selection store lock")
+            .clone()
+            .ok_or_else(|| {
+                anyhow::anyhow!("persistent session has no canonical owner to reopen")
+            })?;
+        store.retire_quarantined_owner()?;
+        *completion_state = None;
+        self.clear_retired_runtime().await;
+        Ok(())
+    }
+
+    /// A prompt is a new demand, never a retry: a blocked canonical view is
+    /// reopened once at a certified boundary before this prompt is admitted.
+    pub(crate) fn reopen_blocked_canonical_runtime(&self) {
+        if self.session_is_closed() {
+            return;
+        }
+        let blocked = self
+            .session
+            .blocking_lock()
+            .as_deref()
+            .and_then(|engine| engine.session.canonical_live_session())
+            .is_some_and(|live| live.projection_blocked());
+        if !blocked {
+            return;
+        }
+        if let Err(error) = self
+            .runtime
+            .block_on(self.reopen_quarantined_session_runtime())
+        {
+            eprintln!("pa-daemon: canonical runtime reopen refused: {error:#}");
+        }
+    }
+
     /// Authorized cancel-and-replace already aborts and settles at the worker.
     /// It does not grant permission to reuse the old physical owner.
     pub(crate) async fn discard_replaced_session_runtime(&self) {

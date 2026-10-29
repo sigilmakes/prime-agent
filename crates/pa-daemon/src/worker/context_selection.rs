@@ -141,6 +141,19 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         }))
     }
 
+    fn retire_quarantined_owner(&self) -> anyhow::Result<()> {
+        let mut core = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+        let store = core
+            .store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("canonical store is unavailable"))?;
+        store.retire_quarantined_canonical_owner()?;
+        Ok(())
+    }
+
     fn capture(&self, expected_file: &std::path::Path) -> Result<ContextSelectionSource> {
         let core = self.0.lock().expect("session core lock");
         let lease = current_lease(&core)?;

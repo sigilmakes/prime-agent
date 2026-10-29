@@ -438,6 +438,12 @@ impl CanonicalLiveSession {
         self.blocked.store(true, Ordering::Release);
     }
 
+    /// Whether this view refuses every later projection.
+    #[must_use]
+    pub fn projection_blocked(&self) -> bool {
+        self.blocked.load(Ordering::Acquire)
+    }
+
     /// Refuse new projections after any failed, uncertain or lost receipt.
     ///
     /// # Errors

@@ -60,6 +60,13 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
     fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
         None
     }
+
+    /// Certify and retire a blocked SDK mirror's actual owner so the next build
+    /// attaches a successor epoch. Refusal keeps the cached runtime and its
+    /// blocked view; history is never rewritten.
+    fn retire_quarantined_owner(&self) -> anyhow::Result<()> {
+        anyhow::bail!("this session has no canonical owner to reopen")
+    }
 }
 
 impl super::AgentSessionEngine {
