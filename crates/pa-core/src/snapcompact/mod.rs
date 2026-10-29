@@ -16,6 +16,8 @@ pub use serialize::{serialize_conversation, SerializeOptions};
 const MAX_SOURCE_BYTES: usize = 4_000_000;
 const MAX_ARCHIVE_BYTES: usize = 24_000_000;
 const LEAD: &str = "Snapcompact bitmap archive. This is bounded, lossy conversation text, not a lossless memory. Read images in order between the oldest and newest text.\n";
+const FALLBACK_NOTICE: &str =
+    "[Text fallback: this model cannot read the bitmap frames; bounded, lossy source text only, not a lossless memory]\n";
 
 /// Errors distinguish an intentional decline from cancellation and bad data.
 #[derive(Debug, Error)]
@@ -80,7 +82,8 @@ pub struct ReplayLimits {
     pub max_image_bytes: usize,
     pub max_payload_bytes: usize,
     pub available_tokens: usize,
-    /// Explicit opt-in for incompatible/nonvision replay, never initial rendering.
+    /// Optional tighter cap on the automatic text fallback. Replay produces the
+    /// fallback for incompatible readers without it; this only bounds it further.
     pub text_fallback_chars: Option<usize>,
 }
 
@@ -613,9 +616,64 @@ pub fn prepare(
     Ok(archive)
 }
 
+/// Automatic bounded text fallback for a reader that cannot consume bitmap
+/// frames. The cap counts Unicode scalars; `text_fallback_chars` can only tighten
+/// it. The result always carries the lossy-memory label and never claims to be
+/// the complete archive.
+fn text_fallback(archive: &Archive, limits: &ReplayLimits) -> Result<String> {
+    let notice = format!(
+        "{FALLBACK_NOTICE}[Archive source is lossy: {} of {} source chars were not retained]\n",
+        archive.truncated_chars(),
+        archive.total_chars()
+    );
+    let overhead = LEAD.len() + notice.len();
+    let token_budget = limits.available_tokens;
+    let payload_budget = limits.max_payload_bytes.saturating_sub(64);
+    if token_budget <= overhead || payload_budget <= overhead {
+        return Err(Error::Budget("text fallback does not fit".into()));
+    }
+    let source = serialize::plain(&archive.source_text());
+    let render = |cap: usize| format!("{LEAD}{notice}{}", serialize::truncate(&source, cap));
+    let fits = |text: &str| text.len() <= token_budget && json_text_bytes(text) <= payload_budget;
+    let mut high = limits
+        .text_fallback_chars
+        .unwrap_or(MAX_SOURCE_BYTES)
+        .min(MAX_SOURCE_BYTES)
+        .min(source.chars().count());
+    let text = render(high);
+    if fits(&text) {
+        return Ok(text);
+    }
+    // Rendered text grows with the cap; binary-search the largest fitting bound.
+    let mut low = 0;
+    let mut best = None;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let text = render(mid);
+        if fits(&text) {
+            best = Some(text);
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if let Some(text) = best {
+        return Ok(text);
+    }
+    let text = render(0);
+    if fits(&text) {
+        Ok(text)
+    } else {
+        Err(Error::Budget("text fallback does not fit".into()))
+    }
+}
+
 /// Rebuild ordered text/image context with current send-time limits. Oldest
-/// middle frames are omitted first and every omission is visible. Nonvision or
-/// incompatible profiles require explicit bounded text fallback.
+/// middle frames are omitted first and every omission is visible. A reader that
+/// cannot consume the bitmap (nonvision or incompatible render geometry) gets a
+/// clearly labelled, bounded and lossy text fallback instead of image blocks.
+/// Limits are resolved for the current model, so switching back to a vision
+/// model reads the same archive as images again.
 /// # Errors
 /// Rejects corrupt archives and representations that cannot fit current limits.
 pub fn replay(archive: &Archive, limits: &ReplayLimits) -> Result<Vec<ReplayBlock>> {
@@ -632,25 +690,7 @@ pub fn replay(archive: &Archive, limits: &ReplayLimits) -> Result<Vec<ReplayBloc
                 .is_some_and(|g| frame.geometry.width > g.width)
         });
     if incompatible {
-        let cap = limits
-            .text_fallback_chars
-            .ok_or_else(|| {
-                Error::Declined(
-                    "archive reader incompatible; explicit text fallback required".into(),
-                )
-            })?
-            .min(MAX_SOURCE_BYTES);
-        let source = serialize::plain(&archive.source_text());
-        let text = format!(
-            "{LEAD}[Explicit text fallback; images unavailable, source may be omitted]\n{}",
-            serialize::truncate(&source, cap)
-        );
-        if text.len() > limits.available_tokens
-            || json_text_bytes(&text) + 64 > limits.max_payload_bytes
-        {
-            return Err(Error::Budget("text fallback does not fit".into()));
-        }
-        return Ok(vec![ReplayBlock::Text(text)]);
+        return Ok(vec![ReplayBlock::Text(text_fallback(archive, limits)?)]);
     }
     let mut start = 0;
     loop {

@@ -636,13 +636,30 @@ impl AgentSession {
         )
     }
 
+    /// Whether a resolved model change can invalidate the cached assembled view.
+    /// Route, transport, identity, and vision capability each select a different
+    /// archive rendering, so any change re-assembles it for the new model.
+    fn model_view_changed(previous: &pa_types::ai::Model, next: &pa_types::ai::Model) -> bool {
+        let vision =
+            |model: &pa_types::ai::Model| model.input.contains(&pa_types::ai::ModelInput::Image);
+        previous.provider != next.provider
+            || previous.id != next.id
+            || previous.api != next.api
+            || previous.base_url != next.base_url
+            || vision(previous) != vision(next)
+    }
+
     /// Model change bookkeeping (mirrors appendModelChange); the model
-    /// forwards to the loop through the shared wire shape.
+    /// forwards to the loop through the shared wire shape. Non-canonical
+    /// sessions re-assemble their accepted archive for the new model before the
+    /// switch commits, so a model that cannot read the archive never replaces
+    /// the one that can.
     ///
     /// # Errors
     ///
     /// Returns an error when the model cannot be converted to the loop wire
-    /// shape, or when the model-change row cannot be persisted.
+    /// shape, when the assembled context cannot be rendered for the new model,
+    /// or when the model-change row cannot be persisted.
     pub async fn set_model(
         &self,
         model: &pa_types::ai::Model,
@@ -662,11 +679,26 @@ impl AgentSession {
             )
             .await?;
         }
+        let previous = self
+            .context_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let model = self.configure_ollama_model(model);
         let wire: pa_agent::types::Model = serde_json::from_value(
             serde_json::to_value(&model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        // Render the accepted archive for the new model BEFORE the switch
+        // commits. A failed render leaves the previous model and view in place
+        // instead of installing a model that cannot read this session.
+        if self.canonical_live.is_none()
+            && previous
+                .as_ref()
+                .is_none_or(|previous| Self::model_view_changed(previous, &model))
+        {
+            self.refresh_assembled_context(&model).await?;
+        }
         *self
             .context_model
             .write()
@@ -687,8 +719,9 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when the model cannot be converted to the loop
-    /// wire shape, or when the model-change row cannot be persisted.
+    /// Returns an error when the model cannot be converted to the loop wire
+    /// shape, when the assembled context cannot be rendered for the new model,
+    /// or when the model-change row cannot be persisted.
     pub async fn set_model_and_thinking_level(
         &self,
         model: &pa_types::ai::Model,
@@ -709,11 +742,26 @@ impl AgentSession {
             )
             .await?;
         }
+        let previous = self
+            .context_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let model = self.configure_ollama_model(model);
         let wire: pa_agent::types::Model = serde_json::from_value(
             serde_json::to_value(&model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        // Render the accepted archive for the new model BEFORE the switch
+        // commits. A failed render leaves the previous model and view in place
+        // instead of installing a model that cannot read this session.
+        if self.canonical_live.is_none()
+            && previous
+                .as_ref()
+                .is_none_or(|previous| Self::model_view_changed(previous, &model))
+        {
+            self.refresh_assembled_context(&model).await?;
+        }
         *self
             .context_model
             .write()

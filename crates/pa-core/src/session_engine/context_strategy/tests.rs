@@ -690,14 +690,12 @@ async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuat
     );
     let mut incompatible = model.clone();
     incompatible.id = "different-model".into();
-    restored
+    let before = observed.lock().unwrap().len();
+    // The switch itself refuses: installing a model that cannot read this
+    // provider-native archive would leave the session unreadable.
+    let mismatch = restored
         .session
         .set_model(&incompatible, &incompatible.provider, &incompatible.id)
-        .await
-        .unwrap();
-    let before = observed.lock().unwrap().len();
-    let mismatch = restored
-        .prompt("must not network", PromptOptions::default())
         .await
         .unwrap_err();
     assert!(mismatch.to_string().contains("route"));
@@ -792,6 +790,106 @@ async fn snap_archive_expands_on_compaction_restore_and_branch_without_duplicate
     .await
     .unwrap();
     assert_eq!(restored.session.agent().state().await.messages, branch);
+}
+
+#[tokio::test]
+async fn snap_archive_switches_to_a_nonvision_model_as_text_and_keeps_the_archive() {
+    let f = Fixture::new(ORDERED, "default_context/rolling", true).await;
+    let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false,"contextStrategy":"default_context/rolling","plugins":{
+        "default_context":{"config":{"policy":"full","compactors":["snapcompact/snapcompact"]}},
+        "snapcompact":{"config":{"profile":"explicit","frame_size":128,"frame_tokens":1,"max_frames":4,"max_source_bytes":10000}}
+    }});
+    std::fs::write(f.agent.join("settings.json"), settings.to_string()).unwrap();
+    f.engine.reload_plugins().await.unwrap();
+    let mut gpt = f.model.clone();
+    gpt.id = "gpt-5".into();
+    gpt.api = "openai-responses".into();
+    gpt.provider = "openai".into();
+    gpt.input.push(pa_types::ai::ModelInput::Image);
+    f.engine
+        .session
+        .set_model(&gpt, &gpt.provider, &gpt.id)
+        .await
+        .unwrap();
+    let mut source = String::new();
+    for n in 0..1500 {
+        write!(source, "switch-source-{n} detailed continuation ").unwrap();
+    }
+    f.engine
+        .session
+        .shared_persistence()
+        .lock()
+        .await
+        .append_message(user(&source))
+        .unwrap();
+    let CompactOutcome::Ran(run) = f
+        .engine
+        .session
+        .compact(None, &gpt, None, None)
+        .await
+        .unwrap()
+    else {
+        panic!("snap did not run")
+    };
+    assert!(matches!(
+        run.entry.context_archive.unwrap().representation,
+        ContextRepresentation::Snapcompact { .. }
+    ));
+    // The same persisted session now selects a text-only model. Restore must not
+    // send image blocks to it, and must not rewrite the accepted archive.
+    let mut deepseek = gpt.clone();
+    deepseek.id = "deepseek-v4-flash".into();
+    deepseek.api = "openai-completions".into();
+    deepseek.provider = "deepseek".into();
+    deepseek.input = vec![pa_types::ai::ModelInput::Text];
+    deepseek.context_window = 1_000_000;
+    f.engine
+        .session
+        .set_model(&deepseek, &deepseek.provider, &deepseek.id)
+        .await
+        .unwrap();
+    f.provider.push_text_turn("continued after switch");
+    f.engine
+        .session
+        .prompt("continue after switch", PromptOptions::default())
+        .await
+        .unwrap();
+    let calls = f.provider.calls();
+    let body = serde_json::to_string(&calls.last().unwrap().messages).unwrap();
+    assert!(
+        !body.contains("\"type\":\"image\""),
+        "nonvision model received an image block"
+    );
+    assert!(body.contains("Text fallback"));
+    assert!(body.contains("switch-source-"));
+    let entries = f.engine.session.entries().await;
+    assert!(
+        entries.iter().any(
+            |entry| matches!(entry, FileEntry::Compaction { payload, .. }
+            if matches!(payload.context_archive.as_ref().map(|archive| &archive.representation),
+                Some(ContextRepresentation::Snapcompact { .. })))
+        ),
+        "model switch must not replace or discard the accepted archive"
+    );
+    // Switching back re-renders the same archive as bitmap frames.
+    f.engine
+        .session
+        .set_model(&gpt, &gpt.provider, &gpt.id)
+        .await
+        .unwrap();
+    f.provider.push_text_turn("continued on the vision model");
+    f.engine
+        .session
+        .prompt("continue on the vision model", PromptOptions::default())
+        .await
+        .unwrap();
+    let calls = f.provider.calls();
+    let body = serde_json::to_string(&calls.last().unwrap().messages).unwrap();
+    assert!(
+        body.contains("\"type\":\"image\""),
+        "switching back to a vision model must restore bitmap frames"
+    );
+    assert!(!body.contains("Text fallback"));
 }
 
 #[tokio::test]

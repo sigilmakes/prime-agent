@@ -318,6 +318,25 @@ pub(super) async fn assemble_for_strategy(
 
 impl AgentSession {
     pub(crate) async fn context_messages(&self) -> anyhow::Result<Vec<AgentMessage>> {
+        let model = self
+            .context_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (messages, archive) = self.assembled_context(model.as_ref()).await?;
+        *self
+            .context_archive
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = archive;
+        Ok(messages)
+    }
+
+    /// Assemble the model-facing view for one resolved model without publishing
+    /// it. The caller commits the returned messages and archive.
+    pub(crate) async fn assembled_context(
+        &self,
+        model: Option<&pa_types::ai::Model>,
+    ) -> anyhow::Result<(Vec<AgentMessage>, Option<ContextArchive>)> {
         let (context, leaf) = if let Some(plugins) = &self.plugins {
             let snapshot = {
                 let session = self.session.lock().await;
@@ -331,18 +350,13 @@ impl AgentSession {
                 session.get_leaf_id().map(str::to_owned),
             )
         };
-        let model = self
-            .context_model
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let messages = match &self.plugins {
             Some(plugins) => {
                 assemble_at(
                     plugins,
                     context.messages,
                     context.archive.as_ref(),
-                    model.as_ref(),
+                    model,
                     leaf.as_deref(),
                 )
                 .await
@@ -358,11 +372,29 @@ impl AgentSession {
             }
             None => Ok(context.messages),
         }?;
+        Ok((messages, context.archive))
+    }
+
+    /// Re-assemble and publish the non-canonical loop view for a model switch.
+    /// Canonical sessions re-expand archives at the stream boundary, so setting
+    /// this view there would duplicate the archive prefix.
+    pub(crate) async fn refresh_assembled_context(
+        &self,
+        model: &pa_types::ai::Model,
+    ) -> anyhow::Result<()> {
+        let (messages, archive) = self.assembled_context(Some(model)).await?;
         *self
             .context_archive
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = context.archive;
-        Ok(messages)
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = archive;
+        *self
+            .accepted_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.agent
+            .set_messages(super::rebuilt_loop_messages(messages))
+            .await;
+        Ok(())
     }
 
     pub(crate) async fn strategy_compaction_attempts(

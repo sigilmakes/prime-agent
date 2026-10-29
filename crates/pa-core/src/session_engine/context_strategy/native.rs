@@ -759,4 +759,90 @@ mod tests {
         let limits = snap_limits(&model, &Value::Null);
         assert!(!limits.vision);
     }
+
+    fn user_message(text: &str) -> AgentMessage {
+        AgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text(text.into()),
+            timestamp: 0,
+            rest: pa_types::JsonMap::new(),
+        })
+    }
+
+    #[test]
+    fn gpt_bitmap_archive_restores_as_text_for_a_nonvision_model_then_keeps_images() {
+        let gpt: pa_types::ai::Model = serde_json::from_value(json!({
+            "id":"gpt-5", "name":"GPT", "api":"openai-responses", "provider":"openai",
+            "baseUrl":"https://api.openai.com/v1", "reasoning":true,
+            "input":["text","image"],
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+            "contextWindow":400_000, "maxTokens":128_000
+        }))
+        .unwrap();
+        let deepseek: pa_types::ai::Model = serde_json::from_value(json!({
+            "id":"deepseek-v4-flash", "name":"DeepSeek V4 Flash", "api":"openai-completions",
+            "provider":"deepseek", "baseUrl":"https://api.deepseek.com", "reasoning":true,
+            "input":["text"],
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+            "contextWindow":1_000_000, "maxTokens":384_000
+        }))
+        .unwrap();
+        let source = user_message(&"gpt archive source marker ".repeat(3000));
+        let gpt_limits = snap_limits(&gpt, &Value::Null);
+        assert!(gpt_limits.vision);
+        assert_eq!(gpt_limits.profile, Some(RenderProfile::OpenAi));
+        let archive = crate::snapcompact::prepare(
+            None,
+            &[source],
+            &[],
+            &crate::snapcompact::Config::default(),
+            &gpt_limits,
+            &|| false,
+        )
+        .unwrap();
+        assert!(archive.frame_count() > 0, "fixture needs bitmap frames");
+        let body = archive.to_json().unwrap();
+
+        // The session switches to a text-only model. The same archive must restore
+        // automatically, as labelled bounded text, and never as image blocks.
+        let deepseek_limits = snap_limits(&deepseek, &Value::Null);
+        assert!(!deepseek_limits.vision);
+        assert_eq!(deepseek_limits.profile, None);
+        let restored = expand_snap(&body, Some(&deepseek), &Value::Null).unwrap();
+        let AgentMessage::User(message) = &restored[0] else {
+            panic!("archive restore must produce one user message")
+        };
+        let pa_types::ai::UserContent::Blocks(blocks) = &message.content else {
+            panic!("archive restore must produce content blocks")
+        };
+        assert!(!blocks
+            .iter()
+            .any(|block| matches!(block, pa_types::ai::UserContentBlock::Image(_))));
+        let text: String = blocks
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::UserContentBlock::Text(text) => Some(text.text.as_str()),
+                pa_types::ai::UserContentBlock::Image(_)
+                | pa_types::ai::UserContentBlock::Raw(_) => None,
+            })
+            .collect();
+        assert!(text.contains("gpt archive source marker"));
+        assert!(text.contains("Text fallback"));
+        assert!(text.len() <= deepseek_limits.available_tokens);
+
+        // Switching back to the GPT model keeps every bitmap frame.
+        let back = expand_snap(&body, Some(&gpt), &Value::Null).unwrap();
+        let AgentMessage::User(message) = &back[0] else {
+            panic!("archive restore must produce one user message")
+        };
+        let pa_types::ai::UserContent::Blocks(blocks) = &message.content else {
+            panic!("archive restore must produce content blocks")
+        };
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|block| matches!(block, pa_types::ai::UserContentBlock::Image(_)))
+                .count(),
+            archive.frame_count()
+        );
+    }
 }

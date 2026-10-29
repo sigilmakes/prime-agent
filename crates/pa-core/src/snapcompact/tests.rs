@@ -225,10 +225,16 @@ fn current_reader_budget_omits_oldest_frames_and_nonvision_is_explicit() {
         ),
         Err(Error::Declined(_))
     ));
-    assert!(matches!(replay(&a, &no_vision), Err(Error::Declined(_))));
+    let automatic = replay(&a, &no_vision).unwrap();
+    assert!(
+        matches!(&automatic[0],ReplayBlock::Text(t) if t.contains("Text fallback") && t.contains("bounded") && t.contains("not a lossless memory"))
+    );
+    assert!(!automatic
+        .iter()
+        .any(|block| matches!(block, ReplayBlock::Image { .. })));
     no_vision.text_fallback_chars = Some(200);
     assert!(
-        matches!(&replay(&a,&no_vision).unwrap()[0],ReplayBlock::Text(t) if t.contains("Explicit text fallback") && t.contains("bounded"))
+        matches!(&replay(&a,&no_vision).unwrap()[0],ReplayBlock::Text(t) if t.contains("Text fallback"))
     );
     no_vision.available_tokens = 1;
     assert!(matches!(replay(&a, &no_vision), Err(Error::Budget(_))));
@@ -241,7 +247,7 @@ fn current_reader_budget_omits_oldest_frames_and_nonvision_is_explicit() {
     let mut smaller = limits(64);
     smaller.text_fallback_chars = Some(100);
     assert!(
-        matches!(&replay(&a,&smaller).unwrap()[0],ReplayBlock::Text(t) if t.contains("Explicit text fallback"))
+        matches!(&replay(&a,&smaller).unwrap()[0],ReplayBlock::Text(t) if t.contains("Text fallback"))
     );
 }
 
@@ -323,7 +329,13 @@ fn json_escaping_and_unicode_fallback_are_budgeted_conservatively() {
         ReplayBlock::Image { .. } => panic!("text expected"),
     };
     lim.available_tokens = text.chars().count();
-    assert!(matches!(replay(&unicode, &lim), Err(Error::Budget(_))));
+    // The byte count of the source exceeds its scalar count; the fallback now
+    // shrinks the cap to fit instead of failing.
+    let ReplayBlock::Text(shrunken) = &replay(&unicode, &lim).unwrap()[0] else {
+        panic!("text expected")
+    };
+    assert!(shrunken.len() <= lim.available_tokens);
+    assert!(shrunken.chars().count() < text.chars().count());
 }
 
 #[test]
@@ -423,4 +435,87 @@ fn multibyte_source_tail_never_exceeds_configured_byte_cap() {
                 .map(|s| s.text.chars().count() as u64)
                 .sum::<u64>()
     );
+}
+
+#[test]
+fn nonvision_reader_gets_automatic_labelled_text_fallback_without_images() {
+    let vision = limits(128);
+    let a = compact(
+        &"archive source needle ".repeat(120),
+        &Config::default(),
+        &vision,
+    );
+    assert!(a.frame_count() > 0);
+    // A text-only reader with an unrecognized lineage and no explicit fallback cap.
+    let mut deepseek_like = limits(128);
+    deepseek_like.vision = false;
+    deepseek_like.profile = None;
+    let before = a.to_json().unwrap();
+    let blocks = replay(&a, &deepseek_like).expect("nonvision reader must restore");
+    assert_eq!(blocks.len(), 1);
+    let ReplayBlock::Text(text) = &blocks[0] else {
+        panic!("text fallback expected")
+    };
+    assert!(text.contains("archive source needle"));
+    assert!(text.contains("Text fallback"));
+    assert!(text.contains("lossy"));
+    assert!(text.contains("not a lossless memory"));
+    assert!(text.contains("source chars were not retained"));
+    assert!(text.len() <= deepseek_like.available_tokens);
+    assert!(json_text_bytes(text) + 64 <= deepseek_like.max_payload_bytes);
+    // Replay never mutates or replaces the archive a vision model can still read.
+    assert_eq!(a.to_json().unwrap(), before);
+    assert!(!image_data(&a, &vision).is_empty());
+}
+
+#[test]
+fn automatic_fallback_respects_available_tokens_and_payload_budget() {
+    let a = compact(
+        &"budget word ".repeat(200),
+        &Config::default(),
+        &limits(128),
+    );
+    let mut tight = limits(128);
+    tight.vision = false;
+    tight.profile = None;
+    tight.available_tokens = 600;
+    let ReplayBlock::Text(text) = &replay(&a, &tight).unwrap()[0] else {
+        panic!("text fallback expected")
+    };
+    assert!(text.len() <= tight.available_tokens);
+    assert!(text.contains("budget word"));
+    let mut payload = limits(128);
+    payload.vision = false;
+    payload.profile = None;
+    payload.max_payload_bytes = 800;
+    let ReplayBlock::Text(text) = &replay(&a, &payload).unwrap()[0] else {
+        panic!("text fallback expected")
+    };
+    assert!(json_text_bytes(text) + 64 <= payload.max_payload_bytes);
+    tight.available_tokens = 8;
+    assert!(matches!(replay(&a, &tight), Err(Error::Budget(_))));
+}
+
+#[test]
+fn narrower_render_geometry_falls_back_to_text_instead_of_oversized_frames() {
+    let a = compact(
+        &"geometry source ".repeat(100),
+        &Config::default(),
+        &limits(128),
+    );
+    assert!(a.frame_count() > 0);
+    let mut narrow_vision = limits(64);
+    assert!(narrow_vision.vision);
+    let blocks = replay(&a, &narrow_vision).expect("incompatible geometry must restore");
+    assert!(!blocks
+        .iter()
+        .any(|block| matches!(block, ReplayBlock::Image { .. })));
+    assert!(matches!(&blocks[0], ReplayBlock::Text(t)
+        if t.contains("geometry source") && t.contains("Text fallback")));
+    // A compatible vision reader keeps every bitmap frame.
+    narrow_vision.profile = Some(RenderProfile::Explicit {
+        frame_size: 128,
+        frame_tokens: 100,
+    });
+    assert_eq!(image_data(&a, &narrow_vision).len(), a.frame_count());
 }
