@@ -250,9 +250,6 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         .spawn(spawn_request("worker-a", "ship the lane"))
         .await
         .expect("spawn");
-    // The registry sits outside a live worker turn here: release the
-    // detached task prompt at the boundary the worker would signal.
-    children.notify_turn_done();
     assert_eq!(handle.name, "worker-a");
     assert!(handle.rlm_child_id.starts_with("sub-"), "{handle:?}");
     assert_eq!(handle.model, "scripted/faux-1");
@@ -492,7 +489,6 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         .spawn(spawn_request("worker-a", "second shard"))
         .await
         .expect("respawn under the freed name");
-    children.notify_turn_done();
     let live = children
         .collect(vec!["worker-a".to_string()], 0)
         .await

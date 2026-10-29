@@ -980,7 +980,7 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// The worker's turn completed: release child prompt tasks waiting on the boundary.
+    /// The worker's turn completed: clear the turn-scoped context boundary.
     fn on_turn_done(&self) {
         *self
             .prompt_context_boundary

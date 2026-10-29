@@ -148,7 +148,19 @@ async fn spawn_fake_supervisor(
                                 "sessionName": "f20-worker",
                             })),
                         ),
-                        "prompt" => response_success(Some(&id), command_type, None),
+                        "prompt" => {
+                            child_subagents
+                                .prompt_admissions
+                                .fetch_add(1, Ordering::SeqCst);
+                            let delay = child_subagents.prompt_delay_ms.load(Ordering::SeqCst);
+                            if delay > 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(u64::from(
+                                    delay,
+                                )))
+                                .await;
+                            }
+                            response_success(Some(&id), command_type, None)
+                        }
                         "wait_for_idle" => {
                             tokio::time::sleep(std::time::Duration::from_millis(idle_delay_ms))
                                 .await;
@@ -261,6 +273,11 @@ struct FakeChildSubagents {
     running: AtomicBool,
     quiescent_waits: std::sync::atomic::AtomicUsize,
     answer_reads: AtomicU32,
+    /// Delays the fake's `prompt` response so a test can prove spawn
+    /// awaits kickoff admission instead of detaching it.
+    prompt_delay_ms: AtomicU32,
+    /// Counts task prompts the fake child accepted.
+    prompt_admissions: AtomicU32,
 }
 
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
@@ -336,14 +353,58 @@ async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
 }
 
 #[tokio::test]
+async fn spawned_child_can_finish_before_the_parent_turn_ends() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let handle = spawn_child(&sessions).await;
+
+    let notice = tokio::time::timeout(Duration::from_secs(2), follow_up_rx.recv())
+        .await
+        .expect("child kickoff must not wait for its parent turn to finish")
+        .expect("child terminal notice");
+    assert_eq!(
+        notice["customMessage"]["details"]["childId"],
+        handle.rlm_child_id
+    );
+}
+
+#[tokio::test]
+async fn spawn_admits_the_kickoff_before_it_returns() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents {
+        prompt_delay_ms: AtomicU32::new(120),
+        ..FakeChildSubagents::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let _handle = spawn_child(&sessions).await;
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "spawn returned before its task prompt was admitted; a later parent message can overtake it"
+    );
+    assert_eq!(
+        child_subagents.prompt_admissions.load(Ordering::SeqCst),
+        1,
+        "the kickoff prompt must be admitted exactly once before spawn returns"
+    );
+}
+
+#[tokio::test]
 async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     let handle = spawn_child(&sessions).await;
-    // The worker releases the detached prompt at its turn boundary.
-    sessions.notify_turn_done();
-
     let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), follow_up_rx.recv())
         .await
         .expect("the watcher must deliver the notice")
@@ -384,7 +445,6 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
     .await;
     let settled = sessions.settle_notified();
     spawn_child(&sessions).await;
-    sessions.notify_turn_done();
 
     tokio::time::timeout(Duration::from_secs(10), settled)
         .await
@@ -412,7 +472,6 @@ async fn child_updates_surface_through_the_sink() {
     }));
     let settled = sessions.settle_notified();
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     tokio::time::timeout(Duration::from_secs(10), settled)
         .await
         .expect("the child settles");
@@ -471,7 +530,6 @@ async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle(
         .to_string(),
     )
     .unwrap();
-    sessions.notify_turn_done();
     assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
     // One settle hook from the cancel, one from the watcher's settle tail.
     for _ in 0..2 {
@@ -509,9 +567,6 @@ async fn a_child_whose_task_prompt_cannot_be_routed_delivers_the_failure_notice(
         let _ = hook_tx.send(());
     }));
     let handle = spawn_child(&sessions).await;
-    // The worker releases the detached prompt at its turn boundary.
-    sessions.notify_turn_done();
-
     let follow_up = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
         .await
         .expect("the failed child must deliver its failure notice")
@@ -548,7 +603,6 @@ async fn an_unreachable_child_delivers_the_failure_notice_instead_of_no_reply() 
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Unreachable)
             .await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
 
     let follow_up = tokio::time::timeout(Duration::from_secs(3_600), follow_up_rx.recv())
         .await
@@ -587,7 +641,6 @@ async fn a_verdict_landing_inside_the_unreachable_give_up_still_runs_the_settle_
     .await;
     let settled = sessions.settle_notified();
     spawn_child(&sessions).await;
-    sessions.notify_turn_done();
 
     GIVE_UP_POLL.notified().await;
     {
@@ -612,16 +665,13 @@ async fn a_verdict_landing_inside_the_unreachable_give_up_still_runs_the_settle_
     );
 }
 
-/// The review's C1 interleaving: a `collect` that lands inside the
-/// prompt-failure window (after the detached task flips
-/// `prompt_admitted`, before the retry verdict) reads the alive-but-idle
-/// worker as `done` — `refresh_record`'s admission-window misread, not a
-/// settle verdict. The prompt arm's failure claim must ignore it: the
-/// failure row still lands, the roster reports `error`, the hook fires,
-/// and the run marks settled (post-#3171 an unsettled failed run parks
+/// The task prompt is admitted before `spawn` returns, so a failed prompt
+/// has already settled when the caller first sees the handle. The failure
+/// row still lands, the roster reports `error`, the hook fires, and the run
+/// marks settled (post-#3171 an unsettled failed run parks
 /// `waitForRlmQuiescence` forever).
 #[tokio::test]
-async fn a_collect_inside_the_prompt_failure_window_does_not_swallow_the_failure_row() {
+async fn a_failed_prompt_is_settled_before_spawn_returns() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::PromptFails)
@@ -631,27 +681,14 @@ async fn a_collect_inside_the_prompt_failure_window_does_not_swallow_the_failure
         let _ = hook_tx.send(());
     }));
     let handle = spawn_child(&sessions).await;
-    // The window's entry condition, set deterministically: the detached
-    // prompt task flips `prompt_admitted` BEFORE its first
-    // `prompt_child` (host.rs), and the collect below races that task in
-    // production. With the flag set and the worker alive-but-idle, the
-    // real collect path scores the misread.
-    sessions.inner.children.lock().await[0]
-        .lock()
-        .await
-        .prompt_admitted = true;
-    let misread = sessions
+    let collected = sessions
         .collect(vec![handle.rlm_child_id.clone()], 0)
         .await
-        .expect("collect inside the window");
+        .expect("collect after spawn");
     assert_eq!(
-        misread[0].status, "done",
-        "the premise: the collect misreads the pre-prompt idle worker as done"
+        collected[0].status, "error",
+        "spawn must not return before its prompt failure is settled"
     );
-
-    // The task prompt now runs and fails (prompt + retry) inside the
-    // window the collect already scored.
-    sessions.notify_turn_done();
 
     let follow_up = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
         .await
@@ -687,7 +724,6 @@ async fn a_replied_child_whose_prompt_fails_still_delivers_the_failure_row() {
             .await;
     let handle = spawn_child(&sessions).await;
     sessions.mark_replied("child-live").await;
-    sessions.notify_turn_done();
 
     let follow_up = tokio::time::timeout(Duration::from_secs(10), follow_up_rx.recv())
         .await
@@ -728,7 +764,6 @@ async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
     spawn_child(&sessions).await;
     assert!(running.has_changed().unwrap());
     assert!(*running.borrow_and_update());
-    sessions.notify_turn_done();
 
     // The child is idle on its own, but its grandchild still runs: the
     // watcher's idle wait holds for the child's whole subtree.
@@ -765,7 +800,6 @@ async fn collect_with_a_timeout_waits_for_a_running_grandchild() {
     )
     .await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     wait_for_quiescent_wait(&grandchild).await;
 
     let finish = Arc::clone(&grandchild);
@@ -818,7 +852,6 @@ async fn close_children_stops_the_child_and_clears_the_roster() {
         sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Success, FakeChild::Healthy)
             .await;
     spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     one_running_child(&sessions).await;
 
     sessions
@@ -858,7 +891,6 @@ async fn close_children_treats_an_already_gone_child_as_a_no_op() {
     )
     .await;
     spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     one_running_child(&sessions).await;
 
     sessions
@@ -880,7 +912,6 @@ async fn close_children_keeps_a_failed_child_tracked() {
         sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Failure, FakeChild::Healthy)
             .await;
     spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     one_running_child(&sessions).await;
 
     let error = sessions
@@ -907,7 +938,6 @@ async fn a_replied_child_gets_no_terminal_notice() {
     let handle = spawn_child(&sessions).await;
     assert!(!handle.rlm_child_id.is_empty());
     sessions.mark_replied("child-live").await;
-    sessions.notify_turn_done();
 
     let extra = tokio::time::timeout(std::time::Duration::from_secs(2), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "a replied child must not deliver a notice");
@@ -921,7 +951,6 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
     let (sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     // The child settles with its final answer before the delete.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -999,7 +1028,6 @@ async fn a_deleted_settled_child_releases_its_name_slot_and_deletes_idempotently
     let (sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     // The child settles before the delete (a terminal-status row).
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1062,7 +1090,6 @@ async fn a_failed_settle_captures_the_childs_last_assistant_text() {
             .await;
     let handle = spawn_child(&sessions).await;
     let settled = sessions.settle_notified();
-    sessions.notify_turn_done();
     tokio::time::timeout(Duration::from_secs(3_600), settled)
         .await
         .expect("the unreachable give-up settles the child as failed");
@@ -1096,7 +1123,6 @@ async fn a_none_first_answer_capture_recovers_on_a_later_collect() {
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::TextLate)
             .await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     // The watcher's settle refresh consumed the empty first answer read and
     // settled the child with no captured answer.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1139,7 +1165,6 @@ async fn collect_carries_the_full_answer_text_of_a_settled_child() {
     let (sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let entries = sessions.list_subagents().await.expect("child roster");
@@ -1191,7 +1216,6 @@ async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
     let (sessions, _kill_rx) =
         sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     let handle = spawn_child(&sessions).await;
-    sessions.notify_turn_done();
     // The inactive delete requires a settled child (a running child
     // answers "running").
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -322,8 +322,8 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         );
     }
 
-    // The replacement: kill kid-a's worker between its admission and its
-    // task prompt (the detached prompt fires at the turn boundary, below).
+    // The replacement: kill kid-a's worker while its task prompt is being
+    // admitted, below.
     let kid_a_worker_id = {
         let row = wait_until(Duration::from_mins(1), "kid-a roster row", || {
             roster_summaries(&mut client, "l1")
@@ -342,8 +342,6 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         .status()
         .expect("kill kid-a worker");
     assert!(killed.success(), "kill -9 {kid_a_pid}");
-
-    children.notify_turn_done();
 
     // kid-a's prompt must survive the replacement; the budget covers the
     // replacement window end to end.

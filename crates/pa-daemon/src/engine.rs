@@ -231,9 +231,8 @@ pub trait SessionEngine: Send + Sync {
     fn model_context_window(&self) -> Option<u64> {
         None
     }
-    /// The worker's turn loop completed: engines hosting RLM children
-    /// release prompt tasks spawned mid-turn, so the parent's continuation
-    /// request always reaches the provider before a child's first turn.
+    /// The worker's turn loop completed: clear turn-scoped continuation
+    /// state. Child task prompts are admitted at spawn, never here.
     fn on_turn_done(&self) {}
 
     /// The `(provider, model id)` pair the session will run on; fresh

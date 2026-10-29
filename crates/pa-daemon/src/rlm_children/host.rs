@@ -172,11 +172,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
             }
             .await;
             let (record, created, model) = admission?;
-            // The task prompt runs detached from the spawn admission: the
-            // handle returns at registration and the child's first turn
-            // starts after the parent's continuation request is in flight.
-            let watcher_this = Arc::clone(&this);
-            let watcher_record = Arc::clone(&record);
             // TS `spawnMessage`: the kickoff rides prompt admission as
             // the parent's `agent_message` row, so the child renders a
             // parent message and the model reads the
@@ -216,19 +211,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let child_active_session_id = created.active_session_id.clone();
             let child_session_file = created.session_file.clone();
             let child_log_id = child_id.clone();
-            // Capture the current turn boundary before detaching: spawn
-            // admission happens mid-turn, so the parent's continuation
-            // request reaches the provider first (see `wait_turn_done`).
-            let turn_generation = *this.turn_done.subscribe().borrow();
+            let watcher_this = Arc::clone(&this);
+            let watcher_record = Arc::clone(&record);
+            // The detached task survives cancellation of the parent's tool
+            // call, so a spawn never leaves a tracked child without its
+            // settle watcher. The handle still waits for the admission
+            // receipt below: a message the parent sends right after spawn
+            // must land behind the child's task prompt, and waiting for the
+            // parent turn to end let that unrelated message arrive first
+            // (and delayed every task by up to sixty seconds).
+            let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
-                watcher_this.wait_turn_done(turn_generation).await;
-                // The parent closed before the prompt admitted: the
-                // child is closed with it, so the detached task prompt
-                // never fires.
                 if watcher_record.lock().await.closed_by_parent {
+                    let _ = admitted_tx.send(false);
                     return;
                 }
                 watcher_record.lock().await.prompt_admitted = true;
+                let mut watch = true;
                 if let Err(error) = watcher_this
                     .prompt_child(
                         &child_active_session_id,
@@ -270,11 +269,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                                 super::lifecycle::FailedArm::Prompt,
                             )
                             .await;
-                        return;
+                        watch = false;
                     }
                 }
-                watcher_this.watch_child_settle(&watcher_record).await;
+                let _ = admitted_tx.send(watch);
+                if watch {
+                    watcher_this.watch_child_settle(&watcher_record).await;
+                }
             });
+            let _ = admitted_rx.await;
             Ok(RlmSpawnHandle {
                 rlm_child_id: child_id,
                 name,

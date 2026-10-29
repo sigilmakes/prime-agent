@@ -88,6 +88,10 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .arg("--agent-dir")
         .arg(agent_dir)
         .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
+        // This test owns its agent and sessions dirs. Ambient harness env would
+        // point the child workers at the live sessions tree and the live ledger.
+        .env_remove("PRIME_AGENT_SESSION_DIR")
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_err))
         // A supervisor killed at teardown must not leak its session workers: the worker's
@@ -288,16 +292,19 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
-        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
-    ));
-    if candidate.exists() {
-        return Some(candidate);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
+    // This fork may keep the runtime in a Rust-specific venv beside the usual
+    // one; either is a valid live install for the child's reply cell.
+    let candidates = [
+        format!("{home}/.prime/agent/kernel-venv-rust/bin/python"),
+        format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ];
+    if let Some(candidate) = candidates.iter().find(|path| Path::new(path).exists()) {
+        return Some(PathBuf::from(candidate));
     }
     eprintln!(
-        "kernel python {} not found; skipping live family e2e",
-        candidate.display()
+        "kernel python not found in {}; skipping live family e2e",
+        candidates.join(" or ")
     );
     None
 }
@@ -501,11 +508,8 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     assert_eq!(handle.name, "kid");
     let child_id = handle.rlm_child_id.clone();
 
-    // This harness owns its own children registry, so the turn boundary the real
-    // parent's turn would bump is simulated here; without it the spawn prompt never fires.
-    children.notify_turn_done();
-    // Wait for the spawn turn to settle before delivering: the first delivered message
-    // would otherwise consume the spawn response and lose its reply cell.
+    // Wait for the spawn turn to settle before delivering: the first delivered
+    // message would otherwise consume the spawn response and lose its reply cell.
     let settle_deadline = Instant::now() + Duration::from_secs(60);
     let spawn_row = loop {
         let roster = children.list_subagents().await.expect("child roster");
@@ -821,7 +825,6 @@ async fn family_edges_never_cross_families_end_to_end() {
             .await
             .expect("spawn the child");
         assert_eq!(handle.name, kid_name);
-        children.notify_turn_done();
         // The spawn turn settles once the child goes idle with an answer (bounded).
         let settle_deadline = Instant::now() + Duration::from_secs(60);
         loop {
@@ -988,7 +991,6 @@ async fn family_edges_never_cross_families_end_to_end() {
         .await
         .expect("spawn the grandchild");
     assert_eq!(grandkid_handle.name, "grandkid");
-    kid_children.notify_turn_done();
     let grandkid_settle_deadline = Instant::now() + Duration::from_secs(60);
     let grandkid_active = loop {
         let roster = kid_children.list_subagents().await.expect("roster");
@@ -1299,7 +1301,6 @@ async fn parent_renames_a_child_end_to_end() {
         .await
         .expect("spawn the child");
     assert_eq!(handle.name, "kid");
-    children.notify_turn_done();
     // Wait for the spawn turn to settle (bounded), then read the roster's
     // live/persisted child ids.
     let settle_deadline = Instant::now() + Duration::from_secs(60);
