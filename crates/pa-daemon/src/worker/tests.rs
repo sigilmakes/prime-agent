@@ -27,6 +27,26 @@ async fn created_dispatch_worker() -> std::sync::Arc<Worker> {
     worker
 }
 
+/// One parked, queue-visible steering row: the work a queued-input
+/// suspension exists to hold across an abort/compaction boundary.
+pub(super) fn park_steering_row(worker: &Worker, body: &str) {
+    let mut core = worker.core.lock().unwrap();
+    core.steering.push_back(QueuedItem {
+        message: body.to_string(),
+        priority: QueuePriority::Human,
+        preview: None,
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+}
+
 /// The session events seen by an attached client since `mark`, in
 /// wire order.
 fn session_events_since(

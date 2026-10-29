@@ -566,3 +566,129 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A suspension that holds no parked work protects nothing (issue #33): its
+/// only job is to keep queued input from firing across an abort/compaction
+/// boundary. An idle target therefore wakes on the first delivery instead of
+/// refusing it, and the gate does not outlive the hold.
+#[tokio::test]
+async fn deliver_message_releases_a_stale_suspension_on_an_idle_target() {
+    let worker = created_worker().await;
+    worker.core.lock().unwrap().queued_input_suspended = true;
+    let response = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "wake up",
+                "sender": { "activeSessionId": "source-session" },
+            }),
+        )
+        .await;
+    assert!(
+        response.success,
+        "the stale gate refused the delivery: {response:?}"
+    );
+    let data = response.data.expect("receipt data");
+    assert_eq!(data["deliveryStatus"], "delivered");
+    assert!(
+        data.get("queuedReason").is_none(),
+        "a delivered receipt carries no queued reason: {data}"
+    );
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the stale gate survived the delivery"
+    );
+}
+
+/// A suspension that holds parked work IS a hold: the delivery parks behind
+/// it instead of failing, and the receipt says queued plus why. The next
+/// resume boundary (an explicit resume_queue here) delivers the park.
+#[tokio::test]
+async fn deliver_message_parks_under_a_held_suspension_with_receipt_truth() {
+    let worker = created_worker().await;
+    crate::worker::tests::park_steering_row(&worker, "held user row");
+    worker.core.lock().unwrap().queued_input_suspended = true;
+    let response = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "queued by the hold",
+                "sender": { "activeSessionId": "source-session" },
+            }),
+        )
+        .await;
+    assert!(
+        response.success,
+        "the held gate refused instead of parking: {response:?}"
+    );
+    let data = response.data.expect("receipt data");
+    assert_eq!(data["deliveryStatus"], "queued");
+    assert_eq!(data["queuedReason"], "input_admission_suspended");
+    assert!(data["queuedAt"].as_str().is_some(), "queuedAt: {data}");
+    assert!(
+        data.get("deliveredAt").is_none(),
+        "deliveredAt on a parked receipt: {data}"
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.queued_input_suspended,
+            "the delivery released a hold that had parked work to protect"
+        );
+        assert_eq!(
+            core.steering.len(),
+            2,
+            "the delivery parked behind the hold"
+        );
+    }
+    // The explicit resume site is the boundary: it clears the gate and the
+    // parked rows drain.
+    let resumed = worker.dispatch("resume_queue", &json!({})).await;
+    assert!(resumed.success, "resume_queue failed: {resumed:?}");
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the resume site did not clear the gate"
+    );
+}
+
+/// A hold is protected by user work, never by agent traffic: a gate whose only
+/// parked rows are agent-message deliveries must not outlive the turn that
+/// parked them (issue #33), or two agents could keep a session deaf by talking.
+#[tokio::test]
+async fn agent_rows_never_protect_a_hold() {
+    let worker = created_worker().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.queued_input_suspended = true;
+    }
+    let parked = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "parked under the abort window",
+                "sender": { "activeSessionId": "source-session" },
+            }),
+        )
+        .await;
+    assert!(parked.success, "the delivery was refused: {parked:?}");
+    assert_eq!(parked.data.as_ref().unwrap()["deliveryStatus"], "queued");
+    worker.core.lock().unwrap().busy = false;
+    assert!(
+        worker.release_unprotected_suspension(),
+        "an agent row protected the hold"
+    );
+    assert!(!worker.core.lock().unwrap().queued_input_suspended);
+
+    // The user's own parked row does protect the hold.
+    worker.core.lock().unwrap().queued_input_suspended = true;
+    crate::worker::tests::park_steering_row(&worker, "user work");
+    assert!(
+        !worker.release_unprotected_suspension(),
+        "the hold over user work was released"
+    );
+    assert!(worker.core.lock().unwrap().queued_input_suspended);
+}

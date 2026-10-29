@@ -1140,6 +1140,7 @@ impl AgentMessageController for InlineMessages {
             receiver_role: input.receiver_role,
             delivered_at,
             queued_at,
+            queued_reason: None,
         })
     }
 }

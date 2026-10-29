@@ -460,6 +460,10 @@ impl Worker {
 
     fn handle_abort(&self) -> DaemonResponse {
         self.request_abort();
+        // An idle abort has no turn and no parked row to hold: releasing here
+        // keeps the stop from wedging the session against later input
+        // (issue #33). A busy abort releases when the aborted turn settles.
+        self.release_unprotected_suspension();
         response_success(None, "abort", None)
     }
 
@@ -467,6 +471,9 @@ impl Worker {
         // The response acknowledges the abort itself, never the
         // async deliveries the resumed pump runs at the settle.
         self.abort_and_send_queued();
+        // With no queued work the funnel never reaches its resume site; the
+        // empty hold releases here instead of wedging the session (issue #33).
+        self.release_unprotected_suspension();
         response_success(None, "abort_and_send_queued", None)
     }
 
@@ -768,8 +775,10 @@ impl Worker {
         // The same TS `requestAbort()` suspension as the bare `abort`.
         core.queued_input_suspended = true;
         drop(core);
-        // And the same eager agent abort.
+        // And the same eager agent abort; the clear emptied both lanes, so the
+        // suspension holds nothing and releases at once (issue #33).
         self.engine.abort_in_flight_turn();
+        self.release_unprotected_suspension();
         response_success(None, "abort_and_clear_queue", cleared.data)
     }
 

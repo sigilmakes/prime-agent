@@ -447,5 +447,9 @@ fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<Agent
             .get("queuedAt")
             .and_then(Value::as_str)
             .map(str::to_string),
+        queued_reason: data
+            .get("queuedReason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }

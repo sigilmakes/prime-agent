@@ -156,13 +156,19 @@ async fn compact_with_paused_goal_never_continues() {
         .dispatch("compact", &json!({ "activeSessionId": "goal-session" }))
         .await;
     assert!(compact.success, "scripted compact failed: {compact:?}");
-    let rejected = worker
+    // A paused goal mints no continuation, and the compaction parked nothing:
+    // the gate releases with the empty hold (issue #33) so the next prompt is
+    // admitted instead of the session staying deaf until a resume site.
+    let plain = worker
         .dispatch(
             "prompt_and_wait",
             &json!({ "activeSessionId": "goal-session", "message": "hi" }),
         )
         .await;
-    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+    assert!(
+        plain.success,
+        "the compaction left the idle session suspended: {plain:?}"
+    );
     let events = session_events_since(&mut subscription);
     assert!(
         !events

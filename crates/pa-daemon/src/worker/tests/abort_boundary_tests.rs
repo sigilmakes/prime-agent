@@ -1,9 +1,13 @@
 //! Post-abort/post-compact queued-input suspension e2e tests.
 use super::*;
 
+/// The gate exists to hold parked work across an abort boundary: with a parked
+/// row it rejects plain prompts until a resume site (a steer), and with nothing
+/// parked it releases itself instead of wedging the idle session (issue #33).
 #[tokio::test]
-async fn abort_suspends_plain_prompts_until_steer_resumes() {
+async fn abort_with_parked_work_suspends_plain_prompts_until_steer_resumes() {
     let worker = created_dispatch_worker().await;
+    park_steering_row(&worker, "parked row");
     let aborted = worker.dispatch("abort", &json!({})).await;
     assert!(aborted.success, "abort failed: {aborted:?}");
     let rejected = worker
@@ -49,8 +53,34 @@ async fn abort_suspends_plain_prompts_until_steer_resumes() {
     assert!(plain.success, "still suspended after steer: {plain:?}");
 }
 
+/// An abort on an idle session with nothing queued has nothing to hold: it must
+/// not leave the session deaf to every later prompt and agent message.
 #[tokio::test]
-async fn compact_suspends_and_resume_queue_clears() {
+async fn abort_with_an_empty_queue_releases_the_gate() {
+    let worker = created_dispatch_worker().await;
+    let aborted = worker.dispatch("abort", &json!({})).await;
+    assert!(aborted.success, "abort failed: {aborted:?}");
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the abort left the empty session suspended"
+    );
+    let plain = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "after the stop" }),
+        )
+        .await;
+    assert!(
+        plain.success,
+        "still suspended after an empty abort: {plain:?}"
+    );
+}
+
+/// A compaction that finishes with no parked work (and no active goal) has
+/// nothing left to hold: it releases its own gate instead of leaving the idle
+/// session suspended until an unrelated resume site fires.
+#[tokio::test]
+async fn compact_success_with_an_empty_queue_releases_the_gate() {
     let worker = created_dispatch_worker().await;
     let compact = worker
         .dispatch(
@@ -59,28 +89,92 @@ async fn compact_suspends_and_resume_queue_clears() {
         )
         .await;
     assert!(compact.success, "scripted compact failed: {compact:?}");
-    let rejected = worker
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the compaction left the empty session suspended"
+    );
+    let plain = worker
         .dispatch(
             "prompt_and_wait",
-            &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
+            &json!({ "activeSessionId": "suspension-session", "message": "after compact" }),
         )
         .await;
-    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+    assert!(
+        plain.success,
+        "still suspended after a compaction with nothing parked: {plain:?}"
+    );
+    // The empty-queue resume stays the TS failure: there is nothing to resume.
     let resumed = worker.dispatch("resume_queue", &json!({})).await;
     assert!(
         !resumed.success,
         "resume_queue on the empty queue must still answer the TS failure: {resumed:?}"
     );
     assert_eq!(resumed.error.as_deref(), Some("No queued work to resume"));
+}
+
+/// A skipped compaction (nothing to compact) is the same empty-hold case: the
+/// gate must not outlive it.
+#[tokio::test]
+async fn compact_skip_with_an_empty_queue_releases_the_gate() {
+    let worker = crate::worker::compaction_admission_tests::compaction_admission_worker(json!({
+        "responses": [{ "error": "Session is too short to compact", "skipped": true }],
+    }))
+    .await;
+    let compact = worker
+        .dispatch(
+            "compact",
+            &json!({ "activeSessionId": "compaction-session" }),
+        )
+        .await;
+    assert!(!compact.success, "the skip answered success: {compact:?}");
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the skipped compaction left the gate set"
+    );
     let plain = worker
         .dispatch(
             "prompt_and_wait",
-            &json!({ "activeSessionId": "suspension-session", "message": "after resume" }),
+            &json!({ "activeSessionId": "compaction-session", "message": "after the skip" }),
         )
         .await;
     assert!(
         plain.success,
-        "still suspended after resume_queue: {plain:?}"
+        "still suspended after the skipped compaction: {plain:?}"
+    );
+}
+
+/// A failed compaction that parked work MID-window keeps the park (the hold
+/// still protects rows); the explicit resume boundary is the way out.
+#[tokio::test]
+async fn compact_failure_with_parked_work_keeps_the_park() {
+    let worker = crate::worker::compaction_admission_tests::compaction_admission_worker(json!({
+        "responses": [{ "error": "provider exploded" }],
+    }))
+    .await;
+    park_steering_row(&worker, "parked row");
+    let compact = worker
+        .dispatch(
+            "compact",
+            &json!({ "activeSessionId": "compaction-session" }),
+        )
+        .await;
+    assert!(
+        !compact.success,
+        "the failure answered success: {compact:?}"
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.queued_input_suspended,
+            "the failed compaction released a hold over parked work"
+        );
+        assert_eq!(core.steering.len(), 1, "the parked row must survive");
+    }
+    let resumed = worker.dispatch("resume_queue", &json!({})).await;
+    assert!(resumed.success, "resume_queue failed: {resumed:?}");
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the resume site did not clear the gate"
     );
 }
 
@@ -258,23 +352,28 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Abort-and-send with nothing queued is an abort with nothing to send: it
+/// releases its gate instead of parking the session forever.
 #[tokio::test]
-async fn abort_and_send_queued_with_an_empty_queue_is_a_plain_abort() {
+async fn abort_and_send_queued_with_an_empty_queue_releases_the_gate() {
     let worker = created_dispatch_worker().await;
     let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
     assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
     assert_eq!(aborted.command, "abort_and_send_queued");
-    let rejected = worker
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the empty abort-and-send left the gate set"
+    );
+    let plain = worker
         .dispatch(
             "prompt_and_wait",
             &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
         )
         .await;
     assert!(
-        !rejected.success,
-        "admitted after the abort-only abort: {rejected:?}"
+        plain.success,
+        "still suspended after the empty abort-and-send: {plain:?}"
     );
-    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
 }
 
 /// The per-engine provider-admission counter: the decorator runs inside the
@@ -559,18 +658,27 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Abort-and-clear empties the lanes before it suspends, so it has nothing to
+/// hold either: the gate releases and later input is admitted.
 #[tokio::test]
-async fn abort_and_clear_queue_suspends_plain_prompts() {
+async fn abort_and_clear_queue_with_nothing_parked_releases_the_gate() {
     let worker = created_dispatch_worker().await;
     let cleared = worker.dispatch("abort_and_clear_queue", &json!({})).await;
     assert!(cleared.success, "abort_and_clear_queue failed: {cleared:?}");
-    let rejected = worker
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the cleared abort left the gate set"
+    );
+    let plain = worker
         .dispatch(
             "prompt_and_wait",
             &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
         )
         .await;
-    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+    assert!(
+        plain.success,
+        "still suspended after abort-and-clear: {plain:?}"
+    );
     let resumed = worker
         .dispatch(
             "follow_up",

@@ -97,6 +97,10 @@ pub struct AgentMessageReceipt {
     pub receiver_role: Option<AgentFamilyRelationship>,
     pub delivered_at: Option<String>,
     pub queued_at: Option<String>,
+    /// Why a `queued` delivery cannot run yet, when the target said so
+    /// (`input_admission_suspended`, `compaction_in_progress`). Absent for a
+    /// plain queue-behind-busy delivery.
+    pub queued_reason: Option<String>,
 }
 
 /// One addressable family member: a parent, sibling, or child of this
@@ -373,6 +377,7 @@ fn receipt_value(receipt: &AgentMessageReceipt) -> Value {
         "deliveryStatus": receipt.delivery_status.as_str(),
         "deliveredAt": receipt.delivered_at,
         "queuedAt": receipt.queued_at,
+        "queuedReason": receipt.queued_reason,
         "deliveryMode": receipt.delivery_mode,
         "receiverRole": receipt.receiver_role.map(|role| role.as_str()),
     })
