@@ -45,6 +45,9 @@ mod child_usage;
 #[path = "session_store/child_usage_tests.rs"]
 mod child_usage_tests;
 mod context_selection;
+#[cfg(all(test, unix))]
+#[path = "session_store/durable_create_tests.rs"]
+mod durable_create_tests;
 mod index;
 
 use index::fold_child_usage_attributions;

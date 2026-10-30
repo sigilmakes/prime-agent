@@ -19,9 +19,10 @@
 //! [`IoOutcome::FsyncUnproven`], which the authority treats as `Uncertain` and
 //! which blocks the epoch instead of draining it.
 //!
-//! Not wired yet: its consumer is the writer seam that takes a Core-issued
-//! `CanonicalWriteTicket`. The file-inner allow is removed at that point and must
-//! not become permanent debt.
+//! Wired so far: the session store's per-row append classifies its outcome here
+//! ([`append_outcome`]) and settles the grant through [`settle`]. Still unwired:
+//! the writer seam that takes a Core-issued `CanonicalWriteTicket`. The file-inner
+//! allow is removed at that point and must not become permanent debt.
 #![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
@@ -112,6 +113,22 @@ pub(super) trait CertaintySink {
 /// error, never silent success.
 pub(super) fn settle<S: CertaintySink>(sink: S, outcome: IoOutcome) -> Result<(), S::Error> {
     sink.record(outcome.certainty())
+}
+
+/// Classify an append the shared window writer performed.
+///
+/// That writer (`window::append_cached`) opens append-only, so it never creates
+/// the file and no directory entry is at stake: its success already includes the
+/// file's `fsync`, which is [`IoOutcome::DurableOk`] only because the create path
+/// renamed durably first. A failure is reported from outside its write loop, so
+/// the daemon cannot tell a zero-byte refusal from a torn prefix; it must never be
+/// reported as a refusal, and the authority reads it as an unproven tail.
+#[must_use]
+pub(super) fn append_outcome<E>(result: &Result<(), E>) -> IoOutcome {
+    match result {
+        Ok(()) => IoOutcome::DurableOk,
+        Err(_) => IoOutcome::PartialPrefix,
+    }
 }
 
 /// Append `bytes` and prove durability, reporting what the kernel let through.
@@ -387,6 +404,24 @@ mod tests {
             Path::new("/tmp/dir")
         );
         assert_eq!(parent_directory(Path::new("/rows.jsonl")), Path::new("/"));
+    }
+
+    #[test]
+    fn a_failed_append_is_never_reported_as_a_refusal() {
+        // The shared writer reports one error for "the open refused" and "a prefix
+        // landed". Outside its write loop the two cannot be told apart, so the
+        // classification must stay unproven; only success carries a durability proof.
+        let failed: Result<(), std::io::Error> =
+            Err(std::io::Error::from(ErrorKind::PermissionDenied));
+        assert_eq!(append_outcome(&failed), IoOutcome::PartialPrefix);
+        assert_eq!(
+            append_outcome(&failed).certainty(),
+            IoCertainty::Uncertain,
+            "a failed append must never be Known"
+        );
+        let appended: Result<(), std::io::Error> = Ok(());
+        assert_eq!(append_outcome(&appended), IoOutcome::DurableOk);
+        assert_eq!(append_outcome(&appended).certainty(), IoCertainty::Known);
     }
 
     #[test]

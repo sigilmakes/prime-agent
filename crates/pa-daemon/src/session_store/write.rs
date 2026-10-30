@@ -4,6 +4,8 @@
 
 use pa_core::session_engine::canonical_coordinator::CanonicalWriteCertainty;
 
+use super::canonical_io::{append_outcome, settle};
+
 use super::{
     fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
     SessionFile, SessionHeader, Value, Write,
@@ -107,12 +109,17 @@ impl SessionFile {
 
     /// Write the full file atomically (header + every entry). The temp is
     /// fsynced before the rename (TS `_rewriteFile` passes no `fsync` option),
-    /// so a hard crash cannot zero out rows the durable append landed.
+    /// so a hard crash cannot zero out rows the durable append landed, and the
+    /// rename itself is durable: the containing directory is synced, so a crash
+    /// cannot lose the name of a file this call created. That directory proof is
+    /// what [`Self::persist_granted_entry`]'s append branch rests on when it
+    /// classifies a landed append as `Known`.
     ///
     /// # Errors
     ///
     /// Returns an error when the store only holds a window, or the write,
-    /// flush, sync, or rename fails; an empty path answers `Ok(())`.
+    /// flush, sync, rename, or parent-directory sync fails; an empty path answers
+    /// `Ok(())`.
     pub fn rewrite(&self) -> Result<()> {
         anyhow::ensure!(
             self.canonical_live.is_none(),
@@ -150,7 +157,7 @@ impl SessionFile {
             writer.flush()?;
             writer.get_ref().sync_all()?;
         }
-        pa_core::platform::rename_onto(&temp, path)
+        pa_core::platform::rename_onto_durable(&temp, path)
             .with_context(|| format!("persist {}", path.display()))?;
         Ok(())
     }
@@ -354,22 +361,21 @@ impl SessionFile {
                 .with_context(|| format!("append to {}", self.path.display())),
             };
             // `Known` is provable HERE only because this branch requires a file that
-            // already existed: the bootstrap rewrite created it durably, so this
-            // append puts no directory entry at stake. `window::append_cached` opens
-            // with create-if-missing and does NOT sync the parent directory on a
-            // create, so if the file could vanish between the guard above and that
-            // open, a successful write would still be an unproven create and this
-            // classification would be a lie. The assertion pins the assumption the
-            // guard rests on, so a later reader cannot turn it into a race.
+            // already existed, and the bootstrap rewrite put that name on disk
+            // durably (it renames and syncs the parent directory). The shared writer
+            // opens append-only and never creates the file, so this append puts no
+            // directory entry at stake: a successful write proves the bytes and
+            // nothing else. The assertion pins the assumption the branch rests on.
             debug_assert!(
                 existed_before,
                 "the durable append branch requires a file that already existed"
             );
+            let outcome = append_outcome(&appended);
             // Settle before the row joins the index: a caller must never observe an
             // indexed row whose flight is still unclassified. An early failure above
             // drops the grant unclassified, which fails closed and poisons the epoch.
             if let Some(grant) = grant.take() {
-                grant.settle(certainty_of(&appended))?;
+                settle(grant, outcome)?;
             }
             appended?;
             #[cfg(test)]
@@ -465,16 +471,4 @@ fn write_line<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     Ok(())
-}
-
-/// Classify one append attempt for the canonical epoch.
-///
-/// A failed append is `Uncertain`: bytes may have reached the file before the
-/// error, and the epoch must not drain across a state nobody proved.
-fn certainty_of(result: &Result<()>) -> CanonicalWriteCertainty {
-    if result.is_ok() {
-        CanonicalWriteCertainty::Known
-    } else {
-        CanonicalWriteCertainty::Uncertain
-    }
 }

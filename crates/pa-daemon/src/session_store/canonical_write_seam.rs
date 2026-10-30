@@ -17,7 +17,7 @@ use pa_core::session::canonical::{
     CanonicalCursor, CanonicalEntryDraft, CanonicalIoStage, CanonicalOperation, CanonicalStoreError,
 };
 use pa_core::session_engine::canonical_coordinator::{
-    CanonicalWriteCertainty, CanonicalWriteRecorder, CanonicalWriteTicket,
+    CanonicalAppendGrant, CanonicalWriteCertainty, CanonicalWriteRecorder, CanonicalWriteTicket,
 };
 
 use super::canonical_io::{append_rows_durable, settle, CertaintySink, IoCertainty, IoOutcome};
@@ -36,6 +36,17 @@ impl CertaintySink for CanonicalWriteRecorder {
 
     fn record(self, certainty: IoCertainty) -> Result<(), Self::Error> {
         CanonicalWriteRecorder::record(self, CanonicalWriteCertainty::from(certainty))
+    }
+}
+
+/// The store's per-row append grant consumes the same one classification: the
+/// writer reports what it observed, and only [`IoOutcome::certainty`] decides
+/// whether that is `Known` enough to drain the epoch.
+impl CertaintySink for CanonicalAppendGrant {
+    type Error = CanonicalStoreError;
+
+    fn record(self, certainty: IoCertainty) -> Result<(), Self::Error> {
+        CanonicalAppendGrant::settle(self, CanonicalWriteCertainty::from(certainty))
     }
 }
 
