@@ -31,6 +31,8 @@ pub(crate) enum Applied {
     Selection { leaf: String },
     /// A row the index already holds.
     Already,
+    /// A row with no id: carried by the log, not a tree node (the session header).
+    Opaque,
 }
 
 /// Rows by seq, by id, and the parent/child edges of the session tree.
@@ -51,6 +53,12 @@ impl Index {
     pub(crate) fn insert(&mut self, seq: u64, ts: String, body: Value) -> Result<Applied, Error> {
         if self.by_seq(seq).is_some() {
             return Ok(Applied::Already);
+        }
+        if body.get("id").and_then(Value::as_str).is_none() {
+            // The session header carries no id: it has a seq, not a place in the
+            // tree, and the newest seq still has to advance past it.
+            self.last_seq = self.last_seq.max(seq);
+            return Ok(Applied::Opaque);
         }
         let envelope = envelope(&body)?;
         if self.by_id.contains_key(&envelope.id) {
