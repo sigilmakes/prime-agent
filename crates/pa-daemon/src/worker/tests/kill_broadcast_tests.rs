@@ -255,9 +255,22 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
         .expect("the job stays in the store");
     assert_eq!(cancelled.status, pa_core::cron::JobStatus::Cancelled);
     assert_eq!(cancelled.next_run_at, None);
-    // The close archived the session file (the wake scan's state gate).
-    let info = crate::session_store::read_session_info(std::path::Path::new(session_file)).unwrap();
-    assert_eq!(info.state.as_deref(), Some("archived"));
+    // The close archived the session (the wake scan's state gate): the
+    // archived session_state row is durable in the log.
+    let rows = crate::session_transport::test_support::log_row_bodies(&dir.join("agent"), session_id);
+    eprintln!("DEBUG rows: {rows:?}");
+    let state = rows
+        .iter()
+        .filter_map(|row| {
+            if row.get("type").and_then(Value::as_str) == Some("session_state") {
+                row.get("state").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .last()
+        .expect("the close wrote a session_state row");
+    assert_eq!(state, "archived");
 }
 
 /// The #247 matrix: the aborted row still broadcasts and persists, the
@@ -583,19 +596,19 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         anyhow::ensure!(start.success, "goal start failed: {start:?}");
         fixture.admitted().await?;
         let before = worker.engine.goal_state_value();
-        let path = {
+        let session_id = {
             let core = worker.core.lock().unwrap();
             let store = core
                 .store
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("missing canonical store"))?;
             anyhow::ensure!(
-                store.lease.is_some(),
-                "the canonical writer must own its real runtime lease"
+                store.is_log_served(),
+                "the serving store rides the session log"
             );
-            store.path.clone()
+            store.session_id().to_owned()
         };
-        let history_before = std::fs::read(&path)?;
+        let agent_dir = dir.path().join("agent");
         fixture.release();
         // No abort command and no aborted signal in this case: the provider
         // itself returns Error(Aborted, []) with a distinctive response id.
@@ -607,7 +620,7 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         anyhow::ensure!(idle.success, "native provider turn never settled: {idle:?}");
         let messages = worker.dispatch("get_messages", &json!({})).await;
         anyhow::ensure!(messages.success, "get_messages failed: {messages:?}");
-        Ok((before, path, history_before, messages))
+        Ok((before, session_id, agent_dir, messages))
     }
     .await;
     let mut cleanup_error = None;
@@ -637,7 +650,7 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         cleanup_error.is_none(),
         "{cleanup_error:?}; observation: {observed:?}"
     );
-    let (before, path, history_before, messages) = observed.expect("native abort fixture settled");
+    let (before, session_id, agent_dir, messages) = observed.expect("native abort fixture settled");
     let events = session_events_since(&mut subscription);
     let named = |kind: &str| -> &Value {
         let matching: Vec<_> = events
@@ -681,33 +694,8 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         .expect("native row in get_messages");
     assert_eq!(displayed["content"], json!([]));
     assert_eq!(displayed, end);
-
-    let physical = std::fs::read(&path).expect("physical canonical journal");
-    assert!(
-        physical.starts_with(&history_before),
-        "prior canonical history changed"
-    );
-    let entries = crate::session_store::parse_session_entries(
-        std::str::from_utf8(&physical).expect("canonical UTF-8"),
-    );
-    let disk_row = &entries
-        .iter()
-        .find(|entry| {
-            entry["type"] == "message" && entry["message"]["responseId"] == NATIVE_RESPONSE_ID
-        })
-        .expect("native row physically journaled")["message"];
-    assert_eq!(disk_row["content"], json!([]));
-    assert_eq!(disk_row["stopReason"], json!("aborted"));
-    assert_eq!(disk_row, end);
-    let reopened =
-        crate::session_store::SessionFile::open(&path).expect("reopen canonical journal");
-    let reopened_messages = reopened.messages();
-    let restored = reopened_messages
-        .iter()
-        .find(|message| message["responseId"] == NATIVE_RESPONSE_ID)
-        .expect("native row survives reopen");
-    assert_eq!(restored["content"], json!([]));
-    assert_eq!(restored, end);
+    // The fold carries the native row; the log's append-before-index
+    // invariant (the transport tests) makes the fold row the durable row.
     assert_eq!(before["status"], json!("active"));
     assert!(before["tokensUsed"].as_u64().unwrap_or(0) > 0);
     let after = worker.engine.goal_state_value();
@@ -716,7 +704,26 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
     assert_eq!(after["tokensUsed"], before["tokensUsed"]);
     assert_eq!(after["continuationsUsed"], before["continuationsUsed"]);
     assert_eq!(fixture.calls(), 2, "no further paid provider work");
-    let core = worker.core.lock().unwrap();
-    assert!(!core.busy);
-    assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(!core.busy);
+        assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    }
+    // The reopen proof: the kill releases the log's flock, and the replayed
+    // fold carries the native row.
+    let killed = worker.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "kill failed: {killed:?}");
+    drop(worker);
+    let reopened = crate::session_store::SessionFile::open_log(
+        &session_dir.join(crate::session_store::session_file_name(&session_id)),
+        &agent_dir,
+    )
+    .expect("reopen the session log");
+    let let_binding = reopened.messages();
+    let restored = let_binding
+        .iter()
+        .find(|message| message["responseId"] == NATIVE_RESPONSE_ID)
+        .expect("native row survives reopen");
+    assert_eq!(restored["content"], json!([]));
+    assert_eq!(restored, end);
 }
