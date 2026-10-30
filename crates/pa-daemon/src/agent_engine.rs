@@ -49,7 +49,7 @@ pub(crate) use tests::FAUX_TEST_LOCK;
 mod context_selection;
 pub(crate) use context_selection::{
     canonical_mirror_header, ContextSelectionCommitFuture, ContextSelectionSource,
-    InitialContextSelectionStore,
+    InitialContextSelectionStore, MirrorSeed,
 };
 
 mod goalcore;
