@@ -1,0 +1,546 @@
+//! The required behavior list from the session-log spec, one test per item.
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write as _};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use super::disk::{Disk, RealDisk};
+use super::{Error, NotWritten, Outcome, RepairReport, SessionLog};
+
+const ID: &str = "01a18af1-session";
+
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(30)
+}
+
+fn row(n: u64) -> serde_json::Value {
+    json!({ "kind": "test", "n": n })
+}
+
+fn committed_seq(outcome: &Outcome) -> Option<u64> {
+    match outcome {
+        Outcome::Committed { seq, .. } => Some(*seq),
+        _ => None,
+    }
+}
+
+fn log_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(format!("{ID}.jsonl"))
+}
+
+type FsyncHook = Box<dyn Fn(&File) -> io::Result<()> + Send + Sync>;
+type DirHook = Box<dyn Fn(&Path) -> io::Result<()> + Send + Sync>;
+type WriteHook = Box<dyn Fn(&mut File, &[u8]) -> io::Result<()> + Send + Sync>;
+
+/// The real disk with test hooks. The default hooks skip fsync: durability is
+/// proven by the tests that install failing hooks, not by repetition here.
+struct TestDisk {
+    disk: RealDisk,
+    fsync: FsyncHook,
+    sync_dir: DirHook,
+    write: WriteHook,
+}
+
+impl TestDisk {
+    fn new() -> Self {
+        Self {
+            disk: RealDisk,
+            fsync: Box::new(|_| Ok(())),
+            sync_dir: Box::new(|_| Ok(())),
+            write: Box::new(File::write_all),
+        }
+    }
+
+    fn fsync<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&File) -> io::Result<()> + Send + Sync + 'static,
+    {
+        self.fsync = Box::new(hook);
+        self
+    }
+
+    fn sync_dir<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&Path) -> io::Result<()> + Send + Sync + 'static,
+    {
+        self.sync_dir = Box::new(hook);
+        self
+    }
+
+    fn write<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&mut File, &[u8]) -> io::Result<()> + Send + Sync + 'static,
+    {
+        self.write = Box::new(hook);
+        self
+    }
+}
+
+impl Disk for TestDisk {
+    fn open_log(&self, path: &Path) -> io::Result<(File, bool)> {
+        self.disk.open_log(path)
+    }
+    fn open_lock(&self, path: &Path) -> io::Result<File> {
+        self.disk.open_lock(path)
+    }
+    fn open_rw(&self, path: &Path) -> io::Result<File> {
+        self.disk.open_rw(path)
+    }
+    fn open_read(&self, path: &Path) -> io::Result<File> {
+        self.disk.open_read(path)
+    }
+    fn write(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+        (self.write)(file, bytes)
+    }
+    fn fsync(&self, file: &File) -> io::Result<()> {
+        (self.fsync)(file)
+    }
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        (self.sync_dir)(dir)
+    }
+    fn len(&self, file: &File) -> io::Result<u64> {
+        self.disk.len(file)
+    }
+    fn truncate(&self, file: &File, len: u64) -> io::Result<()> {
+        self.disk.truncate(file, len)
+    }
+    fn try_lock(&self, file: &File) -> io::Result<bool> {
+        self.disk.try_lock(file)
+    }
+    fn unlock(&self, file: &File) -> io::Result<()> {
+        self.disk.unlock(file)
+    }
+}
+
+#[test]
+fn append_and_read_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+
+    let rows = log.read_since(0).unwrap();
+    assert_eq!(rows.iter().map(|row| row.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(rows[0].body, row(1));
+    assert_eq!(rows[0].ts.len(), 24, "YYYY-MM-DDTHH:MM:SS.mmmZ");
+    assert!(rows[0].ts.ends_with('Z'));
+
+    let tail = log.read_since(1).unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].seq, 2);
+}
+
+#[test]
+fn a_killed_writer_leaves_a_torn_tail_that_repair_truncates() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+    let good = std::fs::metadata(&path).unwrap().len();
+
+    // What a writer killed mid-line leaves behind: no terminating newline.
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(
+        br#"{"seq":3,"ts":"2026-10-30T04:00:00.000Z","crc":"00000000","row":{"kind":"test","#,
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let torn = std::fs::metadata(&path).unwrap().len() - good;
+
+    let reopened = SessionLog::open(temp.path(), ID, deadline());
+    assert!(
+        matches!(
+            reopened,
+            Err(Error::Damaged {
+                last_good_seq: 2,
+                ..
+            })
+        ),
+        "a torn tail must be reported, not silently kept"
+    );
+
+    let report = SessionLog::repair(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(
+        report,
+        RepairReport {
+            last_good_seq: 2,
+            truncated_bytes: torn,
+            rows: 2,
+        }
+    );
+
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(3), deadline())), Some(3));
+    assert_eq!(log.read_since(0).unwrap().len(), 3);
+}
+
+#[test]
+fn reading_stops_at_a_torn_tail_without_repairing() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"{\"seq\":3").unwrap();
+    drop(file);
+
+    assert_eq!(log.read_since(0).unwrap().len(), 2);
+    assert!(
+        SessionLog::repair(temp.path(), ID, deadline())
+            .unwrap()
+            .truncated_bytes
+            > 0
+    );
+}
+
+#[test]
+fn an_interrupted_write_is_provably_not_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let disk: Arc<dyn Disk> = {
+        let interrupt_once = Arc::new(AtomicBool::new(true));
+        Arc::new(TestDisk::new().write(move |file, bytes| {
+            if interrupt_once.swap(false, Ordering::SeqCst) {
+                file.write_all(&bytes[..bytes.len() / 2])?;
+                return Err(io::Error::other("write interrupted"));
+            }
+            file.write_all(bytes)
+        }))
+    };
+    let mut log = SessionLog::open_with(disk, temp.path(), ID, deadline()).unwrap();
+    let outcome = log.append(&row(1), deadline());
+    assert!(
+        matches!(
+            outcome,
+            Outcome::NotWritten {
+                reason: NotWritten::Io(_)
+            }
+        ),
+        "a half line cannot be a row: {outcome:?}"
+    );
+
+    let torn = std::fs::metadata(&path).unwrap().len();
+    assert!(torn > 0, "the interrupted bytes are on disk");
+    let report = SessionLog::repair(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(
+        report,
+        RepairReport {
+            last_good_seq: 0,
+            truncated_bytes: torn,
+            rows: 0,
+        }
+    );
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+}
+
+#[test]
+fn a_second_writer_is_refused_at_the_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    let lock_path = temp.path().join(format!("{ID}.lock"));
+    // A real second flock holder: same file, its own open file description.
+    let rival = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    rival.lock().unwrap();
+
+    let until = deadline();
+    match log.append(&row(1), until) {
+        Outcome::Busy {
+            until: reported,
+            holder,
+        } => {
+            assert_eq!(reported, until);
+            let holder = holder.expect("the rival recorded itself");
+            assert_eq!(holder.pid, std::process::id());
+            assert!(holder.since_ms > 0);
+        }
+        other => panic!("expected Busy, got {other:?}"),
+    }
+    assert!(log.read_since(0).unwrap().is_empty());
+
+    rival.unlock().unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+}
+
+#[test]
+fn two_writers_never_share_a_seq() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut left = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    let mut right = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    for n in 0..5u64 {
+        assert_eq!(
+            committed_seq(&left.append(&row(n), deadline())),
+            Some(2 * n + 1)
+        );
+        assert_eq!(
+            committed_seq(&right.append(&row(n), deadline())),
+            Some(2 * n + 2)
+        );
+    }
+    let rows = left.read_since(0).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        (1..=10).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_crash_before_the_directory_sync_leaves_no_partial_row() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let lossy: Arc<dyn Disk> = Arc::new(
+        TestDisk::new().sync_dir(|_| Err(io::Error::other("power lost before the directory sync"))),
+    );
+    assert!(matches!(
+        SessionLog::open_with(lossy, temp.path(), ID, deadline()),
+        Err(Error::Io(_))
+    ));
+    // Whatever survived the lost entry is a complete log: absent or empty.
+    if let Ok(bytes) = std::fs::read(&path) {
+        assert!(bytes.is_empty(), "the file must not hold a partial row");
+    }
+
+    // The entry was lost with the crash: the next open starts a fresh log.
+    let _ = std::fs::remove_file(&path);
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    assert_eq!(log.read_since(0).unwrap().len(), 1);
+}
+
+#[test]
+fn a_failed_fsync_is_undecided_and_recover_never_lies() {
+    for bytes_survive in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let fail_once = Arc::new(AtomicBool::new(true));
+        let disk: Arc<dyn Disk> = {
+            let fail_once = fail_once.clone();
+            Arc::new(TestDisk::new().fsync(move |file| {
+                // The empty file's create-time barrier succeeds; the barrier
+                // for the row's bytes fails, once.
+                let pending = file.metadata()?.len() > 0;
+                if pending && fail_once.swap(false, Ordering::SeqCst) {
+                    if !bytes_survive {
+                        // An unflushed write that dies with the failure.
+                        file.set_len(0)?;
+                    }
+                    return Err(io::Error::other("fsync failed"));
+                }
+                crate::platform::fsync(file)
+            }))
+        };
+        let mut log = SessionLog::open_with(disk, temp.path(), ID, deadline()).unwrap();
+        let outcome = log.append(&row(1), deadline());
+        let Outcome::Unknown { recover } = outcome else {
+            panic!("a failed barrier is Unknown, got {outcome:?}");
+        };
+        assert_eq!(recover.seq(), 1);
+        let resolved = recover.recover(deadline()).unwrap();
+
+        // What the log actually holds, read without the injected disk.
+        let rows = SessionLog::open(temp.path(), ID, deadline())
+            .unwrap()
+            .read_since(0)
+            .unwrap();
+        match &resolved {
+            Outcome::Committed { seq, .. } => {
+                assert_eq!(*seq, 1);
+                assert_eq!(rows.len(), 1, "Committed must mean the row is there");
+            }
+            Outcome::NotWritten {
+                reason: NotWritten::Absent { seq },
+            } => {
+                assert_eq!(*seq, 1);
+                assert!(rows.is_empty(), "NotWritten must mean the row is not there");
+            }
+            other => panic!("recover must decide, got {other:?}"),
+        }
+        assert_eq!(
+            matches!(resolved, Outcome::Committed { .. }),
+            bytes_survive,
+            "recover agrees with what is on disk"
+        );
+        // The retry pins the seq the recover answer named, so the log still
+        // holds exactly one row: this is the no-ACK idempotency.
+        assert_eq!(
+            committed_seq(&log.append_at(1, &row(1), deadline())),
+            Some(1)
+        );
+        let after = SessionLog::open(temp.path(), ID, deadline())
+            .unwrap()
+            .read_since(0)
+            .unwrap();
+        assert_eq!(after.len(), 1, "the retry added no second row");
+    }
+}
+
+#[test]
+fn a_duplicate_retry_is_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(
+        committed_seq(&log.append_at(7, &row(7), deadline())),
+        Some(7)
+    );
+    assert_eq!(
+        committed_seq(&log.append_at(7, &row(7), deadline())),
+        Some(7)
+    );
+    let rows = log.read_since(0).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].seq, 7);
+
+    let taken = log.append_at(7, &row(99), deadline());
+    assert!(
+        matches!(
+            taken,
+            Outcome::NotWritten {
+                reason: NotWritten::SeqConflict { seq: 7 }
+            }
+        ),
+        "a different row at the same seq is not a retry: {taken:?}"
+    );
+    assert_eq!(log.read_since(0).unwrap().len(), 1);
+}
+
+#[test]
+fn a_flipped_byte_stops_the_read_and_is_reported_by_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    for n in 1..=3u64 {
+        assert_eq!(committed_seq(&log.append(&row(n), deadline())), Some(n));
+    }
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let target = bytes
+        .windows(6)
+        .position(|window| window == br#""n":2}"#)
+        .expect("the second row's body")
+        + 4;
+    bytes[target] ^= 0x01;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let rows = log.read_since(0).unwrap();
+    assert_eq!(rows.iter().map(|row| row.seq).collect::<Vec<_>>(), [1]);
+
+    let report = SessionLog::repair(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(report.last_good_seq, 1);
+    assert_eq!(report.rows, 1);
+    assert!(report.truncated_bytes > 0, "repair reports the damage");
+}
+
+#[test]
+fn seq_keeps_increasing_across_handles() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut first = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&first.append(&row(1), deadline())), Some(1));
+    assert_eq!(committed_seq(&first.append(&row(2), deadline())), Some(2));
+    drop(first);
+
+    let mut second = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&second.append(&row(3), deadline())), Some(3));
+    assert_eq!(second.read_since(1).unwrap().len(), 2);
+}
+
+#[test]
+fn a_hundred_thousand_rows_stay_usable() {
+    let temp = tempfile::tempdir().unwrap();
+    let disk: Arc<dyn Disk> = Arc::new(TestDisk::new());
+    let mut log = SessionLog::open_with(disk, temp.path(), ID, deadline()).unwrap();
+    let started = Instant::now();
+    for n in 0..100_000u64 {
+        assert_eq!(committed_seq(&log.append(&row(n), deadline())), Some(n + 1));
+    }
+    let appended = started.elapsed();
+
+    let tail = log.read_since(99_990).unwrap();
+    assert_eq!(tail.len(), 10);
+    assert_eq!(tail[9].seq, 100_000);
+    assert_eq!(log.read_since(0).unwrap().len(), 100_000);
+    assert!(
+        appended < Duration::from_secs(60),
+        "appends took {appended:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(180),
+        "appends and reads took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_row_that_is_not_an_object_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    let outcome = log.append(&"text", deadline());
+    assert!(matches!(
+        outcome,
+        Outcome::NotWritten {
+            reason: NotWritten::Encode(_)
+        }
+    ));
+    assert!(log.read_since(0).unwrap().is_empty());
+}
+
+#[test]
+fn a_session_id_must_be_one_path_component() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        SessionLog::open(temp.path(), "../escape", deadline()),
+        Err(Error::Io(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unopenable_session_is_reported() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if nix::unistd::geteuid().is_root() {
+        // Root bypasses the mode bits; the case cannot be built.
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let lock_path = temp.path().join(format!("{ID}.lock"));
+    std::fs::write(&lock_path, b"").unwrap();
+    std::fs::write(log_path(temp.path()), b"").unwrap();
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    let error = SessionLog::open(temp.path(), ID, deadline());
+    assert!(
+        matches!(error, Err(Error::Io(_))),
+        "an unopenable lock is an error, not a wedge: {error:?}"
+    );
+    assert!(matches!(
+        SessionLog::repair(temp.path(), ID, deadline()),
+        Err(Error::Io(_))
+    ));
+
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(
+        log_path(temp.path()),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let error = SessionLog::open(temp.path(), ID, deadline());
+    assert!(
+        matches!(error, Err(Error::Io(_))),
+        "an unreadable log is an error: {error:?}"
+    );
+    std::fs::set_permissions(
+        log_path(temp.path()),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+}

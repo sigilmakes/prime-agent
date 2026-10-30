@@ -16,7 +16,9 @@ canonical-integration-test-support = []
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `raw_value` lets the session log checksum the row's exact bytes instead of
+# a re-serialization of a parsed value.
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio.workspace = true
 futures.workspace = true
 thiserror.workspace = true
