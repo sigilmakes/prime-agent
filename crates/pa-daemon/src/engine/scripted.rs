@@ -549,7 +549,7 @@ impl SessionEngine for ScriptedEngine {
             let index = self
                 .compaction
                 .next
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |current| {
@@ -628,7 +628,7 @@ impl SessionEngine for ScriptedEngine {
             let index = self
                 .branch_summary
                 .next
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |current| {

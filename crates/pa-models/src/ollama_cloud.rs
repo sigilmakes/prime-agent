@@ -236,7 +236,7 @@ async fn detail_worker(
         };
         let size = metadata.to_string().len() + id.len() + 8;
         if retained_bytes
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |bytes| {
