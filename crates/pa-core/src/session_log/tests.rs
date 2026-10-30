@@ -660,6 +660,109 @@ fn seq_keeps_increasing_across_handles() {
 }
 
 #[test]
+fn refresh_reads_only_the_new_tail_and_advances_the_cursor() {
+    let temp = tempfile::tempdir().unwrap();
+    // The seam's default hooks skip fsync: this test is about the cursor, and
+    // 10k durable appends would dominate the suite's runtime.
+    let disk: Arc<dyn Disk> = Arc::new(TestDisk::new());
+    let mut follower = SessionLog::open_with(disk.clone(), temp.path(), ID, deadline()).unwrap();
+    let mut writer = SessionLog::open_with(disk, temp.path(), ID, deadline()).unwrap();
+    for n in 1..=10_000u64 {
+        assert_eq!(committed_seq(&writer.append(&row(n), deadline())), Some(n));
+    }
+
+    // One scan adopts the whole delta, in order.
+    let adopted = follower.refresh(deadline()).unwrap();
+    assert_eq!(adopted.len(), 10_000);
+    assert_eq!(adopted[0].seq, 1);
+    assert_eq!(adopted[9_999].seq, 10_000);
+    assert!(follower.refresh(deadline()).unwrap().is_empty());
+
+    // A foreign append is read as a delta, not as a rescan of the log.
+    assert_eq!(
+        committed_seq(&writer.append(&row(10_001), deadline())),
+        Some(10_001)
+    );
+    let delta = follower.refresh(deadline()).unwrap();
+    assert_eq!(delta.len(), 1);
+    assert_eq!(delta[0].seq, 10_001);
+    // The follower's own append continues from the adopted tail.
+    assert_eq!(
+        committed_seq(&follower.append(&row(10_002), deadline())),
+        Some(10_002)
+    );
+
+    // An idle refresh is a length check: if it rescanned 10k rows, 500 of them
+    // would take tens of seconds.
+    let started = Instant::now();
+    for _ in 0..500 {
+        assert!(follower.refresh(deadline()).unwrap().is_empty());
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "idle refreshes took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn refresh_reports_damage_the_way_an_append_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut writer = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&writer.append(&row(1), deadline())), Some(1));
+    assert_eq!(committed_seq(&writer.append(&row(2), deadline())), Some(2));
+    let mut follower = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+
+    // A torn tail: the cursor stays on the last complete line.
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"{\"seq\":3").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert!(matches!(
+        follower.refresh(deadline()),
+        Err(Error::Damaged {
+            last_good_seq: 2,
+            ..
+        })
+    ));
+    assert!(
+        follower.refresh(deadline()).is_err(),
+        "still torn until repaired"
+    );
+    assert_eq!(
+        SessionLog::repair(temp.path(), ID, deadline())
+            .unwrap()
+            .last_good_seq,
+        2
+    );
+    assert!(follower.refresh(deadline()).unwrap().is_empty());
+
+    // A complete bad line is Corrupt, and it also stops the cursor before it.
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(
+        b"{\"seq\":3,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"00000000\",\"row\":{\"kind\":\"test\",\"n\":3}}\n",
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert!(matches!(
+        follower.refresh(deadline()),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
+    assert_eq!(
+        SessionLog::repair(temp.path(), ID, deadline())
+            .unwrap()
+            .last_good_seq,
+        2
+    );
+    assert_eq!(
+        committed_seq(&follower.append(&row(3), deadline())),
+        Some(3)
+    );
+}
+
+#[test]
 fn a_hundred_thousand_rows_stay_usable() {
     let temp = tempfile::tempdir().unwrap();
     let disk: Arc<dyn Disk> = Arc::new(TestDisk::new());
