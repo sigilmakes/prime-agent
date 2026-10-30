@@ -66,6 +66,11 @@ pub const WORKER_TELEMETRY_DISABLED_ENV: &str =
 /// unreachable for this long exits instead of lingering orphaned.
 pub const WORKER_SUPERVISOR_LOST_EXIT_MS_ENV: &str =
     "PRIME_AGENT_INTERNAL_WORKER_SUPERVISOR_LOST_EXIT_MS";
+/// Shutdown settle deadline (ms): a worker whose requested stop has not
+/// completed by then exits on its own, so a refused (or abandoned) stop can
+/// never leave the process running forever.
+pub const WORKER_SHUTDOWN_SETTLE_MS_ENV: &str =
+    "PRIME_AGENT_INTERNAL_WORKER_SHUTDOWN_SETTLE_MS";
 
 /// The worker identity/handshake set the supervisor stamps on a worker
 /// spawn ([`crate::descriptor::worker_launch_env`]), minus the public

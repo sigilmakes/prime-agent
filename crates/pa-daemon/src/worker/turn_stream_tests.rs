@@ -34,6 +34,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         abort_requested: false,
         suppress_aborted_row: false,
         shutdown_requested: false,
+        shutdown_requested_at: None,
         compacting: false,
         auto_compaction_enabled: true,
         last_activity_ms: 0,

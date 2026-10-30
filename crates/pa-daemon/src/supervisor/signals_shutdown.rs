@@ -94,11 +94,19 @@ impl Supervisor {
                     complete = false;
                     continue;
                 };
-                if force && self.persist_stop_tombstone(&resident).await.is_err() {
+                // Durable stop intent lands BEFORE the worker is told (the TS
+                // `persistWorkerStopTombstone` order): a supervisor that dies mid-pass
+                // leaves a tombstone the next boot's reap finishes, and a worker that
+                // REFUSES its stop keeps it — a refusal is a retryable "not yet", never
+                // a way to look adoptable to the next boot. `intentional_stop` stays set
+                // for the same reason: this worker's own exit is the stop finishing,
+                // not a crash the watchdog relaunches.
+                if self.persist_stop_tombstone(&resident).await.is_err() {
+                    self.log_line("worker stop tombstone could not persist; leaving worker untouched");
                     complete = false;
                     continue;
                 }
-                let was_intentional = resident.intentional_stop.swap(true, Ordering::SeqCst);
+                resident.intentional_stop.store(true, Ordering::SeqCst);
                 let response = self
                     .route_command_typed(
                         &resident,
@@ -112,9 +120,9 @@ impl Supervisor {
                     && super::worker_lifecycle::worker_process_gone(initial_pid, initial_start.clone())
                         .await;
                 if !force && !already_gone && !matches!(&response, Ok(response) if response.success) {
-                    resident
-                        .intentional_stop
-                        .store(was_intentional, Ordering::SeqCst);
+                    // A graceful refusal leaves the worker running with its stop intent
+                    // durable: this pass stays incomplete, and a later attempt (or the
+                    // worker's own shutdown deadline) finishes the stop.
                     self.log_line(&format!(
                         "session worker {} refused graceful shutdown: {response:?}",
                         resident.worker_id
@@ -122,14 +130,6 @@ impl Supervisor {
                     complete = false;
                     continue;
                 }
-                // Only accepted graceful accounting, or explicit force, permits durable
-                // retirement intent and process escalation.
-                if !force && self.persist_stop_tombstone(&resident).await.is_err() {
-                    self.log_line("worker stop tombstone could not persist; leaving worker untouched");
-                    complete = false;
-                    continue;
-                }
-                resident.intentional_stop.store(true, Ordering::SeqCst);
                 resident.note_retired();
                 if let Some(bound_reap) = bound_reap.as_ref() {
                     if !crate::registry::OwnedWorkerReap::matches_bound(bound_reap, &resident).await {

@@ -94,6 +94,11 @@ impl Worker {
             // abort would register a controller nothing later cancels, and the
             // exit leaves its child running.
             core.shutdown_requested = true;
+            // The FIRST request arms the orphan monitor's stop deadline: a stop that
+            // never completes (a refused close, a caller that died) still ends the
+            // process. A retry does not extend it.
+            core.shutdown_requested_at
+                .get_or_insert_with(std::time::Instant::now);
             core.abort_requested = true;
         }
         // The running user bash goes with the stop: the passivation stop must

@@ -755,19 +755,11 @@ impl Supervisor {
     ) -> anyhow::Result<()> {
         // Idle eviction already owns all admission. Keep that fence through the
         // verdict and retirement; a refusal releases it without retiring the worker.
-        let was_intentional = resident.intentional_stop.swap(true, Ordering::SeqCst);
+        //
         // The stop's durable intent persists BEFORE the worker is told (TS
         // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
         // survives the escalation, must never be adopted as healthy by a later boot.
-        let prior = match self.persist_stop_tombstone_stop(resident).await {
-            Ok(prior) => prior,
-            Err(error) => {
-                resident
-                    .intentional_stop
-                    .store(was_intentional, Ordering::SeqCst);
-                return Err(error);
-            }
-        };
+        self.persist_stop_tombstone_stop(resident).await?;
         let response = if let Some(fence) = fence.as_ref() {
             let cmd_tx = resident.cmd_tx.lock().await.clone();
             match cmd_tx {
@@ -812,17 +804,17 @@ impl Supervisor {
                 resident.worker_id
             )),
             result => {
-                // The worker refused, so no stop is in flight: the intent comes back out of
-                // the descriptor and the worker stays routable and adoptable.
-                if let Err(error) = self.clear_stop_tombstone(resident, &prior).await {
-                    self.log_line(&format!(
-                        "session worker {} stop tombstone clear failed: {error:#}",
-                        resident.worker_id
-                    ));
-                }
-                resident
-                    .intentional_stop
-                    .store(was_intentional, Ordering::SeqCst);
+                // The worker refused. Its stop intent STAYS durable: a refusal is a
+                // retryable "not yet", never a way back to adoptable health — the boot
+                // reap covers only tombstoned descriptors and the adoption finishes a
+                // tombstoned stop, so a worker that keeps refusing is still stopped by
+                // the next boot. `intentional_stop` stays set with it, because this
+                // worker's own exit from here on is the stop finishing, not a crash the
+                // supervision watchdog relaunches.
+                self.log_line(&format!(
+                    "session worker {} refused its stop; the stop intent stays durable: {result:?}",
+                    resident.worker_id
+                ));
                 anyhow::bail!("Worker shutdown refused: {result:?}");
             }
         }

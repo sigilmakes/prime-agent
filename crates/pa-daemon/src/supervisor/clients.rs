@@ -15,6 +15,12 @@ use super::{
 /// keeps running after its owner's last connection closes.
 const OWNED_WORKER_DISCONNECT_GRACE: Duration = Duration::from_secs(30);
 
+/// The control command a draining worker's own close needs after the terminal
+/// shutdown gate has flipped: the per-child `kill` of its RLM close cascade.
+fn drain_control_command(command: &DaemonCommand) -> bool {
+    matches!(command, DaemonCommand::Kill { .. })
+}
+
 async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
     let mut line = serde_json::to_string(value)?;
     line.push('\n');
@@ -535,7 +541,12 @@ impl Supervisor {
         let type_name = command_type_name(&envelope.command).to_string();
         // Terminal shutdown admission gate: once `shutting_down` has flipped, no later
         // client command may reach a worker (the stop pass may already be retiring it).
-        if self.shutting_down.load(Ordering::SeqCst) {
+        // `kill` is the one exception, and it is load-bearing: a draining worker closes
+        // its RLM children with one routed `kill` each, so a gate that refuses it makes
+        // every session with children refuse its own stop, and the drain can only end in
+        // a forced SIGTERM. The command starts no work (it ends a session), and it is
+        // already the never-refused control admission in `routing`.
+        if self.shutting_down.load(Ordering::SeqCst) && !drain_control_command(&envelope.command) {
             return (
                 vec![Outbound::Line(response_line(&response_failure(
                     Some(&command_id),

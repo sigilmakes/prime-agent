@@ -52,8 +52,8 @@ mod commands;
 pub use env::{
     strip_inherited_worker_env, WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV,
     WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV,
-    WORKER_SOCKET_ENV, WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
-    WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
+    WORKER_SHUTDOWN_SETTLE_MS_ENV, WORKER_SOCKET_ENV, WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+    WORKER_SUPERVISOR_SOCKET_ENV, WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
 use serde_json::Map;
 pub(crate) use session_core::SessionCore;
@@ -301,6 +301,7 @@ impl Worker {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            shutdown_requested_at: None,
             last_activity_ms: 0,
             compacting: false,
             auto_compaction_enabled: true,

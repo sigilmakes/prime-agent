@@ -40,6 +40,11 @@ pub(crate) struct SessionCore {
     /// gate's aborted-row exception stays closed while it settles its turn.
     pub(crate) suppress_aborted_row: bool,
     pub(crate) shutdown_requested: bool,
+    /// When the FIRST shutdown request armed [`Self::shutdown_requested`]: the
+    /// orphan monitor bounds a stop that never completes (a refusal, or a
+    /// caller that died) from this instant, so a requested stop can never
+    /// leave the process running forever. Retries do not move it.
+    pub(crate) shutdown_requested_at: Option<std::time::Instant>,
     /// True while a compaction run is in flight (TS `isCompacting`).
     pub(crate) compacting: bool,
     /// The turn's tool calls in flight, keyed by tool-call id: the
@@ -153,6 +158,7 @@ impl SessionCore {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            shutdown_requested_at: None,
             last_activity_ms: 0,
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),

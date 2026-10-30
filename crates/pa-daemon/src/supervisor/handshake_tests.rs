@@ -655,14 +655,44 @@ async fn accounting_refusal_fixture(
     (dir, supervisor, resident, verdict, worker)
 }
 
-fn assert_no_retirement(supervisor: &Supervisor, resident: &ResidentWorker) {
+/// A refusal retires nothing: no exit, no retire, the worker stays registered, and the
+/// injected retirement never ran.
+async fn assert_no_retirement(supervisor: &Supervisor, resident: &ResidentWorker) {
     assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
-    assert!(!resident.intentional_stop.load(Ordering::SeqCst));
     assert!(!resident.route_state().retired);
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
     assert!(super::worker_lifecycle::retirement_overrides()
         .lock()
         .unwrap()
         .contains_key(&resident.descriptor_path));
+}
+
+/// A refused stop is a retryable "not yet", and its stop intent STAYS durable through
+/// the refusal. That is the difference between a retryable stop and an immortal worker:
+/// the boot reap covers tombstoned descriptors and the adoption finishes a tombstoned
+/// stop, so a worker that keeps refusing is stopped by the next boot instead of being
+/// adopted as healthy.
+async fn assert_refusal_keeps_the_stop_intent(
+    supervisor: &Supervisor,
+    resident: &ResidentWorker,
+) {
+    assert_no_retirement(supervisor, resident).await;
+    assert!(
+        resident.intentional_stop.load(Ordering::SeqCst),
+        "a refused stop stays this worker's own stop"
+    );
+    assert!(
+        resident.descriptor.lock().await.stop_requested_at.is_some(),
+        "the in-memory stop intent survives the refusal"
+    );
+    let persisted: Value = serde_json::from_str(
+        &std::fs::read_to_string(&resident.descriptor_path).expect("persisted descriptor"),
+    )
+    .expect("descriptor json");
+    assert!(
+        persisted["stopRequestedAt"].is_string(),
+        "the durable stop intent survives the refusal: {persisted}"
+    );
 }
 
 #[cfg(unix)]
@@ -721,9 +751,7 @@ async fn public_graceful_shutdown_refusal_preserves_worker_then_retry_or_force_c
             .unwrap();
             assert_eq!(response["success"], attempt == 1, "{response}");
             if attempt == 0 {
-                assert_no_retirement(&supervisor, &resident);
-                assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
-                assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+                assert_refusal_keeps_the_stop_intent(&supervisor, &resident).await;
                 assert!(!supervisor.shutting_down.load(Ordering::SeqCst));
                 assert!(!supervisor.shutdown_started.load(Ordering::SeqCst));
             }
@@ -757,9 +785,8 @@ async fn per_session_graceful_stop_refusal_does_not_retire_and_can_retry() {
         );
     verdict.send(false).await.unwrap();
     assert!(supervisor.stop_worker(&resident).await.is_err());
-    assert_no_retirement(&supervisor, &resident);
-    assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
-    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
+    // The refusal is retryable, and it leaves the durable stop intent in place.
+    assert_refusal_keeps_the_stop_intent(&supervisor, &resident).await;
     verdict.send(true).await.unwrap();
     supervisor.stop_worker(&resident).await.unwrap();
     assert!(supervisor.registry.get(&resident.worker_id).await.is_none());
@@ -832,9 +859,10 @@ async fn public_plain_kill_refusal_does_not_run_finally_retirement() {
         response["error"].as_str().unwrap().contains("accounting"),
         "{response}"
     );
-    assert_no_retirement(&supervisor, &resident);
+    // A ROOT kill the worker refused is not a stop: it wrote no tombstone, and the
+    // worker it refused keeps its registration.
+    assert_no_retirement(&supervisor, &resident).await;
     assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
-    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
     serving.abort();
     worker.abort();
 }
@@ -860,12 +888,11 @@ async fn first_signal_accounting_refusal_preserves_worker_without_closing_event(
     })
     .await
     .unwrap();
-    assert_no_retirement(&supervisor, &resident);
+    assert_refusal_keeps_the_stop_intent(&supervisor, &resident).await;
     assert!(
         events.try_recv().is_err(),
         "refusal cannot announce terminal closing"
     );
-    assert!(supervisor.registry.get(&resident.worker_id).await.is_some());
     assert!(
         !supervisor.begin_signal_drain(),
         "the operator's repeated signal remains force"
@@ -924,18 +951,18 @@ async fn idle_eviction_fences_racing_client_routes_until_refusal_or_retirement()
         assert!(!resident.route_state().retired);
         verdict.send(success).await.unwrap();
         assert_eq!(stopping.await.unwrap().success, success);
-        if !success {
-            assert_no_retirement(&supervisor, &resident);
-            assert!(
-                resident.descriptor.lock().await.stop_requested_at.is_none(),
-                "a refused stop clears its tombstone"
-            );
-            assert_eq!(
-                resident.inflight.available_permits(),
-                crate::backpressure::WORKER_INFLIGHT_CAPACITY,
-                "refusal reopens client admission",
-            );
+        if success {
+            continue;
         }
+        // Idle eviction's refusal keeps the tombstone it wrote before the route: the
+        // stop stays retryable, and a worker that is never retried is still reaped by
+        // the next boot instead of being adopted as healthy.
+        assert_refusal_keeps_the_stop_intent(&supervisor, &resident).await;
+        assert_eq!(
+            resident.inflight.available_permits(),
+            crate::backpressure::WORKER_INFLIGHT_CAPACITY,
+            "refusal reopens client admission",
+        );
     }
     assert!(supervisor.registry.get(&resident.worker_id).await.is_none());
     assert!(resident.route_state().retired);
@@ -975,8 +1002,7 @@ async fn partial_shutdown_retry_targets_only_the_worker_that_refused_accounting(
     owed_verdict.send(false).await.unwrap();
     assert!(supervisor.prepare_shutdown(/*force*/ false).await.is_err());
     assert!(supervisor.registry.get(&closed.worker_id).await.is_none());
-    assert!(supervisor.registry.get(&owed.worker_id).await.is_some());
-    assert_no_retirement(&supervisor, &owed);
+    assert_refusal_keeps_the_stop_intent(&supervisor, &owed).await;
     {
         let roster = supervisor.roster.lock().unwrap();
         let rows = roster.entries();
@@ -1019,4 +1045,101 @@ async fn partial_shutdown_retry_targets_only_the_worker_that_refused_accounting(
     assert!(supervisor.accept_exit.load(Ordering::SeqCst));
     closed_worker.abort();
     owed_worker.abort();
+}
+
+/// Answer every routed request with `success`: a stop needs no worker socket, because the
+/// resident's own reply slot resolves the route.
+async fn answer_routes(resident: &Arc<ResidentWorker>, success: bool) -> tokio::task::JoinHandle<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(tx);
+    let resident = Arc::clone(resident);
+    tokio::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            let reply = resident
+                .pending
+                .lock()
+                .await
+                .remove(&request.request_id)
+                .expect("the routed stop holds a reply slot");
+            let response = if success {
+                crate::protocol::response_success(None, "shutdown", None)
+            } else {
+                crate::protocol::response_failure(
+                    None,
+                    "shutdown",
+                    "Final child accounting remains owed",
+                    None,
+                )
+            };
+            let _ = reply.send(WorkerReply::Typed(response));
+        }
+    })
+}
+
+/// A refused stop is retryable, and it is not a way to survive the next boot: the
+/// descriptor stays tombstoned, and the boot reap's protection test (the one that skips
+/// only tombstoned descriptors) no longer spares the worker.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_refused_stop_stays_tombstoned_so_the_next_boot_reaps_the_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: socket_path.clone(),
+            agent_dir: agent_dir.clone(),
+        })
+        .unwrap(),
+    );
+    let descriptor_dir = crate::descriptor::descriptor_dir(&agent_dir, &socket_path);
+    std::fs::create_dir_all(&descriptor_dir).unwrap();
+    let descriptor_path = descriptor_dir.join("w-refuse.json");
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2, "workerId": "w-refuse", "pid": std::process::id(),
+        "socketPath": dir.path().join("w.sock"),
+        "recoveryJournalPath": dir.path().join("recovery.jsonl"),
+        "supervisorSocketPath": socket_path,
+        "authenticationToken": "fixture-only", "rootActiveSessionId": "w-refuse",
+        "createdAt": "t", "updatedAt": "t", "lifecycle": "ready",
+        "createCommand": {}, "consecutiveFailures": 0
+    }))
+    .unwrap();
+    crate::descriptor::persist_worker(&descriptor_path, &descriptor).unwrap();
+    let resident = ResidentWorker::new("w-refuse".into(), descriptor, descriptor_path.clone());
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    super::worker_lifecycle::retirement_overrides()
+        .lock()
+        .unwrap()
+        .insert(
+            descriptor_path.clone(),
+            super::worker_lifecycle::WorkerRetirement::Retired,
+        );
+
+    // Before any stop intent, the running worker is one the boot reap must spare.
+    assert!(
+        crate::boot_reap::protected_worker_pids(&agent_dir, &socket_path)
+            .contains(&std::process::id()),
+        "a healthy worker is protected from the reap"
+    );
+
+    let refusing = answer_routes(&resident, /*success*/ false).await;
+    assert!(supervisor.stop_worker(&resident).await.is_err());
+    assert_refusal_keeps_the_stop_intent(&supervisor, &resident).await;
+    assert!(
+        !crate::boot_reap::protected_worker_pids(&agent_dir, &socket_path)
+            .contains(&std::process::id()),
+        "the refused worker's tombstone puts it in the next boot's reap"
+    );
+
+    // The same worker still accepts the retry that ends the stop.
+    refusing.abort();
+    let accepting = answer_routes(&resident, /*success*/ true).await;
+    supervisor
+        .stop_worker(&resident)
+        .await
+        .expect("the retried stop completes");
+    assert!(supervisor.registry.get(&resident.worker_id).await.is_none());
+    accepting.abort();
 }

@@ -508,7 +508,7 @@ fn is_unix_socket_file(_path: &Path) -> bool {
 /// SOCKET identity owns. The descriptor directories are keyed by the RAW
 /// spelling each daemon started with, so every spelling directory is read.
 #[cfg(target_os = "linux")]
-fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
+pub(crate) fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
     let ours = normalize_socket_spelling(socket_path);
     let mut protected = HashSet::new();
     let Ok(spellings) = std::fs::read_dir(agent_dir.join("daemon-workers")) else {
