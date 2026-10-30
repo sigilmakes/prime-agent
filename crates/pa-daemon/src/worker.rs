@@ -941,6 +941,42 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
         let row_id = row_id.to_owned();
         let target_id = target_id.to_owned();
         Box::pin(async move {
+            // A report that lands inside another caller's adoption window waits
+            // for that caller's ACK instead of dropping. The window is an
+            // ordering fact, not a write failure; no lock is held while waiting
+            // and the wait re-reads the window after every wake. A window that
+            // outlives the shared deadline is reported, never awaited forever.
+            let deadline = tokio::time::Instant::now() + crate::session_store::ADOPTION_ORDER_WAIT;
+            loop {
+                let window = {
+                    let core = core
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    core.store
+                        .as_ref()
+                        .and_then(crate::session_store::SessionFile::canonical_adoption_window)
+                };
+                let Some((signal, _)) = window else { break };
+                let notified = signal.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let pending = {
+                    let core = core
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    core.store
+                        .as_ref()
+                        .is_some_and(crate::session_store::SessionFile::canonical_adoption_pending)
+                };
+                if !pending {
+                    break;
+                }
+                if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                    return Err(std::io::Error::other(
+                        "canonical adoption window did not settle",
+                    ));
+                }
+            }
             let mut core = core.lock().unwrap();
             let Some(store) = core.store.as_mut() else {
                 return Err(missing_usage_target(&target_id));

@@ -15,6 +15,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
 
 /// Immutable owner-certified observation. This carries no execution or write authority.
 /// Membership is not replay order. Only the local SDK owns its execution queue.
@@ -217,6 +218,14 @@ pub trait CanonicalLiveOwner: Send + Sync {
         -> CanonicalFuture<()>;
     /// Admit the actual correlated tool before execution, never after its result.
     fn admit_tool(&self, request: CanonicalLiveToolRequest) -> CanonicalFuture<()>;
+
+    /// Wait, bounded by `deadline`, until no adoption is pending on this owner.
+    ///
+    /// A refusal with [`CanonicalRequestedWrite::NotRequested`] and
+    /// [`CanonicalSourceDisposition::PendingAdoption`] proves the identical
+    /// request created no operation. Re-issuing it once this settles is how the
+    /// ordering window resolves; it is not a retry of a write.
+    fn await_adoption_settled(&self, deadline: tokio::time::Instant) -> CanonicalFuture<()>;
 }
 
 struct CanonicalProjection {
@@ -269,6 +278,10 @@ pub struct CanonicalLiveSession {
         std::sync::Mutex<Option<Arc<std::sync::RwLock<Option<pa_types::session::ContextArchive>>>>>,
     busy: AtomicBool,
     blocked: AtomicBool,
+    /// Fires whenever one flight or a pending projection is released. A caller
+    /// that lost the admission race waits on this instead of treating another
+    /// caller's in-flight operation as its own failure.
+    released: tokio::sync::Notify,
     after_assistant_commit: std::sync::Mutex<Option<Arc<AfterAssistantCommit>>>,
 }
 
@@ -279,9 +292,7 @@ struct Flight<'a> {
 }
 impl Flight<'_> {
     fn refused(&mut self, error: CanonicalStoreError) -> CanonicalStoreError {
-        if error.requested == CanonicalRequestedWrite::NotRequested
-            && error.source == CanonicalSourceDisposition::ReadyForObservation
-        {
+        if error.certifies_unwritten() {
             self.complete = true;
         }
         error
@@ -296,7 +307,7 @@ impl Drop for Flight<'_> {
                 self.started_at.line()
             );
         }
-        self.live.busy.store(false, Ordering::Release);
+        self.live.release();
     }
 }
 
@@ -308,6 +319,22 @@ pub struct CanonicalLiveMutation<'a> {
     caller: CanonicalCallerGuard,
     kind: CanonicalMutationKind,
     local_revision: u64,
+}
+
+/// How long one caller waits for another caller's in-flight adoption before it
+/// reports the ordering window as unresolved. An adoption window is a local
+/// prepare/write/ACK round trip, so this is orders of magnitude above a real
+/// settle time and well below any client turn timeout; it exists so a broken
+/// peer can never park a turn forever.
+const ADOPTION_ORDER_WAIT: Duration = Duration::from_secs(5);
+
+fn pending_adoption(detail: impl Into<String>) -> CanonicalStoreError {
+    CanonicalStoreError {
+        kind: CanonicalFailureKind::AdoptionConflict,
+        requested: CanonicalRequestedWrite::NotRequested,
+        source: CanonicalSourceDisposition::PendingAdoption,
+        detail: detail.into(),
+    }
 }
 
 fn failure(detail: impl Into<String>, requested: CanonicalRequestedWrite) -> CanonicalStoreError {
@@ -335,6 +362,7 @@ impl CanonicalLiveSession {
             archive: std::sync::Mutex::new(None),
             busy: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
+            released: tokio::sync::Notify::new(),
             after_assistant_commit: std::sync::Mutex::new(None),
         })
     }
@@ -390,8 +418,47 @@ impl CanonicalLiveSession {
             .bind_canonical_metadata_writer(Arc::downgrade(&writer));
     }
 
+    /// Admit one local flight, waiting out another caller instead of refusing.
+    ///
+    /// A busy flight or an unprojected run end is an ordering window: the other
+    /// caller is about to publish its receipt, and this caller's first action
+    /// would still be a read of that same source. Waiting for the release and
+    /// re-evaluating resolves it; only the shared deadline reports it as
+    /// unresolved, and then nothing has been started or written.
+    ///
+    /// # Errors
+    /// Refuses a quarantined view, a poisoned slot, or a window that outlives
+    /// [`ADOPTION_ORDER_WAIT`].
+    async fn enter(&self) -> Result<Flight<'_>, CanonicalStoreError> {
+        let deadline = tokio::time::Instant::now() + ADOPTION_ORDER_WAIT;
+        loop {
+            // Arm before the re-check: `notify_waiters` only wakes waiters that
+            // are already registered, so a release that lands between the check
+            // and the await would otherwise be lost.
+            let released = self.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            match self.try_enter() {
+                Err(error) if error.is_pending_adoption() => {
+                    if tokio::time::timeout_at(deadline, released).await.is_err() {
+                        return Err(pending_adoption(
+                            "canonical ordering window did not settle; nothing was started",
+                        ));
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+
     #[track_caller]
-    fn enter(&self) -> Result<Flight<'_>, CanonicalStoreError> {
+    fn try_enter(&self) -> Result<Flight<'_>, CanonicalStoreError> {
+        if self.blocked.load(Ordering::Acquire) {
+            return Err(failure(
+                "canonical receipt has not completed",
+                CanonicalRequestedWrite::NotRequested,
+            ));
+        }
         if self
             .projection
             .lock()
@@ -403,25 +470,20 @@ impl CanonicalLiveSession {
             })?
             .is_some()
         {
-            return Err(failure(
-                "canonical model projection is pending",
-                CanonicalRequestedWrite::NotRequested,
-            ));
+            return Err(pending_adoption("canonical model projection is pending"));
         }
-        if self.blocked.load(Ordering::Acquire)
-            || self
-                .busy
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
-            return Err(failure(
-                "canonical local run is blocked or has pending adoption",
-                CanonicalRequestedWrite::NotRequested,
+            return Err(pending_adoption(
+                "canonical local run has another caller's flight",
             ));
         }
         // Retirement may have closed admission between the first check and CAS.
         if self.blocked.load(Ordering::Acquire) {
-            self.busy.store(false, Ordering::Release);
+            self.release();
             return Err(failure(
                 "canonical view is retired or blocked",
                 CanonicalRequestedWrite::NotRequested,
@@ -432,6 +494,33 @@ impl CanonicalLiveSession {
             complete: false,
             started_at: std::panic::Location::caller(),
         })
+    }
+
+    /// Release the one flight slot and wake every caller waiting on the window.
+    fn release(&self) {
+        self.busy.store(false, Ordering::Release);
+        self.released.notify_waiters();
+    }
+
+    /// Run one owner call, resolving another caller's adoption window first.
+    ///
+    /// Every gated owner call refuses a request that overlaps another caller
+    /// before it creates an operation, a barrier or a write, so the identical
+    /// call may be issued again once that caller's ACK lands. The wait is the
+    /// owner's own completion signal, bounded by one shared deadline.
+    async fn settle_owner<T>(
+        &self,
+        mut call: impl FnMut() -> CanonicalFuture<T>,
+    ) -> Result<T, CanonicalStoreError> {
+        let deadline = tokio::time::Instant::now() + ADOPTION_ORDER_WAIT;
+        loop {
+            match call().await {
+                Err(error) if error.is_pending_adoption() => {
+                    self.owner.await_adoption_settled(deadline).await?;
+                }
+                result => return result,
+            }
+        }
     }
 
     pub(crate) fn block_projection(&self) {
@@ -446,8 +535,13 @@ impl CanonicalLiveSession {
 
     /// Refuse new projections after any failed, uncertain or lost receipt.
     ///
+    /// This is the synchronous readiness check for callers that cannot wait
+    /// (episode registration). A live flight or pending projection is reported
+    /// as the wait condition it is, not as a lost receipt.
+    ///
     /// # Errors
-    /// Refuses changed authority, invalid source/adoption, or incomplete owner ACK.
+    /// Refuses a quarantined view or a poisoned slot; reports another caller's
+    /// ordering window as [`CanonicalSourceDisposition::PendingAdoption`].
     pub fn ensure_ready(&self) -> Result<(), CanonicalStoreError> {
         if self.blocked.load(Ordering::Acquire) {
             return Err(failure(
@@ -456,9 +550,8 @@ impl CanonicalLiveSession {
             ));
         }
         if self.busy.load(Ordering::Acquire) {
-            return Err(failure(
-                "canonical receipt has not completed",
-                CanonicalRequestedWrite::NotRequested,
+            return Err(pending_adoption(
+                "canonical local run has another caller's flight",
             ));
         }
         if self
@@ -472,10 +565,7 @@ impl CanonicalLiveSession {
             })?
             .is_some()
         {
-            return Err(failure(
-                "canonical receipt has not completed",
-                CanonicalRequestedWrite::NotRequested,
-            ));
+            return Err(pending_adoption("canonical model projection is pending"));
         }
         Ok(())
     }
@@ -483,7 +573,7 @@ impl CanonicalLiveSession {
     /// Permanently close this view, then retire its completed physical owner.
     /// No local guard survives the owner call. Failures never reopen admission.
     pub(super) async fn retire_completed_runtime(&self) -> Result<(), CanonicalStoreError> {
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         self.blocked.store(true, Ordering::Release);
         if self
             .run
@@ -517,7 +607,8 @@ impl CanonicalLiveSession {
             })?
         };
         flight.complete = true;
-        self.owner.retire_completed_runtime(expected).await
+        self.settle_owner(|| self.owner.retire_completed_runtime(expected.clone()))
+            .await
     }
 
     async fn install(
@@ -623,7 +714,7 @@ impl CanonicalLiveSession {
     /// # Errors
     /// Refuses changed authority, invalid source/adoption, or incomplete owner ACK.
     pub async fn observe(&self) -> Result<(), CanonicalStoreError> {
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         // Reads own only the busy slot. Cancellation/local rejection is not lost I/O.
         flight.complete = true;
         let (revision, binding, admission) = {
@@ -644,7 +735,7 @@ impl CanonicalLiveSession {
             && matches!(&admission,
             CanonicalAdmissionPolicy::Replace(ids) if !ids.is_empty());
         if !bootstrap {
-            let snapshot = self.owner.snapshot().await?;
+            let snapshot = self.settle_owner(|| self.owner.snapshot()).await?;
             self.session
                 .lock()
                 .await
@@ -657,12 +748,13 @@ impl CanonicalLiveSession {
         // Nonempty bootstrap changes owner admission and retains lost-reply debt.
         flight.complete = false;
         let prepared = self
-            .owner
-            .prepare(CanonicalLivePrepareRequest {
-                expected: binding.clone(),
-                source: CanonicalSourceRequest::Full,
-                mode: CanonicalPrepareMode::Observe,
-                admission: admission.clone(),
+            .settle_owner(|| {
+                self.owner.prepare(CanonicalLivePrepareRequest {
+                    expected: binding.clone(),
+                    source: CanonicalSourceRequest::Full,
+                    mode: CanonicalPrepareMode::Observe,
+                    admission: admission.clone(),
+                })
             })
             .await
             .map_err(|error| flight.refused(error))?;
@@ -684,7 +776,7 @@ impl CanonicalLiveSession {
         kind: CanonicalMutationKind,
     ) -> Result<CanonicalLiveMutation<'_>, CanonicalStoreError> {
         self.observe().await?;
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let (revision, binding, admission) = {
             let session = self.session.lock().await;
             (
@@ -700,12 +792,13 @@ impl CanonicalLiveSession {
             )
         };
         let prepared = self
-            .owner
-            .prepare(CanonicalLivePrepareRequest {
-                expected: binding.clone(),
-                source: CanonicalSourceRequest::Full,
-                mode: CanonicalPrepareMode::Mutation(kind),
-                admission: admission.clone(),
+            .settle_owner(|| {
+                self.owner.prepare(CanonicalLivePrepareRequest {
+                    expected: binding.clone(),
+                    source: CanonicalSourceRequest::Full,
+                    mode: CanonicalPrepareMode::Mutation(kind),
+                    admission: admission.clone(),
+                })
             })
             .await
             .map_err(|error| flight.refused(error))?;
@@ -828,7 +921,7 @@ impl CanonicalLiveSession {
         message: pa_types::ai::UserMessage,
     ) -> Result<pa_types::ai::UserMessage, CanonicalStoreError> {
         self.observe().await?;
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let (revision, binding) = {
             let session = self.session.lock().await;
             (
@@ -837,11 +930,12 @@ impl CanonicalLiveSession {
             )
         };
         let delivered = self
-            .owner
-            .admit_user(CanonicalLiveUserRequest {
-                expected: binding.clone(),
-                source: CanonicalSourceRequest::Full,
-                message: message.clone(),
+            .settle_owner(|| {
+                self.owner.admit_user(CanonicalLiveUserRequest {
+                    expected: binding.clone(),
+                    source: CanonicalSourceRequest::Full,
+                    message: message.clone(),
+                })
             })
             .await
             .map_err(|error| flight.refused(error))?;
@@ -960,7 +1054,7 @@ impl CanonicalLiveSession {
         message: pa_types::session::CustomMessage,
     ) -> Result<pa_types::session::CustomMessage, CanonicalStoreError> {
         self.observe().await?;
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let (revision, binding) = {
             let session = self.session.lock().await;
             (
@@ -969,11 +1063,12 @@ impl CanonicalLiveSession {
             )
         };
         let delivered = self
-            .owner
-            .admit_custom(CanonicalLiveCustomRequest {
-                expected: binding.clone(),
-                source: CanonicalSourceRequest::Full,
-                message: message.clone(),
+            .settle_owner(|| {
+                self.owner.admit_custom(CanonicalLiveCustomRequest {
+                    expected: binding.clone(),
+                    source: CanonicalSourceRequest::Full,
+                    message: message.clone(),
+                })
             })
             .await
             .map_err(|error| flight.refused(error))?;
@@ -1055,7 +1150,7 @@ impl CanonicalLiveSession {
         prepared: CanonicalPrepared,
         expected: CanonicalCursor,
     ) -> Result<(), CanonicalStoreError> {
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let revision = {
             let session = self.session.lock().await;
             if session.canonical_binding() != Some(&expected) {
@@ -1121,7 +1216,7 @@ impl CanonicalLiveSession {
                     CanonicalRequestedWrite::NotRequested,
                 )
             })?;
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let run = self
             .run
             .lock()
@@ -1150,13 +1245,15 @@ impl CanonicalLiveSession {
                 .check_canonical_live_revision(projection.local_revision, &projection.cursor)
                 .map_err(|error| failure(error.to_string(), CanonicalRequestedWrite::NotWritten))?;
         }
-        self.owner
-            .begin_provider_step(CanonicalLiveProviderStepRequest {
-                expected: projection.cursor.clone(),
-                run,
-                model: Arc::new(model),
-                invocation: Arc::new(CanonicalLiveProviderInvocation { _private: () }),
-            })
+        self.settle_owner(|| {
+            self.owner
+                .begin_provider_step(CanonicalLiveProviderStepRequest {
+                    expected: projection.cursor.clone(),
+                    run: Arc::clone(&run),
+                    model: Arc::new(model.clone()),
+                    invocation: Arc::new(CanonicalLiveProviderInvocation { _private: () }),
+                })
+        })
             .await
             .map_err(|error| flight.refused(error))?;
         {
@@ -1190,7 +1287,7 @@ impl CanonicalLiveSession {
         &self,
     ) -> Result<Vec<pa_agent::types::AgentMessage>, CanonicalStoreError> {
         self.observe().await?;
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let run = self
             .run
             .lock()
@@ -1276,7 +1373,7 @@ impl CanonicalLiveSession {
 
     pub(crate) async fn start_run(&self) -> Result<(), CanonicalStoreError> {
         self.observe().await?;
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         {
             let run = self.run.lock().map_err(|_| {
                 failure(
@@ -1303,10 +1400,11 @@ impl CanonicalLiveSession {
         };
         let run = Arc::new(CanonicalLiveRun { _private: () });
         let prepared = self
-            .owner
-            .register_run(CanonicalLiveRunRequest {
-                expected: expected.clone(),
-                run: Arc::clone(&run),
+            .settle_owner(|| {
+                self.owner.register_run(CanonicalLiveRunRequest {
+                    expected: expected.clone(),
+                    run: Arc::clone(&run),
+                })
             })
             .await
             .map_err(|error| flight.refused(error))?;
@@ -1360,7 +1458,7 @@ impl CanonicalLiveSession {
         tool_name: String,
         args: serde_json::Value,
     ) -> Result<(), CanonicalStoreError> {
-        let mut flight = self.enter()?;
+        let mut flight = self.enter().await?;
         let run = self
             .run
             .lock()
@@ -1377,16 +1475,17 @@ impl CanonicalLiveSession {
                     CanonicalRequestedWrite::NotRequested,
                 )
             })?;
-        self.owner
-            .admit_tool(CanonicalLiveToolRequest {
-                run,
+        self.settle_owner(|| {
+            self.owner.admit_tool(CanonicalLiveToolRequest {
+                run: Arc::clone(&run),
                 tool: Arc::new(CanonicalLiveToolExecution {
-                    tool_call_id,
-                    tool_name,
-                    args,
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    args: args.clone(),
                 }),
             })
-            .await?;
+        })
+        .await?;
         flight.complete = true;
         Ok(())
     }
@@ -1458,14 +1557,18 @@ impl CanonicalLiveMutation<'_> {
         let disposition = self
             .flight
             .live
-            .owner
-            .append(CanonicalLiveAppendRequest {
-                run,
-                context_admission,
-                operation: self.operation.clone(),
-                expected: self.cursor.clone(),
-                source: CanonicalSourceRequest::Full,
-                draft,
+            .settle_owner(|| {
+                self.flight
+                    .live
+                    .owner
+                    .append(CanonicalLiveAppendRequest {
+                        run: run.clone(),
+                        context_admission: context_admission.clone(),
+                        operation: self.operation.clone(),
+                        expected: self.cursor.clone(),
+                        source: CanonicalSourceRequest::Full,
+                        draft: draft.clone(),
+                    })
             })
             .await;
         let disposition = match disposition {
@@ -1474,6 +1577,12 @@ impl CanonicalLiveMutation<'_> {
                 if error.requested == CanonicalRequestedWrite::NotWritten
                     && error.source == CanonicalSourceDisposition::Unchanged =>
             {
+                self.abandon().await?;
+                return Err(error);
+            }
+            // An ordering refusal started nothing: release the prepared ticket
+            // instead of quarantining a view that never wrote for this request.
+            Err(error) if error.certifies_unwritten() => {
                 self.abandon().await?;
                 return Err(error);
             }

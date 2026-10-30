@@ -140,8 +140,8 @@ async fn cancelled_provider_preflight_keeps_next_same_session_prompt_ready() {
         .unwrap();
 }
 
-#[test]
-fn unproven_refusal_never_reopens_flight() {
+#[tokio::test]
+async fn unproven_refusal_never_reopens_flight() {
     for requested in [
         CanonicalRequestedWrite::NotWritten,
         CanonicalRequestedWrite::Unknown,
@@ -149,7 +149,7 @@ fn unproven_refusal_never_reopens_flight() {
     ] {
         let owner = Owner::new();
         let live = CanonicalLiveSession::new(owner.clone(), manager(&owner));
-        let mut flight = live.enter().unwrap();
+        let mut flight = live.enter().await.unwrap();
         let _ = flight.refused(CanonicalStoreError {
             kind: CanonicalFailureKind::SourceChanged,
             requested,

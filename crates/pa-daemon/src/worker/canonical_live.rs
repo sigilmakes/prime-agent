@@ -217,4 +217,25 @@ impl CanonicalLiveOwner for CoreCanonicalLiveOwner {
                 .admit_canonical_tool(request)
         })
     }
+
+    fn await_adoption_settled(&self, deadline: tokio::time::Instant) -> CanonicalFuture<()> {
+        let core = Arc::clone(&self.core);
+        let source = self.source.clone();
+        Box::pin(async move {
+            // The window is read under the same core lock every owner call takes,
+            // and the lock is DROPPED before the await: the ACK that closes this
+            // window needs that lock, so waiting while holding it would deadlock.
+            let window = || {
+                let core = core.lock().map_err(refused)?;
+                validate(&core, &source)?;
+                Ok::<_, CanonicalStoreError>(
+                    core.store
+                        .as_ref()
+                        .expect("validated store")
+                        .canonical_adoption_window(),
+                )
+            };
+            crate::session_store::wait_out_adoption(window, deadline).await
+        })
+    }
 }

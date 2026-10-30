@@ -54,6 +54,25 @@ pub struct CanonicalStoreError {
     pub source: CanonicalSourceDisposition,
     pub detail: String,
 }
+impl CanonicalStoreError {
+    /// Another caller holds this owner's adoption window. The refused request
+    /// created no operation, so the wait condition is that caller's completion.
+    #[must_use]
+    pub fn is_pending_adoption(&self) -> bool {
+        self.requested == CanonicalRequestedWrite::NotRequested
+            && self.source == CanonicalSourceDisposition::PendingAdoption
+    }
+
+    /// The owner certifies this request wrote nothing, so refusing it cannot
+    /// quarantine the view. `NeedsReconcile`, and any requested or committed
+    /// write, certify nothing.
+    #[must_use]
+    pub fn certifies_unwritten(&self) -> bool {
+        self.requested == CanonicalRequestedWrite::NotRequested
+            && self.source != CanonicalSourceDisposition::NeedsReconcile
+    }
+}
+
 impl std::fmt::Display for CanonicalStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}: {}", self.kind, self.detail)

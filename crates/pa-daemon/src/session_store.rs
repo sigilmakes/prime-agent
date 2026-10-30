@@ -35,6 +35,7 @@ mod canonical_io_seam_tests;
 mod canonical_live;
 #[cfg(test)]
 mod canonical_live_tests;
+pub(crate) use canonical_live::{wait_out_adoption, ADOPTION_ORDER_WAIT};
 pub(crate) mod canonical_raw;
 pub(crate) mod canonical_revision;
 #[cfg(test)]

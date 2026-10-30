@@ -442,6 +442,11 @@ impl CanonicalLiveOwner for Owner {
         self.0.lock().unwrap().tool_admissions += 1;
         Box::pin(async { Ok(()) })
     }
+    // This double owns no adoption window of its own: every gate it has is the
+    // one under test, so there is never another caller to settle.
+    fn await_adoption_settled(&self, _: tokio::time::Instant) -> CanonicalFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 fn manager(owner: &Owner) -> Arc<tokio::sync::Mutex<SessionManager>> {
     let state = owner.0.lock().unwrap();
@@ -599,6 +604,52 @@ async fn dropping_a_prepared_ticket_blocks_before_another_owner_call() {
     assert!(live.observe().await.is_err());
     assert_eq!(owner.0.lock().unwrap().appends, 0);
 }
+/// A caller that loses the admission race waits for the in-flight caller instead
+/// of being told the view failed. The release signal is armed before the
+/// re-check, so a completion that lands between them cannot be missed.
+#[tokio::test]
+async fn a_second_caller_waits_out_an_in_flight_flight_and_then_proceeds() {
+    let owner = Owner::new();
+    owner.seed(serde_json::json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"ready"}]}}));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    owner.0.lock().unwrap().snapshot_gate = Some(gate.clone());
+    let session = manager(&owner);
+    let live = CanonicalLiveSession::new(owner.clone(), session.clone());
+    let first = tokio::spawn({
+        let live = live.clone();
+        async move { live.observe().await }
+    });
+    // The first caller is inside its owner call, holding the one flight slot.
+    // The owner lock is released before waiting: the snapshot needs it too.
+    let started = {
+        let state = owner.0.lock().unwrap();
+        state.snapshot_started.clone()
+    };
+    started.notified().await;
+    let second = tokio::spawn({
+        let live = live.clone();
+        async move {
+            live.append(CanonicalMutationKind::OwnerMetadata, metadata())
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !second.is_finished(),
+        "the second caller must wait for the in-flight flight, not refuse"
+    );
+    // Release the first caller. Only its snapshot was gated.
+    owner.0.lock().unwrap().snapshot_gate = None;
+    gate.notify_one();
+    first.await.unwrap().unwrap();
+    second
+        .await
+        .unwrap()
+        .expect("the waiting caller proceeds once the release lands");
+    assert_eq!(owner.0.lock().unwrap().appends, 1);
+    live.ensure_ready().unwrap();
+}
+
 #[tokio::test]
 async fn bound_manager_refuses_both_local_and_retained_identity_minting() {
     let owner = Owner::new();
@@ -1604,7 +1655,7 @@ async fn failed_local_install_attempts_exact_abandon_but_flight_stays_blocked() 
         }
         let session = manager(&owner);
         let live = CanonicalLiveSession::new(owner.clone(), session.clone());
-        let flight = live.enter().unwrap();
+        let flight = live.enter().await.unwrap();
         let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
         let prepared = CanonicalPrepared {
             caller,

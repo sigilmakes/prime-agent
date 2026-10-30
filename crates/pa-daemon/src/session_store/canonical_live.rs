@@ -5,10 +5,11 @@
 //! turns into permission to write or project another source.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use pa_core::session::canonical::{
     CanonicalAckPhase, CanonicalAcknowledgement, CanonicalAdmissionPolicy, CanonicalAppendReceipt,
-    CanonicalCallerGuard, CanonicalCallerNotifier, CanonicalCallerSignal,
+    CanonicalCallerGuard, CanonicalCallerNotifier, CanonicalCallerSignal, CanonicalCallerState,
     CanonicalCommitDisposition, CanonicalCursor, CanonicalFailureKind, CanonicalIoStage,
     CanonicalOperation, CanonicalPrepareMode, CanonicalPrepared, CanonicalRequestedWrite,
     CanonicalSourceDisposition, CanonicalStoreError,
@@ -74,12 +75,61 @@ fn unresolved_with(
     }
 }
 
+/// How long one caller waits for another caller's adoption window. A window is
+/// a local prepare/write/ACK round trip on the same machine, so this is orders
+/// of magnitude above a real settle and far below a client turn timeout; it
+/// exists so a broken or abandoned caller cannot park a turn forever.
+pub(crate) const ADOPTION_ORDER_WAIT: Duration = Duration::from_secs(5);
+
+/// Wait for the owner's adoption window to close, without holding a lock.
+///
+/// The signal is armed before the deciding check, so a release that lands
+/// between the check and the await is not lost. Every wake re-reads the actual
+/// window instead of assuming it closed, and the deadline bounds the wait.
+pub(crate) async fn wait_out_adoption(
+    window: impl Fn() -> Result<Option<(Arc<tokio::sync::Notify>, bool)>>,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    loop {
+        let Some((signal, _)) = window()? else {
+            return Ok(());
+        };
+        let notified = signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !window()?.is_some_and(|(_, pending)| pending) {
+            return Ok(());
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            return Err(pending_adoption("canonical owner adoption did not settle"));
+        }
+    }
+}
+
+/// A request refused by another caller's in-flight adoption window. The owner
+/// proves it created no operation, barrier or write, so the caller's resolution
+/// is to wait for that caller's ACK and issue the same request again.
+fn pending_adoption(detail: impl std::fmt::Display) -> CanonicalStoreError {
+    let detail = detail.to_string();
+    eprintln!(
+        "pa-daemon: canonical refusal phase=owner reason={}",
+        label_of(&detail)
+    );
+    CanonicalStoreError {
+        kind: CanonicalFailureKind::AdoptionConflict,
+        requested: CanonicalRequestedWrite::NotRequested,
+        source: CanonicalSourceDisposition::PendingAdoption,
+        detail,
+    }
+}
+
 fn label_of(detail: &str) -> &'static str {
     match detail {
         "canonical owner adoption abandoned" => "canonical_owner_abandoned_pending_adoption",
         "canonical owner invalidated" => "canonical_owner_invalidated",
         "canonical owner authority poisoned" => "canonical_owner_authority_poisoned",
         "canonical owner awaiting adoption acknowledgement" => "canonical_owner_pending_adoption",
+        "canonical owner adoption did not settle" => "canonical_owner_adoption_wait_timeout",
         "canonical owner caller abandoned before acknowledgement" => {
             "canonical_owner_abandoned_caller"
         }
@@ -156,9 +206,14 @@ fn label_of(detail: &str) -> &'static str {
     }
 }
 
-struct Notify;
+/// The owner's own completion signal. Every caller-state transition and every
+/// adoption-window release wakes the callers waiting on that window, so an
+/// ordering conflict becomes a wait instead of a refusal.
+struct Notify(Arc<tokio::sync::Notify>);
 impl CanonicalCallerNotifier for Notify {
-    fn changed(&self) {}
+    fn changed(&self) {
+        self.0.notify_waiters();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -168,6 +223,10 @@ enum PendingProvenance {
 }
 
 struct Pending {
+    /// When this window was armed. An adoption whose caller can never return is
+    /// released after [`ADOPTION_ORDER_WAIT`]; a live caller is never awaited
+    /// that long because the owner state mutex serializes entire operations.
+    armed: std::time::Instant,
     provenance: PendingProvenance,
     operation: CanonicalOperation,
     cursor: CanonicalCursor,
@@ -211,6 +270,8 @@ struct State {
     #[cfg(test)]
     fail_stage_capture: bool,
     callers: Vec<CanonicalCallerSignal>,
+    /// Wakes waiters whenever this owner's adoption window closes.
+    adoption: Arc<tokio::sync::Notify>,
 }
 
 /// Clone-shared ownership state. Read-only opens never create this allocation.
@@ -267,6 +328,45 @@ impl UnstartedRefusal {
 }
 
 impl State {
+    /// Release an adoption window that provably wrote nothing and whose caller
+    /// can never return to complete it.
+    ///
+    /// Two things make a window unresolvable: its caller guard dropped (recorded
+    /// `Abandoned`, after which the ACK necessarily refuses), or a provisional
+    /// window armed before a fallible preflight was left with no caller at all.
+    /// Either one refuses every later caller forever if kept. Neither wrote
+    /// anything: the owner state mutex serializes a whole operation, so no
+    /// in-flight write is ever observable here, and an operation that wrote
+    /// advances `cursor` past `from`. A written-but-unacknowledged row keeps its
+    /// window: that is committed debt, and only the reconcile boundary may
+    /// resolve it. A live caller (active or holding an acknowledged prepared
+    /// ticket) keeps its window for as long as its work takes.
+    fn expire_unwritten_adoption(&mut self) -> Result<()> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(());
+        };
+        if pending.cursor != pending.from || pending.armed.elapsed() < ADOPTION_ORDER_WAIT {
+            return Ok(());
+        }
+        let live = pending.signal.as_ref().is_some_and(|signal| {
+            matches!(
+                signal.state(),
+                CanonicalCallerState::Active | CanonicalCallerState::PreparedAcknowledged
+            )
+        });
+        if live {
+            return Ok(());
+        }
+        let operation = pending.operation.clone();
+        let barrier = pending.barrier.clone();
+        self.revision
+            .clear_barrier(&operation, &barrier)
+            .map_err(|e| unresolved(format!("expired adoption barrier: {e:?}")))?;
+        self.pending.take();
+        self.adoption.notify_waiters();
+        Ok(())
+    }
+
     // Called only inside the verified lease mutation, before this request creates
     // an operation. A stale SDK source is not permission to ignore existing debt.
     fn refuse_unstarted(
@@ -396,7 +496,7 @@ impl State {
         match (self.pending.is_some(), abandoned) {
             (true, true) => return Err(unresolved("canonical owner adoption abandoned")),
             (true, false) => {
-                return Err(unresolved(
+                return Err(pending_adoption(
                     "canonical owner awaiting adoption acknowledgement",
                 ));
             }
@@ -612,6 +712,7 @@ impl SessionFile {
             #[cfg(test)]
             fail_stage_capture: false,
             callers: Vec::new(),
+            adoption: Arc::new(tokio::sync::Notify::new()),
         }))));
         Ok(cursor)
     }
@@ -660,6 +761,7 @@ impl SessionFile {
                 .0
                 .lock()
                 .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
             state.available()?;
             if state.registered.contains(id) {
                 return Err(failure("user delivery already registered"));
@@ -700,6 +802,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -732,6 +835,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -758,19 +862,28 @@ impl SessionFile {
                 );
                 // The local Core queue was checked by the retiring view. Owner membership
                 // is historical admission, never a substitute execution queue.
-                self.retire_canonical_source(&mut state)?;
-                state.blocked = true;
-                state
-                    .revision
-                    .invalidate()
-                    .map_err(|e| unresolved(format!("invalidate: {e:?}")))?;
-                self.canonical_delivered.clone_from(&state.delivered);
-                self.canonical_delivered_custom
-                    .clone_from(&state.delivered_custom);
-                self.canonical_live = None;
-                Ok(())
+                self.retire_owned_epoch(&mut state)
+                    .map_err(anyhow::Error::from)
             })
             .map_err(unresolved)
+    }
+
+    /// Retire this actual epoch at the already-certified durable boundary.
+    ///
+    /// The caller proves the durable source before this runs; here only the
+    /// owner's ordered close and detach remain. Undelivered FIFOs survive.
+    fn retire_owned_epoch(&mut self, state: &mut State) -> Result<()> {
+        self.retire_canonical_source(state)?;
+        state.blocked = true;
+        state
+            .revision
+            .invalidate()
+            .map_err(|e| unresolved(format!("invalidate: {e:?}")))?;
+        self.canonical_delivered.clone_from(&state.delivered);
+        self.canonical_delivered_custom
+            .clone_from(&state.delivered_custom);
+        self.canonical_live = None;
+        Ok(())
     }
 
     /// Atomically navigate the actual owner, including branch ABA with no new bytes.
@@ -820,6 +933,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -877,8 +991,9 @@ impl SessionFile {
                         let barrier = state.revision.set_barrier(&operation).map_err(|e| {
                             unresolved(format!("navigation prepare barrier: {e:?}"))
                         })?;
-                        let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+                        let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify(Arc::clone(&state.adoption))));
                         state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                             provenance: PendingProvenance::Retained,
                             operation: operation.clone(),
                             cursor: checkpoint.cursor.clone(),
@@ -953,6 +1068,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -979,6 +1095,7 @@ impl SessionFile {
                 let barrier = state.revision.set_barrier(&operation)
                     .map_err(|e| failure(format!("prepare barrier: {e:?}")))?;
                 state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                     provenance: PendingProvenance::Retained,
                     operation: operation.clone(), cursor: raw.cursor.clone(), barrier: barrier.clone(),
                     prepared: true, mutation: matches!(request.mode, CanonicalPrepareMode::Mutation(_)),
@@ -998,7 +1115,7 @@ impl SessionFile {
                 }
                 let checkpoint = state.raw.checkpoint(request.source)?;
                 let from = checkpoint.cursor.clone();
-                let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+                let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify(Arc::clone(&state.adoption))));
                 let provenance = if matches!(request.mode, CanonicalPrepareMode::Observe)
                     && match &request.admission {
                         CanonicalAdmissionPolicy::Preserve => true,
@@ -1016,6 +1133,7 @@ impl SessionFile {
                 };
                 state.admitted.extend(ids);
                 state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                     provenance,
                     operation: operation.clone(),
                     cursor: checkpoint.cursor.clone(),
@@ -1057,6 +1175,7 @@ impl SessionFile {
                 if request.phase == CanonicalAckPhase::AbandonPreparedOnly
                     && state.pending.is_none()
                 {
+        state.expire_unwritten_adoption()?;
                     state.available()?;
                     let prepared = state
                         .prepared
@@ -1122,6 +1241,7 @@ impl SessionFile {
                     state.revision.clear_barrier(&request.operation, &pending.barrier)
                         .map_err(|e| unresolved(format!("ACK barrier: {e:?}")))?;
                     state.pending.take();
+                    state.adoption.notify_waiters();
                     return Ok(CanonicalLiveAcknowledged {
                         operation: request.operation,
                         cursor: request.cursor,
@@ -1189,6 +1309,7 @@ impl SessionFile {
                     .pending
                     .take()
                     .ok_or_else(|| failure("pending receipt disappeared"))?;
+                state.adoption.notify_waiters();
                 if !pending.prepared {
                     if matches!(
                         state
@@ -1264,6 +1385,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         if state
@@ -1357,6 +1479,7 @@ impl SessionFile {
                         .set_barrier(&request.operation)
                         .map_err(|e| failure(format!("commit barrier: {e:?}")))?;
                     state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                         provenance: PendingProvenance::Retained,
                         operation: request.operation.clone(),
                         cursor: current.cursor.clone(),
@@ -1456,6 +1579,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease.with_owned_mutation(&self.path.clone(), || {
@@ -1478,6 +1602,7 @@ impl SessionFile {
                 .map_err(|e| failure(format!("user prepare barrier: {e:?}")))?;
             // Arm pending before delivery/write. Losing the reply keeps this barrier.
             state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                             provenance: PendingProvenance::Retained,
                 operation: operation.clone(), cursor: current.cursor.clone(), barrier,
                 prepared: true, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
@@ -1521,7 +1646,7 @@ impl SessionFile {
             }
             state.admitted.insert(id.clone());
             let checkpoint = state.raw.checkpoint(request.source)?;
-            let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+            let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify(Arc::clone(&state.adoption))));
             let pending = state.pending.as_mut().ok_or_else(|| unresolved("user pending state lost"))?;
             pending.cursor = checkpoint.cursor.clone();
             pending.signal = Some(signal);
@@ -1729,6 +1854,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -1782,6 +1908,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -1950,6 +2077,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -1999,6 +2127,7 @@ impl SessionFile {
                     .set_barrier(&operation)
                     .map_err(|e| failure(format!("delivery barrier: {e:?}")))?;
                 state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                     provenance: PendingProvenance::Retained,
                     operation: operation.clone(),
                     cursor: current.cursor.clone(),
@@ -2066,6 +2195,7 @@ impl SessionFile {
                     .clear_barrier(&operation, &pending.barrier)
                     .map_err(|e| unresolved(format!("delivery completion barrier: {e:?}")))?;
                 state.pending.take();
+                state.adoption.notify_waiters();
                 Ok(id)
             })
             .map_err(unresolved)
@@ -2086,6 +2216,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         let payload = pa_types::session::CustomMessageEntry {
@@ -2106,8 +2237,19 @@ impl SessionFile {
             if let Some(id) = &existing {
                 let row = current.retained.iter().find(|row| row.entry().id() == Some(id.as_str()))
                     .ok_or_else(|| failure("delivered Custom FIFO row missing"))?;
-                anyhow::ensure!(matches!(row.entry(), pa_types::session::FileEntry::CustomMessage { payload: actual, .. } if actual == &payload),
-                    "delivered Custom FIFO head differs from exact accepted intent");
+                if !matches!(row.entry(), pa_types::session::FileEntry::CustomMessage { payload: actual, .. } if actual == &payload) {
+                    // Nothing of this request exists yet: the FIFO head is an
+                    // already-durable row another producer staged first. Refuse the
+                    // ordering, never the session.
+                    return Err(CanonicalStoreError {
+                        kind: CanonicalFailureKind::SourceChanged,
+                        requested: CanonicalRequestedWrite::NotRequested,
+                        source: CanonicalSourceDisposition::Unchanged,
+                        detail: "delivered Custom FIFO head differs from exact accepted intent"
+                            .to_owned(),
+                    }
+                    .into());
+                }
             }
             state.revision.check_owner_state_advance()
                 .map_err(|e| failure(format!("Custom preflight: {e:?}")))?;
@@ -2115,6 +2257,7 @@ impl SessionFile {
             let barrier = state.revision.set_barrier(&operation)
                 .map_err(|e| failure(format!("Custom delivery barrier: {e:?}")))?;
             state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                 provenance: PendingProvenance::Retained,
                 operation: operation.clone(), cursor: current.cursor.clone(), barrier,
                 prepared: true, mutation: false, signal: None, staged: false, from: current.cursor.clone(),
@@ -2152,7 +2295,7 @@ impl SessionFile {
                 id
             };
             let checkpoint = state.raw.checkpoint(request.source)?;
-            let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+            let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify(Arc::clone(&state.adoption))));
             let pending = state.pending.as_mut().ok_or_else(|| unresolved("Custom pending state lost"))?;
             pending.cursor = checkpoint.cursor.clone();
             pending.signal = Some(signal);
@@ -2240,33 +2383,70 @@ impl SessionFile {
         lease.with_owned_mutation(&self.path, || Ok(())).is_err()
     }
 
-    /// Retire the actual owner at a certified boundary after a quarantined SDK
-    /// view blocked every later projection.
+    /// Whether another caller currently holds this owner's adoption window.
+    pub(crate) fn canonical_adoption_pending(&self) -> bool {
+        self.canonical_adoption_window()
+            .is_some_and(|(_, pending)| pending)
+    }
+
+    /// The owner's adoption window: its change signal and whether another
+    /// caller currently holds it. `None` when no owner is attached.
+    pub(crate) fn canonical_adoption_window(&self) -> Option<(Arc<tokio::sync::Notify>, bool)> {
+        let owner = self.canonical_live.as_ref()?;
+        let state = owner.0.lock().ok()?;
+        Some((
+            Arc::clone(&state.adoption),
+            state.pending.is_some() && !state.blocked,
+        ))
+    }
+
+    /// Reconcile a quarantined SDK view back to a servable owner.
     ///
-    /// The source must still equal the owner's last certified cursor and no
-    /// receipt may remain: no prepared mutation, admitted tool, unfinished
-    /// caller, live run, or child usage I/O. The next build then attaches a
-    /// successor epoch that re-reads the same durable rows; history is never
-    /// rewritten and no unknown physical owner is reused.
+    /// A quarantined view refuses every event, so nothing it still owes can ever
+    /// be completed: its pending adoption, prepared ticket, admitted tools and
+    /// un-ACKed run are dead debt, and requiring them to settle is exactly the
+    /// permanent refusal this path exists to repair. The reconcile trusts the
+    /// durable journal instead: a full capture must still equal the owner's last
+    /// certified source, which proves the rows are complete and that no foreign
+    /// writer advanced them. Child-usage I/O lives outside the journal and must
+    /// be resolved. The successor epoch then re-reads those rows; history is
+    /// never rewritten and no unknown physical owner is reused.
     pub(crate) fn retire_quarantined_canonical_owner(&mut self) -> Result<()> {
         let owner = self
             .canonical_live
             .clone()
             .ok_or_else(|| failure("canonical owner not attached"))?;
-        {
-            let state = owner
-                .0
-                .lock()
-                .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-            state.available()?;
-            if state.callers.iter().any(|signal| {
-                signal.state() != pa_core::session::canonical::CanonicalCallerState::Completed
-            }) {
-                return Err(unresolved("canonical caller has not completed"));
-            }
+        let mut state = owner
+            .0
+            .lock()
+            .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        // A poisoned authority or revision means this process cannot certify what
+        // it wrote. Only a new physical owner may recover that, never a reopen.
+        if state.authority.poisoned() {
+            return Err(unresolved("canonical owner authority poisoned"));
         }
-        let cursor = self.canonical_snapshot()?.checkpoint.cursor;
-        self.retire_completed_canonical_runtime(&cursor)
+        let lease = state.verify(self)?;
+        lease
+            .with_owned_mutation(&self.path.clone(), || {
+                anyhow::ensure!(
+                    state.current(self)?.cursor == state.raw.cursor,
+                    "quarantined canonical source changed outside owner"
+                );
+                anyhow::ensure!(
+                    self.child_usage_recovery.pending.is_none(),
+                    "child usage I/O remains unresolved"
+                );
+                // This view refuses every later event, so an admitted tool can
+                // never receive its terminal row from it. The durable rows are
+                // complete; drop the dead admissions before the ordered close.
+                state.tools.clear();
+                self.retire_owned_epoch(&mut state)
+                    .map_err(anyhow::Error::from)
+            })
+            .map_err(|error| match error.downcast::<CanonicalStoreError>() {
+                Ok(error) => error,
+                Err(error) => unresolved(error),
+            })
     }
 }
 
@@ -2285,6 +2465,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
+        state.expire_unwritten_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -2318,8 +2499,9 @@ impl SessionFile {
                     .revision
                     .set_barrier(&operation)
                     .map_err(|e| unresolved(format!("run opening barrier: {e:?}")))?;
-                let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify));
+                let (caller, signal) = CanonicalCallerGuard::new(Arc::new(Notify(Arc::clone(&state.adoption))));
                 state.pending = Some(Pending {
+                    armed: std::time::Instant::now(),
                     provenance: PendingProvenance::Retained,
                     operation: operation.clone(),
                     cursor: checkpoint.cursor.clone(),
