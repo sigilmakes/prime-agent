@@ -612,7 +612,7 @@ fn owned_tail_completion_obeys_a_managed_lease_and_refuses_a_released_one() {
     let stale = std::sync::Arc::new(
         crate::lease::acquire_runtime_session_lease(&store.path, dir.path()).unwrap(),
     );
-    stale.release();
+    stale.release().unwrap();
     store.lease = Some(stale);
     assert!(store
         .append_child_usage_once("leased-a", &target, child(), None)
@@ -629,7 +629,7 @@ fn owned_tail_completion_obeys_a_managed_lease_and_refuses_a_released_one() {
     ));
     assert!(std::fs::read(&store.path).unwrap().starts_with(&partial));
     assert_eq!(attribution_rows(&store).len(), 1);
-    store.lease.take().unwrap().release();
+    store.lease.take().unwrap().release().unwrap();
 }
 
 #[test]
@@ -652,7 +652,7 @@ fn admitted_confirmation_finishes_while_release_drains_and_later_writes_are_refu
             start_rx
                 .recv_timeout(std::time::Duration::from_secs(3))
                 .unwrap();
-            releaser.release();
+            releaser.release().unwrap();
         });
         let probe_lease = std::sync::Arc::clone(&lease);
         let path = store.path.clone();

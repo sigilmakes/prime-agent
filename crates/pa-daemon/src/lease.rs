@@ -1,9 +1,11 @@
 //! Session leases: one process may host one runtime per canonical session
 //! file — a lease is `<agent-dir>/session-leases/<sha256(path)>.lock`
 //! containing `owner.json`, acquired by an atomic rename; stale owners are
-//! reclaimed, and a guard lock serializes lease updates.
+//! reclaimed, owners whose identity cannot be verified (and unreadable
+//! records) are reclaimed past a bounded age, a guard lock serializes lease
+//! updates, and a held mutation re-verifies the on-disk owner token first.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -69,6 +71,70 @@ impl SessionAlreadyActiveError {
     }
 }
 
+/// A mutation refused by a held lease whose on-disk owner token no longer
+/// matches the holder's: the lease was revoked or replaced from under the
+/// holder, so writing the session file would double-write behind a
+/// successor.
+#[derive(Debug, thiserror::Error)]
+#[error("Session lease no longer owns {session_path}: {cause}")]
+pub struct LeaseRevokedError {
+    pub session_path: String,
+    /// How the on-disk record failed to confirm the held token.
+    pub cause: LeaseRevocation,
+}
+
+/// How the on-disk owner record failed to confirm the held token.
+#[derive(Debug, thiserror::Error)]
+pub enum LeaseRevocation {
+    /// A readable `owner.json` names another holder.
+    #[error("the on-disk owner token is another holder's")]
+    Replaced,
+    /// `owner.json` (or its lease directory) is gone.
+    #[error("the on-disk owner record is gone")]
+    Missing,
+    /// `owner.json` cannot be read or parsed, so no token confirms
+    /// ownership; the holder refuses rather than write blind.
+    #[error("the on-disk owner record is unreadable")]
+    Unreadable(#[source] anyhow::Error),
+}
+
+/// Acquisition found an unreadable owner record: acquisition cannot prove
+/// nobody lives there, so it refuses with this; once the record is past
+/// its bounded age window, acquisition reclaims and retries instead.
+#[derive(Debug, thiserror::Error)]
+#[error("Session lease owner record is unreadable in {directory}: {source}")]
+pub struct CorruptLeaseOwnerError {
+    pub directory: PathBuf,
+    #[source]
+    pub source: anyhow::Error,
+}
+
+/// The guard stayed busy through its whole wait budget, so the coordinated
+/// action never ran and the lease directory is unchanged.
+#[derive(Debug, thiserror::Error)]
+#[error("Could not coordinate session lease: {directory}")]
+pub struct LeaseGuardBusyError {
+    pub directory: PathBuf,
+}
+
+/// Why a lease release left the holder's record on disk.
+#[derive(Debug, thiserror::Error)]
+pub enum LeaseReleaseError {
+    /// The release's guard stayed busy through the fast budget; the record
+    /// stays until a retry or the dead-owner sweep.
+    #[error("Session lease release did not cross the guard: {directory}")]
+    GuardBusy { directory: PathBuf },
+    /// A failure left the record in place after the guard was crossed: the
+    /// chained source carries the reason (an unreadable owner record, or a
+    /// failed removal of the holder's own directory).
+    #[error("Session lease release failed: {directory}")]
+    IoFailure {
+        directory: PathBuf,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
 pub fn canonical_session_path(path: &Path) -> PathBuf {
     match path.canonicalize() {
         Ok(canonical) => canonical,
@@ -130,26 +196,67 @@ fn read_owner(directory: &Path) -> Result<Option<LeaseOwner>> {
     Ok(Some(owner))
 }
 
-fn owner_alive(owner: &LeaseOwner) -> bool {
+/// Whether an owner record still describes the process it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerLiveness {
+    /// The pid answered dead, or the recorded start id refutes the current
+    /// pid's start identity (pid reuse): the owner is provably gone.
+    Dead,
+    /// The pid is alive and its recorded start identity is verified — the
+    /// only full confirmation, honored indefinitely.
+    Alive,
+    /// The record answers neither way: no recorded start id, an
+    /// unobservable one, or a failed liveness answer. Identity cannot rule
+    /// out pid reuse, so the holder is trusted only while the lease is
+    /// younger than [`UNVERIFIED_OWNER_AFTER`].
+    Unverifiable,
+}
+
+fn owner_liveness(owner: &LeaseOwner) -> OwnerLiveness {
     match is_process_alive(owner.pid) {
+        Ok(false) => return OwnerLiveness::Dead,
         Ok(true) => {}
-        // A provably-dead owner is stale; an unverifiable one counts as
-        // alive, like the TS lease (reclaiming a live owner is worse).
-        Ok(false) => return false,
-        Err(_) => return true,
+        // A failed liveness answer is evidence neither way.
+        Err(_) => return OwnerLiveness::Unverifiable,
     }
     match owner.process_start_id.as_deref() {
-        None => true,
+        // A live pid without a recorded start id is not identity: the pid
+        // number may already name a different process.
+        None => OwnerLiveness::Unverifiable,
         Some(expected) => match get_process_start_id(owner.pid) {
-            Some(current) => current == expected,
-            // Unobservable identity counts as alive, like the TS lease.
-            None => true,
+            Some(current) if current == expected => OwnerLiveness::Alive,
+            Some(_) => OwnerLiveness::Dead,
+            None => OwnerLiveness::Unverifiable,
         },
     }
 }
 
-fn lease_reclaimable(owner: Option<&LeaseOwner>) -> bool {
-    owner.is_none_or(|owner| !owner_alive(owner))
+/// How long a lease whose owner cannot be verified still blocks when the
+/// pid itself answers: an unreadable owner record, a record without a
+/// start identity, an unobservable one, or a failed liveness answer cannot
+/// distinguish a live holder from a recycled pid, so past this bound (from
+/// the lease directory's creation mtime — the record is never rewritten
+/// while held) both the dead-owner sweep and the acquisition path reclaim
+/// the record and let a new holder acquire over it. A live holder with a
+/// verified identity is unaffected; a holder refused by reclaim re-verifies
+/// the on-disk token at its next mutation and stops writing.
+const UNVERIFIED_OWNER_AFTER: Duration = Duration::from_secs(60);
+
+/// Whether a lease state that cannot affirm or deny liveness — an
+/// unverifiable owner or an unreadable owner record — may be reclaimed.
+fn unverified_state_reclaimable(lease_age: Option<Duration>) -> bool {
+    lease_age.is_some_and(|age| age > UNVERIFIED_OWNER_AFTER)
+}
+
+fn lease_reclaimable(owner: Option<&LeaseOwner>, lease_age: Option<Duration>) -> bool {
+    match owner {
+        None => true,
+        Some(owner) => match owner_liveness(owner) {
+            OwnerLiveness::Dead => true,
+            OwnerLiveness::Alive => false,
+            OwnerLiveness::Unverifiable => unverified_state_reclaimable(lease_age),
+        },
+    }
 }
 
 /// Whether a failed candidate-onto-lease-directory rename means the lease
@@ -287,7 +394,9 @@ fn with_lease_guard<T>(
                 // provably dead (a live owner may hold the guard mid-release).
                 if crate::paths::mtime_age(&guard).is_some_and(|age| age > STALE_GUARD_AFTER)
                     && match read_owner(directory) {
-                        Ok(Some(owner)) => !owner_alive(&owner),
+                        // Steal only when the owner is provably dead: a
+                        // live owner's guard may cover its bookkeeping.
+                        Ok(Some(owner)) => owner_liveness(&owner) == OwnerLiveness::Dead,
                         Ok(None) => true,
                         Err(_) => false,
                     }
@@ -301,10 +410,10 @@ fn with_lease_guard<T>(
         }
     }
     if !acquired {
-        return Err(anyhow!(
-            "Could not coordinate session lease: {}",
-            directory.display()
-        ));
+        return Err(LeaseGuardBusyError {
+            directory: directory.to_path_buf(),
+        }
+        .into());
     }
     let result = action();
     let _ = fs::remove_dir_all(&guard);
@@ -344,12 +453,26 @@ impl SessionLease {
         crate::session_store::persist_info_sidecar(&self.opened_path);
     }
 
-    pub fn release(&self) {
+    /// Release the lease: flush both sidecars, drain admitted mutations,
+    /// then remove the on-disk record while this holder still owns it. A
+    /// missing or foreign record is a clean release: the lease was revoked
+    /// or replaced, the successor's record must survive, and the holder's
+    /// part is done. Failures leave the holder's record on disk and return
+    /// a typed reason; a caller may retry, and `Drop` reports the same
+    /// failure to stderr because it cannot return it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LeaseReleaseError::GuardBusy`] when the guard stays busy
+    /// through the fast release budget (releasing must stay fast: another
+    /// holder's acquire or bookkeeping is sub-millisecond), and
+    /// [`LeaseReleaseError::IoFailure`] when the on-disk removal failed.
+    pub fn release(&self) -> Result<(), LeaseReleaseError> {
         if self
             .released
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            return;
+            return Ok(());
         }
         // Fence against a concurrent append: one already past its
         // released-check must land before the lease directory is removed,
@@ -367,20 +490,50 @@ impl SessionLease {
             std::thread::yield_now();
         }
         self.write_sidecars();
-        let _ = with_lease_guard(&self.directory, GuardWait::Fast, || {
-            if let Ok(Some(owner)) = read_owner(&self.directory) {
-                if owner.token == self.token {
-                    reclaim_stale(&self.directory);
+        with_lease_guard(&self.directory, GuardWait::Fast, || {
+            match read_owner(&self.directory) {
+                // The holder's token is still on record: rename the
+                // directory away.
+                Ok(Some(owner)) if owner.token == self.token => {
+                    anyhow::ensure!(
+                        reclaim_stale(&self.directory),
+                        "Could not remove the released session lease: {}",
+                        self.directory.display()
+                    );
                 }
+                // A missing or foreign record: nothing ours is on disk.
+                Ok(_) => {}
+                // An unreadable record: removing blind could take a
+                // successor's lease (whose own read may be the broken
+                // one); the record is reclaimable only through the
+                // bounded age window instead.
+                Err(source) => return Err(source),
             }
             Ok(())
-        });
+        })
+        .map_err(|source| {
+            if source.downcast_ref::<LeaseGuardBusyError>().is_some() {
+                LeaseReleaseError::GuardBusy {
+                    directory: self.directory.clone(),
+                }
+            } else {
+                LeaseReleaseError::IoFailure {
+                    directory: self.directory.clone(),
+                    source,
+                }
+            }
+        })
     }
 }
 
 impl Drop for SessionLease {
     fn drop(&mut self) {
-        self.release();
+        if let Err(error) = self.release() {
+            // Drop cannot return the failure, and the on-disk record is
+            // still there: stderr is the daemon's visible log surface
+            // (worker stderr is captured to logs).
+            eprintln!("pa-daemon: session lease not removed on drop: {error:?}");
+        }
     }
 }
 
@@ -407,6 +560,10 @@ impl SessionLease {
     /// Hold the existing append admission fence across proof, mutation and sync.
     /// Release retains its existing ten-second drain policy: a wedged IO call
     /// or suspended process beyond that bound is not absolute handoff safety.
+    ///
+    /// Before the action, the on-disk owner token is re-verified (see
+    /// [`Self::verify_ownership`]): a lease revoked or replaced in the
+    /// meantime is refused instead of writing behind its successor.
     pub(crate) fn with_owned_mutation<T>(
         &self,
         path: &Path,
@@ -420,7 +577,32 @@ impl SessionLease {
                 && canonical_session_path(path) == self.session_path,
             "session lease does not own append target"
         );
+        if let Err(revoked) = self.verify_ownership() {
+            return Err(revoked.into());
+        }
         action()
+    }
+
+    /// Re-read the on-disk owner record and confirm it still names this
+    /// holder's token, refusing every other outcome: a readable foreign
+    /// token is replacement, a missing record is revocation, and an
+    /// unreadable record may hide either. This runs once per mutation —
+    /// every `with_owned_mutation` (and so every `append`, since each call
+    /// is one admitted batch written in one `write_all`) takes one small
+    /// read of `owner.json` before its action, and a batch is one fenced
+    /// window, so re-reading per row inside a batch would only multiply
+    /// reads without narrowing the admission gate.
+    fn verify_ownership(&self) -> Result<(), LeaseRevokedError> {
+        let revoked = |cause| LeaseRevokedError {
+            session_path: self.session_path.to_string_lossy().to_string(),
+            cause,
+        };
+        match read_owner(&self.directory) {
+            Ok(Some(owner)) if owner.token == self.token => Ok(()),
+            Ok(Some(_)) => Err(revoked(LeaseRevocation::Replaced)),
+            Ok(None) => Err(revoked(LeaseRevocation::Missing)),
+            Err(source) => Err(revoked(LeaseRevocation::Unreadable(source))),
+        }
     }
 
     pub(crate) fn append(&self, path: &Path, bytes: &[u8]) -> Result<()> {
@@ -448,12 +630,22 @@ pub struct LiveLeaseOwner {
 
 /// Whether a live process holds the session file's runtime lease: read
 /// the shared `session-leases` record (never acquiring, never reclaiming);
-/// a dead, missing, or unreadable owner answers `None`.
+/// a dead, missing, or unreadable owner answers `None`, and an owner whose
+/// identity cannot be verified (no observable start id over a live pid)
+/// answers `None` once the lease is past [`UNVERIFIED_OWNER_AFTER`] — the
+/// same window the reclaim paths honor.
 #[must_use]
 pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLeaseOwner> {
     let directory = lease_directory(agent_dir, session_path);
     let owner = read_owner(&directory).ok()??;
-    if !owner_alive(&owner) {
+    let unverifiable = match owner_liveness(&owner) {
+        OwnerLiveness::Dead => return None,
+        OwnerLiveness::Alive => false,
+        OwnerLiveness::Unverifiable => true,
+    };
+    if unverifiable
+        && crate::paths::mtime_age(&directory).is_some_and(|age| age > UNVERIFIED_OWNER_AFTER)
+    {
         return None;
     }
     Some(LiveLeaseOwner {
@@ -538,8 +730,28 @@ pub fn acquire_runtime_session_lease(
                         continue;
                     }
                     if is_rename_target_contention(&directory, &error, cfg!(windows)) {
-                        let existing = read_owner(&directory)?;
-                        if !lease_reclaimable(existing.as_ref()) {
+                        let lease_age = crate::paths::mtime_age(&directory);
+                        let existing = match read_owner(&directory) {
+                            Ok(existing) => existing,
+                            // An unreadable record proves nothing about
+                            // liveness: past the bounded window it is
+                            // reclaimed and acquisition retries over the
+                            // freed path; within it the corruption
+                            // surfaces explicitly.
+                            Err(source) => {
+                                if unverified_state_reclaimable(lease_age)
+                                    && reclaim_stale(&directory)
+                                {
+                                    continue;
+                                }
+                                return Err(CorruptLeaseOwnerError {
+                                    directory: directory.clone(),
+                                    source,
+                                }
+                                .into());
+                            }
+                        };
+                        if !lease_reclaimable(existing.as_ref(), lease_age) {
                             return Err(SessionAlreadyActiveError::for_owner(
                                 &canonical.to_string_lossy(),
                                 existing.as_ref(),
@@ -554,7 +766,7 @@ pub fn acquire_runtime_session_lease(
             }
         }
         let existing = read_owner(&directory)?;
-        if !lease_reclaimable(existing.as_ref()) {
+        if !lease_reclaimable(existing.as_ref(), crate::paths::mtime_age(&directory)) {
             return Err(SessionAlreadyActiveError::for_owner(
                 &canonical.to_string_lossy(),
                 existing.as_ref(),
@@ -587,8 +799,27 @@ pub(crate) fn reclaim_dead_owner_leases(agent_dir: &Path) -> usize {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
         {
             let reclaimed = with_lease_guard(&path, GuardWait::Fast, || {
-                let existing = read_owner(&path)?;
-                Ok(lease_reclaimable(existing.as_ref()) && reclaim_stale(&path))
+                match read_owner(&path) {
+                    // No record is free; a provably dead owner's is too.
+                    Ok(None) => Ok(reclaim_stale(&path)),
+                    Ok(Some(owner)) => match owner_liveness(&owner) {
+                        OwnerLiveness::Dead => Ok(reclaim_stale(&path)),
+                        // An unverifiable owner (no verifiable start
+                        // identity over a live pid) is reclaimable only
+                        // past the bounded age window.
+                        OwnerLiveness::Unverifiable => {
+                            Ok(unverified_state_reclaimable(crate::paths::mtime_age(&path))
+                                && reclaim_stale(&path))
+                        }
+                        OwnerLiveness::Alive => Ok(false),
+                    },
+                    // An unreadable record stays within the bounded age
+                    // window (acquisition refuses it explicitly there) and
+                    // is reclaimed past it: its liveness is unknowable,
+                    // and acquisition self-heals over the freed path.
+                    Err(_) => Ok(unverified_state_reclaimable(crate::paths::mtime_age(&path))
+                        && reclaim_stale(&path)),
+                }
             });
             if reclaimed.unwrap_or(false) {
                 removed += 1;
@@ -603,6 +834,37 @@ pub(crate) fn reclaim_dead_owner_leases(agent_dir: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Install a fresh live owner record over a lease directory, in the
+    /// role of a successor holder that reclaimed the record in place.
+    fn install_successor_owner(directory: &Path, session_path: &Path, token: &str) {
+        let owner = LeaseOwner {
+            version: 1,
+            token: token.to_owned(),
+            pid: std::process::id(),
+            process_start_id: get_process_start_id(std::process::id()),
+            active_session_id: None,
+            session_path: canonical_session_path(session_path)
+                .to_string_lossy()
+                .to_string(),
+            created_at: crate::util::now_iso(),
+        };
+        fs::write(
+            directory.join("owner.json"),
+            serde_json::to_string_pretty(&owner).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    /// Set a lease directory's mtime past the bounded window (the record
+    /// is never rewritten while held, so the mtime stands for acquire time).
+    fn age_lease_directory(directory: &Path) {
+        let old = std::time::SystemTime::now() - UNVERIFIED_OWNER_AFTER - Duration::from_secs(30);
+        std::fs::File::open(directory)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
 
     #[test]
     fn process_start_id_reflects_the_platform_ladder() {
@@ -642,17 +904,17 @@ mod tests {
             .unwrap();
         let err = acquire_session_lease(Some(&session), &dir).unwrap_err();
         assert!(err.to_string().contains("already active"));
-        lease.release();
+        lease.release().unwrap();
         let second = acquire_session_lease(Some(&session), &dir)
             .unwrap()
             .unwrap();
-        second.release();
+        second.release().unwrap();
         std::env::remove_var(SESSION_LEASES_ENABLED_ENV);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_dead_owner_sweep_spares_live_and_unreadable_leases() {
+    fn the_dead_owner_sweep_spares_live_and_freshly_unverifiable_leases() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path();
         let live_path = agent_dir.join("live.jsonl");
@@ -701,11 +963,238 @@ mod tests {
         assert!(!stale_leftover.exists());
         assert!(
             corrupt_directory.exists(),
-            "an unreadable owner keeps its lease, like the acquire path"
+            "a young unreadable record is kept (the bound has not passed)"
         );
         live.append(&live_path, b"row\n")
             .expect("the live lease still owns its append");
-        live.release();
+        live.release().unwrap();
+    }
+
+    /// A revoked or replaced lease writes nothing: every mutation re-reads
+    /// the on-disk owner record, so a successor's live token (and a missing
+    /// or unreadable record) refuse with the typed revocation, and release
+    /// leaves the unreadable record for the bounded sweep instead of
+    /// removing it blind.
+    #[test]
+    fn revoked_lease_refuses_mutations_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, b"first\n").unwrap();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        assert!(lease.append(&path, b"row\n").is_ok());
+        assert_eq!(fs::read(&path).unwrap(), b"first\nrow\n");
+        let directory = lease.directory.clone();
+        // The successor's record is verified-live (this process's pid and
+        // start id), which proves the refusal reads the record itself.
+        install_successor_owner(&directory, &path, "successor");
+
+        let error = lease.append(&path, b"row\n").unwrap_err();
+        let revoked = error.downcast_ref::<LeaseRevokedError>().unwrap();
+        assert!(
+            matches!(revoked.cause, LeaseRevocation::Replaced),
+            "{error:?}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"first\nrow\n",
+            "the revoked lease wrote nothing"
+        );
+
+        fs::remove_file(directory.join("owner.json")).unwrap();
+        let error = lease.append(&path, b"row\n").unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<LeaseRevokedError>().map(|e| &e.cause),
+            Some(LeaseRevocation::Missing)
+        ));
+
+        fs::write(directory.join("owner.json"), "not json").unwrap();
+        let error = lease.append(&path, b"row\n").unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<LeaseRevokedError>().map(|e| &e.cause),
+            Some(LeaseRevocation::Unreadable(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"first\nrow\n");
+
+        // Release over the unreadable record is observable and defers: the
+        // record stays for the sweep (a removal here would act blind).
+        assert!(matches!(
+            lease.release(),
+            Err(LeaseReleaseError::IoFailure { .. })
+        ));
+        assert!(directory.exists());
+    }
+
+    /// Releasing a lease whose on-disk record was replaced by a live
+    /// successor removes nothing: release stays clean because the
+    /// successor's record must survive.
+    #[test]
+    fn release_of_a_replaced_lease_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        let directory = lease.directory.clone();
+        install_successor_owner(&directory, &path, "successor");
+        lease.release().unwrap();
+        assert!(directory.exists(), "the successor's lease survived release");
+        assert_eq!(
+            fs::read_to_string(directory.join("owner.json"))
+                .unwrap()
+                .contains("successor"),
+            true
+        );
+    }
+
+    /// A failed release is observable: guard exhaustion and an unreadable
+    /// record answer typed errors with the record still on disk, and an
+    /// unblocked retry removes the record.
+    #[test]
+    fn release_failures_are_observable_and_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        let directory = lease.directory.clone();
+        // A brand-new foreign guard consumes the whole fast budget.
+        let guard = PathBuf::from(format!("{}.guard", directory.display()));
+        fs::create_dir(&guard).unwrap();
+        assert!(
+            matches!(lease.release(), Err(LeaseReleaseError::GuardBusy { .. })),
+            "the busy guard must be observable"
+        );
+        assert!(directory.exists(), "the failed release left the record");
+        fs::remove_dir(&guard).unwrap();
+        lease.release().unwrap();
+        assert!(!directory.exists(), "the retry removed the record");
+    }
+
+    /// An unverifiable owner identity (a live pid with no recorded start
+    /// id) and an unreadable owner record are reclaimable once past the
+    /// bounded age window; a verified identity is honored past the window
+    /// (its age is read, never used against it).
+    #[test]
+    fn unverifiable_owner_records_age_out_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path();
+        let live_path = agent_dir.join("verified.jsonl");
+        fs::write(&live_path, "{}\n").unwrap();
+        let live = acquire_runtime_session_lease(&live_path, agent_dir).unwrap();
+        let verified_directory = lease_directory(agent_dir, &canonical_session_path(&live_path));
+
+        let mut broken = Vec::new();
+        // A live owner with no recorded start id: its pid answers alive,
+        // so only the age bound can refute pid reuse...
+        let unverifiable_path = lease_directory(
+            agent_dir,
+            &canonical_session_path(&agent_dir.join("unverifiable.jsonl")),
+        );
+        fs::create_dir_all(&unverifiable_path).unwrap();
+        let owner = LeaseOwner {
+            version: 1,
+            token: "no-start-id".to_owned(),
+            pid: std::process::id(),
+            process_start_id: None,
+            active_session_id: None,
+            session_path: String::new(),
+            created_at: crate::util::now_iso(),
+        };
+        fs::write(
+            unverifiable_path.join("owner.json"),
+            serde_json::to_string_pretty(&owner).unwrap() + "\n",
+        )
+        .unwrap();
+        age_lease_directory(&unverifiable_path);
+        broken.push(unverifiable_path);
+
+        // ...and an unreadable record stays only within the same bound.
+        let corrupt_path = lease_directory(
+            agent_dir,
+            &canonical_session_path(&agent_dir.join("corrupt.jsonl")),
+        );
+        fs::create_dir_all(&corrupt_path).unwrap();
+        fs::write(corrupt_path.join("owner.json"), "not json").unwrap();
+        age_lease_directory(&corrupt_path);
+        broken.push(corrupt_path);
+
+        age_lease_directory(&verified_directory);
+        assert_eq!(
+            reclaim_dead_owner_leases(agent_dir),
+            broken.len(),
+            "only the aged broken records were reclaimed"
+        );
+        for directory in &broken {
+            assert!(!directory.exists(), "{} survived", directory.display());
+        }
+        assert!(
+            verified_directory.exists(),
+            "a verified identity is honored past the window"
+        );
+        live.release().unwrap();
+    }
+
+    /// Acquisition self-heals over aged broken records: an unreadable
+    /// record and an unrefutable live-pid owner are reclaimed and the
+    /// acquire retries; a young unreadable record refuses explicitly
+    /// instead of acquiring over unknown liveness.
+    #[cfg(unix)]
+    #[test]
+    fn acquisition_self_heals_over_aged_broken_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path();
+
+        let corrupt_path = agent_dir.join("corrupt.jsonl");
+        fs::write(&corrupt_path, "{}\n").unwrap();
+        let corrupt_directory = lease_directory(agent_dir, &canonical_session_path(&corrupt_path));
+        fs::create_dir_all(&corrupt_directory).unwrap();
+        fs::write(corrupt_directory.join("owner.json"), "not json").unwrap();
+
+        // Young: the explicit corruption refusal stands.
+        let error = acquire_runtime_session_lease(&corrupt_path, agent_dir).unwrap_err();
+        assert!(
+            error.downcast_ref::<CorruptLeaseOwnerError>().is_some(),
+            "unexpected refusal: {error}"
+        );
+
+        age_lease_directory(&corrupt_directory);
+        let healed = acquire_runtime_session_lease(&corrupt_path, agent_dir).unwrap();
+        assert_ne!(
+            read_owner(&healed.directory).unwrap().unwrap().token,
+            "",
+            "the healed record names a fresh holder"
+        );
+        healed.release().unwrap();
+
+        // An unrefutable live-pid owner (this test's own pid, with no
+        // recorded start id) gives way only past the bounded window.
+        let unverifiable_path = agent_dir.join("unverifiable.jsonl");
+        fs::write(&unverifiable_path, "{}\n").unwrap();
+        let unverifiable_directory =
+            lease_directory(agent_dir, &canonical_session_path(&unverifiable_path));
+        fs::create_dir_all(&unverifiable_directory).unwrap();
+        let owner = LeaseOwner {
+            version: 1,
+            token: "no-start-id".to_owned(),
+            pid: std::process::id(),
+            process_start_id: None,
+            active_session_id: None,
+            session_path: canonical_session_path(&unverifiable_path)
+                .to_string_lossy()
+                .to_string(),
+            created_at: crate::util::now_iso(),
+        };
+        fs::write(
+            unverifiable_directory.join("owner.json"),
+            serde_json::to_string_pretty(&owner).unwrap() + "\n",
+        )
+        .unwrap();
+        age_lease_directory(&unverifiable_directory);
+        let takeover = acquire_runtime_session_lease(&unverifiable_path, agent_dir).unwrap();
+        assert_ne!(
+            read_owner(&takeover.directory).unwrap().unwrap().token,
+            "no-start-id",
+            "the aged unverifiable record was reclaimed in place"
+        );
+        takeover.release().unwrap();
     }
 
     /// A kill -9 mid-mutation leaves a dead owner plus a brand-new guard
@@ -748,7 +1237,7 @@ mod tests {
             elapsed < STALE_GUARD_AFTER + THROUGH_STALE_SLACK + Duration::from_secs(10),
             "the stale reclaim overran its window: {elapsed:?}"
         );
-        lease.release();
+        lease.release().unwrap();
     }
 
     /// A stale guard of a live owner is never stolen: the open path fails
@@ -792,7 +1281,7 @@ mod tests {
             "the live owner's guard was stolen"
         );
         std::fs::remove_dir(&guard).unwrap();
-        lease.release();
+        lease.release().unwrap();
     }
 
     #[cfg(unix)]
@@ -974,9 +1463,11 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         fs::write(&path, b"{}\n").unwrap();
         let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
-        assert!(lease
-            .with_owned_mutation::<()>(&path, || Err(anyhow!("injected callback error")))
-            .is_err());
+        assert!(
+            lease
+                .with_owned_mutation::<()>(&path, || Err(anyhow!("injected callback error")))
+                .is_err()
+        );
         assert_eq!(
             lease
                 .append_in_flight
@@ -993,7 +1484,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
         );
-        lease.release();
+        lease.release().unwrap();
         assert!(!lease.directory.exists());
     }
 

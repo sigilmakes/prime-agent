@@ -525,7 +525,7 @@ mod tests {
         let previous = {
             let mut core = core.lock().unwrap();
             let lease = core.store.as_mut().unwrap().lease.take().unwrap();
-            lease.release();
+            lease.release().unwrap();
             let mut reopened = SessionFile::open(&path).unwrap();
             reopened.lease = Some(Arc::new(
                 crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
@@ -565,7 +565,8 @@ mod tests {
             .lease
             .as_ref()
             .unwrap()
-            .release();
+            .release()
+            .unwrap();
         assert!(adapter
             .commit(source.clone(), choice("policy/a"))
             .await

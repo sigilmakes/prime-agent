@@ -167,5 +167,5 @@ fn boot_cleanup_preserves_unverifiable_journals_and_waiting_callers_status() {
         pa_daemon::lease::acquire_runtime_session_lease(&live_session, &agent_dir).is_err(),
         "the live fixture still owns its session"
     );
-    live_lease.release();
+    live_lease.release().unwrap();
 }

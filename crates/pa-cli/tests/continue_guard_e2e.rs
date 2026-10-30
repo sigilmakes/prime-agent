@@ -354,7 +354,7 @@ fn print_resume_refuses_a_foreign_lease_holder() {
     assert!(stdout.is_empty(), "stdout: {stdout}");
     assert_eq!(stderr, expected);
 
-    holder.release();
+    holder.release().unwrap();
 
     // With the holder gone the same open proceeds: the guard's lease
     // probe answers None for a released lease (the stale record is not
