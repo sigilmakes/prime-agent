@@ -168,9 +168,6 @@ impl SessionFile {
             skipped_lines: 0,
             epoch: None,
             rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
             log_transport: None,
         };
         for line in lines {
