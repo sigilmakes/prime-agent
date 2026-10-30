@@ -767,4 +767,365 @@ mod tests {
             "the row's aggregate matches the served fold"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Verifier additions (verify-wiring @ 406e74539). These are the tests
+    // verify-rip §5 lists as missing; see reports/verify-wiring.md for the
+    // verdict each one supports.
+    // ------------------------------------------------------------------
+
+    /// T-C / W-3: a rival that created the log first must not cost the
+    /// deferred wire's first flush a second header row.
+    #[test]
+    fn a_rival_created_log_keeps_exactly_one_header_row() {
+        let dir = temp_dir("rival-header");
+        let session_path = dir.join("rival-header.jsonl");
+        // A rival writer creates the log, makes its own header durable, then
+        // releases it. It names the SAME session: one session served twice,
+        // not two sessions.
+        let rival_header = {
+            let rival = SessionFile::create("test", None, 0);
+            let mut line = crate::session_store::session_header_line(&rival.header);
+            line["id"] = json!("rival-header");
+            line
+        };
+        {
+            std::fs::create_dir_all(log_dir(&dir)).expect("log dir");
+            let mut rival_log =
+                SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("rival open");
+            assert!(matches!(
+                rival_log.append(&rival_header, deadline()),
+                Outcome::Committed { .. }
+            ));
+        }
+
+        // The deferred wire's first flush opens the rival's existing, clean,
+        // unlocked log and writes its own header before its rows.
+        let (mut store, _) = fresh_log_session(&dir, "rival-header");
+        store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "user", "content": "hi", "timestamp": 1 } }),
+            )
+            .expect("persist");
+
+        let log = SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("open");
+        let rows = log.read_since(0).expect("read");
+        let types: Vec<Value> = rows
+            .iter()
+            .map(|row| row.body.get("type").cloned().unwrap_or(Value::Null))
+            .collect();
+        let headers = types
+            .iter()
+            .filter(|type_| type_.as_str() == Some("session"))
+            .count();
+        assert_eq!(
+            headers, 1,
+            "the log must hold exactly one session header row; rows: {types:?}"
+        );
+        assert_eq!(rows[0].body.get("type").and_then(Value::as_str), Some("session"));
+        drop(log);
+
+        // The fold must not carry a second header as an entry either.
+        let reopened = SessionFile::open_log(&session_path, &dir).expect("reopen");
+        let folded = reopened
+            .entries()
+            .iter()
+            .map(|entry| entry.type_.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            folded.iter().filter(|type_| *type_ == "session").count(),
+            0,
+            "a duplicate header joined the fold: {folded:?}"
+        );
+    }
+
+    /// T-B / W-1, executed: a flush whose fsync fails leaves the row in the
+    /// file and out of the cursor. The retry of that row must resolve to the
+    /// row the file holds, not append a second one.
+    ///
+    /// Needs the fsync fault injector (LD_PRELOAD); skipped when it is absent:
+    /// `PA_W1_ARM_FILE` names a file whose existence fails fsync for paths
+    /// containing "w1fault". pa-daemon itself has no seam for this (see
+    /// reports/verify-wiring.md section 5.3).
+    #[test]
+    fn an_undecided_flush_row_is_not_appended_twice() {
+        let Ok(arm) = std::env::var("PA_W1_ARM_FILE") else {
+            eprintln!("skipped: no fsync fault injector (PA_W1_ARM_FILE unset)");
+            return;
+        };
+        let dir = temp_dir("w1fault");
+        let session_id = format!(
+            "w1fault-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        );
+        // The log path carries "w1fault", which is what the injector matches.
+        let header = {
+            let store = SessionFile::create("test", None, 0);
+            let mut line = crate::session_store::session_header_line(&store.header);
+            line["id"] = serde_json::json!(session_id);
+            line
+        };
+        let row = |id: &str, text: &str| {
+            serde_json::json!({
+                "type": "message",
+                "id": id,
+                "parentId": serde_json::Value::Null,
+                "timestamp": "2026-10-30T00:00:00.000Z",
+                "message": { "role": "user", "content": text, "timestamp": 1 }
+            })
+        };
+        let wire = LogWire::deferred(&dir);
+        wire.flush(&session_id, &header, std::slice::from_ref(&row("row-a", "one")))
+            .expect("the first flush commits");
+
+        // Arm the injector: the write lands, its fsync fails, and the recovery
+        // cannot decide either (its own fsync fails the same way).
+        std::fs::write(&arm, b"armed").expect("arm");
+        let undecided = wire.flush(&session_id, &header, std::slice::from_ref(&row("row-b", "two")));
+        std::fs::remove_file(&arm).expect("disarm");
+        assert!(
+            undecided.is_err(),
+            "an undecided append must be refused: {undecided:?}"
+        );
+
+        // The row is in the log even though the wire never decided it.
+        let log = SessionLog::open(&log_dir(&dir), &session_id, deadline()).expect("open");
+        let held = log
+            .read_since(0)
+            .expect("read")
+            .into_iter()
+            .filter(|held| held.body.get("id").and_then(Value::as_str) == Some("row-b"))
+            .count();
+        assert_eq!(held, 1, "the undecided row reached the file");
+        drop(log);
+
+        // The retry of the same row: ONE row, one seq.
+        wire.flush(&session_id, &header, std::slice::from_ref(&row("row-b", "two")))
+            .expect("the retry resolves");
+        let log = SessionLog::open(&log_dir(&dir), &session_id, deadline()).expect("open");
+        let rows = log.read_since(0).expect("read");
+        let ids: Vec<Value> = rows
+            .iter()
+            .map(|held| held.body.get("id").cloned().unwrap_or(Value::Null))
+            .collect();
+        assert_eq!(
+            ids.iter()
+                .filter(|id| id.as_str() == Some("row-b"))
+                .count(),
+            1,
+            "one caller intent, one row: {ids:?}"
+        );
+    }
+
+    /// F3 (characterization): the daemon fold cannot see the runtime's
+    /// `branch_selection` row, so a selection made through the runtime is
+    /// invisible to it and its leaf is the last indexed entry.
+    #[test]
+    fn the_daemon_fold_skips_the_runtime_selection_row() {
+        let dir = temp_dir("selection-gap");
+        let session_path = dir.join("selection-gap.jsonl");
+        let (mut store, _) = fresh_log_session(&dir, "selection-gap");
+        store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "user", "content": "hi", "timestamp": 1 } }),
+            )
+            .expect("user row");
+        let answer = store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "assistant", "content": [{ "type": "text", "text": "done" }], "timestamp": 2 } }),
+            )
+            .expect("assistant row");
+        drop(store);
+
+        // The row `SessionRuntime::select` writes (same shape, fixed id).
+        let marker = json!({
+            "type": "branch_selection",
+            "id": "selection-1",
+            "parentId": answer,
+            "leafId": answer,
+        });
+        {
+            let mut log =
+                SessionLog::open(&log_dir(&dir), "selection-gap", deadline()).expect("open");
+            assert!(matches!(
+                log.append(&marker, deadline()),
+                Outcome::Committed { .. }
+            ));
+        }
+
+        let fold = SessionFile::open_log(&session_path, &dir).expect("daemon fold reopen");
+        assert!(
+            fold.entry("selection-1").is_none(),
+            "the selection row is not a SessionEntry (it has no timestamp)"
+        );
+        assert_eq!(fold.skipped_lines, 1, "the fold counted it as unusable");
+        assert_eq!(
+            fold.leaf_id(),
+            Some(answer.as_str()),
+            "the fold's leaf is the last indexed entry, not the selected one"
+        );
+    }
+
+    /// T-E isolation: the three rows WITHOUT the transport's header row project
+    /// correctly, so the header row is what blanks the runtime's projection.
+    #[test]
+    fn the_header_row_is_what_blanks_the_runtime_projection() {
+        use pa_core::session_runtime::SessionRuntime;
+
+        let dir = temp_dir("header-slot");
+        std::fs::create_dir_all(log_dir(&dir)).expect("log dir");
+        {
+            let mut log =
+                SessionLog::open(&log_dir(&dir), "header-slot", deadline()).expect("open the log");
+            for (id, parent, role, text) in [
+                ("root", None, "user", "hi"),
+                ("answer", Some("root"), "assistant", "done"),
+            ] {
+                let row = json!({
+                    "type": "message",
+                    "id": id,
+                    "parentId": parent,
+                    "timestamp": "2026-10-30T00:00:00.000Z",
+                    "message": { "role": role, "content": [{ "type": "text", "text": text }] }
+                });
+                assert!(matches!(
+                    log.append(&row, deadline()),
+                    Outcome::Committed { .. }
+                ));
+            }
+        }
+        let opened = SessionRuntime::open(&log_dir(&dir), "header-slot", deadline())
+            .expect("runtime open");
+        assert_eq!(
+            opened.runtime.projection().len(),
+            2,
+            "without a header row the fold selects the conversation tip"
+        );
+    }
+
+    /// T-E (transport level): a flushed turn replays through the runtime fold
+    /// with the same projection, and a branch selection made through that fold
+    /// is a row in the same log.
+    #[test]
+    fn a_flushed_turn_replays_through_the_runtime_fold() {
+        use pa_core::session_runtime::{ProviderMessage, SessionRuntime};
+
+        let dir = temp_dir("runtime-replay");
+        let session_path = dir.join("runtime-replay.jsonl");
+        let (mut store, _) = fresh_log_session(&dir, "runtime-replay");
+        let user = store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "user", "content": "hi", "timestamp": 1 } }),
+            )
+            .expect("user row");
+        let answer = store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "assistant", "content": [{ "type": "text", "text": "done" }], "timestamp": 2 } }),
+            )
+            .expect("assistant row");
+        let tool = store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "toolResult", "content": [{ "type": "text", "text": "listing" }], "timestamp": 3 } }),
+            )
+            .expect("tool row");
+        // The serving store holds the log's flock; the runtime takes it next.
+        drop(store);
+
+        let opened = SessionRuntime::open(&log_dir(&dir), "runtime-replay", deadline())
+            .expect("runtime open");
+        let mut runtime = opened.runtime;
+        let turn = vec![
+            ProviderMessage {
+                role: "user".to_owned(),
+                content: "hi".to_owned(),
+            },
+            ProviderMessage {
+                role: "assistant".to_owned(),
+                content: "done".to_owned(),
+            },
+            ProviderMessage {
+                role: "toolResult".to_owned(),
+                content: "listing".to_owned(),
+            },
+        ];
+        assert_eq!(
+            runtime.projection(),
+            turn,
+            "the flushed turn must project in log order; the fold holds {} rows and selected leaf {:?}",
+            runtime.rows().len(),
+            runtime.leaf()
+        );
+        assert_eq!(runtime.leaf(), Some(tool.as_str()));
+
+        // A second answer forking from the user row: the tip branch keeps the
+        // first turn selected until a selection row says otherwise.
+        let alternative = json!({
+            "type": "message",
+            "id": "alternative-answer",
+            "parentId": user,
+            "timestamp": "2026-10-30T00:00:04.000Z",
+            "message": { "role": "assistant", "content": [{ "type": "text", "text": "other" }], "timestamp": 4 }
+        });
+        assert!(matches!(
+            runtime.append(&alternative, deadline()).expect("append"),
+            Outcome::Committed { .. }
+        ));
+        assert_eq!(
+            runtime.projection(),
+            turn,
+            "a sibling row does not steal the selection"
+        );
+
+        // Selecting the fork's leaf switches the projection, and the selection
+        // is a row: it must survive a reopen.
+        runtime
+            .select("alternative-answer", deadline())
+            .expect("select the fork");
+        assert_eq!(
+            runtime.projection(),
+            vec![
+                ProviderMessage {
+                    role: "user".to_owned(),
+                    content: "hi".to_owned(),
+                },
+                ProviderMessage {
+                    role: "assistant".to_owned(),
+                    content: "other".to_owned(),
+                },
+            ]
+        );
+        runtime.select(&tool, deadline()).expect("select the turn");
+        assert_eq!(runtime.projection(), turn);
+        drop(runtime);
+
+        let reopened = SessionRuntime::open(&log_dir(&dir), "runtime-replay", deadline())
+            .expect("reopen");
+        assert_eq!(
+            reopened.runtime.projection(),
+            turn,
+            "the selection row replays: the same branch is selected after a reopen"
+        );
+        assert_eq!(reopened.runtime.leaf(), Some(tool.as_str()));
+        drop(reopened);
+
+        // The daemon's own fold opens the same log and keeps the turn.
+        let fold = SessionFile::open_log(&session_path, &dir).expect("daemon fold reopen");
+        assert!(fold.entry(&answer).is_some(), "the turn's rows are in the log");
+        // Characterization, not an endorsement (port-order gap): the daemon
+        // fold does not know the runtime's `branch_selection` row, so it skips
+        // both selection rows and its leaf is the last indexed entry rather
+        // than the selected one.
+        assert_eq!(
+            fold.leaf_id(),
+            Some("alternative-answer"),
+            "the daemon fold and the runtime fold disagree on the selected leaf"
+        );
+    }
 }
