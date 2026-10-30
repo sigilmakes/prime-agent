@@ -269,7 +269,12 @@ impl SessionFile {
         }
         fold_child_usage_attributions(&mut file.entries);
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
-        let wire = crate::session_transport::LogWire::held(log, agent_dir, file.entries.len());
+        let wire = crate::session_transport::LogWire::held(
+            log,
+            agent_dir,
+            file.entries.len(),
+            rows.last().map_or(1, |row| row.seq),
+        );
         file.log_transport = Some(wire);
         Ok(file)
     }

@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 /// Every filesystem operation the session log performs.
-pub(crate) trait Disk: Send + Sync {
+pub trait Disk: Send + Sync {
     /// Open the log for appending, creating it when absent; `true` when this
     /// call created the file.
     fn open_log(&self, path: &Path) -> io::Result<(File, bool)>;
@@ -34,7 +34,7 @@ pub(crate) trait Disk: Send + Sync {
 }
 
 /// The production disk.
-pub(crate) struct RealDisk;
+pub struct RealDisk;
 
 impl Disk for RealDisk {
     fn open_log(&self, path: &Path) -> io::Result<(File, bool)> {

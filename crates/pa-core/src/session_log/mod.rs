@@ -8,7 +8,10 @@
 //! outcomes. Waiting for another writer is the caller's decision.
 
 mod crc;
-mod disk;
+// The disk seam is public so a harness crate can inject a fault-injected
+// disk at its own tests (`Disk`'s doc: real files in production,
+// fault-injected files in tests exercising the same code path).
+pub mod disk;
 mod line;
 #[cfg(test)]
 mod tests;
@@ -20,7 +23,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use disk::{Disk, RealDisk};
+pub use disk::{Disk, RealDisk};
 pub use line::Row;
 
 /// Why nothing durable was written.
@@ -310,7 +313,11 @@ impl SessionLog {
         Self::repair_with(Arc::new(RealDisk), dir, id, deadline)
     }
 
-    fn open_with(
+    /// Open a session's log over an injected [`Disk`] implementation: the
+    /// fault-injection seam. Production uses [`Self::open`]; a disk wrapper
+    /// that fails a syscall on schedule drives the same code path with the
+    /// failure the schedule names.
+    pub fn open_with(
         disk: Arc<dyn Disk>,
         dir: &Path,
         id: &str,

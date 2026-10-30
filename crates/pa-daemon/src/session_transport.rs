@@ -140,45 +140,220 @@ pub(crate) struct LogWire {
     state: std::sync::Arc<std::sync::Mutex<WireState>>,
 }
 
-/// The wire's shared state. The unmaterialized-row cursor lives here because
-/// a store clone carries the same wire: one log gets exactly one tail cursor.
-#[derive(Debug)]
+/// The wire's shared state. The seq cursor and the pending row live here
+/// because a store clone carries the same wire: one log gets exactly one
+/// tail cursor.
 struct WireState {
     /// `None` until the first flush; a refused open retries at the next call.
     log: Option<SessionLog>,
+    /// `None` in production (the open takes [`SessionLog::open`]); an
+    /// injected disk drives the fault-injection tests through the very same
+    /// code paths ([`Disk`]'s own contract).
+    disk: Option<std::sync::Arc<dyn pa_core::session_log::Disk>>,
     agent_dir: PathBuf,
-    /// The header row is durable in the log. A fresh (deferred) wire writes
-    /// it as row one; a held (reopened) wire replays it from the fold's open.
+    /// Row one of the log is a session header. A fresh (deferred) wire writes
+    /// it as row one; a wire whose open found a pre-existing log adopts the
+    /// header it finds at row one instead of writing a second one.
     header_written: bool,
     /// How many of the fold's entry rows are durable in the log, in fold
-    /// order. The store flushes only `entries.len() - flushed` at its tail.
+    /// order. The store flushes only `entries.len() - flushed` at its tail;
+    /// the funnel's per-row write commits then indexes, so this moves with
+    /// the store's count, never ahead of it.
     flushed_entries: usize,
+    /// The next seq this wire pins: the log's last row's seq plus one, set
+    /// at the open and moved by committed rows and tail adoptions only —
+    /// never by a refused or undecided write.
+    next_seq: u64,
+    /// A write whose durability is not decided: the seq it pinned and the
+    /// row it carried. The retry re-pins the same seq, and the core answers
+    /// from the log's bytes — a write that landed is reported, never
+    /// repeated. The pending survives every undecided read of its recovery;
+    /// the log's own verdict on the seq clears it.
+    pending: Option<PendingRow>,
 }
 
-/// Resolve one decided append outcome; `flushed` grows only with committed
-/// rows, and an `Unknown` verdict is asked of the core's recovery before the
-/// caller sees anything.
-fn commit_one(flushed: &mut usize, outcome: Outcome) -> Result<(), LogWireError> {
-    match outcome {
-        Outcome::Committed { .. } => {
-            *flushed += 1;
-            Ok(())
+/// One undecided write: the seq it pinned and the row it carried.
+#[derive(Debug)]
+struct PendingRow {
+    seq: u64,
+    row: Value,
+}
+
+impl std::fmt::Debug for WireState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WireState")
+            .field("has_log", &self.log.is_some())
+            .field("has_disk", &self.disk.is_some())
+            .field("header_written", &self.header_written)
+            .field("flushed_entries", &self.flushed_entries)
+            .field("next_seq", &self.next_seq)
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+impl WireState {
+    /// Resolve the log this wire writes through, exactly once per wire
+    /// object: create the log when absent; for a log that already holds
+    /// rows, adopt row one when it is a session header (no wire writes a
+    /// second header) and take the seq cursor from the log's last row.
+    fn ensure_open(&mut self, session_id: &str) -> Result<(), LogWireError> {
+        if self.log.is_some() {
+            return Ok(());
         }
-        Outcome::Unknown { recover } => match recover.recover(deadline()) {
-            Ok(Outcome::Committed { .. }) => {
-                *flushed += 1;
-                Ok(())
+        std::fs::create_dir_all(log_dir(&self.agent_dir)).map_err(LogWireError::Io)?;
+        let log = match self.disk.clone() {
+            Some(disk) => {
+                SessionLog::open_with(disk, &log_dir(&self.agent_dir), session_id, deadline())
+                    .map_err(open_error)?
             }
-            Ok(Outcome::NotWritten { reason }) => Err(LogWireError::Refused(anyhow::anyhow!(
-                "the log resolved the append as not written: {reason:?}"
-            ))),
-            Ok(Outcome::Busy { .. } | Outcome::Unknown { .. }) | Err(_) => {
-                Err(LogWireError::Refused(anyhow::anyhow!(
-                    "the log could not decide its undecided write"
-                )))
+            None => SessionLog::open(&log_dir(&self.agent_dir), session_id, deadline())
+                .map_err(open_error)?,
+        };
+        // One read decides the adoption and sets the seq cursor both, so the
+        // wire never pins a seq the log already named.
+        let rows = log.read_since(0).map_err(|error| {
+            LogWireError::Refused(
+                anyhow::Error::from(open_error(error))
+                    .context("read the session log at its open"),
+            )
+        })?;
+        if let Some(row) = rows.first() {
+            if row.body.get("type").and_then(Value::as_str) == Some("session") {
+                self.header_written = true;
+                self.flushed_entries = rows.len().saturating_sub(1);
             }
-        },
-        outcome => Err(wire_error(outcome)),
+        }
+        if let Some(last) = rows.last() {
+            self.next_seq = last.seq + 1;
+        }
+        self.log = Some(log);
+        Ok(())
+    }
+
+    /// Adopt the log's tail ([`SessionLog::refresh`], the follower's read)
+    /// before any writes: the seq cursor moves to the log's end, so a rival
+    /// writer's rows since this wire's last look are pinned past, and an
+    /// undecided write whose bytes landed — `Unknown` leaves neither the
+    /// core's cursor nor the wire's advanced — is adopted here, its seq
+    /// answered without a second write. The pending row itself stays: only
+    /// the core's decided outcome clears it, because the caller may
+    /// re-present the same bytes and must re-pin at the pending's seq for
+    /// the core to answer from the landed row instead of repeating it.
+    fn refresh_tail(&mut self) -> Result<(), LogWireError> {
+        let log = self
+            .log
+            .as_mut()
+            .expect("the caller ran ensure_open first");
+        let rows = log.refresh(deadline()).map_err(open_error)?;
+        if let Some(last) = rows.last() {
+            self.next_seq = last.seq + 1;
+        }
+        Ok(())
+    }
+
+    /// Append `row`, pinned, and resolve its outcome against the log before
+    /// anything the caller sees. The rule (the runtime's pending solution):
+    /// the wire pins every row and only a committed row advances the
+    /// cursor; an undecided write keeps its seq and bytes pending so any
+    /// retry re-pins them and the core reports the landed row instead of
+    /// repeating it; a seq that provably holds a foreign row re-syncs and
+    /// re-pins the caller's row once.
+    fn append_pinned(&mut self, row: &Value, is_entry: bool) -> Result<(), LogWireError> {
+        // At most the first attempt plus one re-pin after a provable
+        // conflict: beyond that the log keeps moving under the wire and a
+        // reopen must settle it.
+        for _attempt in 0..2 {
+            let log = self
+                .log
+                .as_mut()
+                .expect("the caller ran ensure_open first");
+            let seq = self
+                .pending
+                .as_ref()
+                .filter(|pending| pending.row == *row)
+                .map(|pending| pending.seq)
+                .unwrap_or(self.next_seq);
+            let outcome = log.append_at(seq, row, deadline());
+            match outcome {
+                Outcome::Committed { .. } => {
+                    // A committed row may be an earlier pending's landed
+                    // bytes re-presented while younger rows already moved
+                    // the cursor; the cursor only ever advances.
+                    self.next_seq = self.next_seq.max(seq + 1);
+                    // The caller indexes the entry it just saw committed.
+                    if is_entry {
+                        self.flushed_entries += 1;
+                    }
+                    self.pending = None;
+                    return Ok(());
+                }
+                Outcome::Unknown { recover } => {
+                    // Remember the seq before the decision: every retry of
+                    // this row re-pins it, and the core answers from the
+                    // log's bytes.
+                    self.pending = Some(PendingRow {
+                        seq: recover.seq(),
+                        row: row.clone(),
+                    });
+                    match recover.recover(deadline()) {
+                        Ok(Outcome::Committed { .. }) => {
+                            // The row is the file's row (the core matched the
+                            // body); the caller indexes it.
+                            self.next_seq = self.next_seq.max(seq + 1);
+                            if is_entry {
+                                self.flushed_entries += 1;
+                            }
+                            self.pending = None;
+                            return Ok(());
+                        }
+                        // The log's verdict: this row's bytes never took the
+                        // pinned seq. Sync the tail's cursor; the loop's next
+                        // attempt re-pins.
+                        Ok(Outcome::NotWritten { .. }) => {
+                            self.pending = None;
+                            self.refresh_tail()?;
+                        }
+                        // An undecided recovery (Busy/error): the seq stays
+                        // pending; nothing else of this flush runs.
+                        _ => {
+                            return Err(LogWireError::Refused(anyhow::anyhow!(
+                                "the session log left its undecided write open; retry the flush"
+                            )))
+                        }
+                    }
+                }
+                Outcome::NotWritten {
+                    reason: pa_core::session_log::NotWritten::SeqConflict { .. },
+                } => {
+                    // The pinned seq holds someone else's row, or none at
+                    // all. The core's own cursor is already current (every
+                    // append adopts the tail first), so `refresh` may have
+                    // nothing new to report; read the rows from this
+                    // wire's stale point onward instead and take the
+                    // cursor from their end. The pinned seq's pending
+                    // stays; a re-present of its bytes still resolves
+                    // through the core's body match.
+                    {
+                        let log = self
+                            .log
+                            .as_mut()
+                            .expect("the caller ran ensure_open first");
+                        let rows = log
+                            .read_since(self.next_seq.saturating_sub(1))
+                            .map_err(open_error)?;
+                        if let Some(last) = rows.last() {
+                            self.next_seq = self.next_seq.max(last.seq + 1);
+                        }
+                    }
+                }
+                outcome => return Err(wire_error(outcome)),
+            }
+        }
+        Err(LogWireError::Refused(anyhow::anyhow!(
+            "the session log's tail kept moving under the wire; reopen the session"
+        )))
     }
 }
 
@@ -189,35 +364,47 @@ impl LogWire {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: None,
+                disk: None,
                 agent_dir: agent_dir.to_path_buf(),
                 header_written: false,
                 flushed_entries: 0,
+                next_seq: 1,
+                pending: None,
             })),
         }
     }
 
     /// A reopened wire wrapping the log the fold was replayed from. The
-    /// header is already durable (row one of the replayed log), and the
-    /// replayed entry count is the wire's tail cursor.
-    pub(crate) fn held(log: SessionLog, agent_dir: &Path, replayed_entries: usize) -> Self {
+    /// header is already durable (row one of the replayed log), `replayed`
+    /// counts the fold's durable entry rows, and `last_seq` pins the cursor
+    /// past the log's last row.
+    pub(crate) fn held(log: SessionLog, agent_dir: &Path, replayed: usize, last_seq: u64) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: Some(log),
+                disk: None,
                 agent_dir: agent_dir.to_path_buf(),
                 header_written: true,
-                flushed_entries: replayed_entries,
+                flushed_entries: replayed,
+                next_seq: last_seq + 1,
+                pending: None,
             })),
         }
     }
 
     /// THE one durable-write API: the pending header row first (exactly once
-    /// per wire), then `rows`, in order.
+    /// per wire; a pre-existing log's header is adopted at the open), then
+    /// `rows`, in order, each pinned at the wire's seq cursor. Every write
+    /// starts with the log's tail, adopted from the log's own cursor, so a
+    /// landed-but-undecided row is answered instead of repeated, and a
+    /// rival's rows are never overwritten.
     ///
     /// # Errors
     ///
     /// [`LogWireError`]: the boundary policy folded into one type. A returned
     /// error leaves the log and the cursor consistent: the committed prefix
-    /// is durable, the rest was never written.
+    /// is durable, its rows indexed by the store, and an undecided write
+    /// stays pending on the wire to resolve at the next flush.
     pub(crate) fn flush(
         &self,
         session_id: &str,
@@ -228,41 +415,41 @@ impl LogWire {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The open resolves first, then appends run one at a time, so the
-        // state's borrow never overlaps itself.
-        if state.log.is_none() {
-            std::fs::create_dir_all(log_dir(&state.agent_dir)).map_err(LogWireError::Io)?;
-            let log = SessionLog::open(&log_dir(&state.agent_dir), session_id, deadline())
-                .map_err(open_error)?;
-            state.log = Some(log);
-        }
+        state.ensure_open(session_id)?;
+        state.refresh_tail()?;
         if !state.header_written {
-            let outcome = state
-                .log
-                .as_mut()
-                .expect("the open above filled the slot")
-                .append(header_row, deadline());
-            commit_one(&mut state.flushed_entries, outcome)?;
+            // The header is row one: pinned at seq one of a log this wire
+            // created.
+            state.append_pinned(header_row, false)?;
             state.header_written = true;
         }
         for row in rows {
-            let outcome = state
-                .log
-                .as_mut()
-                .expect("the open above filled the slot")
-                .append(row, deadline());
-            commit_one(&mut state.flushed_entries, outcome)?;
+            state.append_pinned(row, true)?;
         }
         Ok(())
     }
 
-    /// How many entry rows the log already holds. The store's unmaterialized
-    /// tail is `entries.len() - flushed`.
+    /// How many entry rows the log already holds, per the wire's cursor.
     pub(crate) fn flushed_entries(&self) -> usize {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .flushed_entries
+    }
+
+    /// Inject the disk the wire's flush opens its log through (the
+    /// fault-injection seam: the tests drive the very same code paths).
+    #[cfg(test)]
+    pub(crate) fn defer_with_disk<D: pa_core::session_log::Disk + 'static>(
+        agent_dir: &Path,
+        disk: std::sync::Arc<D>,
+    ) -> Self {
+        let mut wire = Self::deferred(agent_dir);
+        let state = std::sync::Arc::clone(&wire.state);
+        let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.disk = Some(disk);
+        let _ = guard;
+        wire
     }
 }
 
@@ -330,6 +517,10 @@ mod tests {
     use crate::session_store::SessionFile;
     use crate::worker::{Worker, WorkerConfig};
     use serde_json::json;
+    use std::fs::{File, TryLockError};
+    use std::io::{self, Write};
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -358,13 +549,244 @@ mod tests {
         result
     }
 
-    fn fresh_log_session(dir: &std::path::Path, name: &str) -> (SessionFile, std::path::PathBuf) {
+    fn fresh_log_session_with(
+        dir: &std::path::Path,
+        name: &str,
+        wire: LogWire,
+    ) -> (SessionFile, std::path::PathBuf) {
         let session_path = dir.join(format!("{name}.jsonl"));
         let mut store = SessionFile::create("test", None, 0);
         store.set_path(session_path.clone());
-        store.attach_log_wire(LogWire::deferred(&dir));
+        store.attach_log_wire(wire);
         store.rekey_log_session_id(&session_path).expect("re-key");
         (store, session_path)
+    }
+
+    fn fresh_log_session(dir: &std::path::Path, name: &str) -> (SessionFile, std::path::PathBuf) {
+        fresh_log_session_with(dir, name, LogWire::deferred(dir))
+    }
+
+    /// A [`pa_core::session_log::Disk`] wrapper that fails exactly one fsync —
+    /// a write's durability barrier — while its bytes still land. The failed
+    /// barrier's unlock arms the rival: a plain [`File`] takes the log's flock
+    /// the moment the append releases it, so the write's own recovery then
+    /// finds the lock taken and answers busy. fsync lost, bytes landed, lock
+    /// lost — the incident's exact shape, through the production paths.
+    struct FailNextFsync {
+        real: pa_core::session_log::RealDisk,
+        /// The ordinal of the fsync call that must fail; 0 = every call passes.
+        fail_on_ordinal: std::sync::atomic::AtomicU64,
+        calls: std::sync::atomic::AtomicU64,
+        /// Set by the failing fsync; consumed by the next `unlock`, which is
+        /// that append's own lock release.
+        armed: std::sync::atomic::AtomicBool,
+        /// The rival's handles, held so their flocks outlive the append.
+        /// [`Self::release_rival`] drops them.
+        rivals: std::sync::Mutex<Vec<std::fs::File>>,
+        /// The log's lock file, whose fresh open is the rival's file
+        /// description.
+        lock_path: std::path::PathBuf,
+    }
+
+    impl FailNextFsync {
+        fn new(lock_path: std::path::PathBuf) -> Self {
+            Self {
+                real: pa_core::session_log::RealDisk,
+                fail_on_ordinal: std::sync::atomic::AtomicU64::new(0),
+                calls: std::sync::atomic::AtomicU64::new(0),
+                armed: std::sync::atomic::AtomicBool::new(false),
+                rivals: std::sync::Mutex::new(Vec::new()),
+                lock_path,
+            }
+        }
+
+        /// The ordinal of the fsync call that must fail.
+        fn arm_fsync_failure(&self, ordinal: u64) {
+            self.fail_on_ordinal.store(ordinal, Ordering::SeqCst);
+        }
+
+        /// Drop the rival's handles, releasing its flocks.
+        fn release_rival(&self) {
+            self.rivals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
+
+    impl pa_core::session_log::Disk for FailNextFsync {
+        fn open_log(&self, path: &Path) -> io::Result<(File, bool)> {
+            self.real.open_log(path)
+        }
+
+        fn open_lock(&self, path: &Path) -> io::Result<File> {
+            self.real.open_lock(path)
+        }
+
+        fn open_rw(&self, path: &Path) -> io::Result<File> {
+            self.real.open_rw(path)
+        }
+
+        fn open_read(&self, path: &Path) -> io::Result<File> {
+            self.real.open_read(path)
+        }
+
+        fn write(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+            self.real.write(file, bytes)
+        }
+
+        fn fsync(&self, file: &File) -> io::Result<()> {
+            let ordinal = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let target = self.fail_on_ordinal.load(Ordering::SeqCst);
+            if target != 0 && ordinal == target {
+                // The bytes land; durability does not.
+                self.armed.store(true, Ordering::SeqCst);
+                return Err(io::Error::other("fsync lost"));
+            }
+            self.real.fsync(file)
+        }
+
+        fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+            self.real.sync_dir(dir)
+        }
+
+        fn len(&self, file: &File) -> io::Result<u64> {
+            self.real.len(file)
+        }
+
+        fn truncate(&self, file: &File, len: u64) -> io::Result<()> {
+            self.real.truncate(file, len)
+        }
+
+        fn try_lock(&self, file: &File) -> io::Result<bool> {
+            self.real.try_lock(file)
+        }
+
+        fn unlock(&self, file: &File) -> io::Result<()> {
+            let result = self.real.unlock(file);
+            if self.armed.swap(false, Ordering::SeqCst) {
+                // The rival's window: the append just released the lock and
+                // its recovery has not looked yet. A fresh open of the same
+                // lock file is a fresh file description, so its flock
+                // competes.
+                let rival = match File::open(&self.lock_path) {
+                    Ok(rival) => rival,
+                    Err(error) => {
+                        panic!("the rival could not open the lock file to take it: {error}")
+                    }
+                };
+                match rival.try_lock() {
+                    Ok(()) => self
+                        .rivals
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(rival),
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        panic!("the rival could not take the log's lock")
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => {
+                        panic!("the rival's lock attempt failed: {error}")
+                    }
+                }
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn a_rival_created_log_is_adopted_not_re_headed() {
+        let dir = temp_dir("rival-header");
+        // The rival creates the log, writes row one (a session header this
+        // wire did not write), and releases its handle.
+        {
+            let mut log =
+                SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("rival open");
+            assert!(
+                matches!(
+                    log.append(&json!({ "type": "session", "id": "rival-header" }), deadline()),
+                    Outcome::Committed { .. }
+                ),
+                "the rival's header row commits"
+            );
+        }
+        let (mut store, session_path) = fresh_log_session(&dir, "rival-header");
+        // The wire's flush adopts row one and writes no header of its own.
+        store
+            .persist_entry(
+                "message",
+                json!({ "message": { "role": "user", "content": "hi", "timestamp": 1 } }),
+            )
+            .expect("persist");
+        let log = SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("reopen");
+        let rows = log.read_since(0).expect("read");
+        assert_eq!(rows.len(), 2, "the rival's header plus the entry row only");
+        assert_eq!(rows[0].body["type"].as_str(), Some("session"));
+        // The header is metadata, never a conversation root: the served fold
+        // is unaffected. One entry live; one entry on the replay; and if the
+        // header ever leaked into the fold, both counts would be two.
+        assert_eq!(store.entries().len(), 1);
+        drop(store);
+        let replay = SessionFile::open_log(&session_path, &dir).expect("replay");
+        assert_eq!(replay.entries().len(), 1);
+    }
+
+    #[test]
+    fn an_undecided_row_retries_into_exactly_one_file_row() {
+        let dir = temp_dir("undecided");
+        // Ordinal 3: the created log's entry-sync is the first fsync, the
+        // header's append the second, this entry row's barrier the third —
+        // the one whose failure leaves the write undecided. Its unlock arms
+        // the rival, so the recovery answers busy and the wire returns with
+        // the write pending; the re-presented row re-pins the same seq and
+        // the core answers from the landed bytes.
+        let fake = std::sync::Arc::new(FailNextFsync::new(
+            log_dir(&dir).join("undecided.lock"),
+        ));
+        fake.arm_fsync_failure(3);
+        let session_path = dir.join("undecided.jsonl");
+        let mut store = SessionFile::create("test", None, 0);
+        store.set_path(session_path.clone());
+        store.attach_log_wire(LogWire::defer_with_disk(
+            &dir,
+            std::sync::Arc::clone(&fake),
+        ));
+        store.rekey_log_session_id(&session_path).expect("re-key");
+        let entry = crate::session_store::SessionEntry {
+            type_: "message".to_owned(),
+            id: "entry-1".to_owned(),
+            parent_id: None,
+            timestamp: "2026-10-30T00:00:00Z".to_owned(),
+            fields: json!({ "message": { "role": "user", "content": "undecided", "timestamp": 1 } }),
+        };
+        let refused = store
+            .persist_built_log_entry(entry.clone())
+            .expect_err("undecided");
+        assert!(refused.to_string().contains("undecided write open"), "{refused:#}");
+        // The row is not in the fold, but its bytes are in the file: the
+        // barrier was lost, not the write.
+        assert!(store.entries().is_empty());
+        let raw = std::fs::read_to_string(log_file(&dir, "undecided")).expect("log text");
+        assert_eq!(
+            raw.lines().count(),
+            2,
+            "header plus the landed-but-undecided row: {raw}"
+        );
+        // Re-present the same row after the rival releases: the pending
+        // re-pins at its own seq, the core answers from the landed bytes,
+        // and no second copy of the row is written anywhere.
+        fake.release_rival();
+        store
+            .persist_built_log_entry(entry.clone())
+            .expect("the retry");
+        assert_eq!(store.entries().len(), 1, "one index entry");
+        assert_eq!(store.entries()[0].id, entry.id);
+        let raw = std::fs::read_to_string(log_file(&dir, "undecided")).expect("log text");
+        assert_eq!(raw.lines().count(), 2, "no second copy of the row: {raw}");
+        let log = SessionLog::open(&log_dir(&dir), "undecided", deadline()).expect("open");
+        let rows = log.read_since(0).expect("read");
+        let body = serde_json::to_value(&entry).expect("encode");
+        assert_eq!(rows[1].seq, 2);
+        assert_eq!(rows[1].body, body);
     }
 
     #[test]
