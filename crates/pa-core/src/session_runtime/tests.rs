@@ -435,3 +435,60 @@ fn a_header_row_without_an_id_is_carried_not_indexed() {
         3
     );
 }
+
+#[test]
+fn a_delivery_only_runtime_observes_without_appending() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut writer = opened(temp.path());
+    let mut delivery = opened(temp.path());
+    writer
+        .append(&said("root", None, "user", "hello"), deadline())
+        .unwrap();
+    delivery.observe(deadline()).unwrap();
+    assert_eq!(texts(&delivery), ["hello"]);
+
+    writer
+        .append(&answered("answer", "root", "hi"), deadline())
+        .unwrap();
+    assert_eq!(delivery.rows().len(), 1, "nothing arrives unasked");
+    delivery.observe(deadline()).unwrap();
+    assert_eq!(texts(&delivery), ["hello", "hi"]);
+    assert_eq!(delivery.leaf(), Some("answer"));
+    assert_eq!(delivery.last_seq(), 2, "the observer wrote nothing");
+    assert_eq!(delivery.read_since(2).unwrap().len(), 0);
+}
+
+#[test]
+fn a_flushed_turn_replays_with_the_header_present() {
+    let temp = tempfile::tempdir().unwrap();
+    {
+        let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+        // Line one is the transport's header. It carries an id here on purpose:
+        // metadata must not become a root, a leaf, or the selection.
+        let header = json!({
+            "type": "session",
+            "id": "header",
+            "version": 3,
+            "timestamp": "2026-10-30T05:00:00.000Z",
+        });
+        assert_eq!(committed(log.append(&header, deadline())), 1);
+        assert_eq!(
+            committed(log.append(&said("turn", None, "user", "hello"), deadline())),
+            2
+        );
+        assert_eq!(
+            committed(log.append(&answered("reply", "turn", "hi"), deadline())),
+            3
+        );
+    }
+
+    let runtime = opened(temp.path());
+    assert_eq!(runtime.rows().len(), 2, "the header is metadata, not a row");
+    assert_eq!(runtime.leaf(), Some("reply"));
+    assert_eq!(runtime.leaves(), ["reply"]);
+    assert_eq!(texts(&runtime), ["hello", "hi"]);
+    assert_eq!(
+        runtime.header().map(|header| header["version"].clone()),
+        Some(json!(3))
+    );
+}

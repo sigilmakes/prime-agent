@@ -31,7 +31,7 @@ pub(crate) enum Applied {
     Selection { leaf: String },
     /// A row the index already holds.
     Already,
-    /// A row with no id: carried by the log, not a tree node (the session header).
+    /// Carried, not a tree node: the session header, or a row with no id.
     Opaque,
 }
 
@@ -45,6 +45,7 @@ pub(crate) struct Index {
     by_id: HashMap<String, usize>,
     children: HashMap<String, usize>,
     markers: HashSet<usize>,
+    header: Option<Value>,
     last_seq: u64,
 }
 
@@ -54,9 +55,16 @@ impl Index {
         if self.by_seq(seq).is_some() {
             return Ok(Applied::Already);
         }
+        if body.get("type").and_then(Value::as_str) == Some(super::HEADER) {
+            // The session header is metadata, not a turn: it must never become a
+            // root, a leaf, or the selected branch, even when it carries an id.
+            self.header.get_or_insert(body);
+            self.last_seq = self.last_seq.max(seq);
+            return Ok(Applied::Opaque);
+        }
         if body.get("id").and_then(Value::as_str).is_none() {
-            // The session header carries no id: it has a seq, not a place in the
-            // tree, and the newest seq still has to advance past it.
+            // A row with no id has a seq but no place in the tree, and the newest
+            // seq still has to advance past it.
             self.last_seq = self.last_seq.max(seq);
             return Ok(Applied::Opaque);
         }
@@ -98,6 +106,11 @@ impl Index {
         self.last_seq = self.last_seq.max(seq);
         self.entries.push(entry);
         Ok(applied)
+    }
+
+    /// The header row the log carries, when it has one.
+    pub(crate) fn header(&self) -> Option<&Value> {
+        self.header.as_ref()
     }
 
     pub(crate) fn rows(&self) -> &[Entry] {
