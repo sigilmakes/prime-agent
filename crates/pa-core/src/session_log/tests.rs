@@ -467,7 +467,14 @@ fn a_hundred_thousand_rows_stay_usable() {
     let tail = log.read_since(99_990).unwrap();
     assert_eq!(tail.len(), 10);
     assert_eq!(tail[9].seq, 100_000);
-    assert_eq!(log.read_since(0).unwrap().len(), 100_000);
+
+    // The streaming read holds one row at a time; the count is the proof.
+    let mut streamed = 0u64;
+    for row in log.iter_since(0).unwrap() {
+        assert_eq!(row.unwrap().seq, streamed + 1);
+        streamed += 1;
+    }
+    assert_eq!(streamed, 100_000);
     assert!(
         appended < Duration::from_secs(60),
         "appends took {appended:?}"

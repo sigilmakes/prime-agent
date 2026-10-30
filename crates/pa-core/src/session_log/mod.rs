@@ -30,54 +30,35 @@ pub enum NotWritten {
     Encode(String),
     /// `seq` is already named by another row, or lies below the log's next seq
     /// without naming a row; nothing was written.
-    SeqConflict {
-        /// The seq the append asked for.
-        seq: u64,
-    },
+    SeqConflict { seq: u64 },
     /// The log's tail is unusable because an earlier writer died mid-line;
     /// nothing was written. [`SessionLog::repair`] makes the log appendable.
     Damaged {
-        /// Last complete, checksum-valid seq.
         last_good_seq: u64,
-        /// Unusable bytes at the end of the file.
         truncated_bytes: u64,
     },
     /// The write failed provably before the line was complete, or the file
     /// could not be opened at all.
     Io(io::Error),
     /// A resolved [`Outcome::Unknown`]: the row is not in the log.
-    Absent {
-        /// The seq the append intended.
-        seq: u64,
-    },
+    Absent { seq: u64 },
 }
 
 /// What one append attempt established.
 #[derive(Debug)]
 pub enum Outcome {
-    /// The row is durable at `seq`, stamped `ts` by this writer.
-    Committed {
-        /// The committed seq.
-        seq: u64,
-        /// The stamp written into the row's envelope (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
-        ts: String,
-    },
-    /// Nothing durable was written.
-    NotWritten {
-        /// Why.
-        reason: NotWritten,
-    },
-    /// The whole line reached the file but its durability barrier failed, so
-    /// the row may or may not be there. `recover` decides.
-    Unknown {
-        /// The undecided write.
-        recover: Recover,
-    },
-    /// Another writer held the lock at the caller's deadline.
+    /// The row is durable at `seq`; `ts` is the stamp this writer wrote into
+    /// the row's envelope (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
+    Committed { seq: u64, ts: String },
+    /// Nothing durable was written; `reason` says why.
+    NotWritten { reason: NotWritten },
+    /// The whole line reached the file but its barrier failed, so the row may
+    /// or may not be there; `recover` decides.
+    Unknown { recover: Recover },
+    /// Another writer held the lock. `until` is the caller's deadline, echoed;
+    /// `holder` is who held it, as that writer recorded itself.
     Busy {
-        /// The caller's deadline, returned unchanged so policy keeps one clock.
         until: Instant,
-        /// Who held the lock, as that writer recorded itself. Courtesy only.
         holder: Option<Holder>,
     },
 }
@@ -103,10 +84,9 @@ pub enum Error {
     Io(#[from] io::Error),
     /// Another writer holds the lock at the caller's deadline.
     #[error("session log lock is held by another writer")]
+    /// `until` is the caller's deadline; `holder` is who held the lock.
     Busy {
-        /// The caller's deadline.
         until: Instant,
-        /// Who held the lock, when the holder recorded it.
         holder: Option<Holder>,
     },
     /// The tail is torn or corrupt; [`SessionLog::repair`] truncates it.
@@ -114,9 +94,7 @@ pub enum Error {
         "session log damaged after seq {last_good_seq}: {truncated_bytes} unusable trailing bytes"
     )]
     Damaged {
-        /// Last complete, checksum-valid seq.
         last_good_seq: u64,
-        /// Unusable bytes at the end of the file.
         truncated_bytes: u64,
     },
 }
@@ -277,7 +255,23 @@ impl SessionLog {
     ///
     /// I/O errors from opening or reading the log.
     pub fn read_since(&self, since: u64) -> Result<Vec<Row>, Error> {
-        Ok(self.scan(0, since)?.rows)
+        self.iter_since(since)?.collect()
+    }
+
+    /// Rows with `seq > since`, one at a time and without holding the file in
+    /// memory: the caller decides how many to keep. Stops at the first unusable
+    /// line exactly like [`Self::read_since`].
+    ///
+    /// # Errors
+    ///
+    /// I/O errors from opening the log; later reads surface as the item's error.
+    pub fn iter_since(&self, since: u64) -> Result<Rows, Error> {
+        Ok(Rows {
+            scanner: Scanner::open(self.disk.as_ref(), &self.log_path, 0)?,
+            since,
+            last_seq: 0,
+            done: false,
+        })
     }
 
     /// Truncate the unusable tail to the last complete, checksum-valid line,
@@ -480,10 +474,7 @@ impl SessionLog {
 
     /// Read complete, valid lines, stopping at the first bad one.
     fn scan(&self, from: u64, since: u64) -> Result<Scan, Error> {
-        use std::io::{BufRead, BufReader, Read as _, Seek, SeekFrom};
-
-        let mut reader = BufReader::new(self.disk.open_read(&self.log_path)?);
-        reader.seek(SeekFrom::Start(from))?;
+        let mut scanner = Scanner::open(self.disk.as_ref(), &self.log_path, from)?;
         let mut scan = Scan {
             rows: Vec::new(),
             row_count: 0,
@@ -491,26 +482,7 @@ impl SessionLog {
             good_len: from,
             clean: true,
         };
-        let mut offset = from;
-        let mut buffer = Vec::new();
-        loop {
-            buffer.clear();
-            let read = reader
-                .by_ref()
-                .take(line::MAX_LINE_BYTES as u64 + 1)
-                .read_until(b'\n', &mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            if buffer.last() != Some(&b'\n') || buffer.len() > line::MAX_LINE_BYTES {
-                scan.clean = false;
-                break;
-            }
-            buffer.pop();
-            let Some(parsed) = line::parse(&buffer) else {
-                scan.clean = false;
-                break;
-            };
+        while let Some(parsed) = scanner.advance()? {
             if parsed.seq <= scan.last_seq {
                 scan.clean = false;
                 break;
@@ -528,9 +500,9 @@ impl SessionLog {
                     body,
                 });
             }
-            offset += read as u64;
-            scan.good_len = offset;
         }
+        scan.good_len = scanner.offset;
+        scan.clean = scan.clean && scanner.end == End::Eof;
         Ok(scan)
     }
 
@@ -588,6 +560,116 @@ impl SessionLog {
             tracing::warn!(path = %self.lock_path.display(), %error, "session log unlock failed");
         }
         result
+    }
+}
+
+/// Streaming rows after a seq, validated line by line.
+pub struct Rows {
+    scanner: Scanner,
+    since: u64,
+    last_seq: u64,
+    done: bool,
+}
+
+impl Iterator for Rows {
+    type Item = Result<Row, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while !self.done {
+            match self.scanner.advance() {
+                Ok(Some(parsed)) => {
+                    if parsed.seq <= self.last_seq {
+                        self.done = true;
+                        continue;
+                    }
+                    self.last_seq = parsed.seq;
+                    if parsed.seq <= self.since {
+                        continue;
+                    }
+                    let Ok(body) = serde_json::from_str(parsed.body) else {
+                        self.done = true;
+                        continue;
+                    };
+                    return Some(Ok(Row {
+                        seq: parsed.seq,
+                        ts: parsed.ts.to_owned(),
+                        body,
+                    }));
+                }
+                Ok(None) => self.done = true,
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Why a line-by-line read stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// Unread lines may remain.
+    Open,
+    /// The file ended on a complete line.
+    Eof,
+    /// A torn, corrupt, or oversized line ended the read.
+    Bad,
+}
+
+/// Reads validated lines from an offset, one at a time.
+struct Scanner {
+    reader: std::io::BufReader<std::fs::File>,
+    buffer: Vec<u8>,
+    /// Byte offset of the next unread line: the end of the last valid one.
+    offset: u64,
+    end: End,
+}
+
+impl Scanner {
+    fn open(disk: &dyn Disk, path: &Path, from: u64) -> Result<Self, Error> {
+        use std::io::{BufReader, Seek, SeekFrom};
+
+        let mut reader = BufReader::new(disk.open_read(path)?);
+        reader.seek(SeekFrom::Start(from))?;
+        Ok(Self {
+            reader,
+            buffer: Vec::new(),
+            offset: from,
+            end: End::Open,
+        })
+    }
+
+    /// The next complete, valid line; `None` once the read has ended, with
+    /// [`Self::end`] saying whether that was the file's end or damage.
+    fn advance(&mut self) -> Result<Option<line::Parsed<'_>>, Error> {
+        use std::io::{BufRead, Read as _};
+
+        if self.end != End::Open {
+            return Ok(None);
+        }
+        self.buffer.clear();
+        let read = self
+            .reader
+            .by_ref()
+            .take(line::MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut self.buffer)?;
+        if read == 0 {
+            self.end = End::Eof;
+            return Ok(None);
+        }
+        if self.buffer.last() != Some(&b'\n') || self.buffer.len() > line::MAX_LINE_BYTES {
+            self.end = End::Bad;
+            return Ok(None);
+        }
+        self.buffer.pop();
+        let Some(parsed) = line::parse(&self.buffer) else {
+            self.end = End::Bad;
+            return Ok(None);
+        };
+        self.offset += read as u64;
+        Ok(Some(parsed))
     }
 }
 
