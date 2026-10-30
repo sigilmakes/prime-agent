@@ -13,10 +13,6 @@ use super::{
     SessionEngineConfig, SupervisorChildSessions, Value,
 };
 
-/// The instruction the floor appends to a bare skill invocation: ask what
-/// the user wants first, never an imperative to execute.
-pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
-
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config), the supervisor link, the children registry, and the
@@ -226,11 +222,6 @@ impl AgentSessionEngine {
     /// (built here when needed); non-skill inputs and build failures
     /// pass through unchanged.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
-        // The floor keys on the ORIGINAL invocation's shape, not the
-        // expanded parse: a skill body can contain a close tag plus a
-        // `\n\n` tail that parses as a trailing user message.
-        let bare_invocation = pa_types::slash_commands::parse_slash_command(text)
-            .is_some_and(|(name, args)| name.starts_with("skill:") && args.trim().is_empty());
         let Ok(model) = self.resolve_model() else {
             return text.to_string();
         };
@@ -238,17 +229,13 @@ impl AgentSessionEngine {
             eprintln!("skill submission expansion skipped: session build failed: {error:#}");
             return text.to_string();
         }
-        let expanded = self.runtime.block_on(async {
+        self.runtime.block_on(async {
             let guard = self.session.lock().await;
             match guard.as_deref() {
                 Some(engine) => engine.expand_skill_submission(text),
                 None => text.to_string(),
             }
-        });
-        if bare_invocation && pa_types::skill_blocks::parse_skill_block(&expanded).is_some() {
-            return format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}");
-        }
-        expanded
+        })
     }
 
     /// The async build of the core session, awaited on the caller's
