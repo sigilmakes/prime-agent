@@ -56,8 +56,10 @@ transient ordering window into a terminal refusal.
 Nothing here depends on another process's progress:
 
 - A writer that is refused gets `Busy` with the holder's self-recorded pid and
-  start time; it retries or reports, and the refusal proves nothing about the
-  log's content.
+  process start time (`Holder::since_ms`); it retries or reports, and the
+  refusal proves nothing about the log's content. The note is diagnostics only:
+  a holder killed before it wrote one leaves the field empty, and ownership is
+  still the `flock`.
 - A writer that cannot prove durability gets `Unknown` and a `Recover` handle
   that carries the seq it intended. `recover()` repairs the torn tail, reads the
   log, and answers `Committed` (after a fresh fsync, so the answer is durable) or

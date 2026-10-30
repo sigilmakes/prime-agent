@@ -37,6 +37,10 @@ pub enum NotWritten {
         last_good_seq: u64,
         truncated_bytes: u64,
     },
+    /// A complete line after `after_seq` fails validation, so appending would
+    /// put a row behind damage; nothing was written. [`SessionLog::repair`]
+    /// truncates it.
+    Corrupt { after_seq: u64 },
     /// The encoded line exceeds `MAX_LINE_BYTES`, so the reader would call it
     /// damage; nothing was written, and the log is byte-identical.
     TooLong {
@@ -62,7 +66,8 @@ pub enum Outcome {
     /// or may not be there; `recover` decides.
     Unknown { recover: Recover },
     /// Another writer held the lock. `until` is the caller's deadline, echoed;
-    /// `holder` is who held it, as that writer recorded itself.
+    /// `holder` is the holder's pid and process start time, as it recorded
+    /// itself (courtesy only, may be absent).
     Busy {
         until: Instant,
         holder: Option<Holder>,
@@ -78,7 +83,10 @@ pub enum Outcome {
 pub struct Holder {
     /// Process id of the holder.
     pub pid: u32,
-    /// Wall-clock milliseconds when the holder took the lock.
+    /// When the holder *process* started, in milliseconds since the Unix
+    /// epoch. A process start identifies a writer across its whole life, so a
+    /// note from a dead holder is visibly old instead of looking fresh; where
+    /// the platform cannot report a start time this is the acquisition time.
     pub since_ms: u64,
 }
 
@@ -90,7 +98,8 @@ pub enum Error {
     Io(#[from] io::Error),
     /// Another writer holds the lock at the caller's deadline.
     #[error("session log lock is held by another writer")]
-    /// `until` is the caller's deadline; `holder` is who held the lock.
+    /// `until` is the caller's deadline; `holder` is who held the lock: its pid
+    /// and process start time, as that writer recorded itself.
     Busy {
         until: Instant,
         holder: Option<Holder>,
@@ -414,14 +423,8 @@ impl SessionLog {
                     truncated_bytes,
                 },
             },
-            // `write_at` refuses a damaged tail before writing (`Damaged`), so
-            // a reader-only verdict reaches here as "the log is not writable,
-            // and nothing of ours went in".
             Err(Error::Corrupt { after_seq }) => Outcome::NotWritten {
-                reason: NotWritten::Io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("session log corrupt after seq {after_seq}"),
-                )),
+                reason: NotWritten::Corrupt { after_seq },
             },
         }
     }
@@ -500,8 +503,14 @@ impl SessionLog {
         };
         let scan = self.scan(from, u64::MAX)?;
         if !scan.clean {
+            let last_good_seq = scan.last_seq.max(self.next_seq - 1);
+            if scan.corrupt {
+                return Err(Error::Corrupt {
+                    after_seq: last_good_seq,
+                });
+            }
             return Err(Error::Damaged {
-                last_good_seq: scan.last_seq.max(self.next_seq - 1),
+                last_good_seq,
                 truncated_bytes: len - scan.good_len,
             });
         }
@@ -519,10 +528,13 @@ impl SessionLog {
             last_seq: 0,
             good_len: from,
             clean: true,
+            corrupt: false,
         };
         while let Some(parsed) = scanner.advance()? {
             if parsed.seq <= scan.last_seq {
+                // A complete line out of order: damage, not a torn tail.
                 scan.clean = false;
+                scan.corrupt = true;
                 break;
             }
             scan.last_seq = parsed.seq;
@@ -530,6 +542,7 @@ impl SessionLog {
             if parsed.seq > since {
                 let Ok(body) = serde_json::from_str(parsed.body) else {
                     scan.clean = false;
+                    scan.corrupt = true;
                     break;
                 };
                 scan.rows.push(Row {
@@ -540,7 +553,10 @@ impl SessionLog {
             }
         }
         scan.good_len = scanner.offset;
-        scan.clean = scan.clean && scanner.end == End::Eof;
+        if let End::Bad { terminated } = scanner.end {
+            scan.clean = false;
+            scan.corrupt = terminated;
+        }
         Ok(scan)
     }
 
@@ -549,10 +565,10 @@ impl SessionLog {
     fn record_holder(&self) {
         use std::io::{Seek as _, SeekFrom, Write as _};
 
-        let since_ms = std::time::SystemTime::now()
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64);
-        let record = format!("{} {since_ms}\n", std::process::id());
+        let record = format!("{} {}\n", std::process::id(), process_start_ms(now_ms));
         let mut file = &self.lock;
         let written = file
             .set_len(0)
@@ -741,6 +757,8 @@ struct Scan {
     last_seq: u64,
     good_len: u64,
     clean: bool,
+    /// The line that ended the scan was complete but invalid, not a torn tail.
+    corrupt: bool,
 }
 
 /// The two paths one session owns. The id is a single path component: it comes
@@ -766,4 +784,43 @@ fn paths(dir: &Path, id: &str) -> Result<(PathBuf, PathBuf), Error> {
 
 fn body_matches(row: &Row, body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| value == row.body)
+}
+
+/// This process's start, in milliseconds since the Unix epoch. `now_ms` is the
+/// caller's wall clock, used to place the start on the same timeline and as the
+/// answer itself where the platform reports no start time.
+fn process_start_ms(now_ms: u64) -> u64 {
+    #[cfg(target_os = "linux")]
+    if let Some(start) = proc_start_ms(now_ms) {
+        return start;
+    }
+    now_ms
+}
+
+/// `/proc/self/stat` field 22 is the start time in clock ticks since boot;
+/// `/proc/uptime` places boot relative to now.
+#[cfg(target_os = "linux")]
+fn proc_start_ms(now_ms: u64) -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // The command name is parenthesised and may contain spaces or ')'.
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    let start_ticks: u64 = after_name.split_whitespace().nth(19)?.parse().ok()?;
+
+    let ticks_per_second = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+        .ok()
+        .flatten()
+        .and_then(|value| u64::try_from(value).ok())?;
+    let start_uptime_ms = start_ticks.checked_mul(1000)? / ticks_per_second;
+
+    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+    let uptime_field = uptime.split_whitespace().next()?;
+    let (seconds, fraction) = uptime_field.split_once('.').unwrap_or((uptime_field, ""));
+    let seconds: u64 = seconds.parse().ok()?;
+    let mut fraction_ms = 0u64;
+    for digit in fraction.bytes().chain([b'0'; 3]).take(3) {
+        fraction_ms = fraction_ms * 10 + u64::from(digit.saturating_sub(b'0'));
+    }
+    let uptime_ms = seconds.checked_mul(1000)?.checked_add(fraction_ms)?;
+
+    Some(now_ms.saturating_sub(uptime_ms.saturating_sub(start_uptime_ms)))
 }

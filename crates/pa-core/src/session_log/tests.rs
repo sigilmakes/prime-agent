@@ -515,14 +515,40 @@ fn a_creator_crash_before_the_directory_sync_is_repaired_by_the_next_open() {
 fn the_busy_holder_record_round_trips() {
     let temp = tempfile::tempdir().unwrap();
     let lock_path = temp.path().join(format!("{ID}.lock"));
+    let test_started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
     let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
 
     // Taking the lock writes the holder's note.
     assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
-    let note = std::fs::read_to_string(&lock_path).unwrap();
-    let (pid, since_ms) = note.trim().split_once(' ').expect("pid and start time");
-    assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
-    assert!(since_ms.parse::<u64>().unwrap() > 0);
+    let read_note = || {
+        let note = std::fs::read_to_string(&lock_path).unwrap();
+        let (pid, since_ms) = note.trim().split_once(' ').expect("pid and start time");
+        (
+            pid.parse::<u32>().unwrap(),
+            since_ms.parse::<u64>().unwrap(),
+        )
+    };
+    let (pid, since_ms) = read_note();
+    assert_eq!(pid, std::process::id());
+    assert!(since_ms > 0);
+    // A start is not in the future, up to one `/proc` tick of precision.
+    assert!(
+        since_ms <= test_started_ms + 20,
+        "a process start cannot follow the note that records it: {since_ms} vs {test_started_ms}"
+    );
+    // And it is stable across acquisitions, unlike an acquisition time: the
+    // recovered start is only as fine as `/proc/uptime`'s hundredths, so allow
+    // one tick of sampling difference.
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+    let (later_pid, later_since) = read_note();
+    assert_eq!(later_pid, pid);
+    assert!(
+        since_ms.abs_diff(later_since) <= 20,
+        "stable start times: {since_ms} vs {later_since}"
+    );
 
     // A foreign holder's note is what a refused writer reads back.
     let rival = OpenOptions::new()
@@ -532,7 +558,7 @@ fn the_busy_holder_record_round_trips() {
         .unwrap();
     rival.lock().unwrap();
     std::fs::write(&lock_path, "4242 1700000000123\n").unwrap();
-    match log.append(&row(2), deadline()) {
+    match log.append(&row(3), deadline()) {
         Outcome::Busy {
             holder: Some(holder),
             ..
@@ -546,7 +572,7 @@ fn the_busy_holder_record_round_trips() {
         other => panic!("expected Busy with the holder's note, got {other:?}"),
     }
     rival.unlock().unwrap();
-    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+    assert_eq!(committed_seq(&log.append(&row(3), deadline())), Some(3));
 }
 
 #[test]
@@ -580,6 +606,44 @@ fn an_oversized_row_is_refused_before_it_is_written() {
         }
     );
     assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+}
+
+#[test]
+fn an_append_behind_a_corrupt_tail_is_refused_with_its_own_reason() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+
+    // A foreign writer leaves a *complete* line with a bad checksum behind the
+    // tail: appending after it would bury a row behind damage.
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(
+        b"{\"seq\":3,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"00000000\",\"row\":{\"kind\":\"test\",\"n\":3}}\n",
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    let outcome = log.append(&row(4), deadline());
+    assert!(
+        matches!(
+            outcome,
+            Outcome::NotWritten {
+                reason: NotWritten::Corrupt { after_seq: 2 }
+            }
+        ),
+        "a complete bad line is Corrupt, not a torn tail: {outcome:?}"
+    );
+    // The refusal is still a refusal: the log is untouched until repair.
+    assert_eq!(
+        SessionLog::repair(temp.path(), ID, deadline())
+            .unwrap()
+            .last_good_seq,
+        2
+    );
+    assert_eq!(committed_seq(&log.append(&row(4), deadline())), Some(3));
 }
 
 #[test]
