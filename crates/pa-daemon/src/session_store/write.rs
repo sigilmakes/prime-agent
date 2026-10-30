@@ -30,6 +30,12 @@ impl SessionEntry {
 impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
     pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
+        // THE transport switch: the log transport flushes the tail from the
+        // wire's durable cursor (rows before it are already durable), so the
+        // reopen flow's `start` and the wire's cursor agree.
+        if self.log_transport.is_some() {
+            return self.flush_unmaterialized_log_tail(start);
+        }
         anyhow::ensure!(
             self.canonical_live.is_none(),
             "canonical owner requires explicit append and adoption ACK"
@@ -118,6 +124,12 @@ impl SessionFile {
             self.canonical_live.is_none(),
             "cannot rewrite a bound canonical journal"
         );
+        // THE transport switch: a log-transported store has no full-file
+        // rewrite; the log is append-only, so this is the flush of the
+        // unmaterialized tail (the create flows' materialization point).
+        if self.log_transport.is_some() {
+            return self.flush_unmaterialized_log_tail(0);
+        }
         anyhow::ensure!(
             self.child_usage_recovery.pending.is_none(),
             "confirm unresolved attribution before rewriting session"
@@ -276,6 +288,12 @@ impl SessionFile {
             self.canonical_live.is_none(),
             "canonical owner requires explicit append and adoption ACK"
         );
+        // THE transport switch's write arm: a log-transported store's only
+        // durable write is the log row for the built entry (the canonical
+        // grant machinery below stays compiled for the canonical sessions).
+        if self.log_transport.is_some() {
+            return self.persist_built_log_entry(entry);
+        }
         self.persist_owned_entry(entry, step)
     }
 

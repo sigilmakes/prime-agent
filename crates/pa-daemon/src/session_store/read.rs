@@ -171,6 +171,7 @@ impl SessionFile {
             canonical_live: None,
             canonical_delivered: std::collections::VecDeque::new(),
             canonical_delivered_custom: std::collections::VecDeque::new(),
+            log_transport: None,
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -194,6 +195,82 @@ impl SessionFile {
         // (fail-open — an off-path marker must not hide the warning on a
         // branch that never showed it).
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
+        Ok(file)
+    }
+
+    /// Load a log-transported session: the log is the source of truth, the
+    /// fold replays it.
+    ///
+    /// The entry chain mirrors [`SessionFile::open`]'s old-format loader
+    /// (malformed-but-complete rows are skipped, never truncated), so
+    /// serving code sees the same fold either transport produced. The
+    /// returned store carries the held wire: its cursor counts exactly the
+    /// replayed entry rows, so later flushes only move durability.
+    ///
+    /// # Errors
+    ///
+    /// A log that no longer yields a session header (the repair truncation
+    /// emptied it), a header whose type is not `session`, I/O, or a foreign
+    /// writer holding the log.
+    pub(crate) fn open_log(session_path: &Path, agent_dir: &Path) -> Result<Self> {
+        let Some(session_id) = crate::session_transport::session_id_of(session_path) else {
+            anyhow::bail!(
+                "session file path has no id name: {}",
+                session_path.display()
+            );
+        };
+        let (log, repair) = crate::session_transport::open_repaired(agent_dir, &session_id)
+            .map_err(|error| anyhow::Error::from(error).context("open the session log"))?;
+        if let Some(report) = &repair {
+            eprintln!(
+                "pa-daemon: session log {} repaired: {} unusable trailing byte(s) after seq {}",
+                session_id, report.truncated_bytes, report.last_good_seq
+            );
+        }
+        let rows = log
+            .read_since(0)
+            .map_err(|error| anyhow::Error::from(crate::session_transport::open_error(error)))
+            .context("read the session log")?;
+        let Some(header_row) = rows.first() else {
+            anyhow::bail!("session log {session_id} holds no header row (the repair emptied it)");
+        };
+        if header_row.body.get("type").and_then(Value::as_str) != Some("session") {
+            anyhow::bail!("session log {session_id} row one is not a session header");
+        }
+        let pa_types::session::FileEntry::Header { header } =
+            serde_json::from_value::<pa_types::session::FileEntry>(header_row.body.clone())
+                .context("invalid session header in the session log")?
+        else {
+            anyhow::bail!("session log {session_id} row one is not a session header");
+        };
+        let mut file = SessionFile {
+            path: session_path.to_path_buf(),
+            header,
+            entries: Vec::new(),
+            by_id: HashMap::new(),
+            leaf_id: None,
+            window: None,
+            lease: None,
+            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
+            anthropic_warning_shown: false,
+            skipped_lines: 0,
+            epoch: None,
+            rows_written_without_epoch: 0,
+            canonical_live: None,
+            canonical_delivered: std::collections::VecDeque::new(),
+            canonical_delivered_custom: std::collections::VecDeque::new(),
+            log_transport: None,
+        };
+        for row in rows.iter().skip(1) {
+            match serde_json::from_value::<SessionEntry>(row.body.clone()) {
+                Ok(entry) => file.push_index(entry),
+                Err(_) => file.skipped_lines += 1,
+            }
+        }
+        fold_child_usage_attributions(&mut file.entries);
+        file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
+        let wire = crate::session_transport::LogWire::held(log, agent_dir, file.entries.len());
+        file.log_transport = Some(wire);
         Ok(file)
     }
 
@@ -235,6 +312,7 @@ impl SessionFile {
             canonical_live: None,
             canonical_delivered: std::collections::VecDeque::new(),
             canonical_delivered_custom: std::collections::VecDeque::new(),
+            log_transport: None,
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -345,6 +423,7 @@ impl SessionFile {
             canonical_live: None,
             canonical_delivered: std::collections::VecDeque::new(),
             canonical_delivered_custom: std::collections::VecDeque::new(),
+            log_transport: None,
         }
     }
 }

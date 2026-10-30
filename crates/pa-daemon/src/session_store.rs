@@ -46,6 +46,9 @@ mod child_usage;
 mod child_usage_tests;
 mod context_selection;
 mod index;
+// The log-transported half of the store (port-plan §3): the write arm the
+// canonical paths bypass.
+mod log_wire;
 
 use index::fold_child_usage_attributions;
 pub(crate) use index::new_entry_id;
@@ -181,6 +184,11 @@ pub struct SessionFile {
     canonical_live: Option<canonical_live::LiveCanonicalOwner>,
     canonical_delivered: std::collections::VecDeque<String>,
     canonical_delivered_custom: std::collections::VecDeque<String>,
+    /// THE transport switch's live half: `Some` serves this store's durable
+    /// rows through the session-log core (see `pa_daemon::session_transport`
+    /// for the switch and its resolution rule). `None` keeps the pre-port
+    /// canonical paths.
+    pub(crate) log_transport: Option<crate::session_transport::LogWire>,
 }
 
 #[derive(Debug, Clone)]
