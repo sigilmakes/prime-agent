@@ -7,11 +7,6 @@
 pub use writer_hook::{CanonicalWriteCertainty, CanonicalWriteRecorder, CanonicalWriteTicket};
 mod writer_hook;
 
-#[cfg(feature = "canonical-integration-test-support")]
-pub use integration_test_support::{CanonicalTestDrain, CanonicalTestEpoch};
-#[cfg(feature = "canonical-integration-test-support")]
-pub mod integration_test_support;
-
 use std::sync::Arc;
 
 mod epoch;

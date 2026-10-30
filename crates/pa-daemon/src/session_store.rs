@@ -29,9 +29,6 @@ mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
 pub(crate) mod canonical_adapter;
-mod canonical_io;
-#[cfg(test)]
-mod canonical_io_seam_tests;
 mod canonical_live;
 #[cfg(test)]
 mod canonical_live_tests;
@@ -39,7 +36,6 @@ pub(crate) mod canonical_raw;
 pub(crate) mod canonical_revision;
 #[cfg(test)]
 mod canonical_row_grant_tests;
-mod canonical_write_seam;
 mod child_usage;
 #[cfg(test)]
 #[path = "session_store/child_usage_tests.rs"]
