@@ -946,7 +946,7 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
             // ordering fact, not a write failure; no lock is held while waiting
             // and the wait re-reads the window after every wake. A window that
             // outlives the shared deadline is reported, never awaited forever.
-            let deadline = tokio::time::Instant::now() + crate::session_store::ADOPTION_ORDER_WAIT;
+            let deadline = tokio::time::Instant::now() + crate::session_store::ADOPTION_ACK_CEILING;
             loop {
                 let window = {
                     let core = core

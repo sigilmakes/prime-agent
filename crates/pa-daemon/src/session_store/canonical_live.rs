@@ -75,11 +75,15 @@ fn unresolved_with(
     }
 }
 
-/// How long one caller waits for another caller's adoption window. A window is
-/// a local prepare/write/ACK round trip on the same machine, so this is orders
-/// of magnitude above a real settle and far below a client turn timeout; it
-/// exists so a broken or abandoned caller cannot park a turn forever.
-pub(crate) const ADOPTION_ORDER_WAIT: Duration = Duration::from_secs(5);
+/// Ceiling for waiting on another caller's adoption window.
+///
+/// A window is a local prepare/write/ACK round trip on the same machine:
+/// milliseconds in practice. The ceiling is far above that and below the
+/// shallowest client turn timeout in this tree (`DEFAULT_REQUEST_TIMEOUT_MS`,
+/// 30s, in the CLI and inference clients), so a stuck peer reports a refusal
+/// that started nothing before the client gives up. The same period bounds how
+/// stale an abandoned window must be before it may be released.
+pub(crate) const ADOPTION_ACK_CEILING: Duration = Duration::from_secs(12);
 
 /// Wait for the owner's adoption window to close, without holding a lock.
 ///
@@ -224,7 +228,7 @@ enum PendingProvenance {
 
 struct Pending {
     /// When this window was armed. An adoption whose caller can never return is
-    /// released after [`ADOPTION_ORDER_WAIT`]; a live caller is never awaited
+    /// released after [`ADOPTION_ACK_CEILING`]; a live caller is never awaited
     /// that long because the owner state mutex serializes entire operations.
     armed: std::time::Instant,
     provenance: PendingProvenance,
@@ -331,21 +335,26 @@ impl State {
     /// Release an adoption window that provably wrote nothing and whose caller
     /// can never return to complete it.
     ///
-    /// Two things make a window unresolvable: its caller guard dropped (recorded
-    /// `Abandoned`, after which the ACK necessarily refuses), or a provisional
-    /// window armed before a fallible preflight was left with no caller at all.
-    /// Either one refuses every later caller forever if kept. Neither wrote
-    /// anything: the owner state mutex serializes a whole operation, so no
-    /// in-flight write is ever observable here, and an operation that wrote
-    /// advances `cursor` past `from`. A written-but-unacknowledged row keeps its
-    /// window: that is committed debt, and only the reconcile boundary may
-    /// resolve it. A live caller (active or holding an acknowledged prepared
-    /// ticket) keeps its window for as long as its work takes.
-    fn expire_unwritten_adoption(&mut self) -> Result<()> {
+    /// A window is resolvable without its caller only when the durable source
+    /// already certifies the outcome, because then no ACK can add information:
+    ///
+    /// - nothing was written (`cursor == from`): a provisional window armed
+    ///   before a fallible preflight, or a caller guard dropped before its write;
+    /// - the write is already in the journal (`cursor == raw.cursor`): the exact
+    ///   suffix this window was opened for is captured from the file, so the row
+    ///   is committed and visible, and only the bookkeeping ACK is missing.
+    ///
+    /// Anything else - a window whose cursor advanced past the file, or that the
+    /// file does not certify - keeps its window: that is genuine uncertainty, and
+    /// only the reconcile boundary may resolve it. A live caller (active or
+    /// holding an acknowledged prepared ticket) keeps its window for as long as
+    /// its work takes, and a fresh window is never released early.
+    fn settle_orphaned_adoption(&mut self) -> Result<()> {
         let Some(pending) = self.pending.as_ref() else {
             return Ok(());
         };
-        if pending.cursor != pending.from || pending.armed.elapsed() < ADOPTION_ORDER_WAIT {
+        let certified = pending.cursor == pending.from || pending.cursor == self.raw.cursor;
+        if !certified || pending.armed.elapsed() < ADOPTION_ACK_CEILING {
             return Ok(());
         }
         let live = pending.signal.as_ref().is_some_and(|signal| {
@@ -761,7 +770,7 @@ impl SessionFile {
                 .0
                 .lock()
                 .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
             state.available()?;
             if state.registered.contains(id) {
                 return Err(failure("user delivery already registered"));
@@ -802,7 +811,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -835,7 +844,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -933,7 +942,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -1068,7 +1077,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -1175,7 +1184,7 @@ impl SessionFile {
                 if request.phase == CanonicalAckPhase::AbandonPreparedOnly
                     && state.pending.is_none()
                 {
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
                     state.available()?;
                     let prepared = state
                         .prepared
@@ -1385,7 +1394,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         if state
@@ -1579,7 +1588,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease.with_owned_mutation(&self.path.clone(), || {
@@ -1854,7 +1863,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -1908,7 +1917,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -2077,7 +2086,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease
@@ -2216,7 +2225,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         let payload = pa_types::session::CustomMessageEntry {
@@ -2465,7 +2474,7 @@ impl SessionFile {
             .0
             .lock()
             .map_err(|_| unresolved("canonical owner mutex poisoned"))?;
-        state.expire_unwritten_adoption()?;
+        state.settle_orphaned_adoption()?;
         state.available()?;
         let lease = state.verify(self)?;
         lease

@@ -46,7 +46,7 @@ struct Faults {
     opening_operation: Option<CanonicalOperation>,
 }
 struct RealOwner {
-    store: Mutex<SessionFile>,
+    store: Arc<Mutex<SessionFile>>,
     faults: Mutex<Faults>,
 }
 fn append_tool_attributions(store: &mut SessionFile) {
@@ -66,6 +66,26 @@ fn append_tool_attributions(store: &mut SessionFile) {
 }
 
 impl CanonicalLiveOwner for RealOwner {
+    fn await_adoption_settled(&self, deadline: tokio::time::Instant) -> CanonicalFuture<()> {
+        // Clone the handle so the future owns its path to the owner. The store
+        // lock is taken only to read the window, never across the wait.
+        let store = Arc::clone(&self.store);
+        Box::pin(async move {
+            crate::session_store::wait_out_adoption(
+                || {
+                    let store = store.lock().map_err(|_| CanonicalStoreError {
+                        kind: CanonicalFailureKind::InvalidRequest,
+                        requested: CanonicalRequestedWrite::NotRequested,
+                        source: CanonicalSourceDisposition::Unchanged,
+                        detail: "canonical store lock poisoned".into(),
+                    })?;
+                    Ok(store.canonical_adoption_window())
+                },
+                deadline,
+            )
+            .await
+        })
+    }
     fn snapshot(&self) -> CanonicalFuture<CanonicalLiveSnapshot> {
         let result = self.store.lock().unwrap().canonical_snapshot();
         Box::pin(async move { result })
@@ -300,7 +320,7 @@ async fn runtime_with_unregistered_user(
     store.attach_canonical_owner().unwrap();
     let manager = mirror(&store);
     let owner = Arc::new(RealOwner {
-        store: Mutex::new(store),
+        store: Arc::new(Mutex::new(store)),
         faults: Mutex::new(Faults::default()),
     });
     let model: pa_agent::types::Model = serde_json::from_value(json!({
@@ -766,6 +786,75 @@ async fn precomputed_metadata_source_advance_is_certified_after_exact_abandon() 
             }
         }
     }
+}
+
+/// A caller that arrives inside another caller's adoption window waits for that
+/// window to close and then writes. Before the fix it was refused with an
+/// adoption conflict, and a Core caller treated that refusal as terminal.
+#[tokio::test]
+async fn second_caller_waits_out_a_pending_adoption_window_and_then_writes() {
+    let (_dir, owner, engine, provider) = runtime().await;
+    let live = engine.session.canonical_live_session().unwrap();
+    live.observe().await.unwrap();
+    let expected = owner
+        .store
+        .lock()
+        .unwrap()
+        .canonical_snapshot()
+        .unwrap()
+        .checkpoint
+        .cursor;
+    // Another caller opens an adoption window and stops before its ACK.
+    let prepared = owner
+        .store
+        .lock()
+        .unwrap()
+        .prepare_canonical(CanonicalLivePrepareRequest {
+            expected: Some(expected),
+            source: CanonicalSourceRequest::Full,
+            mode: CanonicalPrepareMode::Observe,
+            admission: CanonicalAdmissionPolicy::Preserve,
+        })
+        .unwrap();
+    let writer = tokio::spawn(async move {
+        live.append(
+            CanonicalMutationKind::OwnerMetadata,
+            custom_draft().into_entry(),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !writer.is_finished(),
+        "the second caller must wait for the open adoption window, not refuse"
+    );
+    // The window closes exactly the way a live peer closes it.
+    owner
+        .store
+        .lock()
+        .unwrap()
+        .acknowledge_canonical(CanonicalAcknowledgement {
+            operation: prepared.operation,
+            cursor: prepared.checkpoint.cursor,
+            phase: CanonicalAckPhase::AbandonPreparedOnly,
+            adoption: None,
+        })
+        .unwrap();
+    let id = tokio::time::timeout(std::time::Duration::from_secs(20), writer)
+        .await
+        .expect("the waiting caller must resolve once the window closes")
+        .unwrap()
+        .expect("the waiting caller must be admitted after the window closes");
+    assert!(!id.is_empty());
+    assert!(owner
+        .store
+        .lock()
+        .unwrap()
+        .entries()
+        .iter()
+        .any(|row| row.id == id));
+    live.ensure_ready().unwrap();
+    assert!(provider.calls().is_empty());
 }
 
 #[test]

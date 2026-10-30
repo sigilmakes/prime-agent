@@ -321,12 +321,18 @@ pub struct CanonicalLiveMutation<'a> {
     local_revision: u64,
 }
 
-/// How long one caller waits for another caller's in-flight adoption before it
-/// reports the ordering window as unresolved. An adoption window is a local
-/// prepare/write/ACK round trip, so this is orders of magnitude above a real
-/// settle time and well below any client turn timeout; it exists so a broken
-/// peer can never park a turn forever.
-const ADOPTION_ORDER_WAIT: Duration = Duration::from_secs(5);
+/// Ceiling for waiting on another caller's adoption ACK.
+///
+/// An adoption window is a local prepare/write/ACK round trip: milliseconds in
+/// practice. This ceiling sits far above that and below the shallowest client
+/// turn timeout in this tree (`DEFAULT_REQUEST_TIMEOUT_MS`, 30s, in the CLI and
+/// inference clients), so a stuck peer reports `nothing was started` before the
+/// client gives up, and the caller can retry on its next turn.
+///
+/// The one flight slot is *not* bounded by this: it is released by `Flight::drop`
+/// on every path including panic and cancellation, so it is bounded by liveness,
+/// not by wall clock.
+const ADOPTION_ACK_CEILING: Duration = Duration::from_secs(12);
 
 fn pending_adoption(detail: impl Into<String>) -> CanonicalStoreError {
     CanonicalStoreError {
@@ -426,11 +432,14 @@ impl CanonicalLiveSession {
     /// re-evaluating resolves it; only the shared deadline reports it as
     /// unresolved, and then nothing has been started or written.
     ///
+    /// The wait has no wall-clock deadline on purpose: the flight slot is released
+    /// by `Flight::drop`, which runs on success, error, panic and cancellation, so
+    /// an abandoned owner call is the release signal. A deadline here would turn a
+    /// slow peer into a terminal refusal, which is the failure being fixed.
+    ///
     /// # Errors
-    /// Refuses a quarantined view, a poisoned slot, or a window that outlives
-    /// [`ADOPTION_ORDER_WAIT`].
+    /// Refuses only a quarantined or retired view, and a poisoned slot.
     async fn enter(&self) -> Result<Flight<'_>, CanonicalStoreError> {
-        let deadline = tokio::time::Instant::now() + ADOPTION_ORDER_WAIT;
         loop {
             // Arm before the re-check: `notify_waiters` only wakes waiters that
             // are already registered, so a release that lands between the check
@@ -440,11 +449,7 @@ impl CanonicalLiveSession {
             released.as_mut().enable();
             match self.try_enter() {
                 Err(error) if error.is_pending_adoption() => {
-                    if tokio::time::timeout_at(deadline, released).await.is_err() {
-                        return Err(pending_adoption(
-                            "canonical ordering window did not settle; nothing was started",
-                        ));
-                    }
+                    released.await;
                 }
                 other => return other,
             }
@@ -507,12 +512,13 @@ impl CanonicalLiveSession {
     /// Every gated owner call refuses a request that overlaps another caller
     /// before it creates an operation, a barrier or a write, so the identical
     /// call may be issued again once that caller's ACK lands. The wait is the
-    /// owner's own completion signal, bounded by one shared deadline.
+    /// owner's own completion signal, bounded by [`ADOPTION_ACK_CEILING`], and its
+    /// failure mode is a refusal that certifies nothing was started.
     async fn settle_owner<T>(
         &self,
         mut call: impl FnMut() -> CanonicalFuture<T>,
     ) -> Result<T, CanonicalStoreError> {
-        let deadline = tokio::time::Instant::now() + ADOPTION_ORDER_WAIT;
+        let deadline = tokio::time::Instant::now() + ADOPTION_ACK_CEILING;
         loop {
             match call().await {
                 Err(error) if error.is_pending_adoption() => {
@@ -1635,9 +1641,17 @@ impl CanonicalLiveMutation<'_> {
         let cursor = receipt.to.clone();
         let certificate = {
             let mut session = self.flight.live.session.lock().await;
+            // The row is already written and certified by its exact binding
+            // cursor below. A concurrent producer (spawn kickoff, goal driver,
+            // ipython, compaction) bumps the mirror revision for its own row
+            // while this flight is between the owner write and here; that bump
+            // does not order this suffix, so taking the current revision under
+            // the same lock keeps the cursor proof without refusing a write that
+            // already happened.
+            let revision = session.canonical_local_revision();
             session
                 .apply_canonical_suffix(
-                    self.local_revision,
+                    revision,
                     receipt,
                     CanonicalLocalAdoption::preserve(),
                 )
