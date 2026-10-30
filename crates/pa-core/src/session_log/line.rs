@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use super::crc::crc32;
+use super::crc::crc32_parts;
 
 /// Longest line the reader accepts; a longer line is a bad line.
 pub(crate) const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -43,7 +43,7 @@ pub(crate) fn parse(line: &[u8]) -> Option<Parsed<'_>> {
     let wire: Wire<'_> = serde_json::from_slice(line).ok()?;
     let checksum = u32::from_str_radix(wire.crc, 16).ok()?;
     let body = wire.row.get();
-    if crc32(body.as_bytes()) != checksum || !body.starts_with('{') {
+    if checksum_of(wire.seq, body) != checksum || !body.starts_with('{') {
         return None;
     }
     Some(Parsed {
@@ -62,13 +62,20 @@ pub(crate) fn body_of<T: Serialize>(row: &T) -> Result<String, String> {
     Ok(body)
 }
 
+/// The checksum covers the seq and the row's exact bytes, so a flipped seq is
+/// caught as surely as a flipped byte in the row. The seq joins as its 8
+/// little-endian bytes: no decimal formatting can change the checksum.
+pub(crate) fn checksum_of(seq: u64, body: &str) -> u32 {
+    crc32_parts(&[&seq.to_le_bytes(), body.as_bytes()])
+}
+
 /// One wire line, newline included. `ts` is the writer's own timestamp and
 /// carries no JSON metacharacters.
 pub(crate) fn encode(seq: u64, ts: &str, body: &str) -> Vec<u8> {
     debug_assert!(ts
         .bytes()
         .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\\'));
-    let checksum = crc32(body.as_bytes());
+    let checksum = checksum_of(seq, body);
     let mut line = String::with_capacity(body.len() + 96);
     let _ = write!(
         line,

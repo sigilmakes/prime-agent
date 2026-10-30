@@ -37,6 +37,12 @@ pub enum NotWritten {
         last_good_seq: u64,
         truncated_bytes: u64,
     },
+    /// The encoded line exceeds `MAX_LINE_BYTES`, so the reader would call it
+    /// damage; nothing was written, and the log is byte-identical.
+    TooLong {
+        /// The encoded line's length in bytes.
+        bytes: u64,
+    },
     /// The write failed provably before the line was complete, or the file
     /// could not be opened at all.
     Io(io::Error),
@@ -97,6 +103,10 @@ pub enum Error {
         last_good_seq: u64,
         truncated_bytes: u64,
     },
+    /// A complete line failed validation (envelope, checksum, or ordering).
+    /// Every row up to `after_seq` is intact and was already delivered.
+    #[error("session log line after seq {after_seq} is invalid; repair() truncates it")]
+    Corrupt { after_seq: u64 },
 }
 
 /// What [`SessionLog::repair`] left behind.
@@ -245,26 +255,33 @@ impl SessionLog {
         self.append_inner(Some(seq), row, deadline)
     }
 
-    /// Rows with `seq > since`, in order, stopping at the first unusable line
-    /// (torn tail, bad envelope, checksum mismatch, non-increasing seq).
+    /// Rows with `seq > since`, in order.
     ///
-    /// Reading takes no lock: a concurrent append can only leave a torn line at
-    /// the end, which ends the scan.
+    /// Reading takes no lock: a concurrent append can only leave a torn line
+    /// (no terminating newline) at the end, which ends the scan silently. A
+    /// *complete* line that fails validation is damage, and is reported as
+    /// [`Error::Corrupt`] rather than skipped.
     ///
     /// # Errors
     ///
-    /// I/O errors from opening or reading the log.
+    /// I/O errors from opening or reading the log; [`Error::Corrupt`] when a
+    /// complete line is invalid, in which case the rows before it are lost to
+    /// the caller and [`Self::repair`] is the recovery (use [`Self::iter_since`]
+    /// to keep the good prefix).
     pub fn read_since(&self, since: u64) -> Result<Vec<Row>, Error> {
         self.iter_since(since)?.collect()
     }
 
     /// Rows with `seq > since`, one at a time and without holding the file in
-    /// memory: the caller decides how many to keep. Stops at the first unusable
-    /// line exactly like [`Self::read_since`].
+    /// memory: the caller decides how many to keep.
+    ///
+    /// A torn tail ends the stream with no error; a complete invalid line
+    /// yields one `Err(`[`Error::Corrupt`]`)` *after* the rows that preceded it,
+    /// then ends.
     ///
     /// # Errors
     ///
-    /// I/O errors from opening the log; later reads surface as the item's error.
+    /// I/O errors from opening the log, and the same from later items.
     pub fn iter_since(&self, since: u64) -> Result<Rows, Error> {
         Ok(Rows {
             scanner: Scanner::open(self.disk.as_ref(), &self.log_path, 0)?,
@@ -294,12 +311,14 @@ impl SessionLog {
         let (file, created) = disk.open_log(&log_path)?;
         let lock = disk.open_lock(&lock_path)?;
         if created {
-            // Create is the only directory-entry change this core makes, so it
-            // is the only place a directory sync is owed: without it the entry
-            // may vanish while the bytes survive.
             disk.fsync(&file)?;
-            disk.sync_dir(dir)?;
         }
+        // The entry is synced on every open, not only on create: a creator that
+        // dies between creating the file and its own directory sync leaves a
+        // file that every later open sees as pre-existing (`created == false`),
+        // so a create-only sync would never make that session's entry durable
+        // and a power loss could take the whole session while the bytes survive.
+        disk.sync_dir(dir)?;
         let mut log = Self::new(disk, log_path, lock_path, file, lock);
         log.locked(deadline, |log| {
             let scan = log.scan(0, u64::MAX)?;
@@ -395,6 +414,15 @@ impl SessionLog {
                     truncated_bytes,
                 },
             },
+            // `write_at` refuses a damaged tail before writing (`Damaged`), so
+            // a reader-only verdict reaches here as "the log is not writable,
+            // and nothing of ours went in".
+            Err(Error::Corrupt { after_seq }) => Outcome::NotWritten {
+                reason: NotWritten::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("session log corrupt after seq {after_seq}"),
+                )),
+            },
         }
     }
 
@@ -408,6 +436,16 @@ impl SessionLog {
         };
         let ts = line::now_iso8601();
         let line = line::encode(seq, &ts, &body);
+        if line.len() > line::MAX_LINE_BYTES {
+            // The reader's cap is the contract: a row it cannot read is not a
+            // row. Refusing here keeps `Committed` true and keeps a later scan
+            // from calling the log damaged and truncating it.
+            return Ok(Outcome::NotWritten {
+                reason: NotWritten::TooLong {
+                    bytes: line.len() as u64,
+                },
+            });
+        }
         let start = self.known_len;
         if let Err(error) = self.disk.write(&mut self.file, &line) {
             // A row exists only as a complete line: an interrupted write
@@ -578,9 +616,13 @@ impl Iterator for Rows {
         while !self.done {
             match self.scanner.advance() {
                 Ok(Some(parsed)) => {
+                    // A terminated line that breaks the order is damage, not a
+                    // torn tail: nothing about it can be trusted.
                     if parsed.seq <= self.last_seq {
                         self.done = true;
-                        continue;
+                        return Some(Err(Error::Corrupt {
+                            after_seq: self.last_seq,
+                        }));
                     }
                     self.last_seq = parsed.seq;
                     if parsed.seq <= self.since {
@@ -588,7 +630,9 @@ impl Iterator for Rows {
                     }
                     let Ok(body) = serde_json::from_str(parsed.body) else {
                         self.done = true;
-                        continue;
+                        return Some(Err(Error::Corrupt {
+                            after_seq: self.last_seq,
+                        }));
                     };
                     return Some(Ok(Row {
                         seq: parsed.seq,
@@ -596,7 +640,18 @@ impl Iterator for Rows {
                         body,
                     }));
                 }
-                Ok(None) => self.done = true,
+                Ok(None) => {
+                    self.done = true;
+                    // A torn tail (no terminating newline) is how a concurrent
+                    // append looks; the caller gets its rows and no error. A
+                    // complete but invalid line is damage, reported after the
+                    // rows that preceded it.
+                    if self.scanner.end == (End::Bad { terminated: true }) {
+                        return Some(Err(Error::Corrupt {
+                            after_seq: self.last_seq,
+                        }));
+                    }
+                }
                 Err(error) => {
                     self.done = true;
                     return Some(Err(error));
@@ -614,8 +669,10 @@ enum End {
     Open,
     /// The file ended on a complete line.
     Eof,
-    /// A torn, corrupt, or oversized line ended the read.
-    Bad,
+    /// A torn, corrupt, or oversized line ended the read. `terminated` says
+    /// whether the reader saw that line's newline: an unterminated line is the
+    /// torn tail a concurrent append leaves, a terminated one is damage.
+    Bad { terminated: bool },
 }
 
 /// Reads validated lines from an offset, one at a time.
@@ -659,13 +716,17 @@ impl Scanner {
             self.end = End::Eof;
             return Ok(None);
         }
-        if self.buffer.last() != Some(&b'\n') || self.buffer.len() > line::MAX_LINE_BYTES {
-            self.end = End::Bad;
+        if self.buffer.last() != Some(&b'\n') {
+            self.end = End::Bad { terminated: false };
+            return Ok(None);
+        }
+        if self.buffer.len() > line::MAX_LINE_BYTES {
+            self.end = End::Bad { terminated: true };
             return Ok(None);
         }
         self.buffer.pop();
         let Some(parsed) = line::parse(&self.buffer) else {
-            self.end = End::Bad;
+            self.end = End::Bad { terminated: true };
             return Ok(None);
         };
         self.offset += read as u64;

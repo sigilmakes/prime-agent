@@ -3,14 +3,15 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
 use super::disk::{Disk, RealDisk};
-use super::{Error, NotWritten, Outcome, RepairReport, SessionLog};
+use super::line::MAX_LINE_BYTES;
+use super::{Error, Holder, NotWritten, Outcome, RepairReport, SessionLog};
 
 const ID: &str = "01a18af1-session";
 
@@ -257,14 +258,8 @@ fn a_second_writer_is_refused_at_the_deadline() {
     let until = deadline();
     match log.append(&row(1), until) {
         Outcome::Busy {
-            until: reported,
-            holder,
-        } => {
-            assert_eq!(reported, until);
-            let holder = holder.expect("the rival recorded itself");
-            assert_eq!(holder.pid, std::process::id());
-            assert!(holder.since_ms > 0);
-        }
+            until: reported, ..
+        } => assert_eq!(reported, until),
         other => panic!("expected Busy, got {other:?}"),
     }
     assert!(log.read_since(0).unwrap().is_empty());
@@ -431,13 +426,160 @@ fn a_flipped_byte_stops_the_read_and_is_reported_by_repair() {
     bytes[target] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
 
-    let rows = log.read_since(0).unwrap();
-    assert_eq!(rows.iter().map(|row| row.seq).collect::<Vec<_>>(), [1]);
+    // The stream delivers the rows before the damage, then the error.
+    let collected: Vec<_> = log.iter_since(0).unwrap().collect();
+    assert_eq!(collected.len(), 2, "one row, then the verdict");
+    assert_eq!(collected[0].as_ref().unwrap().seq, 1);
+    assert!(matches!(collected[1], Err(Error::Corrupt { after_seq: 1 })));
+    // The Vec form is all-or-error: the caller repairs instead of guessing.
+    assert!(matches!(
+        log.read_since(0),
+        Err(Error::Corrupt { after_seq: 1 })
+    ));
 
     let report = SessionLog::repair(temp.path(), ID, deadline()).unwrap();
     assert_eq!(report.last_good_seq, 1);
     assert_eq!(report.rows, 1);
     assert!(report.truncated_bytes > 0, "repair reports the damage");
+}
+
+#[test]
+fn a_flipped_seq_is_caught_by_the_checksum() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    for n in 1..=3u64 {
+        assert_eq!(committed_seq(&log.append(&row(n), deadline())), Some(n));
+    }
+
+    // The last row's seq, raised past every later seq: the order still
+    // increases, so only the checksum can catch it.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let target = bytes
+        .windows(8)
+        .position(|window| window == br#""seq":3,"#)
+        .expect("the third row's seq")
+        + 6;
+    assert_eq!(bytes[target], b'3');
+    bytes[target] = b'5';
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert!(matches!(
+        log.read_since(0),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
+    assert_eq!(
+        SessionLog::repair(temp.path(), ID, deadline())
+            .unwrap()
+            .last_good_seq,
+        2
+    );
+}
+
+#[test]
+fn a_creator_crash_before_the_directory_sync_is_repaired_by_the_next_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    // The creator dies at its directory sync, so the entry is never durable.
+    let lossy: Arc<dyn Disk> = Arc::new(
+        TestDisk::new().sync_dir(|_| Err(io::Error::other("power lost before the directory sync"))),
+    );
+    assert!(matches!(
+        SessionLog::open_with(lossy, temp.path(), ID, deadline()),
+        Err(Error::Io(_))
+    ));
+    assert!(
+        path.exists(),
+        "the creator's entry is visible to later opens"
+    );
+
+    // Every later open sees `created == false`; the sync must not depend on it.
+    let syncs = Arc::new(AtomicUsize::new(0));
+    let counter: Arc<dyn Disk> = {
+        let syncs = syncs.clone();
+        Arc::new(TestDisk::new().sync_dir(move |_| {
+            syncs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+    };
+    let mut log = SessionLog::open_with(counter, temp.path(), ID, deadline()).unwrap();
+    assert_eq!(
+        syncs.load(Ordering::SeqCst),
+        1,
+        "the reopening writer syncs the entry"
+    );
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+}
+
+#[test]
+fn the_busy_holder_record_round_trips() {
+    let temp = tempfile::tempdir().unwrap();
+    let lock_path = temp.path().join(format!("{ID}.lock"));
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+
+    // Taking the lock writes the holder's note.
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    let note = std::fs::read_to_string(&lock_path).unwrap();
+    let (pid, since_ms) = note.trim().split_once(' ').expect("pid and start time");
+    assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
+    assert!(since_ms.parse::<u64>().unwrap() > 0);
+
+    // A foreign holder's note is what a refused writer reads back.
+    let rival = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    rival.lock().unwrap();
+    std::fs::write(&lock_path, "4242 1700000000123\n").unwrap();
+    match log.append(&row(2), deadline()) {
+        Outcome::Busy {
+            holder: Some(holder),
+            ..
+        } => assert_eq!(
+            holder,
+            Holder {
+                pid: 4242,
+                since_ms: 1_700_000_000_123,
+            }
+        ),
+        other => panic!("expected Busy with the holder's note, got {other:?}"),
+    }
+    rival.unlock().unwrap();
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+}
+
+#[test]
+fn an_oversized_row_is_refused_before_it_is_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    let before = std::fs::read(&path).unwrap();
+
+    let oversized = json!({ "kind": "test", "blob": "x".repeat(MAX_LINE_BYTES) });
+    match log.append(&oversized, deadline()) {
+        Outcome::NotWritten {
+            reason: NotWritten::TooLong { bytes },
+        } => assert!(bytes > MAX_LINE_BYTES as u64, "{bytes}"),
+        other => panic!("expected TooLong, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the log is byte-identical: nothing was written"
+    );
+    // A refused row must not look like damage to the next reader or repair.
+    assert_eq!(log.read_since(0).unwrap().len(), 1);
+    assert_eq!(
+        SessionLog::repair(temp.path(), ID, deadline()).unwrap(),
+        RepairReport {
+            last_good_seq: 1,
+            truncated_bytes: 0,
+            rows: 1,
+        }
+    );
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
 }
 
 #[test]
