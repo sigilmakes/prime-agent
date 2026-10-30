@@ -446,7 +446,7 @@ impl SessionRuntime {
                     self.selected = Some(leaf);
                 }
             }
-            Applied::Already => {}
+            Applied::Already | Applied::Opaque => {}
         }
         Ok(())
     }

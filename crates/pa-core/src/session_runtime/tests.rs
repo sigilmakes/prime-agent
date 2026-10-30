@@ -401,3 +401,37 @@ fn an_oversized_row_is_refused_and_indexes_nothing() {
     drop(runtime);
     assert_eq!(opened(temp.path()).rows().len(), 0);
 }
+
+#[test]
+fn a_header_row_without_an_id_is_carried_not_indexed() {
+    let temp = tempfile::tempdir().unwrap();
+    {
+        // A real session log starts with the header: a row with a type and a
+        // stamp, and no id.
+        let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+        let header = json!({
+            "type": "session",
+            "version": 3,
+            "timestamp": "2026-10-30T05:00:00.000Z",
+        });
+        assert_eq!(committed(log.append(&header, deadline())), 1);
+        assert_eq!(
+            committed(log.append(&said("root", None, "user", "hello"), deadline())),
+            2
+        );
+    }
+
+    let mut runtime = opened(temp.path());
+    assert_eq!(runtime.rows().len(), 1, "the header is not a tree node");
+    assert_eq!(runtime.last_seq(), 2, "but its seq is not re-used");
+    assert_eq!(runtime.leaf(), Some("root"));
+    assert_eq!(texts(&runtime), ["hello"]);
+    assert_eq!(
+        committed(
+            runtime
+                .append(&answered("answer", "root", "hi"), deadline())
+                .unwrap()
+        ),
+        3
+    );
+}
