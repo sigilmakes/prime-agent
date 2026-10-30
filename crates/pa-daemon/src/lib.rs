@@ -98,6 +98,7 @@ pub mod session_navigation;
 pub(crate) mod session_scan;
 pub mod session_stats;
 pub mod session_store;
+pub(crate) mod session_transport;
 pub mod session_tree;
 pub mod session_usage;
 pub(crate) mod setting_switches;

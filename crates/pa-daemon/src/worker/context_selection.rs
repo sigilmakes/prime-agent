@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::agent_engine::{
     canonical_mirror_header, ContextSelectionCommitFuture, ContextSelectionSource,
-    InitialContextSelectionStore,
+    InitialContextSelectionStore, MirrorSeed,
 };
 use crate::lease::{canonical_session_path, SessionLease};
 use crate::session_store::SessionFile;
@@ -108,6 +108,28 @@ fn write_selection(store: &mut SessionFile, selection: &ContextSelection) -> Res
 }
 
 impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
+    fn mirror_seed(&self) -> Result<Option<MirrorSeed>> {
+        let core = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+        let Some(store) = core.store.as_ref() else {
+            return Ok(None);
+        };
+        if !store.is_log_served() {
+            return Ok(None);
+        }
+        let entries = store
+            .entries()
+            .iter()
+            .map(|entry| serde_json::from_value(serde_json::to_value(entry)?))
+            .collect::<Result<Vec<pa_types::session::FileEntry>, serde_json::Error>>()?;
+        Ok(Some(MirrorSeed {
+            header: store.header.clone(),
+            entries,
+        }))
+    }
+
     fn live_owner(
         &self,
         source: ContextSelectionSource,

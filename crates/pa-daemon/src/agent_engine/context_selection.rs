@@ -31,7 +31,21 @@ pub(crate) fn canonical_mirror_header(header: &SessionHeader) -> anyhow::Result<
 pub(crate) type ContextSelectionCommitFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 
+/// A log-transported session's mirror seed: the serving fold the store
+/// already holds, replayed from the session log. The canonical capture/refusal
+/// machinery is the other transport's read arm; this seed replaces it.
+pub(crate) struct MirrorSeed {
+    pub(crate) header: SessionHeader,
+    pub(crate) entries: Vec<pa_types::session::FileEntry>,
+}
+
 pub(crate) trait InitialContextSelectionStore: Send + Sync {
+    /// The transport switch's read arm: a log-transported serving fold, or
+    /// `None` (the canonical capture/refusal path serves instead).
+    fn mirror_seed(&self) -> anyhow::Result<Option<MirrorSeed>> {
+        Ok(None)
+    }
+
     /// Capture only the current owner and header, never a new lease or writer.
     fn capture(&self, expected_file: &Path) -> anyhow::Result<ContextSelectionSource>;
 
@@ -109,6 +123,23 @@ impl super::AgentSessionEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("persistent session has no canonical context selection owner")
             })?;
+        // THE transport switch's read arm: a log-transported session's mirror
+        // builds from the serving fold; the canonical capture/refusal/lease
+        // machinery below serves the other transport.
+        if let Some(seed) = store.mirror_seed()? {
+            let dir = session_dir.unwrap_or_else(|| {
+                path.parent()
+                    .map_or_else(|| std::path::PathBuf::from("."), Path::to_owned)
+            });
+            let mut manager = pa_core::session::manager::SessionManager::in_memory_from_header(
+                &cwd,
+                &dir,
+                seed.header.clone(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            manager.adopt_entries(seed.entries);
+            return Ok((manager, None, None));
+        }
         // Refuse the read BEFORE building anything: a poisoned epoch means an uncertain
         // write, and serving its tail as if classified is exactly the lie the drain
         // claim exists to prevent.

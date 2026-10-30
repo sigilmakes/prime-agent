@@ -129,6 +129,14 @@ impl SessionFile {
                 origin,
             })?,
         };
+        if self.log_transport.is_some() {
+            // THE transport switch: one durable log row, indexed only once
+            // the log committed it (the receipt/forensics machinery below is
+            // the canonical transport's recovery device; the log core's
+            // verdict replaces it).
+            self.persist_built_log_entry(entry)?;
+            return Ok(ChildUsageAppendResult::Created(aggregate));
+        }
         if self.is_canonical_bound() {
             // The report ID already IS this journal row's stable identity. The
             // exact named owner action writes it once and leaves the checkpoint
