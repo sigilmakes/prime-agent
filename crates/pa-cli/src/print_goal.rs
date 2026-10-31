@@ -1383,7 +1383,9 @@ mod tests {
             dir.path(),
             &dir.path().join("sessions"),
         );
-        session_manager.materialize_session_file(Some(dir.path().join("sessions")));
+        session_manager
+            .materialize_session_file(Some(dir.path().join("sessions")))
+            .expect("materialize the resumed session");
         session_manager
             .append_message(pa_types::session::AgentMessage::User(
                 pa_types::ai::UserMessage {

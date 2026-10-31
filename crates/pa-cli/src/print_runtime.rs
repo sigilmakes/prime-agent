@@ -1344,11 +1344,8 @@ fn open_session_file(
     explicit_cwd_override: Option<&std::path::Path>,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
     let session_cwd = stored_session_cwd(path, fallback_cwd, explicit_cwd_override)?;
-    Ok(pa_core::session::manager::SessionManager::open(
-        &session_cwd,
-        session_dir,
-        path,
-    ))
+    pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path)
+        .map_err(|error| error.to_string())
 }
 
 /// The cwd an opened session runs in: the explicit override (main.ts
