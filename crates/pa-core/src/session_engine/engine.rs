@@ -56,9 +56,9 @@ pub struct SessionEngineConfig {
     /// Restrict initial strategy work to the verified pre-admission prefix.
     /// The complete canonical manager and durable strategy selection stay intact.
     pub context_startup_boundary: super::ContextStartupBoundary,
-    /// Exact ordered canonical user-row IDs after a non-Current boundary.
+    /// Exact ordered User or CustomMessage row IDs after a non-Current boundary.
     /// These prove admission identity; content and timestamps are not deduplicated.
-    pub context_startup_admitted_user_ids: Vec<String>,
+    pub context_startup_admitted_input_ids: Vec<String>,
     /// Acknowledge fresh or saved selection through the embedding's canonical
     /// writer before initial strategy work. When set, the SDK does not mint a
     /// provisional selection row; the host must adopt its verified real row.
@@ -388,7 +388,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
                 &plugins,
                 &session,
                 &config.context_startup_boundary,
-                &config.context_startup_admitted_user_ids,
+                &config.context_startup_admitted_input_ids,
             )?
         };
         let captured = snapshot.await?;
@@ -609,7 +609,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
                     &plugins,
                     &session,
                     &config.context_startup_boundary,
-                    &config.context_startup_admitted_user_ids,
+                    &config.context_startup_admitted_input_ids,
                 )?)
             } else {
                 None

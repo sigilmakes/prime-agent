@@ -417,7 +417,7 @@ impl AgentSession {
         &self,
         mut window: crate::session::window::WindowedSessionStore,
         boundary: &ContextStartupBoundary,
-        admitted_user_ids: &[String],
+        admitted_input_ids: &[String],
     ) -> anyhow::Result<()> {
         let _flight = self.compaction_flight.lock().await;
         let (expected_leaf, session_id) = {
@@ -445,8 +445,8 @@ impl AgentSession {
             .transpose()?;
         let initial = window.context();
         let (context, projection_leaf) = if matches!(boundary, ContextStartupBoundary::Current) {
-            if !admitted_user_ids.is_empty() {
-                anyhow::bail!("Current startup context cannot carry admitted-user proof");
+            if !admitted_input_ids.is_empty() {
+                anyhow::bail!("Current startup context cannot carry admitted-input proof");
             }
             let context = if let Some(target) = &target {
                 let route = format!("{}/{}", target.plugin, target.name);
@@ -474,7 +474,7 @@ impl AgentSession {
                 Some(window.leaf_id()),
                 &route,
                 boundary,
-                admitted_user_ids,
+                admitted_input_ids,
             )?
         };
         let model = self

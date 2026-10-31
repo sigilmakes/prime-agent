@@ -58,7 +58,7 @@ async fn engine_runs_tool_loop_and_persists() {
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         context_startup_boundary: crate::session_engine::ContextStartupBoundary::Current,
-        context_startup_admitted_user_ids: Vec::new(),
+        context_startup_admitted_input_ids: Vec::new(),
         on_initial_context_selection: None,
         ollama_cloud: None,
         semantic_edges: None,
@@ -165,7 +165,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         context_startup_boundary: crate::session_engine::ContextStartupBoundary::Current,
-        context_startup_admitted_user_ids: Vec::new(),
+        context_startup_admitted_input_ids: Vec::new(),
         on_initial_context_selection: None,
         ollama_cloud: None,
         semantic_edges: None,
@@ -240,7 +240,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
         SessionEngineConfig {
             on_late_sent_agent_message: None,
             context_startup_boundary: crate::session_engine::ContextStartupBoundary::Current,
-            context_startup_admitted_user_ids: Vec::new(),
+            context_startup_admitted_input_ids: Vec::new(),
             on_initial_context_selection: None,
             ollama_cloud: None,
             semantic_edges: None,
@@ -432,7 +432,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         context_startup_boundary: crate::session_engine::ContextStartupBoundary::Current,
-        context_startup_admitted_user_ids: Vec::new(),
+        context_startup_admitted_input_ids: Vec::new(),
         on_initial_context_selection: None,
         ollama_cloud: None,
         semantic_edges: None,
