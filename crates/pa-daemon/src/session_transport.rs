@@ -215,7 +215,7 @@ impl WireState {
         if let Some(row) = rows.first() {
             if row.body.get("type").and_then(Value::as_str) == Some("session") {
                 self.header_written = true;
-                self.flushed_entries = rows.len().saturating_sub(1);
+                self.flushed_entries = rows.iter().skip(1).filter(|row| row.body.get("type").and_then(Value::as_str) != Some("branch_selection")).count();
             }
         }
         if let Some(last) = rows.last() {
