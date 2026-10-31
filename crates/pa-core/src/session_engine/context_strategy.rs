@@ -409,8 +409,8 @@ impl AgentSession {
         for _ in 0..3 {
             pa_agent::abort::throw_if_aborted_signal(options.abort)?;
 
-            let strategy = (plugins.context_selection())?;
-            let registration = (plugins.capture_context_registration(&strategy))?;
+            let strategy = plugins.context_selection()?;
+            let registration = plugins.capture_context_registration(&strategy)?;
             let (snapshot, leaf, context) = {
                 let session = self.session.lock().await;
                 (
@@ -419,16 +419,15 @@ impl AgentSession {
                     session.active_context(),
                 )
             };
-            let history = (snapshot.await)?;
-            let branch = (active_branch(&history, leaf.as_deref()))?;
+            let history = snapshot.await?;
+            let branch = active_branch(&history, leaf.as_deref())?;
             let assembly = assemble(
                 plugins,
                 context.messages,
                 context.archive.as_ref(),
                 Some(&options.model),
             );
-            let assembled = assembly.await;
-            let messages = (assembled)?;
+            let messages = guarded(plugins, &strategy, None, options.abort, assembly).await?;
             let messages = super::refinement_gate::without_refinements(messages);
             let preparation = Preparation {
                 branch,
@@ -455,34 +454,34 @@ impl AgentSession {
                 "prepare",
                 preparation.leaf.as_deref(),
             );
-            let frame_messages = (frame.messages())?;
-            let frame_entries = (frame.entries(&preparation.branch))?;
-            let payload = (frame.checked(json!({"stage":"prepare","messages":frame_messages,
-                "entries":frame_entries,"leaf":preparation.leaf})))?;
-            let policy_output = (guarded(
+            let frame_messages = frame.messages()?;
+            let frame_entries = frame.entries(&preparation.branch)?;
+            let payload = frame.checked(json!({"stage":"prepare","messages":frame_messages,
+                "entries":frame_entries,"leaf":preparation.leaf}))?;
+            let policy_output = guarded(
                 plugins,
                 &strategy,
                 None,
                 options.abort,
                 plugins.invoke_context(&strategy, payload, &CancellationToken::new()),
             )
-            .await)?;
-            (frame.check(&policy_output))?;
-            let policy: Policy = (serde_json::from_value(policy_output))?;
+            .await?;
+            frame.check(&policy_output)?;
+            let policy: Policy = serde_json::from_value(policy_output)?;
             if !matches!(policy.policy.as_str(), "rolling" | "full") {
-                return Err((anyhow::anyhow!("unknown context preparation policy")).into());
+                return Err(anyhow::anyhow!("unknown context preparation policy"));
             }
             let mut transaction = None;
             let mut accepted = None;
             let mut conflict = false;
             let mut failures = Vec::new();
             let mut skip = "No eligible compactor";
-            let chain = (policy
+            let chain = policy
                 .compactors
                 .iter()
                 .filter(|route| !plugins.context_route_disabled(route))
                 .map(|route| plugins.context_compactor(route))
-                .collect::<anyhow::Result<Vec<_>>>())?;
+                .collect::<anyhow::Result<Vec<_>>>()?;
             for target in chain {
                 let frame = input::Frame::new(
                     plugins.context_session_id(),
@@ -505,16 +504,16 @@ impl AgentSession {
                 ).await;
                 let output = match output {
                     Ok(value) => value,
-                    Err(error) if terminal(&error) => return Err((error).into()),
+                    Err(error) if terminal(&error) => return Err(error),
                     Err(error) => {
                         failures.push(error.to_string());
                         continue;
                     }
                 };
-                let status = (output
+                let status = output
                     .get("status")
                     .and_then(Value::as_str)
-                    .context("compactor must return an explicit status"))?;
+                    .context("compactor must return an explicit status")?;
                 match status {
                     "decline" => continue,
                     "failure" => {
@@ -528,20 +527,17 @@ impl AgentSession {
                         continue;
                     }
                     "fatal" => {
-                        return Err((anyhow::anyhow!(
+                        bail!(
                             "fatal compactor error: {}",
                             output
                                 .get("reason")
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown")
-                        ))
-                        .into())
+                        )
                     }
-                    "cancelled" => return Err((pa_agent::abort::aborted_error()).into()),
+                    "cancelled" => return Err(pa_agent::abort::aborted_error()),
                     "success" | "native" => {}
-                    other => {
-                        return Err((anyhow::anyhow!("unknown compactor status {other}")).into())
-                    }
+                    other => return Err(anyhow::anyhow!("unknown compactor status {other}")),
                 }
                 match native::eligible(&preparation, &policy.policy, &output, options) {
                     Ok(Ok(())) => {}
@@ -549,7 +545,7 @@ impl AgentSession {
                         skip = reason;
                         continue;
                     }
-                    Err(error) => return Err((error).into()),
+                    Err(error) => return Err(error),
                 }
                 let tokens =
                     super::compaction::estimate_context_tokens(&preparation.messages).tokens;
@@ -579,7 +575,7 @@ impl AgentSession {
                             || output.get("operation").and_then(Value::as_str)
                                 == Some("server") =>
                     {
-                        return Err((error).into())
+                        return Err(error)
                     }
                     Err(error) => {
                         failures.push(error.to_string());
@@ -644,7 +640,7 @@ impl AgentSession {
                         ContextRepresentation::Standard { .. }
                     )
                 });
-                let proposed_summary = (ProposedSummary::mark(&mut context.messages, portable))?;
+                let proposed_summary = ProposedSummary::mark(&mut context.messages, portable)?;
                 let validation = guarded(
                     plugins,
                     &strategy,
@@ -660,7 +656,7 @@ impl AgentSession {
                 .await;
                 let mut view = match validation {
                     Ok(view) => view,
-                    Err(error) if terminal(&error) => return Err((error).into()),
+                    Err(error) if terminal(&error) => return Err(error),
                     Err(error) => {
                         failures.push(error.to_string());
                         continue;
@@ -668,9 +664,9 @@ impl AgentSession {
                 };
                 // Resolve and remove private provenance BEFORE any write. A
                 // dropped, duplicated, or changed proposal is never guessed by body.
-                let proposed_position = (proposed_summary
+                let proposed_position = proposed_summary
                     .map(|proposal| proposal.resolve(&mut view))
-                    .transpose())?;
+                    .transpose()?;
                 let committed = {
                     let mut session = self.session.lock().await;
                     let Some(tail) = descendant_entries(

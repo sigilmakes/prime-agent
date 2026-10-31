@@ -575,8 +575,7 @@ impl SessionPlugins {
     }
 
     // A successful prewrite closure admits exactly one already-built mutation.
-    // Retirement after admission may not cancel its receipt adoption/ACK, but
-    // publication must pass this same registration guard again after ACK.
+    // Publication must pass the same registration guard as the durable append.
     pub(super) fn with_registered_context_authority<T>(
         &self,
         registration: &ContextRegistration,

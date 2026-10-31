@@ -298,7 +298,7 @@ impl AgentSession {
                 &attempt_options,
             );
             let summarized = summarize.await;
-            let mut prepared = (summarized)?;
+            let mut prepared = summarized?;
             // A toggle during the summarizer request must not re-inject the captured digest.
             prepared.entry.harness_digest = None;
             prepared.entry.harness_state_fingerprint = None;
@@ -335,7 +335,7 @@ impl AgentSession {
     /// # Errors
     ///
     /// Returns an error when the row cannot be appended or surfaced;
-    /// it is retained in memory either way.
+    /// the model view is unchanged if the append fails.
     pub async fn record_compaction_outcome(
         &self,
         reason: crate::session_engine::messages::CompactionOutcomeReason,
@@ -351,16 +351,17 @@ impl AgentSession {
             content, reason, outcome,
         );
 
-        let mut session = self.session.lock().await;
-        let (_, write_error) = session.append_custom_message_retained(
-            &row.custom_type,
-            row.content.clone(),
-            row.display,
-            row.details.clone(),
-        );
-        if let Some(error) = write_error {
-            eprintln!("pa-core: compaction outcome row not persisted: {error}");
-        }
+        self.persist_metadata_entry(FileEntry::CustomMessage {
+            base: crate::session::metadata::draft_base(),
+            payload: pa_types::session::CustomMessageEntry {
+                custom_type: row.custom_type.clone(),
+                content: row.content.clone(),
+                display: row.display,
+                details: row.details.clone(),
+                rest: row.rest.clone(),
+            },
+        })
+        .await?;
 
         if let Some(loop_message) =
             session_message_to_loop(&SessionAgentMessage::Custom(row.clone()))

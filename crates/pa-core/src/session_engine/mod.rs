@@ -696,12 +696,16 @@ async fn persist_event(
             let mut session = session.lock().await;
             match session_message {
                 SessionAgentMessage::Custom(custom) => {
-                    session.append_custom_message(
-                        &custom.custom_type,
-                        custom.content,
-                        custom.display,
-                        custom.details,
-                    )?;
+                    session.append_metadata_intent(FileEntry::CustomMessage {
+                        base: crate::session::metadata::draft_base(),
+                        payload: pa_types::session::CustomMessageEntry {
+                            custom_type: custom.custom_type,
+                            content: custom.content,
+                            display: custom.display,
+                            details: custom.details,
+                            rest: custom.rest,
+                        },
+                    })?;
                 }
                 other => {
                     session.append_message(other)?;
