@@ -121,7 +121,7 @@ impl super::AgentSessionEngine {
         }
 
         manager.set_entry_writer(store.entry_writer(source.clone()));
-        manager.set_entry_writer_cursor(seed.cursor);
+        manager.set_committed_cursor(seed.cursor);
         self.row_sink_ready
             .store(true, std::sync::atomic::Ordering::Release);
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =

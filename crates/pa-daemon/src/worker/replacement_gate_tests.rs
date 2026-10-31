@@ -403,7 +403,7 @@ fn a_large_valid_last_row_stays_intact_during_tail_repair() {
     session.rewrite().unwrap();
     let original = std::fs::read(&path).unwrap();
     assert!(original.len() > 1024 * 1024);
-    pa_core::session::manager::repair_jsonl_damage(&path);
+    crate::session_store::SessionFile::open_owned_log(&path).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
 
     {
@@ -415,7 +415,7 @@ fn a_large_valid_last_row_stays_intact_during_tail_repair() {
         torn.write_all(b"{\"type\":\"message\",\"id\":\"torn\"\xc3")
             .unwrap();
     }
-    pa_core::session::manager::repair_jsonl_damage(&path);
+    crate::session_store::SessionFile::open_owned_log(&path).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     let reopened = crate::session_store::SessionFile::open(&path).unwrap();
     assert!(reopened.entry(&id).is_some(), "the large row reloads");
