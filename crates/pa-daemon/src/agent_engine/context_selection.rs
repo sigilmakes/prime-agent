@@ -58,21 +58,6 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         selection: ContextSelection,
     ) -> ContextSelectionCommitFuture;
 
-    /// Bind live receipts to the same immutable owner used to build this mirror.
-    /// Read-only/test adapters may retain the standalone behavior.
-
-
-    /// The typed refusal for a read under a poisoned epoch, if this owner has one.
-    ///
-    /// A live epoch that an uncertain write poisoned may not serve its raw tail:
-    /// the bytes are unclassified, so a reader would be reading a row that may be
-    /// partially present. Owners with no epoch (or no canonical path) return `None`.
-
-
-    /// Certify and retire a blocked SDK mirror's actual owner so the next build
-    /// attaches a successor epoch. Refusal keeps the cached runtime and its
-    /// blocked view; history is never rewritten.
-
 }
 
 impl super::AgentSessionEngine {
