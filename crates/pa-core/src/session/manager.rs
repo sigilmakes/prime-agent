@@ -26,9 +26,7 @@ use super::{build_session_context, SessionContext};
 mod lifecycle;
 use super::window;
 
-mod canonical;
-pub(crate) use canonical::CanonicalLivePublication;
-pub use canonical::{CanonicalLocalAdoption, CanonicalRawCoverage};
+mod metadata;
 
 // `get_session_file_path` has zero external callers; the re-export keeps
 // the pub path stable and avoids dead-code churn.
@@ -46,6 +44,13 @@ pub use git::capture_git_context;
 mod repair;
 use repair::serialize_entry;
 pub use repair::{load_entries_from_file, repair_jsonl_damage};
+
+/// Durable append target supplied by an embedding host.
+/// Implementations preserve the complete entry envelope and return only after
+/// the row is durable. They must not call back into the session manager.
+pub trait SessionEntryWriter: Send + Sync {
+    fn append(&self, entry: &FileEntry) -> std::io::Result<()>;
+}
 
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
@@ -74,10 +79,6 @@ pub struct SessionManager {
     has_assistant_entry: bool,
     append_ownership: super::window::AppendOwnership,
     file_entries: Vec<FileEntry>,
-    canonical_raw: Option<canonical::RawCanonicalState>,
-    canonical_local_revision: u64,
-    canonical_metadata_writer:
-        Option<std::sync::Weak<dyn super::canonical::CanonicalMetadataWriter>>,
     window: Option<super::window::WindowedSessionStore>,
     by_id: HashMap<String, usize>,
     labels_by_id: HashMap<String, String>,
@@ -86,6 +87,7 @@ pub struct SessionManager {
     /// Exact worker-owned rows replayed by the current prompt admission.
     admitted_user_rows: std::collections::VecDeque<String>,
     persist_listeners: Vec<SessionPersistListener>,
+    entry_writer: Option<std::sync::Arc<dyn SessionEntryWriter>>,
 }
 
 /// The refine transcript's consumed artifacts: the conversation message
