@@ -37,6 +37,7 @@ pub(crate) type ContextSelectionCommitFuture =
 pub(crate) struct MirrorSeed {
     pub(crate) header: SessionHeader,
     pub(crate) entries: Vec<pa_types::session::FileEntry>,
+    pub(crate) leaf_id: Option<String>,
 }
 
 pub(crate) trait InitialContextSelectionStore: Send + Sync {
@@ -46,7 +47,10 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         Ok(None)
     }
 
-    fn entry_writer(&self, source: ContextSelectionSource) -> std::sync::Arc<dyn pa_core::session::manager::SessionEntryWriter>;
+    fn entry_writer(
+        &self,
+        source: ContextSelectionSource,
+    ) -> std::sync::Arc<dyn pa_core::session::manager::SessionEntryWriter>;
 
     /// Capture only the current owner and header, never a new lease or writer.
     fn capture(&self, expected_file: &Path) -> anyhow::Result<ContextSelectionSource>;
@@ -57,22 +61,6 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         source: ContextSelectionSource,
         selection: ContextSelection,
     ) -> ContextSelectionCommitFuture;
-
-    /// Bind live receipts to the same immutable owner used to build this mirror.
-    /// Read-only/test adapters may retain the standalone behavior.
-
-
-    /// The typed refusal for a read under a poisoned epoch, if this owner has one.
-    ///
-    /// A live epoch that an uncertain write poisoned may not serve its raw tail:
-    /// the bytes are unclassified, so a reader would be reading a row that may be
-    /// partially present. Owners with no epoch (or no canonical path) return `None`.
-
-
-    /// Certify and retire a blocked SDK mirror's actual owner so the next build
-    /// attaches a successor epoch. Refusal keeps the cached runtime and its
-    /// blocked view; history is never rewritten.
-
 }
 
 impl super::AgentSessionEngine {
@@ -96,7 +84,6 @@ impl super::AgentSessionEngine {
     ) -> anyhow::Result<(
         pa_core::session::manager::SessionManager,
         Option<pa_core::session_engine::engine::InitialContextSelectionCommit>,
-
     )> {
         let Some(path) = session_file else {
             let manager = session_dir.map_or_else(
@@ -115,15 +102,26 @@ impl super::AgentSessionEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("persistent session has no canonical context selection owner")
             })?;
-        let seed = store.mirror_seed()?.ok_or_else(|| anyhow::anyhow!("session log fold is unavailable"))?;
+        let seed = store
+            .mirror_seed()?
+            .ok_or_else(|| anyhow::anyhow!("session log fold is unavailable"))?;
         let source = store.capture(&path)?;
         let dir = session_dir.unwrap_or_else(|| {
-            path.parent().map_or_else(|| std::path::PathBuf::from("."), Path::to_owned)
+            path.parent()
+                .map_or_else(|| std::path::PathBuf::from("."), Path::to_owned)
         });
         let mut manager = pa_core::session::manager::SessionManager::in_memory_from_header(
-            &cwd, &dir, seed.header,
-        ).map_err(anyhow::Error::msg)?;
+            &cwd,
+            &dir,
+            seed.header,
+        )
+        .map_err(anyhow::Error::msg)?;
         manager.adopt_entries(seed.entries);
+        match seed.leaf_id {
+            Some(id) => manager.branch(&id),
+            None => manager.reset_leaf(),
+        }
+
         manager.set_entry_writer(store.entry_writer(source.clone()));
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =
             std::sync::Arc::new(move |selection| store.commit(source.clone(), selection));
@@ -168,7 +166,7 @@ pub(super) fn admitted_user_ids(
             FileEntry::Message {
                 message: AgentMessage::User(_),
                 ..
-            }
+            } | FileEntry::CustomMessage { .. }
         ) {
             ids.push(id);
         }

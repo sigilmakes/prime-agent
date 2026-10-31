@@ -148,16 +148,28 @@ impl SessionFile {
     /// emptied it), a header whose type is not `session`, I/O, or a foreign
     /// writer holding the log.
     pub(crate) fn open_log(session_path: &Path, agent_dir: &Path) -> Result<Self> {
-        let actual = crate::session_transport::log_file(agent_dir, &crate::session_transport::session_id_of(session_path).context("session path has no id")?);
+        let actual = crate::session_transport::log_file(
+            agent_dir,
+            &crate::session_transport::session_id_of(session_path)
+                .context("session path has no id")?,
+        );
         Self::open_log_path(&actual)
     }
 
     fn open_log_path(session_path: &Path) -> Result<Self> {
-        anyhow::ensure!(session_path.is_file(), "session log is unavailable: {}", session_path.display());
-        let session_id = crate::session_transport::session_id_of(session_path).context("session path has no id")?;
-        let directory = session_path.parent().context("session log has no directory")?;
+        anyhow::ensure!(
+            session_path.is_file(),
+            "session log is unavailable: {}",
+            session_path.display()
+        );
+        let session_id = crate::session_transport::session_id_of(session_path)
+            .context("session path has no id")?;
+        let directory = session_path
+            .parent()
+            .context("session log has no directory")?;
         let (log, repair) = crate::session_transport::open_repaired_dir(directory, &session_id)
-            .map_err(anyhow::Error::from).context("open session log")?;
+            .map_err(anyhow::Error::from)
+            .context("open session log")?;
         if let Some(report) = &repair {
             eprintln!(
                 "pa-daemon: session log {} repaired: {} unusable trailing byte(s) after seq {}",
@@ -194,7 +206,10 @@ impl SessionFile {
         };
         for row in rows.iter().skip(1) {
             if row.body.get("type").and_then(Value::as_str) == Some("branch_selection") {
-                let selected = row.body.get("selectedLeaf").context("branch selection has no leaf")?;
+                let selected = row
+                    .body
+                    .get("selectedLeaf")
+                    .context("branch selection has no leaf")?;
                 file.leaf_id = match selected {
                     Value::Null => None,
                     Value::String(id) if file.by_id.contains_key(id) => Some(id.clone()),

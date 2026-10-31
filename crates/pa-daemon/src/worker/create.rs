@@ -211,26 +211,25 @@ impl Worker {
                 // log's flock is the writer's mutual exclusion, so the lease
                 // file is not taken); a pre-port old-format file is refused
                 // typed, never read and never migrated.
-                let loaded =
-                    match crate::session_transport::resolve(&self.config.agent_dir, path) {
-                        crate::session_transport::SessionTransport::SessionLog => {
-                            let path = path.clone();
-                            let agent_dir = self.config.agent_dir.clone();
-                            tokio::task::spawn_blocking(move || {
-                                SessionFile::open_log(&path, &agent_dir)
-                            })
-                            .await
-                            .map_err(anyhow::Error::from)
-                            .and_then(|result| result)
-                        }
-                        crate::session_transport::SessionTransport::LegacyUnsupported => {
-                            Err(anyhow::anyhow!(
-                                "legacy session unsupported: the old-format session file {} is \
+                let loaded = match crate::session_transport::resolve(&self.config.agent_dir, path) {
+                    crate::session_transport::SessionTransport::SessionLog => {
+                        let path = path.clone();
+                        let agent_dir = self.config.agent_dir.clone();
+                        tokio::task::spawn_blocking(move || {
+                            SessionFile::open_log(&path, &agent_dir)
+                        })
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .and_then(|result| result)
+                    }
+                    crate::session_transport::SessionTransport::LegacyUnsupported => {
+                        Err(anyhow::anyhow!(
+                            "legacy session unsupported: the old-format session file {} is \
                                  not read and not migrated",
-                                path.display()
-                            ))
-                        }
-                    };
+                            path.display()
+                        ))
+                    }
+                };
                 match loaded {
                     Ok(mut opened) => {
                         opened_existing_session = true;

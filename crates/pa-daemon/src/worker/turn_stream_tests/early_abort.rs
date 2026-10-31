@@ -10,6 +10,10 @@ struct FirstEventBoundary {
 }
 
 impl SessionEngine for FirstEventBoundary {
+    fn persists_session_entries(&self) -> bool {
+        true
+    }
+
     fn set_session_file(&self, path: std::path::PathBuf) {
         self.engine.set_session_file(path);
     }
@@ -20,28 +24,6 @@ impl SessionEngine for FirstEventBoundary {
 
     fn abort_in_flight_turn(&self) {
         self.engine.abort_in_flight_turn();
-    }
-
-    fn canonical_navigation_session(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = anyhow::Result<
-                        Option<Arc<pa_core::session_engine::canonical_live::CanonicalLiveSession>>,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        self.engine.canonical_navigation_session()
-    }
-
-    fn set_canonical_step_admission(
-        &self,
-        admission: Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>,
-    ) {
-        self.engine.set_canonical_step_admission(admission);
     }
 
     fn run_prompt(
@@ -103,68 +85,33 @@ async fn exact_bound_history(
     core: &Arc<Mutex<SessionCore>>,
     path: &std::path::Path,
 ) -> Vec<Value> {
-    let owner_leaf = {
-        let core = core.lock().unwrap();
-        let store = core.store.as_ref().expect("the worker owns its file");
-        assert!(
-            store.lease.is_some(),
-            "the source binding owns a real lease"
-        );
-        assert!(
-            store.is_canonical_bound(),
-            "the actual owner receipt path ran"
-        );
-        store.leaf_id().map(str::to_owned)
-    };
-    let physical = std::fs::read(path).unwrap();
-    let sdk = engine
-        .session
-        .lock()
-        .await
-        .clone()
-        .expect("the bound SDK was built");
-    sdk.session
-        .canonical_live_session()
-        .expect("not a standalone SDK fixture")
-        .ensure_ready()
-        .expect("the last raw adoption was ACKed");
+    let disk = crate::session_store::SessionFile::open(path).unwrap();
+    let sdk = engine.session.lock().await.clone().expect("SDK built");
     let persistence = sdk.session.shared_persistence();
-    {
-        let manager = persistence.lock().await;
-        let cursor = manager
-            .canonical_binding()
-            .expect("the SDK names the actual source");
-        assert_eq!(cursor.selected_leaf, owner_leaf);
-        assert_eq!(manager.canonical_visible_leaf(), owner_leaf.as_deref());
-        assert!(
-            manager.canonical_pending_admitted_users().is_empty(),
-            "the interrupted turn must not leave a delivery for the next turn"
-        );
-        let mut adopted = manager
-            .canonical_raw_header()
-            .expect("exact physical header")
-            .raw()
-            .to_vec();
-        for row in manager
-            .canonical_raw_full_rows()
-            .expect("full owner-certified raw history")
-        {
-            adopted.extend_from_slice(row.raw());
-        }
-        // Includes every envelope ID, parent ID, timestamp, full payload and
-        // metadata row. No timestamp or UUID normalization is permitted.
-        assert_eq!(
-            adopted, physical,
-            "live canonical bytes equal the actual journal"
-        );
-    }
-    let disk_entries: Vec<Value> = std::str::from_utf8(&physical)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|row| row["type"] == "message")
+    let manager = persistence.lock().await;
+    let expected = crate::session_tree::file_entries(&disk);
+    let actual: Vec<_> = manager
+        .get_entries()
+        .into_iter()
+        .filter(|entry| entry.id().is_some())
         .collect();
-    let disk_messages: Vec<Value> = disk_entries
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+        "full row envelopes must match durable history"
+    );
+    assert_eq!(
+        manager.get_leaf_id(),
+        core.lock().unwrap().store.as_ref().unwrap().leaf_id()
+    );
+    drop(manager);
+    let disk_entries: Vec<Value> = disk
+        .entries()
+        .iter()
+        .filter(|entry| entry.type_ == "message")
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect();
+    let disk_messages: Vec<_> = disk_entries
         .iter()
         .map(|row| row["message"].clone())
         .collect();
@@ -176,7 +123,7 @@ async fn exact_bound_history(
         .collect();
     assert_eq!(
         live_messages, disk_messages,
-        "next-call messages retain exact owner values"
+        "next-call messages retain durable values"
     );
     disk_entries
 }

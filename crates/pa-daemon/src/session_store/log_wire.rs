@@ -63,12 +63,17 @@ impl SessionFile {
 
     /// Selection is durable state but not an entry in the conversation tree.
     pub(crate) fn persist_branch_selection(&self, leaf: Option<&str>) -> Result<()> {
-        let wire = self.log_transport.as_ref().context("session has no log writer")?;
+        self.flush_unmaterialized_log_tail(0)?;
+        let wire = self
+            .log_transport
+            .as_ref()
+            .context("session has no log writer")?;
         wire.flush_selection(
             &self.header.id,
             &super::session_header_line(&self.header),
             leaf,
-        ).map_err(anyhow::Error::from)
+        )
+        .map_err(anyhow::Error::from)
     }
 
     /// Flush every entry row the log does not hold yet, or (for

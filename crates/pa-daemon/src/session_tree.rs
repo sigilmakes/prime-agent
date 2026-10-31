@@ -130,37 +130,6 @@ fn message_text(message: &Value) -> String {
     }
 }
 
-/// Envelope-free context-policy intent for an already computed branch summary.
-/// The actual owner supplies its row identity and new-branch parent.
-pub(crate) fn branch_summary_intent(
-    from_id: Option<&str>,
-    summary: &str,
-    details: Option<Value>,
-    usage: Option<Value>,
-    model: Option<(&str, &str)>,
-) -> Result<FileEntry> {
-    let mut rest = pa_types::JsonMap::new();
-    if let Some((provider, model_id)) = model {
-        rest.insert("provider".into(), json!(provider));
-        rest.insert("modelId".into(), json!(model_id));
-    }
-    Ok(FileEntry::BranchSummary {
-        base: pa_types::session::EntryBase {
-            id: None,
-            parent_id: None,
-            timestamp: None,
-            rest,
-        },
-        payload: pa_types::session::BranchSummaryEntry {
-            from_id: from_id.unwrap_or("root").to_owned(),
-            summary: summary.to_owned(),
-            details,
-            from_hook: None,
-            usage: usage.map(serde_json::from_value).transpose()?,
-        },
-    })
-}
-
 impl SessionFile {
     /// `branch`: move the leaf onto an existing entry; the next append
     /// parents from there.
@@ -241,8 +210,7 @@ impl SessionFile {
             Some(label) => fields["label"] = json!(label),
             None => fields["label"] = Value::Null,
         }
-        self.persist_entry("label", fields)
-            .map_err(Into::into)
+        self.persist_entry("label", fields).map_err(Into::into)
     }
 
     /// The root-to-leaf path of the (new) current leaf as typed entries.
@@ -678,5 +646,30 @@ mod tests {
         let entries = file_entries(&store);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id().unwrap(), a);
+    }
+    #[test]
+    fn selection_survives_reopen_without_a_following_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selection.jsonl");
+        let mut store = SessionFile::create("/fixture", None, 0);
+        store.set_path(path.clone());
+        let first = store
+            .persist_entry(
+                "message",
+                json!({"message": {"role": "user", "content": "first", "timestamp": 1}}),
+            )
+            .unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message": {"role": "assistant", "content": [], "timestamp": 2}}),
+            )
+            .unwrap();
+        store.branch_to(Some(&first)).unwrap();
+        let reopened = SessionFile::open(&path).unwrap();
+        assert_eq!(reopened.leaf_id(), Some(first.as_str()));
+        assert_eq!(reopened.entries().len(), 2);
+        store.branch_to(None).unwrap();
+        assert_eq!(SessionFile::open(&path).unwrap().leaf_id(), None);
     }
 }

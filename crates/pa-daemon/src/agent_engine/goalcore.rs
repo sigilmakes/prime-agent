@@ -69,11 +69,8 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(max_depth) = pending {
-            pa_core::session::metadata::persist_metadata_entry(
-                session,
-                max_depth_entry(max_depth),
-            )
-            .await?;
+            pa_core::session::metadata::persist_metadata_entry(session, max_depth_entry(max_depth))
+                .await?;
         }
         Ok(())
     }

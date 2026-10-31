@@ -11,7 +11,9 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
-    fn persists_session_entries(&self) -> bool { true }
+    fn persists_session_entries(&self) -> bool {
+        true
+    }
 
     /// The worker owns the slot; the engine only writes into it.
 
@@ -635,7 +637,9 @@ impl SessionEngine for AgentSessionEngine {
                 )
                 .await
         };
-        let result = self.runtime.block_on(pa_agent::abort::race_with_abort(run, signal));
+        let result = self
+            .runtime
+            .block_on(pa_agent::abort::race_with_abort(run, signal));
         let compaction = match result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
@@ -676,8 +680,6 @@ impl SessionEngine for AgentSessionEngine {
             }
         }
     }
-
-
 
     fn run_branch_summary(
         &self,
@@ -788,7 +790,10 @@ impl SessionEngine for AgentSessionEngine {
                 let driver = engine.goal_driver.lock().await;
                 driver.ensure_ready()?;
             }
-            engine.session.rebuild_branch_context(branch_entries).await?;
+            engine
+                .session
+                .rebuild_branch_context(branch_entries)
+                .await?;
             // The rebuilt context reads the moved branch's own latest goal
             // entry; the announcement publishes while the driver lock is held.
             let mut driver = engine.goal_driver.lock().await;
@@ -935,7 +940,10 @@ impl SessionEngine for AgentSessionEngine {
         self.runtime.block_on(async {
             let core = self.session.lock().await.clone();
             if let Some(core) = core {
-                core.session.shared_persistence().lock().await
+                core.session
+                    .shared_persistence()
+                    .lock()
+                    .await
                     .replay_admitted_user_rows(Vec::new())
                     .expect("clearing admitted rows cannot fail");
             }

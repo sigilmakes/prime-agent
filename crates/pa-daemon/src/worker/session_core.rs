@@ -20,7 +20,6 @@ pub(crate) struct SessionCore {
     /// One owner (this core), one writer (the engine's `run_turn_once` before the
     /// prompt), one reader (the assistant row's persist arm). The slot is stable
     /// across store replacement, which is why it lives here and not on the store.
-
     pub(crate) context_selection_uncertain: Option<std::sync::Weak<crate::lease::SessionLease>>,
     pub(crate) cwd: String,
     pub(crate) steering: VecDeque<QueuedItem>,
@@ -104,7 +103,6 @@ impl SessionCore {
     /// the actual provider callback in Core, so this unused legacy channel must
     /// not retain its previous serving epoch across the next ordered boundary.
     /// Without an epoch, standalone writes remain covered by their counter.
-
 
     /// Whether a turn, compaction, or queued action is in flight (TS
     /// `hasOngoingSessionWork`); the supervisor-lost exit waits for it to settle.

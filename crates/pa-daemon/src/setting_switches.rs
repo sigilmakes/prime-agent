@@ -177,10 +177,7 @@ impl Worker {
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
-                if let Some(store) = core
-                    .store
-                    .as_mut()
-                {
+                if let Some(store) = core.store.as_mut() {
                     // A bound live Core switch has already committed this intent.
                     let _ = store.persist_entry(
                         "model_change",
@@ -390,10 +387,9 @@ impl Worker {
             let preference_changed = core.service_tier != Some(tier);
             if preference_changed {
                 if let Some(store) = core.store.as_mut() {
-                    if let Err(error) = store.persist_entry(
-                        "service_tier_change",
-                        json!({ "serviceTier": tier }),
-                    ) {
+                    if let Err(error) =
+                        store.persist_entry("service_tier_change", json!({ "serviceTier": tier }))
+                    {
                         return response_failure(
                             None,
                             "set_service_tier",

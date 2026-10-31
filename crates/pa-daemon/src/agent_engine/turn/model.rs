@@ -180,7 +180,12 @@ impl AgentSessionEngine {
         // A bound owner receipt must never wait under Agent::event_delivery.
         // Its existing restore callback runs after run_turn_once has settled,
         // before the retry driver publishes restoration or starts another attempt.
-        let restore_session: std::sync::Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync> = {
+        let restore_session: std::sync::Arc<
+            dyn Fn() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>,
+                > + Send
+                + Sync,
+        > = {
             let primary_state = primary_state.clone();
             let pending_model_changes = pending_model_changes.clone();
             let agent_weak = std::sync::Arc::downgrade(&agent);
@@ -210,14 +215,14 @@ impl AgentSessionEngine {
                     let agent = agent_weak
                         .upgrade()
                         .ok_or_else(|| anyhow::anyhow!("restoration episode Agent retired"))?;
-                    let core = match core_weak {
-                        Some(core) => Some(core.upgrade().ok_or_else(|| {
-                            anyhow::anyhow!("restoration episode Core retired")
-                        })?),
-                        None => None,
-                    };
-                    primary.model =
-                        ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
+                    let core =
+                        match core_weak {
+                            Some(core) => Some(core.upgrade().ok_or_else(|| {
+                                anyhow::anyhow!("restoration episode Core retired")
+                            })?),
+                            None => None,
+                        };
+                    primary.model = ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
                     let model = json_round_trip(&primary.model)
                         .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                     if let Some(persistence) = persistence {

@@ -243,9 +243,6 @@ impl SessionNavigation {
                 .target_lease(std::path::Path::new(path))
                 .map_err(|error| response_failure(None, command, &error.to_string(), None))?,
         };
-        if lease.is_some() {
-            pa_core::session::manager::repair_jsonl_damage(std::path::Path::new(path));
-        }
         let mut file = SessionFile::open(std::path::Path::new(path))
             .map_err(|error| response_failure(None, command, &error.to_string(), None))?;
         file.lease = lease;

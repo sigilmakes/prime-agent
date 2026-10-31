@@ -94,10 +94,7 @@ impl Worker {
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
-                if let Some(store) = core
-                    .store
-                    .as_mut()
-                {
+                if let Some(store) = core.store.as_mut() {
                     // The live Core switch already adopted and ACKed its real row.
                     // TS `appendModelChange` records every switch, even to
                     // the current model.
@@ -203,10 +200,7 @@ impl Worker {
             }
             let cwd = {
                 let mut core = core.lock().unwrap();
-                if let Some(store) = core
-                    .store
-                    .as_mut()
-                {
+                if let Some(store) = core.store.as_mut() {
                     // A bound live Core switch has already committed this intent.
                     if store
                         .persist_entry(
