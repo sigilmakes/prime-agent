@@ -338,7 +338,7 @@ impl AgentSession {
     }
 
     /// Rebuild the current branch's model-facing context.
-    pub async fn rebuild_branch_context(&self) -> anyhow::Result<()> {
+    pub async fn rebuild_current_branch_context(&self) -> anyhow::Result<()> {
         let messages = self.context_messages().await?;
         self.agent
             .commit_idle_messages(
