@@ -733,7 +733,7 @@ mod tests {
             assert!(
                 matches!(
                     log.append(
-                        &json!({ "type": "session", "id": "rival-header" }),
+                        &json!({ "type": "session", "id": "rival-header", "timestamp": "2026-10-30T00:00:00Z", "cwd": "test" }),
                         deadline()
                     ),
                     Outcome::Committed { .. }
@@ -1349,6 +1349,79 @@ mod tests {
             store.leaf_id(),
             replay.leaf_id(),
             "successful navigation must be durable without a following message"
+        );
+    }
+
+    #[test]
+    fn review_new_intent_resolves_the_previous_unknown_before_minting() {
+        let dir = temp_dir("review-next-intent");
+        let fake = std::sync::Arc::new(FailNextFsync::new(
+            log_dir(&dir).join("review-next-intent.lock"),
+        ));
+        fake.arm_fsync_failure(3);
+        let (mut store, path) = fresh_log_session_with(
+            &dir,
+            "review-next-intent",
+            LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)),
+        );
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"unknown"}}),
+            )
+            .expect_err("unknown barrier");
+        fake.release_rival();
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"new intent"}}),
+            )
+            .unwrap();
+        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.entries()).unwrap(),
+            serde_json::to_value(replay.entries()).unwrap()
+        );
+        assert_eq!(store.entries().len(), 2);
+        assert_eq!(
+            store.entries()[1].parent_id.as_deref(),
+            Some(store.entries()[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn review_cloned_folds_observe_independent_positions() {
+        let dir = temp_dir("review-clone");
+        let (mut first, path) = fresh_log_session(&dir, "review-clone");
+        first
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"root"}}),
+            )
+            .unwrap();
+        let mut second = first.clone();
+        first
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"assistant","content":"first"}}),
+            )
+            .unwrap();
+        second.observe_log_tail().unwrap();
+        second
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"second"}}),
+            )
+            .unwrap();
+        first.observe_log_tail().unwrap();
+        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(
+            serde_json::to_value(first.entries()).unwrap(),
+            serde_json::to_value(replay.entries()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(second.entries()).unwrap(),
+            serde_json::to_value(replay.entries()).unwrap()
         );
     }
 }

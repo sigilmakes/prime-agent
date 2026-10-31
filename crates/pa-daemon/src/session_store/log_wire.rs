@@ -14,6 +14,7 @@ pub(super) struct LogProgress(std::sync::Mutex<ReadPosition>);
 struct ReadPosition {
     cursor: pa_core::session_log::ReadCursor,
     flushed_entries: usize,
+    observed_entries: usize,
 }
 
 impl Clone for LogProgress {
@@ -32,6 +33,7 @@ impl LogProgress {
         Self(std::sync::Mutex::new(ReadPosition {
             cursor,
             flushed_entries,
+            observed_entries: flushed_entries,
         }))
     }
 }
@@ -135,7 +137,7 @@ impl SessionFile {
         // Foreign durable rows precede that tail, never suppress its flush.
         let local_tail = self
             .entries
-            .split_off(position.flushed_entries.min(self.entries.len()));
+            .split_off(position.observed_entries.min(self.entries.len()));
         for entry in &local_tail {
             self.by_id.remove(&entry.id);
         }
@@ -173,6 +175,7 @@ impl SessionFile {
             }
         }
         position.flushed_entries = self.entries.len();
+        position.observed_entries = self.entries.len();
         for entry in local_tail {
             if !self.by_id.contains_key(&entry.id) {
                 self.push_index(entry);

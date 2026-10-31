@@ -860,3 +860,40 @@ fn an_unopenable_session_is_reported() {
     )
     .unwrap();
 }
+
+#[test]
+fn a_pinned_retry_reestablishes_the_failed_durability_barrier() {
+    let dir = tempfile::tempdir().unwrap();
+    let fail = Arc::new(AtomicBool::new(false));
+    let barriers = Arc::new(AtomicUsize::new(0));
+    let disk = {
+        let fail = Arc::clone(&fail);
+        let barriers = Arc::clone(&barriers);
+        Arc::new(TestDisk::new().fsync(move |_| {
+            barriers.fetch_add(1, Ordering::SeqCst);
+            if fail.load(Ordering::SeqCst) {
+                Err(io::Error::other("barrier unavailable"))
+            } else {
+                Ok(())
+            }
+        }))
+    };
+    let mut log = SessionLog::open_with(disk, dir.path(), ID, deadline()).unwrap();
+    fail.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        log.append_at(1, &row(1), deadline()),
+        Outcome::Unknown { .. }
+    ));
+    let before = barriers.load(Ordering::SeqCst);
+    assert!(!matches!(
+        log.append_at(1, &row(1), deadline()),
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(barriers.load(Ordering::SeqCst), before + 1);
+    fail.store(false, Ordering::SeqCst);
+    assert_eq!(
+        committed_seq(&log.append_at(1, &row(1), deadline())),
+        Some(1)
+    );
+    assert_eq!(log.read_since(0).unwrap().len(), 1);
+}
