@@ -123,6 +123,11 @@ pub fn is_valid_session_file(path: &Path) -> bool {
     read_session_header_bounded(path).is_some()
 }
 
+enum OpenPolicy {
+    Validate,
+    Repair,
+}
+
 impl SessionFile {
     /// Load an existing session file; malformed entry lines are skipped (the TS loader).
     ///
@@ -130,7 +135,7 @@ impl SessionFile {
     ///
     /// Returns an error when the file cannot be read, is empty, or its header is invalid.
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_log_path(path)
+        Self::open_log_path(path, OpenPolicy::Validate)
     }
 
     /// Load a log-transported session: the log is the source of truth, the
@@ -153,10 +158,10 @@ impl SessionFile {
             &crate::session_transport::session_id_of(session_path)
                 .context("session path has no id")?,
         );
-        Self::open_log_path(&actual)
+        Self::open_log_path(&actual, OpenPolicy::Repair)
     }
 
-    fn open_log_path(session_path: &Path) -> Result<Self> {
+    fn open_log_path(session_path: &Path, policy: OpenPolicy) -> Result<Self> {
         anyhow::ensure!(
             session_path.is_file(),
             "session log is unavailable: {}",
@@ -167,18 +172,30 @@ impl SessionFile {
         let directory = session_path
             .parent()
             .context("session log has no directory")?;
-        let (log, repair) = crate::session_transport::open_repaired_dir(directory, &session_id)
-            .map_err(anyhow::Error::from)
-            .context("open session log")?;
+        let (mut log, repair) = match policy {
+            OpenPolicy::Repair => {
+                crate::session_transport::open_repaired_dir(directory, &session_id)
+                    .map_err(anyhow::Error::from)?
+            }
+            OpenPolicy::Validate => (
+                pa_core::session_log::SessionLog::open(
+                    directory,
+                    &session_id,
+                    crate::session_transport::deadline(),
+                )?,
+                None,
+            ),
+        };
         if let Some(report) = &repair {
             eprintln!(
                 "pa-daemon: session log {} repaired: {} unusable trailing byte(s) after seq {}",
                 session_id, report.truncated_bytes, report.last_good_seq
             );
         }
+        let mut cursor = pa_core::session_log::ReadCursor::default();
         let rows = log
-            .read_since(0)
-            .map_err(|error| anyhow::Error::from(crate::session_transport::open_error(error)))
+            .read_tail(&mut cursor, crate::session_transport::deadline())
+            .map_err(anyhow::Error::from)
             .context("read the session log")?;
         let Some(header_row) = rows.first() else {
             anyhow::bail!("session log {session_id} holds no header row (the repair emptied it)");
@@ -203,6 +220,7 @@ impl SessionFile {
             anthropic_warning_shown: false,
             skipped_lines: 0,
             log_transport: None,
+            log_progress: super::log_wire::LogProgress::default(),
         };
         for row in rows.iter().skip(1) {
             if row.body.get("type").and_then(Value::as_str) == Some("branch_selection") {
@@ -224,10 +242,10 @@ impl SessionFile {
         }
         fold_child_usage_attributions(&mut file.entries);
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
+        file.log_progress = super::log_wire::LogProgress::opened(cursor, file.entries.len());
         let wire = crate::session_transport::LogWire::held(
             log,
             directory,
-            file.entries.len(),
             rows.last().map_or(1, |row| row.seq),
         );
         file.log_transport = Some(wire);
@@ -298,6 +316,7 @@ impl SessionFile {
             anthropic_warning_shown: false,
             skipped_lines: 0,
             log_transport: None,
+            log_progress: super::log_wire::LogProgress::default(),
         }
     }
 }

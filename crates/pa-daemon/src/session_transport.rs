@@ -148,11 +148,6 @@ struct WireState {
     /// it as row one; a wire whose open found a pre-existing log adopts the
     /// header it finds at row one instead of writing a second one.
     header_written: bool,
-    /// How many of the fold's entry rows are durable in the log, in fold
-    /// order. The store flushes only `entries.len() - flushed` at its tail;
-    /// the funnel's per-row write commits then indexes, so this moves with
-    /// the store's count, never ahead of it.
-    flushed_entries: usize,
     /// The next seq this wire pins: the log's last row's seq plus one, set
     /// at the open and moved by committed rows and tail adoptions only —
     /// never by a refused or undecided write.
@@ -179,7 +174,6 @@ impl std::fmt::Debug for WireState {
             .field("has_log", &self.log.is_some())
             .field("has_disk", &self.disk.is_some())
             .field("header_written", &self.header_written)
-            .field("flushed_entries", &self.flushed_entries)
             .field("next_seq", &self.next_seq)
             .field("pending", &self.pending)
             .finish()
@@ -214,13 +208,6 @@ impl WireState {
         if let Some(row) = rows.first() {
             if row.body.get("type").and_then(Value::as_str) == Some("session") {
                 self.header_written = true;
-                self.flushed_entries = rows
-                    .iter()
-                    .skip(1)
-                    .filter(|row| {
-                        row.body.get("type").and_then(Value::as_str) != Some("branch_selection")
-                    })
-                    .count();
             }
         }
         if let Some(last) = rows.last() {
@@ -255,7 +242,20 @@ impl WireState {
     /// retry re-pins them and the core reports the landed row instead of
     /// repeating it; a seq that provably holds a foreign row re-syncs and
     /// re-pins the caller's row once.
-    fn append_pinned(&mut self, row: &Value, is_entry: bool) -> Result<(), LogWireError> {
+    fn append_pinned(
+        &mut self,
+        row: &Value,
+        cursor: &session_log::ReadCursor,
+    ) -> Result<(), LogWireError> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.row != *row)
+        {
+            return Err(LogWireError::Refused(anyhow::anyhow!(
+                "resolve the pending session row before another write"
+            )));
+        }
         // At most the first attempt plus one re-pin after a provable
         // conflict: beyond that the log keeps moving under the wire and a
         // reopen must settle it.
@@ -267,7 +267,9 @@ impl WireState {
                 .filter(|pending| pending.row == *row)
                 .map(|pending| pending.seq)
                 .unwrap_or(self.next_seq);
-            let outcome = log.append_at(seq, row, deadline());
+            let outcome = log
+                .append_at_checked(seq, row, cursor, deadline())
+                .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))?;
             match outcome {
                 Outcome::Committed { .. } => {
                     // A committed row may be an earlier pending's landed
@@ -275,9 +277,6 @@ impl WireState {
                     // the cursor; the cursor only ever advances.
                     self.next_seq = self.next_seq.max(seq + 1);
                     // The caller indexes the entry it just saw committed.
-                    if is_entry {
-                        self.flushed_entries += 1;
-                    }
                     self.pending = None;
                     return Ok(());
                 }
@@ -294,9 +293,6 @@ impl WireState {
                             // The row is the file's row (the core matched the
                             // body); the caller indexes it.
                             self.next_seq = self.next_seq.max(seq + 1);
-                            if is_entry {
-                                self.flushed_entries += 1;
-                            }
                             self.pending = None;
                             return Ok(());
                         }
@@ -319,6 +315,7 @@ impl WireState {
                 Outcome::NotWritten {
                     reason: pa_core::session_log::NotWritten::SeqConflict { .. },
                 } => {
+                    self.pending = None;
                     // The pinned seq holds someone else's row, or none at
                     // all. The core's own cursor is already current (every
                     // append adopts the tail first), so `refresh` may have
@@ -347,6 +344,40 @@ impl WireState {
 }
 
 impl LogWire {
+    /// The exact undecided envelope, before a public caller can mint a new ID.
+    pub(crate) fn pending_row(&self) -> Option<Value> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .as_ref()
+            .map(|pending| pending.row.clone())
+    }
+
+    /// Reconcile pending durability, then extend one fold's independent cursor.
+    pub(crate) fn observe(
+        &self,
+        session_id: &str,
+        cursor: &mut session_log::ReadCursor,
+    ) -> Result<Vec<session_log::Row>, LogWireError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.ensure_open(session_id)?;
+        if let Some(row) = state.pending.as_ref().map(|pending| pending.row.clone()) {
+            state.append_pinned(&row, cursor)?;
+            if row.get("type").and_then(Value::as_str) == Some("session") {
+                state.header_written = true;
+            }
+        }
+        state
+            .log
+            .as_mut()
+            .expect("ensure_open succeeded")
+            .read_tail(cursor, deadline())
+            .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))
+    }
     /// A fresh wire: the log opens (creating file, lock, and row one) at the
     /// first flush.
     pub(crate) fn deferred(agent_dir: &Path) -> Self {
@@ -356,7 +387,6 @@ impl LogWire {
                 disk: None,
                 directory: log_dir(agent_dir),
                 header_written: false,
-                flushed_entries: 0,
                 next_seq: 1,
                 pending: None,
             })),
@@ -378,12 +408,13 @@ impl LogWire {
         session_id: &str,
         header: &Value,
         leaf: Option<&str>,
+        cursor: &session_log::ReadCursor,
     ) -> Result<(), LogWireError> {
-        self.flush(session_id, header, &[])?;
+        self.flush(session_id, header, &[], &mut 0, cursor)?;
         let mut state = self.state.lock().expect("log wire lock");
         state.append_pinned(
             &serde_json::json!({"type": "branch_selection", "selectedLeaf": leaf}),
-            false,
+            cursor,
         )
     }
 
@@ -391,14 +422,13 @@ impl LogWire {
     /// header is already durable (row one of the replayed log), `replayed`
     /// counts the fold's durable entry rows, and `last_seq` pins the cursor
     /// past the log's last row.
-    pub(crate) fn held(log: SessionLog, directory: &Path, replayed: usize, last_seq: u64) -> Self {
+    pub(crate) fn held(log: SessionLog, directory: &Path, last_seq: u64) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: Some(log),
                 disk: None,
                 directory: directory.to_owned(),
                 header_written: true,
-                flushed_entries: replayed,
                 next_seq: last_seq + 1,
                 pending: None,
             })),
@@ -423,6 +453,8 @@ impl LogWire {
         session_id: &str,
         header_row: &Value,
         rows: &[Value],
+        flushed_entries: &mut usize,
+        cursor: &session_log::ReadCursor,
     ) -> Result<(), LogWireError> {
         let mut state = self
             .state
@@ -433,21 +465,14 @@ impl LogWire {
         if !state.header_written {
             // The header is row one: pinned at seq one of a log this wire
             // created.
-            state.append_pinned(header_row, false)?;
+            state.append_pinned(header_row, cursor)?;
             state.header_written = true;
         }
         for row in rows {
-            state.append_pinned(row, true)?;
+            state.append_pinned(row, cursor)?;
+            *flushed_entries += 1;
         }
         Ok(())
-    }
-
-    /// How many entry rows the log already holds, per the wire's cursor.
-    pub(crate) fn flushed_entries(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .flushed_entries
     }
 
     /// Inject the disk the wire's flush opens its log through (the
@@ -1193,55 +1218,137 @@ mod tests {
     fn review_foreign_rows_join_the_serving_fold_before_append() {
         let dir = temp_dir("review-follow");
         let (mut first, path) = fresh_log_session(&dir, "review-follow");
-        first.persist_entry("message", json!({"message":{"role":"user","content":"seed"}})).unwrap();
+        first
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"seed"}}),
+            )
+            .unwrap();
         let mut second = SessionFile::open_log(&path, &dir).unwrap();
-        let foreign = first.persist_entry("message", json!({"message":{"role":"assistant","content":"foreign"}})).unwrap();
-        second.persist_entry("message", json!({"message":{"role":"user","content":"after foreign"}})).unwrap();
+        let foreign = first
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"assistant","content":"foreign"}}),
+            )
+            .unwrap();
+        second
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"after foreign"}}),
+            )
+            .unwrap();
         let durable = SessionFile::open_log(&path, &dir).unwrap();
-        assert_eq!(serde_json::to_value(second.entries()).unwrap(), serde_json::to_value(durable.entries()).unwrap(), "a successful append must serve the full durable fold, including {foreign}");
+        assert_eq!(
+            serde_json::to_value(second.entries()).unwrap(),
+            serde_json::to_value(durable.entries()).unwrap(),
+            "a successful append must serve the full durable fold, including {foreign}"
+        );
     }
 
     #[test]
     fn review_public_retry_does_not_duplicate_an_unknown_row() {
         let dir = temp_dir("review-public-retry");
-        let fake = std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("review-public-retry.lock")));
+        let fake = std::sync::Arc::new(FailNextFsync::new(
+            log_dir(&dir).join("review-public-retry.lock"),
+        ));
         fake.arm_fsync_failure(3);
-        let (mut store, path) = fresh_log_session_with(&dir, "review-public-retry", LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)));
+        let (mut store, path) = fresh_log_session_with(
+            &dir,
+            "review-public-retry",
+            LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)),
+        );
         let fields = json!({"message":{"role":"user","content":"same user intent"}});
-        store.persist_entry("message", fields.clone()).expect_err("unknown barrier");
+        store
+            .persist_entry("message", fields.clone())
+            .expect_err("unknown barrier");
         fake.release_rival();
         store.persist_entry("message", fields).expect("retry");
         let replay = SessionFile::open_log(&path, &dir).unwrap();
-        assert_eq!(replay.entries().len(), 1, "public retry must not mint another durable entry");
-        assert_eq!(serde_json::to_value(store.entries()).unwrap(), serde_json::to_value(replay.entries()).unwrap());
+        assert_eq!(
+            replay.entries().len(),
+            1,
+            "public retry must not mint another durable entry"
+        );
+        assert_eq!(
+            serde_json::to_value(store.entries()).unwrap(),
+            serde_json::to_value(replay.entries()).unwrap()
+        );
     }
 
     #[test]
     fn review_external_repair_cannot_leave_removed_rows_in_serving_fold() {
         let dir = temp_dir("review-repair");
         let (mut store, path) = fresh_log_session(&dir, "review-repair");
-        store.persist_entry("message", json!({"message":{"role":"user","content":"survivor"}})).unwrap();
-        store.persist_entry("message", json!({"message":{"role":"assistant","content":"lost in repair"}})).unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"survivor"}}),
+            )
+            .unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"assistant","content":"lost in repair"}}),
+            )
+            .unwrap();
         let log_path = log_file(&dir, "review-repair");
         let mut bytes = std::fs::read(&log_path).unwrap();
-        let last_line = bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n').nth(1).unwrap().0 + 1;
+        let last_line = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'\n')
+            .nth(1)
+            .unwrap()
+            .0
+            + 1;
         bytes[last_line] = b'!';
         std::fs::write(&log_path, bytes).unwrap();
         let report = SessionLog::repair(&log_dir(&dir), "review-repair", deadline()).unwrap();
         assert_eq!(report.last_good_seq, 2);
-        store.persist_entry("message", json!({"message":{"role":"user","content":"after repair"}})).unwrap();
+        let refusal = store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"after repair"}}),
+            )
+            .expect_err("stale live fold requires reopen");
+        assert!(format!("{refusal:#}").contains("reopen"));
+        let mut store = SessionFile::open_log(&path, &dir).unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"after repair"}}),
+            )
+            .unwrap();
         let replay = SessionFile::open_log(&path, &dir).unwrap();
-        assert_eq!(serde_json::to_value(store.entries()).unwrap(), serde_json::to_value(replay.entries()).unwrap(), "repair must reject or rebuild a stale live fold");
+        assert_eq!(
+            serde_json::to_value(store.entries()).unwrap(),
+            serde_json::to_value(replay.entries()).unwrap(),
+            "repair must reject or rebuild a stale live fold"
+        );
     }
 
     #[test]
     fn review_selected_branch_survives_sessionfile_reopen() {
         let dir = temp_dir("review-selection");
         let (mut store, path) = fresh_log_session(&dir, "review-selection");
-        let root = store.persist_entry("message", json!({"message":{"role":"user","content":"root"}})).unwrap();
-        store.persist_entry("message", json!({"message":{"role":"assistant","content":"tip"}})).unwrap();
+        let root = store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"user","content":"root"}}),
+            )
+            .unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message":{"role":"assistant","content":"tip"}}),
+            )
+            .unwrap();
         store.branch_to(Some(&root)).unwrap();
         let replay = SessionFile::open_log(&path, &dir).unwrap();
-        assert_eq!(store.leaf_id(), replay.leaf_id(), "successful navigation must be durable without a following message");
+        assert_eq!(
+            store.leaf_id(),
+            replay.leaf_id(),
+            "successful navigation must be durable without a following message"
+        );
     }
 }

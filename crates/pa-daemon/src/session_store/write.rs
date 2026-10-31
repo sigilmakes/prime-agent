@@ -134,6 +134,10 @@ impl SessionFile {
         fields: Value,
         timestamp: &str,
     ) -> Result<String> {
+        if let Some(entry) = self.pending_log_entry(entry_type, &fields) {
+            return self.persist_built_log_entry(entry);
+        }
+        self.observe_log_tail()?;
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),

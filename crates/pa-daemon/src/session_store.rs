@@ -153,6 +153,7 @@ pub struct SessionFile {
     pub(crate) anthropic_warning_shown: bool,
     /// Durable row transport; absent only for an in-memory session.
     pub(crate) log_transport: Option<crate::session_transport::LogWire>,
+    log_progress: log_wire::LogProgress,
 }
 
 #[derive(Debug, Clone)]
