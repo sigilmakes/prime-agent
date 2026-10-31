@@ -204,10 +204,7 @@ fn warm_cache_reads_only_header_and_suffix_and_append_stays_warm() {
     assert!(appended.read_stats().cache_hit);
     assert_eq!(appended.context().thinking_level, "low");
     assert_eq!(appended.leaf_id(), "new");
-    let expected = build_session_context(
-        &super::super::parse_session_entries(&std::fs::read_to_string(&path).unwrap()),
-        None,
-    );
+    let expected = build_session_context(&super::super::read::read_entries(&path).unwrap(), None);
     assert_eq!(
         serde_json::to_value(appended.context().messages).unwrap(),
         serde_json::to_value(expected.messages).unwrap()
@@ -407,7 +404,7 @@ fn stale_corrupt_and_replaced_cache_rebuild() {
     write_fixture(&path, fixture()).unwrap();
     WindowedSessionStore::open(&path).unwrap().unwrap();
     let changed = fixture().replace("high", "low ");
-    std::fs::write(&path, changed).unwrap();
+    write_fixture(&path, changed).unwrap();
     let stale = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(!stale.read_stats().cache_hit);
     assert_eq!(stale.context().thinking_level, "low ");
@@ -462,12 +459,11 @@ async fn context_and_hydration_match_full_reader() {
         serde_json::to_vec(window.entries()).unwrap(),
         serde_json::to_vec(&full).unwrap()
     );
-    assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+    assert_eq!(super::super::read::read_entries(&path).unwrap(), full);
 }
 
 #[tokio::test]
 async fn metadata_and_concurrent_disk_append_survive_hydration() {
-    use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.jsonl");
     let body = fixture();
@@ -480,15 +476,11 @@ async fn metadata_and_concurrent_disk_append_survive_hydration() {
         "x".repeat(CHUNK_BYTES * 3)
     );
     assert!(store.metadata_entries().is_empty());
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(file, "{}", json!({"type":"message","id":"appended","parentId":"leaf","message":{"role":"user","content":"new","timestamp":0}})).unwrap();
+    append_fixture(&path, format!("{}\n", json!({"type":"message","id":"appended","parentId":"leaf","message":{"role":"user","content":"new","timestamp":0}})).as_bytes(), AppendOwnership::Unleased).unwrap();
     store.ensure_full_history().await.unwrap();
     assert_eq!(store.leaf_id(), "leaf");
     assert_eq!(store.entries().last().unwrap().id(), Some("appended"));
-    let expected = super::super::parse_session_entries(&std::fs::read_to_string(&path).unwrap());
+    let expected = super::super::read::read_entries(&path).unwrap();
     assert_eq!(
         serde_json::to_vec(store.entries()).unwrap(),
         serde_json::to_vec(&expected).unwrap()
@@ -514,8 +506,9 @@ async fn manager_opens_window_and_appends_without_hydration() {
     manager.append_session_info("resumed").unwrap();
     assert!(!manager.is_full_history());
     let after = std::fs::read_to_string(&path).unwrap();
-    assert!(after.starts_with(&body));
-    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path).unwrap();
+    assert!(after.contains("resumed"));
+    let reopened =
+        super::super::manager::SessionManager::open(dir.path(), dir.path(), &path).unwrap();
     assert_eq!(
         serde_json::to_vec(&manager.active_context().messages).unwrap(),
         serde_json::to_vec(&reopened.active_context().messages).unwrap()
@@ -578,7 +571,7 @@ fn sparse_settings_and_sibling_changes_match_full_context() {
 }
 
 #[test]
-fn unterminated_session_uses_repair_fallback() {
+fn unterminated_session_is_not_admitted_as_a_window() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("torn.jsonl");
     std::fs::write(&path, fixture().trim_end()).unwrap();
@@ -591,7 +584,7 @@ fn reverse_reader_preserves_long_lines_and_unterminated_tail() {
     let path = dir.path().join("lines");
     let long = "é".repeat(CHUNK_BYTES * 2);
     let body = format!("first\n{long}\nlast");
-    write_fixture(&path, &body).unwrap();
+    std::fs::write(&path, &body).unwrap();
     let mut reader = ReverseLines {
         file: std::fs::File::open(path).unwrap(),
         position: body.len() as u64,
@@ -642,7 +635,10 @@ fn no_retained_boundary_matches_cold_context_and_keeps_only_the_physical_suffix(
             .unwrap(),
             expected
         );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        assert_eq!(
+            super::super::read::read_entries(&path).unwrap(),
+            super::super::parse_session_entries(&body)
+        );
     }
 }
 
@@ -869,7 +865,8 @@ async fn adopted_manager_live_appends_match_full_reopen() {
         )
         .unwrap();
     let live = manager.active_context();
-    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path).unwrap();
+    let reopened =
+        super::super::manager::SessionManager::open(dir.path(), dir.path(), &path).unwrap();
     let reopened_ctx = reopened.active_context();
     let live_bytes = serde_json::to_vec(&(
         &live.messages,
@@ -957,7 +954,6 @@ async fn full_history_snapshot_serves_retained_rows_without_the_file() {
 /// Without the sole-writer lease another writer may have appended out of band.
 #[tokio::test]
 async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
-    use std::io::Write as _;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unleased-full.jsonl");
     write_fixture(&path, full_history_fixture()).unwrap();
@@ -966,12 +962,7 @@ async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
             .await
             .unwrap();
     // An out-of-band append (the unleased world's other writer).
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    file.write_all(b"{\"type\":\"message\",\"id\":\"oob\",\"parentId\":\"audit\",\"message\":{\"role\":\"user\",\"content\":\"external\",\"timestamp\":0}}\n").unwrap();
-    drop(file);
+    append_fixture(&path, b"{\"type\":\"message\",\"id\":\"oob\",\"parentId\":\"audit\",\"message\":{\"role\":\"user\",\"content\":\"external\",\"timestamp\":0}}\n", AppendOwnership::Unleased).unwrap();
     let snapshot = manager.history_snapshot().await.unwrap();
     assert!(
         snapshot.iter().any(|entry| entry.id() == Some("oob")),

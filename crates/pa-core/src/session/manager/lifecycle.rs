@@ -3,7 +3,7 @@
 
 use super::{
     capture_git_context, create_session_id, format_iso_now, get_session_file_path,
-    resolve_session_rlm_depth, root_rlm_depth_from_env, AgentMessage, FileEntry, HashMap,
+    resolve_session_rlm_depth, root_rlm_depth_from_env, FileEntry, HashMap,
     NewSessionOptions, Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
 };
 
@@ -107,7 +107,6 @@ impl SessionManager {
             persist,
             session_dir_backed: persist,
             flushed: false,
-            has_assistant_entry: false,
             append_ownership: super::window::AppendOwnership::Unleased,
             file_entries: Vec::new(),
             window: None,
@@ -251,7 +250,6 @@ impl SessionManager {
         let branch = forked_branch_entries(entries);
         // The copied rows' assistant entries keep the append path durable
         // from the first new entry: one predicate for the durable-append rule.
-        forked.refresh_has_assistant_entry(&branch);
         forked.adopt_entries(branch);
         forked.flush_now().map_err(|error| error.to_string())?;
         Ok(forked)
@@ -306,7 +304,6 @@ impl SessionManager {
         self.file_entries = entries;
         self.build_index();
         self.leaf_id = Some(window.leaf_id().to_owned());
-        self.has_assistant_entry = true;
         self.flushed = true;
         self.window = Some(window);
     }
@@ -345,7 +342,6 @@ impl SessionManager {
         self.window = None;
         self.standalone_log = None;
         self.read_cursor = crate::session_log::ReadCursor::default();
-        self.refresh_has_assistant_entry(&entries);
         self.file_entries = entries;
         self.admitted_user_rows.clear();
         self.admitted_custom_rows.clear();
@@ -392,7 +388,6 @@ impl SessionManager {
         self.admitted_user_rows.clear();
         self.admitted_custom_rows.clear();
         self.window = None;
-        self.has_assistant_entry = false;
         self.by_id.clear();
         self.labels_by_id.clear();
         self.label_timestamps_by_id.clear();
@@ -456,21 +451,11 @@ impl SessionManager {
             },
         };
         let rest = std::mem::take(&mut self.file_entries);
-        let has_assistant = rest.iter().any(|entry| {
-            matches!(
-                entry,
-                FileEntry::Message {
-                    message: AgentMessage::Assistant(_),
-                    ..
-                }
-            )
-        });
         self.file_entries = vec![header];
         self.file_entries.extend(
             rest.into_iter()
                 .filter(|entry| !matches!(entry, FileEntry::Header { .. })),
         );
-        self.has_assistant_entry = has_assistant;
         self.standalone_log = None;
         self.read_cursor = crate::session_log::ReadCursor::default();
         self.flush_now()?;

@@ -8,6 +8,7 @@ pub(super) struct StandaloneLog {
     log: SessionLog,
     cursor: ReadCursor,
     seq: u64,
+    initialized: usize,
     pending: Option<(u64, FileEntry)>,
 }
 
@@ -17,24 +18,21 @@ impl SessionManager {
         self.entry_writer = Some(writer);
     }
 
-    pub(super) fn refresh_has_assistant_entry(&mut self, entries: &[FileEntry]) {
-        self.has_assistant_entry = entries.iter().any(|entry| {
-            matches!(
-                entry,
-                FileEntry::Message {
-                    message: super::AgentMessage::Assistant(_),
-                    ..
-                }
-            )
-        });
-    }
-
     pub(super) fn build_index(&mut self) {
         self.by_id.clear();
         self.labels_by_id.clear();
         self.label_timestamps_by_id.clear();
         self.leaf_id = None;
         for (index, entry) in self.file_entries.iter().enumerate() {
+            if matches!(entry, FileEntry::Header { .. }) {
+                continue;
+            }
+            if let FileEntry::Unknown { rest } = entry {
+                if rest.get("type").and_then(serde_json::Value::as_str) == Some("branch_selection") {
+                    self.leaf_id = rest.get("selectedLeaf").and_then(serde_json::Value::as_str).map(str::to_owned);
+                    continue;
+                }
+            }
             if let Some(id) = entry.id() {
                 self.by_id.insert(id.to_owned(), index);
                 self.leaf_id = Some(id.to_owned());
@@ -123,90 +121,114 @@ impl SessionManager {
     /// # Errors
     /// Returns log contention, damage, mismatch or I/O errors; never repairs.
     pub fn flush_now(&mut self) -> io::Result<()> {
-        if !self.persist || self.entry_writer.is_some() || self.standalone_log.is_some() {
+        if !self.persist
+            || self.entry_writer.is_some()
+            || (self.standalone_log.is_some() && self.flushed)
+        {
             return Ok(());
         }
-        let path = self.session_file.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "persisted manager has no session path",
-            )
-        })?;
-        let dir = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "session path has no parent")
-        })?;
-        let id = path.file_stem().and_then(|id| id.to_str()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "session path has no UTF-8 id")
-        })?;
-        std::fs::create_dir_all(dir)?;
-        let mut log = SessionLog::open(dir, id, Instant::now()).map_err(io::Error::other)?;
-        let mut cursor = ReadCursor::default();
-        let rows = log
-            .read_tail(&mut cursor, Instant::now())
-            .map_err(io::Error::other)?;
-        let mut existing = rows
-            .iter()
-            .map(|row| serde_json::from_value(row.body.clone()).map_err(io::Error::from))
-            .collect::<io::Result<Vec<FileEntry>>>()?;
-        super::super::apply_child_usage_attributions(&mut existing);
-        if self.window.is_some() {
-            if existing.first().map(serde_json::to_value).transpose()?
-                != self
-                    .file_entries
-                    .first()
-                    .map(serde_json::to_value)
-                    .transpose()?
+        let mut state = if let Some(state) = self.standalone_log.take() {
+            state
+        } else {
+            let path = self.session_file.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "persisted manager has no session path",
+                )
+            })?;
+            if self.flushed {
+                std::fs::metadata(path)?;
+            }
+            let dir = path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "session path has no parent")
+            })?;
+            let id = path.file_stem().and_then(|id| id.to_str()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "session path has no UTF-8 id")
+            })?;
+            std::fs::create_dir_all(dir)?;
+            let mut log = SessionLog::open(dir, id, Instant::now()).map_err(io::Error::other)?;
+            let mut cursor = ReadCursor::default();
+            let rows = log
+                .read_tail(&mut cursor, Instant::now())
+                .map_err(io::Error::other)?;
+            if !self.flushed && !rows.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "new session target already contains a log",
+                ));
+            }
+            let mut existing = rows
+                .iter()
+                .map(|row| serde_json::from_value(row.body.clone()).map_err(io::Error::from))
+                .collect::<io::Result<Vec<FileEntry>>>()?;
+            super::super::apply_child_usage_attributions(&mut existing);
+            if self.window.is_some() {
+                if existing.first().map(serde_json::to_value).transpose()?
+                    != self
+                        .file_entries
+                        .first()
+                        .map(serde_json::to_value)
+                        .transpose()?
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "session window header differs from durable log",
+                    ));
+                }
+                self.standalone_log = Some(StandaloneLog {
+                    initialized: self.file_entries.len(),
+                    seq: rows.last().map_or(0, |row| row.seq),
+                    log,
+                    cursor,
+                    pending: None,
+                });
+                return Ok(());
+            }
+            let shared = existing.len().min(self.file_entries.len());
+            if serde_json::to_value(&existing[..shared])?
+                != serde_json::to_value(&self.file_entries[..shared])?
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "session window header differs from durable log",
+                    "existing session log differs from manager history",
                 ));
             }
-            self.standalone_log = Some(StandaloneLog {
+            if existing.len() > self.file_entries.len() {
+                self.file_entries
+                    .extend(existing.into_iter().skip(self.file_entries.len()));
+                self.build_index();
+            }
+            StandaloneLog {
+                initialized: rows.len(),
                 seq: rows.last().map_or(0, |row| row.seq),
                 log,
                 cursor,
                 pending: None,
-            });
-            return Ok(());
-        }
-        let shared = existing.len().min(self.file_entries.len());
-        if serde_json::to_value(&existing[..shared])?
-            != serde_json::to_value(&self.file_entries[..shared])?
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "existing session log differs from manager history",
-            ));
-        }
-        if existing.len() > self.file_entries.len() {
-            self.file_entries
-                .extend(existing.into_iter().skip(self.file_entries.len()));
-            self.build_index();
-        }
-        let mut state = StandaloneLog {
-            seq: rows.last().map_or(0, |row| row.seq),
-            log,
-            cursor,
-            pending: None,
+            }
         };
-        for entry in self.file_entries.iter().skip(rows.len()) {
-            let seq = state.seq + 1;
-            let outcome = state
-                .log
-                .append_at_checked(seq, entry, &state.cursor, Instant::now())
-                .map_err(io::Error::other)?;
-            committed(outcome)?;
-            let rows = state
-                .log
-                .read_tail(&mut state.cursor, Instant::now())
-                .map_err(io::Error::other)?;
-            state.seq = rows.last().map_or(seq, |row| row.seq);
-        }
+        let result = (|| {
+            for entry in self.file_entries.iter().skip(state.initialized) {
+                let seq = state.seq + 1;
+                let outcome = state
+                    .log
+                    .append_at_checked(seq, entry, &state.cursor, Instant::now())
+                    .map_err(io::Error::other)?;
+                committed(outcome)?;
+                let rows = state
+                    .log
+                    .read_tail(&mut state.cursor, Instant::now())
+                    .map_err(io::Error::other)?;
+                state.seq = rows.last().map_or(seq, |row| row.seq);
+                state.initialized += 1;
+            }
+            Ok(())
+        })();
         self.standalone_log = Some(state);
-        self.flushed = true;
-        self.notify_persist_listeners();
-        Ok(())
+        if result.is_ok() {
+            self.flushed = true;
+            self.notify_persist_listeners();
+        }
+        result
     }
 
     pub(super) fn persist_entry(&mut self, entry: &mut FileEntry) -> io::Result<()> {
@@ -281,6 +303,9 @@ impl SessionManager {
                     .log
                     .append_at_checked(seq, entry, &state.cursor, Instant::now())
                     .map_err(io::Error::other)?;
+                if matches!(&outcome, Outcome::Busy { .. } | Outcome::NotWritten { .. }) {
+                    state.pending = None;
+                }
                 committed(outcome)?;
                 let rows = state
                     .log

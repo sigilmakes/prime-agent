@@ -25,7 +25,8 @@ pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
         entries.push(serde_json::from_value(row.body)?);
         line.clear();
     }
-    if !matches!(entries.first(), Some(FileEntry::Header { header }) if header.version == Some(super::CURRENT_SESSION_VERSION) && !header.id.is_empty() && header.id != "." && header.id != ".." && !header.id.contains(['/', '\\', '\0'])) {
+    if !matches!(entries.first(), Some(FileEntry::Header { header }) if header.version == Some(super::CURRENT_SESSION_VERSION) && !header.id.is_empty() && header.id != "." && header.id != ".." && !header.id.contains(['/', '\\', '\0']))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "session log has no header",

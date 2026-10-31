@@ -780,9 +780,91 @@ fn external_commits_enter_context_before_inference_and_parent_selection() {
 fn unsupported_and_torn_prefixes_never_repair_or_recreate_existing_files() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unsupported.jsonl");
-    for bytes in [b"".as_slice(), b"{\"type\":\"session\",\"id\":\"old\"}\n".as_slice(), b"{\"seq\":1,\"row\":{".as_slice()] {
+    for bytes in [
+        b"".as_slice(),
+        b"{\"type\":\"session\",\"id\":\"old\"}\n".as_slice(),
+        b"{\"seq\":1,\"row\":{".as_slice(),
+    ] {
         std::fs::write(&path, bytes).unwrap();
         assert!(SessionManager::open(dir.path(), dir.path(), &path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
+}
+
+#[test]
+fn mirrored_sink_tail_is_visible_before_model_and_next_append() {
+    use std::sync::{Arc, Mutex};
+    struct Writer(Mutex<crate::session_log::SessionLog>);
+    impl SessionEntryWriter for Writer {
+        fn read_tail(
+            &self,
+            cursor: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            self.0
+                .lock()
+                .unwrap()
+                .read_tail(cursor, std::time::Instant::now())
+                .map_err(std::io::Error::other)?
+                .into_iter()
+                .map(|row| serde_json::from_value(row.body).map_err(std::io::Error::from))
+                .collect()
+        }
+        fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
+            match self
+                .0
+                .lock()
+                .unwrap()
+                .append(entry, std::time::Instant::now())
+            {
+                crate::session_log::Outcome::Committed { .. } => Ok(()),
+                other => Err(std::io::Error::other(format!("{other:?}"))),
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::in_memory(dir.path());
+    let mut log =
+        crate::session_log::SessionLog::open(dir.path(), "mirror", std::time::Instant::now())
+            .unwrap();
+    assert!(matches!(
+        log.append(&manager.file_entries[0], std::time::Instant::now()),
+        crate::session_log::Outcome::Committed { .. }
+    ));
+    let mut cursor = crate::session_log::ReadCursor::default();
+    log.read_tail(&mut cursor, std::time::Instant::now())
+        .unwrap();
+    let writer = Arc::new(Writer(Mutex::new(log)));
+    manager.set_committed_cursor(cursor);
+    manager.set_entry_writer(writer.clone());
+    let mut row: FileEntry = serde_json::from_value(serde_json::json!({"type":"message","id":"foreign","parentId":null,"message":{"role":"user","content":"external input","timestamp":0}})).unwrap();
+    writer.append(&mut row).unwrap();
+    manager.refresh_committed_entries().unwrap();
+    assert_eq!(manager.active_context().messages.len(), 1);
+    let mut row: FileEntry = serde_json::from_value(serde_json::json!({"type":"custom_message","id":"foreign-custom","parentId":"foreign","customType":"external","content":"external notice","display":true})).unwrap();
+    writer.append(&mut row).unwrap();
+    let id = manager.append_session_info("after foreign").unwrap();
+    assert_eq!(
+        manager.get_entry_by_id(&id).unwrap().parent_id(),
+        Some("foreign-custom")
+    );
+}
+
+#[test]
+fn lazy_new_session_never_adopts_a_precreated_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::persisted(dir.path(), dir.path());
+    let target = manager.get_session_file().unwrap().to_owned();
+    write_log_fixture(
+        &target,
+        serde_json::to_string(&manager.file_entries[0]).unwrap(),
+    )
+    .unwrap();
+    let before = std::fs::read(&target).unwrap();
+    assert_eq!(
+        manager.flush_now().unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    assert!(manager.append_session_info("cannot overwrite").is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), before);
 }

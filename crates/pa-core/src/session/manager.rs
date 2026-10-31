@@ -76,7 +76,6 @@ pub struct SessionManager {
     /// session-owned artifacts (local harness state) resolve under it.
     session_dir_backed: bool,
     flushed: bool,
-    has_assistant_entry: bool,
     append_ownership: super::window::AppendOwnership,
     file_entries: Vec<FileEntry>,
     window: Option<super::window::WindowedSessionStore>,

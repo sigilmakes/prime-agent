@@ -381,7 +381,6 @@ impl SessionManager {
                 .cloned(),
         );
         let leaf = self.leaf_id.clone();
-        self.refresh_has_assistant_entry(&entries);
         self.file_entries = entries;
         self.build_index();
         self.leaf_id = leaf;
