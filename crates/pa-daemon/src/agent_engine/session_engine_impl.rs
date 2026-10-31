@@ -1301,7 +1301,7 @@ impl SessionEngine for AgentSessionEngine {
             if let crate::engine::EmitResult::Accepted(id) = &result {
                 accepted_inputs.borrow_mut().push(id.clone());
             }
-            result.continues()
+            result
         };
         let mut emit = self.goal_tracking_emit(&mut publish);
         // The accepted-turn row carries the skill-expanded text (the
@@ -1342,7 +1342,9 @@ impl SessionEngine for AgentSessionEngine {
             if let Some(message) = execution.continuation_message {
                 if !emit(EngineEvent::CustomMessage(
                     crate::session_commands::custom_message_value(&message),
-                )) {
+                ))
+                .continues()
+                {
                     return;
                 }
                 self.run_turns(TurnPrompt::Injected(message), aborted, &mut emit);
@@ -1405,7 +1407,7 @@ impl SessionEngine for AgentSessionEngine {
                 return;
             }
         };
-        if !emit(accepted) {
+        if !emit(accepted).continues() {
             return;
         }
         // The batched co-delivery rows: one accepted user row per batched
@@ -1427,7 +1429,9 @@ impl SessionEngine for AgentSessionEngine {
                 "role": "user",
                 "content": content,
                 "timestamp": now_millis(),
-            }))) {
+            })))
+            .continues()
+            {
                 return;
             }
         }
@@ -1438,9 +1442,7 @@ impl SessionEngine for AgentSessionEngine {
                 let persistence = built.session.shared_persistence();
                 let mut manager = persistence.lock().await;
                 manager.refresh_committed_entries()?;
-                if !accepted.is_empty() {
-                    manager.replay_admitted_input_rows(accepted)?;
-                }
+                manager.replay_admitted_input_rows(accepted)?;
             }
             Ok::<(), std::io::Error>(())
         }) {

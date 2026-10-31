@@ -37,8 +37,6 @@ impl SessionEngine for BurstStreamEngine {
         _aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut publish = |event| emit(event).continues();
-        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         for index in 0..=self.deltas {
             let message = Self::message_with(&Self::delta_text(index));
             let stream_event = if index == 0 {
@@ -49,7 +47,9 @@ impl SessionEngine for BurstStreamEngine {
             if !emit(EngineEvent::AssistantUpdate {
                 message: crate::engine::AssistantSnapshot::Wire(message),
                 stream_event: Some(stream_event),
-            }) {
+            })
+            .continues()
+            {
                 return;
             }
             if self.spacing_ms > 0 {
@@ -58,7 +58,9 @@ impl SessionEngine for BurstStreamEngine {
         }
         if !emit(EngineEvent::AssistantMessage(Self::message_with(
             &self.full_text(),
-        ))) {
+        )))
+        .continues()
+        {
             return;
         }
         emit(EngineEvent::Done(Ok(())));

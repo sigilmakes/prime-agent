@@ -255,7 +255,10 @@ impl AgentSessionEngine {
     /// Emit the `goal_update` event when the session's goal state changed
     /// since the last emission (per-session dedupe). A session without a
     /// goal seeds the baseline silently.
-    pub(crate) fn goal_update_if_changed(&self, emit: &mut dyn FnMut(EngineEvent) -> bool) -> bool {
+    pub(crate) fn goal_update_if_changed(
+        &self,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
+    ) -> bool {
         let Some(goal) = self.current_goal_state() else {
             // No session yet, or the driver is mid-mutation: a later event re-checks.
             return true;
@@ -288,6 +291,7 @@ impl AgentSessionEngine {
         emit(EngineEvent::GoalUpdate {
             goal: serde_json::to_value(&goal).unwrap_or(Value::Null),
         })
+        .continues()
     }
 
     /// Wrap one prompt's emit callback so every forwarded event is followed
@@ -296,13 +300,14 @@ impl AgentSessionEngine {
     /// row lands between the surrounding rows.
     pub(crate) fn goal_tracking_emit<'a>(
         &'a self,
-        emit: &'a mut dyn FnMut(EngineEvent) -> bool,
-    ) -> impl FnMut(EngineEvent) -> bool + 'a {
+        emit: &'a mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
+    ) -> impl FnMut(EngineEvent) -> crate::engine::EmitResult + 'a {
         move |event: EngineEvent| {
-            if !emit(event) {
-                return false;
+            let result = emit(event);
+            if !result.continues() || !self.goal_update_if_changed(emit) {
+                return crate::engine::EmitResult::Stop;
             }
-            self.goal_update_if_changed(emit)
+            result
         }
     }
 }

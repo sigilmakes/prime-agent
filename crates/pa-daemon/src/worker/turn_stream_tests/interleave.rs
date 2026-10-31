@@ -218,8 +218,6 @@ impl SessionEngine for GateHoldEngine {
         _aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut publish = |event| emit(event).continues();
-        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         emit(EngineEvent::Done(Ok(())));
     }
 

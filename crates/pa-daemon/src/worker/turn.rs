@@ -632,7 +632,10 @@ impl TurnRunner {
                     EngineEvent::UserMessage(message) if accepted_row => {
                         if let Some(store) = core.store.as_mut() {
                             match store.persist_entry("message", json!({"message": message})) {
-                                Ok(id) => admitted_id = Some(id),
+                                Ok(id) if !store.path.as_os_str().is_empty() => {
+                                    admitted_id = Some(id)
+                                }
+                                Ok(_) => {}
                                 Err(error) => {
                                     eprintln!("pa-daemon: accepted user row refused: {error:#}");
                                     return crate::engine::EmitResult::Stop;
@@ -675,7 +678,10 @@ impl TurnRunner {
                             fields.remove("timestamp");
                             let fields = Value::Object(fields);
                             match store.persist_entry("custom_message", fields) {
-                                Ok(id) if accepted_row || emitting_prefix_rows.get() => {
+                                Ok(id)
+                                    if (accepted_row || emitting_prefix_rows.get())
+                                        && !store.path.as_os_str().is_empty() =>
+                                {
                                     admitted_id = Some(id)
                                 }
                                 Ok(_) => {}

@@ -17,8 +17,6 @@ impl SessionEngine for ReleaseCountingEngine {
         _aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut publish = |event| emit(event).continues();
-        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         emit(EngineEvent::Done(Ok(())));
     }
 
@@ -150,8 +148,6 @@ impl SessionEngine for AdmitProbeEngine {
         _aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut publish = |event| emit(event).continues();
-        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         self.prompts.lock().unwrap().push(request.message);
         emit(EngineEvent::Done(Ok(())));
     }

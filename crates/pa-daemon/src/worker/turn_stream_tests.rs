@@ -140,10 +140,8 @@ impl SessionEngine for GateProbeEngine {
         _aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut publish = |event| emit(event).continues();
-        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         for frame in &self.frames {
-            if !emit(frame.clone()) {
+            if !emit(frame.clone()).continues() {
                 return;
             }
         }

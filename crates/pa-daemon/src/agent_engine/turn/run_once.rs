@@ -79,7 +79,7 @@ impl AgentSessionEngine {
             std::sync::Mutex<Vec<pa_types::session::ModelChangeEntry>>,
         >,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> anyhow::Result<TurnOnce> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // AgentStart is an awaited listener call after the run owns its abort
@@ -415,7 +415,7 @@ impl AgentSessionEngine {
                 event = rx.recv() => {
                     match event {
                         Some(event) => {
-                            if !emit(event) {
+                            if !emit(event).continues() {
                                 aborted = true;
                             }
                         }
@@ -429,7 +429,7 @@ impl AgentSessionEngine {
                         Err(error) => admission_error = Some(error),
                     }
                     while let Ok(event) = rx.try_recv() {
-                        if !emit(event) {
+                        if !emit(event).continues() {
                             aborted = true;
                             break;
                         }

@@ -16,7 +16,7 @@ impl AgentSessionEngine {
         prompt: &TurnPrompt,
         boundary_passed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> TurnResult {
         #[derive(Clone)]
         struct FailoverPrimary {
@@ -501,7 +501,7 @@ impl AgentSessionEngine {
                             }
                         }
                         let engine_event = retry_event_to_engine_event(event);
-                        if !emit(engine_event) {
+                        if !emit(engine_event).continues() {
                             anyhow::bail!("emit cancelled");
                         }
                         Ok(())

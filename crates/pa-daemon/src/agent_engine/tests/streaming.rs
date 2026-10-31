@@ -1282,3 +1282,112 @@ fn cold_switch_uses_caller_persistence_and_hot_switch_commits_once_through_sink(
         count()
     );
 }
+
+#[test]
+fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) =
+        faux_engine_with_settings(&json!({"responses":["one", "two", "three"]}), 1024);
+    let path = dir.path().join("cached-mixed-inputs.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    engine.set_session_file(path.clone());
+    let owner = own_log_store(&engine, store);
+    let contexts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&contexts);
+    *engine.test_stream_decorator.lock().unwrap() = Some(std::sync::Arc::new(move |normal| {
+        let captured = std::sync::Arc::clone(&captured);
+        std::sync::Arc::new(move |model, context, options| {
+            let normal = std::sync::Arc::clone(&normal);
+            let captured = std::sync::Arc::clone(&captured);
+            Box::pin(async move {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(&context).unwrap());
+                normal(model, context, options).await
+            })
+        })
+    }));
+    let texts = [
+        "cached-first-input",
+        "cached-custom-input",
+        "cached-last-input",
+    ];
+    let mut accepted = Vec::new();
+    let mut first_sdk = None;
+    for (index, text) in texts.iter().enumerate() {
+        let leaf = owner
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .leaf_id()
+            .map(str::to_owned);
+        engine.set_prompt_context_boundary(leaf);
+        let mut done = None;
+        engine.run_prompt(index, PromptRequest {
+            message: (*text).to_owned(), batch: Vec::new(), images: Vec::new(), source: "user".to_owned(),
+            agent_message_id: None,
+            custom_message: (index == 1).then(|| json!({"role":"custom", "customType":"cached-input", "content":text, "display":true, "timestamp":1})),
+        }, &|| false, &mut |event| {
+            let input = match event {
+                EngineEvent::UserMessage(message) => Some(("message", json!({"message":message}))),
+                EngineEvent::CustomMessage(message) => {
+                    let mut fields = message.as_object().unwrap().clone();
+                    fields.remove("role"); fields.remove("timestamp");
+                    Some(("custom_message", serde_json::Value::Object(fields)))
+                }
+                EngineEvent::Done(result) => { done = Some(result); None }
+                _ => None,
+            };
+            if let Some((kind, fields)) = input {
+                let id = owner.lock().unwrap().store.as_mut().unwrap().persist_entry(kind, fields).unwrap();
+                accepted.push(id.clone());
+                crate::engine::EmitResult::Accepted(id)
+            } else { crate::engine::EmitResult::Continue }
+        });
+        engine.on_turn_done();
+        assert_eq!(done, Some(Ok(())));
+        let sdk = engine.session.blocking_lock().clone().unwrap();
+        if let Some(first) = &first_sdk {
+            assert!(std::sync::Arc::ptr_eq(first, &sdk));
+        } else {
+            first_sdk = Some(sdk);
+        }
+    }
+    let contexts = contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 3);
+    for (index, context) in contexts.iter().enumerate() {
+        let encoded = context.to_string();
+        for text in &texts[..=index] {
+            assert_eq!(encoded.matches(text).count(), 1, "{encoded}");
+        }
+    }
+    let reopened = crate::session_store::SessionFile::open(&path).unwrap();
+    for id in &accepted {
+        assert_eq!(
+            reopened
+                .entries()
+                .iter()
+                .filter(|entry| &entry.id == id)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(accepted.len(), 3);
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| entry.type_ == "custom_message"
+                || (entry.type_ == "message" && entry.fields["message"]["role"] == "user"))
+            .count(),
+        3
+    );
+}

@@ -43,7 +43,7 @@ impl AgentSessionEngine {
     /// pair, persisting and broadcasting exactly like the `/compact` flow.
     pub(crate) fn run_auto_compaction(
         &self,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> AutoCompactionRun {
         // TS runs the summarizer on the session's live model; a fresh
         // startup-chain resolution can land it on a provider the session
@@ -76,7 +76,9 @@ impl AgentSessionEngine {
         // summarizer runs, so attached surfaces see the loader.
         if !emit(EngineEvent::CompactionStart {
             event: crate::compaction::compaction_start_event("threshold", None),
-        }) {
+        })
+        .continues()
+        {
             return AutoCompactionRun::Cancelled;
         }
         pa_core::session_engine::compaction_trace::trace(
@@ -142,7 +144,9 @@ impl AgentSessionEngine {
                 if let Some(message) = &run.ipython_state {
                     if !emit(EngineEvent::CustomMessage(
                         crate::session_commands::custom_message_value(message),
-                    )) {
+                    ))
+                    .continues()
+                    {
                         return AutoCompactionRun::Cancelled;
                     }
                     pa_core::session_engine::compaction_trace::trace(
@@ -155,7 +159,7 @@ impl AgentSessionEngine {
                 let entry = serde_json::to_value(&run.entry).unwrap_or(Value::Null);
                 let event =
                     crate::compaction::compaction_end_success("threshold", &result, false, None);
-                if !emit(EngineEvent::Compaction { entry, event }) {
+                if !emit(EngineEvent::Compaction { entry, event }).continues() {
                     return AutoCompactionRun::Cancelled;
                 }
                 pa_core::session_engine::compaction_trace::trace(

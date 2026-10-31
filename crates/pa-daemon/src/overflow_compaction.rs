@@ -68,7 +68,7 @@ impl AgentSessionEngine {
     pub(crate) fn run_overflow_compaction(
         &self,
         assistant: &pa_agent::types::AssistantMessage,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> OverflowArmRun {
         match self.overflow_recovery_attempt(assistant, emit) {
             OverflowAttempt::None => OverflowArmRun::NotApplicable,
@@ -83,7 +83,7 @@ impl AgentSessionEngine {
     /// proceeds regardless; returns whether the emitter stayed alive.
     pub(crate) fn run_pre_turn_overflow_compaction(
         &self,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> bool {
         let Some(assistant) = self.last_loop_assistant_message() else {
             return true;
@@ -139,7 +139,7 @@ impl AgentSessionEngine {
     fn overflow_recovery_attempt(
         &self,
         assistant: &pa_agent::types::AssistantMessage,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> OverflowAttempt {
         // TS runs the check and the summarizer on `this.model` — the
         // session's live model. The Rust equivalent is the provider target
@@ -256,7 +256,9 @@ impl AgentSessionEngine {
                 "overflow",
                 custom_instructions.as_deref(),
             ),
-        }) {
+        })
+        .continues()
+        {
             return OverflowAttempt::Cancelled;
         }
         pa_core::session_engine::compaction_trace::trace(
@@ -308,7 +310,9 @@ impl AgentSessionEngine {
                 if let Some(message) = &run.ipython_state {
                     if !emit(EngineEvent::CustomMessage(
                         crate::session_commands::custom_message_value(message),
-                    )) {
+                    ))
+                    .continues()
+                    {
                         return OverflowAttempt::Cancelled;
                     }
                 }
@@ -322,7 +326,7 @@ impl AgentSessionEngine {
                     true,
                     custom_instructions.as_deref(),
                 );
-                if !emit(EngineEvent::Compaction { entry, event }) {
+                if !emit(EngineEvent::Compaction { entry, event }).continues() {
                     return OverflowAttempt::Cancelled;
                 }
                 pa_core::session_engine::compaction_trace::trace(

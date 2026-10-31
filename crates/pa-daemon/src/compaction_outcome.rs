@@ -22,7 +22,7 @@ impl AgentSessionEngine {
         outcome: CompactionOutcomeKind,
         message: &str,
         custom_instructions: Option<&str>,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> bool {
         // The durable row + live-context insertion (TS
         // `_persistCompactionOutcome`).
@@ -42,7 +42,7 @@ impl AgentSessionEngine {
             // `compaction_end` below still fires so clients never stay pending.
             match row {
                 Ok(row) => {
-                    if !emit(EngineEvent::CustomMessage(custom_message_value(&row))) {
+                    if !emit(EngineEvent::CustomMessage(custom_message_value(&row))).continues() {
                         return false;
                     }
                 }
