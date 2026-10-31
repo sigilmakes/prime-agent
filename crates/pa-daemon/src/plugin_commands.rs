@@ -630,6 +630,162 @@ return {
     }
 
     #[tokio::test]
+    async fn deferred_job_publication_fences_sessions_and_surfaces_persistence_errors() {
+        let fixture = Fixture::new().await;
+        let session = fixture
+            .worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .session_id()
+            .to_owned();
+        let mut received = fixture.worker.events.subscribe();
+        let job = json!({"id":"fixture-job","plugin":"counter","generation":"fixture-generation",
+            "state":{"status":"completed","result":{"summary":"already committed"}}});
+        crate::plugin_job_events::publish(
+            &fixture.worker.core,
+            &fixture.worker.events,
+            "replaced-session",
+            job.clone(),
+        );
+        assert!(received.try_recv().is_err(), "stale session cannot publish");
+        assert!(fixture.rows().is_empty());
+        let blocker = fixture.cwd.join("not-a-directory");
+        std::fs::write(&blocker, "fixture blocker").unwrap();
+        fixture
+            .worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .unwrap()
+            .set_path(blocker.join("session.jsonl"));
+        crate::plugin_job_events::publish(
+            &fixture.worker.core,
+            &fixture.worker.events,
+            &session,
+            job.clone(),
+        );
+        let start: Value = serde_json::from_slice(&received.recv().await.unwrap().payload).unwrap();
+        let end: Value = serde_json::from_slice(&received.recv().await.unwrap().payload).unwrap();
+        assert_eq!(start["event"]["type"], "message_start");
+        assert_eq!(end["event"]["type"], "message_end");
+        let row = &end["event"]["message"];
+        assert_eq!(
+            row["details"]["state"], job["state"],
+            "publication failure never rewrites committed state"
+        );
+        assert!(row["details"]["persistenceError"].is_string());
+        assert!(row["content"]
+            .as_str()
+            .unwrap()
+            .contains("Could not save job outcome"));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn deferred_job_success_and_failure_reach_custom_message_transport_once() {
+        for fail in [false, true] {
+            let fixture = Fixture::new().await;
+            std::fs::write(
+                fixture.cwd.join("counter.lua"),
+                r#"
+return {commands={{name='later',run=function(input,ctx)
+ return ctx.call('jobs.enqueue',{hook='later',input={fail=input.args=='fail'}})
+end}},hooks={{name='later',run=function(input)
+ if input.fail then error('fixture deferred failure') end
+ return {summary='fixture deferred success'}
+end}}}
+"#,
+            )
+            .unwrap();
+            let reload = fixture.command("/reload", None).await;
+            assert!(reload.success, "{reload:?}");
+            let session = fixture.core.session.session_id().await;
+            fixture
+                .worker
+                .core
+                .lock()
+                .unwrap()
+                .store
+                .as_mut()
+                .unwrap()
+                .header
+                .id = session;
+            let core = Arc::clone(&fixture.worker.core);
+            let events = Arc::clone(&fixture.worker.events);
+            fixture
+                .worker
+                .agent_engine
+                .as_ref()
+                .unwrap()
+                .set_plugin_job_sink(Arc::new(move |session, job| {
+                    crate::plugin_job_events::publish(&core, &events, session, job);
+                }));
+            let mut received = fixture.worker.events.subscribe();
+            let command = fixture
+                .command(
+                    if fail {
+                        "/later fail"
+                    } else {
+                        "/later success"
+                    },
+                    None,
+                )
+                .await;
+            assert!(command.success, "{command:?}");
+            let row = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let frame = received.recv().await.unwrap();
+                    let frame: Value = serde_json::from_slice(&frame.payload).unwrap();
+                    if frame["event"]["type"] == "message_end"
+                        && frame["event"]["message"]["customType"] == "plugin_job_outcome"
+                    {
+                        break frame["event"]["message"].clone();
+                    }
+                }
+            })
+            .await
+            .expect("terminal outcome reaches attached client");
+            let terminal = fixture.core.drain_plugin_jobs().await;
+            assert_eq!(terminal.len(), 1, "{terminal:?}");
+            assert_eq!(row["details"], terminal[0]);
+            assert_eq!(row["display"], true);
+            assert_eq!(
+                row["details"]["state"]["status"],
+                if fail { "failed" } else { "completed" }
+            );
+            assert!(row["content"].as_str().unwrap().contains(if fail {
+                "fixture deferred failure"
+            } else {
+                "fixture deferred success"
+            }));
+            assert_eq!(
+                fixture.core.drain_plugin_jobs().await,
+                terminal,
+                "observing never consumes results"
+            );
+            assert_eq!(
+                fixture
+                    .rows()
+                    .iter()
+                    .filter(|row| row["customType"] == "plugin_job_outcome")
+                    .count(),
+                1
+            );
+            assert!(
+                received.try_recv().is_err(),
+                "draining must not rebroadcast outcomes"
+            );
+            assert!(fixture.provider.calls().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn failed_reload_keeps_the_last_good_inventory_and_manager_reports_diagnostic() {
         let fixture = Fixture::new().await;
         let before = fixture.catalog().await;

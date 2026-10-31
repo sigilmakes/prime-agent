@@ -26,6 +26,7 @@ pub(super) struct PluginJobs {
     command_barrier: Arc<tokio::sync::Mutex<()>>,
     settled: Arc<tokio::sync::Notify>,
     turn_activity: Arc<TurnActivitySignal>,
+    sink: Arc<Mutex<Option<super::PluginJobSink>>>,
 }
 struct Job {
     plugin: String,
@@ -49,7 +50,11 @@ impl PluginJobs {
             command_barrier,
             settled: Arc::default(),
             turn_activity,
+            sink: Arc::default(),
         }
+    }
+    pub(super) fn set_sink(&self, sink: super::PluginJobSink) {
+        *self.sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(sink);
     }
     pub(super) fn checkpoint(&self) -> Vec<String> {
         self.jobs
@@ -107,6 +112,7 @@ impl HostCapabilities for PluginJobs {
         let command_barrier = Arc::clone(&self.command_barrier);
         let settled = Arc::clone(&self.settled);
         let turn_activity = Arc::clone(&self.turn_activity);
+        let sink = Arc::clone(&self.sink);
         Box::pin(async move {
             let host = host.upgrade().ok_or("session ended")?;
             if cancellation.is_cancelled() {
@@ -214,15 +220,28 @@ impl HostCapabilities for PluginJobs {
                             Err("job ended without result".into())
                         }
                         .await;
-                        if let Some(job) = jobs
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .get_mut(&job_id)
+                        let outcome = {
+                            let mut jobs = jobs.lock().unwrap_or_else(PoisonError::into_inner);
+                            jobs.get_mut(&job_id).map(|job| {
+                                job.state = match result {
+                                    Ok(value) => json!({"status":"completed","result":value}),
+                                    Err(error) => json!({"status":"failed","error":error}),
+                                };
+                                json!({"id":job_id,"plugin":job.plugin,
+                                    "generation":job.generation.to_string(),"state":job.state})
+                            })
+                        };
+                        let observer = sink.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                        if let (Some(observer), Some(outcome), Some(host)) =
+                            (observer, outcome, host.upgrade())
                         {
-                            job.state = match result {
-                                Ok(value) => json!({"status":"completed","result":value}),
-                                Err(error) => json!({"status":"failed","error":error}),
-                            };
+                            // Retired generations keep their terminal state for
+                            // drains, but cannot publish into a replacement.
+                            if let Err(error) = host.with_current_contributions(&[&target], || {
+                                observer(&request.session, outcome);
+                            }) {
+                                tracing::debug!(%error, "retired plugin job outcome not published");
+                            }
                         }
                         settled.notify_waiters();
                     });

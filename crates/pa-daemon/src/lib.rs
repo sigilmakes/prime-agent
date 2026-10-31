@@ -69,6 +69,7 @@ pub(crate) mod peer_client;
 pub(crate) mod peer_tickets;
 pub mod platform;
 pub(crate) mod plugin_commands;
+mod plugin_job_events;
 pub mod prompt_admission;
 pub mod protocol;
 pub(crate) mod queue_commands;

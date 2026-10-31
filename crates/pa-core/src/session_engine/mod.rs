@@ -187,7 +187,21 @@ pub struct AgentSession {
     agent_dir: Option<std::path::PathBuf>,
 }
 
+/// Receives one terminal deferred-job outcome for its durable session identity.
+/// Hosts fence replaced sessions. The observer runs after the terminal state is
+/// recorded and outside the job registry lock. Drains remain independent, so
+/// observing an outcome never consumes a caller's result.
+pub type PluginJobSink = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
+
 impl AgentSession {
+    /// Install the host's terminal deferred-job observer. Only future outcomes
+    /// are delivered; installing an observer never replays historical results.
+    pub fn set_plugin_job_sink(&self, sink: PluginJobSink) {
+        if let Some(jobs) = &self.plugin_jobs {
+            jobs.set_sink(sink);
+        }
+    }
+
     /// Opaque admitted job IDs for correlating one command or prompt's new work.
     pub fn plugin_job_checkpoint(&self) -> Vec<String> {
         self.plugin_jobs

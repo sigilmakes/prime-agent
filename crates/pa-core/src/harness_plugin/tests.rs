@@ -494,6 +494,29 @@ async fn retirement_cancels_owned_job_and_does_not_publish_after_reenable() {
 }
 
 #[tokio::test]
+async fn retired_job_outcomes_remain_drainable_without_publishing_into_new_generation() {
+    let f = held_fixture().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    f.engine
+        .session
+        .set_plugin_job_sink(Arc::new(move |session, job| {
+            tx.send((session.to_owned(), job)).unwrap();
+        }));
+    f.call("refine", json!({})).await.unwrap();
+    started(&f).await;
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(f.agent.join("settings.json")).unwrap()).unwrap();
+    config["plugins"]["harness"]["enabled"] = json!(false);
+    std::fs::write(f.agent.join("settings.json"), config.to_string()).unwrap();
+    f.engine.reload_plugins().await.unwrap();
+    let terminal = f.engine.drain_plugin_jobs().await;
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0]["state"]["status"], "failed");
+    assert!(rx.try_recv().is_err(), "retired generation cannot publish");
+    assert_eq!(f.engine.drain_plugin_jobs().await, terminal);
+}
+
+#[tokio::test]
 async fn dynamic_refine_command_schedules_after_public_command_persistence() {
     let mut config = settings(true);
     config["testProvider"] = json!(AUX_PROVIDER);
