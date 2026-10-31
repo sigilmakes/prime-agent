@@ -63,6 +63,7 @@ impl SessionManager {
     /// # Errors
     /// An ID does not name a retained user row.
     pub fn replay_admitted_user_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
+        self.refresh_committed_entries()?;
         for id in &ids {
             if !matches!(
                 self.retained_entries()
@@ -88,6 +89,7 @@ impl SessionManager {
     /// # Errors
     /// Reject IDs that are not retained user or custom-message inputs.
     pub fn replay_admitted_input_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
+        self.refresh_committed_entries()?;
         let mut users = std::collections::VecDeque::new();
         let mut customs = std::collections::VecDeque::new();
         for id in ids {
@@ -119,6 +121,7 @@ impl SessionManager {
     /// # Errors
     /// An ID does not name a retained custom-message row.
     pub fn replay_admitted_custom_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
+        self.refresh_committed_entries()?;
         for id in &ids {
             if !matches!(
                 self.retained_entries()
