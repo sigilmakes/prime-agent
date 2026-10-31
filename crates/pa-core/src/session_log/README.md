@@ -4,6 +4,13 @@ One session, one `<session-id>.jsonl`, one `<session-id>.lock`, one writer at a
 time. No compatibility with the old format: a session that fails to load is
 reported, not repaired behind the caller's back.
 
+## Read-only consumers
+
+`Row::decode` validates one newline-stripped line with the same envelope and
+CRC parser as the log scanner. Catalog readers keep their own byte cursor and
+last sequence for resumable derived metadata. They ignore incomplete trailing
+lines and never create, lock, fsync, or repair the source log.
+
 ## Invariants
 
 1. **Ownership is the `flock`.** A writer owns the log while it holds
