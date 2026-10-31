@@ -1,8 +1,6 @@
-//! Append-only session store on disk: one JSONL file per session under
-//! `<agent-dir>/sessions/<uuid>.jsonl`, first line is the `session` header,
-//! entries form a parent-id chain (tree). Layout compatibility with the TS
-//! product is load-bearing: TUI reattach, checkpoint/resume, and external
-//! tooling read the same files.
+//! Serving conversation fold over the durable, checksummed session log.
+//! Entries keep their original parent graph; branch selection and context
+//! projection do not rewrite canonical history.
 
 use anyhow::{anyhow, Context, Result};
 use pa_types::ai::Usage;
@@ -31,8 +29,7 @@ mod window_tests;
 mod child_usage;
 mod context_selection;
 mod index;
-// The log-transported half of the store (port-plan §3): the write arm the
-// canonical paths bypass.
+// One durable row writer for the serving fold.
 mod log_wire;
 
 use index::fold_child_usage_attributions;
@@ -154,10 +151,7 @@ pub struct SessionFile {
     /// serve it through `get_state`
     /// (`SessionSummary::anthropic_warning_shown`).
     pub(crate) anthropic_warning_shown: bool,
-    /// THE transport switch's live half: `Some` serves this store's durable
-    /// rows through the session-log core (see `pa_daemon::session_transport`
-    /// for the switch and its resolution rule). `None` keeps the pre-port
-    /// canonical paths.
+    /// Durable row transport; absent only for an in-memory session.
     pub(crate) log_transport: Option<crate::session_transport::LogWire>,
 }
 

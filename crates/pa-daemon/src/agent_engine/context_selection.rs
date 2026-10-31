@@ -1,4 +1,4 @@
-//! The daemon's canonical owner acknowledges the SDK's selected strategy.
+//! Build the SDK view from the serving fold and persist its selected strategy.
 
 use std::future::Future;
 use std::path::Path;
@@ -31,9 +31,7 @@ pub(crate) fn canonical_mirror_header(header: &SessionHeader) -> anyhow::Result<
 pub(crate) type ContextSelectionCommitFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 
-/// A log-transported session's mirror seed: the serving fold the store
-/// already holds, replayed from the session log. The canonical capture/refusal
-/// machinery is the other transport's read arm; this seed replaces it.
+/// The serving fold replayed from the session log.
 pub(crate) struct MirrorSeed {
     pub(crate) header: SessionHeader,
     pub(crate) entries: Vec<pa_types::session::FileEntry>,
@@ -41,8 +39,7 @@ pub(crate) struct MirrorSeed {
 }
 
 pub(crate) trait InitialContextSelectionStore: Send + Sync {
-    /// The transport switch's read arm: a log-transported serving fold, or
-    /// `None` (the canonical capture/refusal path serves instead).
+    /// The session's current serving fold; absent only without a persistent store.
     fn mirror_seed(&self) -> anyhow::Result<Option<MirrorSeed>> {
         Ok(None)
     }

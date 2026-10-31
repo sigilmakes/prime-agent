@@ -15,12 +15,6 @@ pub(crate) struct SessionCore {
     pub(crate) generation: String,
     pub(crate) last_event_sequence: u64,
     pub(crate) store: Option<SessionFile>,
-    /// The live provider step, shared with the per-turn engine.
-    ///
-    /// One owner (this core), one writer (the engine's `run_turn_once` before the
-    /// prompt), one reader (the assistant row's persist arm). The slot is stable
-    /// across store replacement, which is why it lives here and not on the store.
-    pub(crate) context_selection_uncertain: Option<std::sync::Weak<crate::lease::SessionLease>>,
     pub(crate) cwd: String,
     pub(crate) steering: VecDeque<QueuedItem>,
     pub(crate) follow_up: VecDeque<QueuedItem>,
