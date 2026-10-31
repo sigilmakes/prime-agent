@@ -50,10 +50,9 @@ impl SessionManager {
             let Some(path) = path else {
                 return Ok(retained);
             };
-            let mut entries = tokio::task::spawn_blocking(move || {
-                super::super::read::read_entries(&path)
-            })
-            .await??;
+            let mut entries =
+                tokio::task::spawn_blocking(move || super::super::read::read_entries(&path))
+                    .await??;
             let ids: std::collections::HashSet<String> = entries
                 .iter()
                 .filter_map(|entry| entry.id().map(str::to_owned))

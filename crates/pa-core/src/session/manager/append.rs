@@ -8,25 +8,13 @@ use super::{
 
 impl SessionManager {
     pub(crate) fn append_entry(&mut self, entry: FileEntry) -> std::io::Result<String> {
-        let was_assistant = self.has_assistant_entry;
-        let was_flushed = self.flushed;
-        if matches!(
-            entry,
-            FileEntry::Message {
-                message: AgentMessage::Assistant(_),
-                ..
-            }
-        ) {
-            self.has_assistant_entry = true;
+        let mut entry = entry;
+        self.persist_entry(&mut entry)?;
+        if let Some(id) = entry.id().filter(|id| self.by_id.contains_key(*id)) {
+            return Ok(id.to_owned());
         }
         self.file_entries.push(entry);
         let index = self.file_entries.len() - 1;
-        if let Err(error) = self.persist_entry(index) {
-            self.file_entries.pop();
-            self.has_assistant_entry = was_assistant;
-            self.flushed = was_flushed;
-            return Err(error);
-        }
         let entry = self.file_entries[index].clone();
         if let Some(window) = &mut self.window {
             window.append_entry(entry.clone());
@@ -38,8 +26,9 @@ impl SessionManager {
         Ok(entry.id().unwrap_or_default().to_owned())
     }
 
-    pub(crate) fn next_base(&self) -> EntryBase {
-        EntryBase {
+    pub(crate) fn next_base(&mut self) -> std::io::Result<EntryBase> {
+        self.refresh_committed_entries()?;
+        Ok(EntryBase {
             id: Some(if self.window.is_some() {
                 uuid::Uuid::new_v4().to_string()
             } else {
@@ -48,7 +37,7 @@ impl SessionManager {
             parent_id: self.leaf_id.clone(),
             timestamp: Some(format_iso_now()),
             rest: pa_types::JsonMap::new(),
-        }
+        })
     }
 
     /// # Errors
@@ -61,7 +50,7 @@ impl SessionManager {
                 return Ok(id);
             }
         }
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::Message { message, base })?;
         Ok(id)
     }
@@ -94,6 +83,37 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Register accepted input identities, partitioned by their stored row type.
+    ///
+    /// # Errors
+    /// Reject IDs that are not retained user or custom-message inputs.
+    pub fn replay_admitted_input_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
+        let mut users = std::collections::VecDeque::new();
+        let mut customs = std::collections::VecDeque::new();
+        for id in ids {
+            match self
+                .retained_entries()
+                .iter()
+                .find(|entry| entry.id() == Some(id.as_str()))
+            {
+                Some(FileEntry::Message {
+                    message: AgentMessage::User(_),
+                    ..
+                }) => users.push_back(id),
+                Some(FileEntry::CustomMessage { .. }) => customs.push_back(id),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("admitted input row {id} is absent from the retained transcript"),
+                    ))
+                }
+            }
+        }
+        self.admitted_user_rows = users;
+        self.admitted_custom_rows = customs;
+        Ok(())
+    }
+
     /// Register exact admitted custom-message rows, in replay order.
     ///
     /// # Errors
@@ -101,7 +121,9 @@ impl SessionManager {
     pub fn replay_admitted_custom_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
         for id in &ids {
             if !matches!(
-                self.retained_entries().iter().find(|entry| entry.id() == Some(id.as_str())),
+                self.retained_entries()
+                    .iter()
+                    .find(|entry| entry.id() == Some(id.as_str())),
                 Some(FileEntry::CustomMessage { .. })
             ) {
                 return Err(std::io::Error::new(
@@ -119,41 +141,12 @@ impl SessionManager {
         self.admitted_custom_rows.pop_front()
     }
 
-    /// Append a conversation message with the TS `_appendEntry` retained-write
-    /// contract: a failed disk write keeps the row in the live index (the loop
-    /// already owns it), the error surfacing for logging only.
-    pub fn append_message_retained(
-        &mut self,
-        message: AgentMessage,
-    ) -> (String, Option<std::io::Error>) {
-        let admitted = match &message {
-            AgentMessage::User(_) => self.admitted_user_rows.pop_front(),
-            AgentMessage::Assistant(_)
-            | AgentMessage::ToolResult(_)
-            | AgentMessage::BashExecution(_)
-            | AgentMessage::Custom(_)
-            | AgentMessage::BranchSummary(_)
-            | AgentMessage::CompactionSummary(_) => None,
-        };
-        if let Some(id) = admitted {
-            return (id, None);
-        }
-        if matches!(message, AgentMessage::Assistant(_)) {
-            self.has_assistant_entry = true;
-        }
-        let base = self.next_base();
-        self.file_entries.push(FileEntry::Message { message, base });
-        let index = self.file_entries.len() - 1;
-        let write_error = self.persist_entry(index).err();
-        let entry = self.file_entries[index].clone();
-        if let Some(window) = &mut self.window {
-            window.append_entry(entry.clone());
-        }
-        if let Some(id) = entry.id().map(str::to_string) {
-            self.by_id.insert(id.clone(), index);
-            self.leaf_id = Some(id);
-        }
-        (if write_error.is_none() { entry.id().unwrap_or_default().to_owned() } else { String::new() }, write_error)
+    /// Append only after the row is durable.
+    ///
+    /// # Errors
+    /// Returns the durable append error without retaining a phantom row.
+    pub fn append_message_retained(&mut self, message: AgentMessage) -> std::io::Result<String> {
+        self.append_message(message)
     }
 
     /// # Errors
@@ -163,7 +156,7 @@ impl SessionManager {
         &mut self,
         thinking_level: &str,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::ThinkingLevelChange {
             payload: pa_types::session::ThinkingLevelChangeEntry {
                 thinking_level: thinking_level.to_string(),
@@ -180,7 +173,7 @@ impl SessionManager {
         &mut self,
         service_tier: Option<pa_types::ai::ServiceTier>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::ServiceTierChange {
             payload: pa_types::session::ServiceTierChangeEntry { service_tier },
             base,
@@ -196,7 +189,7 @@ impl SessionManager {
         provider: &str,
         model_id: &str,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::ModelChange {
             payload: pa_types::session::ModelChangeEntry {
                 provider: provider.to_string(),
@@ -218,7 +211,7 @@ impl SessionManager {
         &mut self,
         payload: pa_types::session::CompactionEntry,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::Compaction { payload, base })?;
         Ok(id)
     }
@@ -231,7 +224,7 @@ impl SessionManager {
         custom_type: &str,
         data: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::Custom {
             payload: pa_types::session::CustomEntry {
                 custom_type: custom_type.to_string(),
@@ -243,34 +236,16 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a custom entry with the TS `_appendEntry` retained-write
-    /// contract: a failed disk write keeps the entry in the live index and
-    /// surfaces the error for the caller to log (the refine audit arm).
+    /// Append an audit row only after persistence succeeds.
+    ///
+    /// # Errors
+    /// Returns the durable append error.
     pub fn append_custom_entry_retained(
         &mut self,
         custom_type: &str,
         data: Option<serde_json::Value>,
-    ) -> (String, Option<std::io::Error>) {
-        let base = self.next_base();
-        self.file_entries.push(FileEntry::Custom {
-            payload: pa_types::session::CustomEntry {
-                custom_type: custom_type.to_string(),
-                data,
-                rest: serde_json::Map::default(),
-            },
-            base,
-        });
-        let index = self.file_entries.len() - 1;
-        let write_error = self.persist_entry(index).err();
-        let entry = self.file_entries[index].clone();
-        if let Some(window) = &mut self.window {
-            window.append_entry(entry.clone());
-        }
-        if let Some(id) = entry.id().map(str::to_string) {
-            self.by_id.insert(id.clone(), index);
-            self.leaf_id = Some(id);
-        }
-        (if write_error.is_none() { entry.id().unwrap_or_default().to_owned() } else { String::new() }, write_error)
+    ) -> std::io::Result<String> {
+        self.append_custom_entry(custom_type, data)
     }
 
     /// Append a custom message entry (compaction/refine notices, prompts).
@@ -285,7 +260,7 @@ impl SessionManager {
         display: bool,
         details: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::CustomMessage {
             payload: pa_types::session::CustomMessageEntry {
                 custom_type: custom_type.to_string(),
@@ -299,39 +274,18 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a best-effort disclosure row: a failed disk write keeps the
-    /// entry indexed (context rebuilds must not drop the disclosure; the
-    /// gap-bridged usage walk tolerates the missing line on reload). The
-    /// write error surfaces for logging only.
+    /// Append a disclosure only after persistence succeeds.
+    ///
+    /// # Errors
+    /// Returns the durable append error.
     pub fn append_custom_message_retained(
         &mut self,
         custom_type: &str,
         content: pa_types::ai::UserContent,
         display: bool,
         details: Option<serde_json::Value>,
-    ) -> (String, Option<std::io::Error>) {
-        let base = self.next_base();
-        self.file_entries.push(FileEntry::CustomMessage {
-            payload: pa_types::session::CustomMessageEntry {
-                custom_type: custom_type.to_string(),
-                content,
-                details,
-                display,
-                rest: serde_json::Map::default(),
-            },
-            base,
-        });
-        let index = self.file_entries.len() - 1;
-        let write_error = self.persist_entry(index).err();
-        let entry = self.file_entries[index].clone();
-        if let Some(window) = &mut self.window {
-            window.append_entry(entry.clone());
-        }
-        if let Some(id) = entry.id().map(str::to_string) {
-            self.by_id.insert(id.clone(), index);
-            self.leaf_id = Some(id);
-        }
-        (if write_error.is_none() { entry.id().unwrap_or_default().to_owned() } else { String::new() }, write_error)
+    ) -> std::io::Result<String> {
+        self.append_custom_message(custom_type, content, display, details)
     }
 
     /// Fold child usage into the target assistant and record the attribution
@@ -366,7 +320,7 @@ impl SessionManager {
                 format!("Assistant message entry {target_id} not found"),
             )
         })?;
-        let mut base = self.next_base();
+        let mut base = self.next_base()?;
         base.id = Some(row_id.to_owned());
         let id = self.append_entry(FileEntry::ChildUsageAttributed {
             payload: pa_types::session::ChildUsageAttributionEntry {
@@ -395,7 +349,7 @@ impl SessionManager {
     ///
     /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_info(&mut self, name: &str) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::SessionInfo {
             payload: pa_types::session::SessionInfoEntry {
                 name: Some(name.trim().to_string()),
@@ -439,7 +393,7 @@ impl SessionManager {
     ///
     /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_state(&mut self, status: SessionStateStatus) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = self.append_entry(FileEntry::SessionState {
             payload: pa_types::session::SessionStateEntry {
                 state: SessionState {

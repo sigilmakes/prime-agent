@@ -6,7 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::window_cache::{self, Generation, Snapshot};
-pub use super::window_cache::{append_cached, flush as flush_cache, AppendOwnership};
+pub use super::window_cache::{flush as flush_cache, AppendOwnership};
 use pa_types::session::{FileEntry, SessionHeader};
 use serde::{Deserialize, Serialize};
 
@@ -316,7 +316,10 @@ impl WindowedSessionStore {
             let row = crate::session_log::Row::decode(&envelope, 0)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             if newer_seq.is_some_and(|newer| row.seq >= newer) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "session log sequence is not increasing"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session log sequence is not increasing",
+                ));
             }
             newer_seq = Some(row.seq);
             let line = serde_json::to_vec(&row.body)?;
@@ -668,7 +671,10 @@ impl WindowedSessionStore {
         reads.jsonl_bytes += header.len() as u64;
         reads.jsonl_ranges.push((0, header.len() as u64));
         if header.pop() != Some(b'\n') {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "session header is unterminated"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session header is unterminated",
+            ));
         }
         let header_row = crate::session_log::Row::decode(&header, 0)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -688,7 +694,10 @@ impl WindowedSessionStore {
             .jsonl_ranges
             .push((snapshot.start, suffix.len() as u64));
         if !suffix.is_empty() && !suffix.ends_with('\n') {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "session suffix is unterminated"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session suffix is unterminated",
+            ));
         }
         let mut raw_entries = Vec::new();
         let mut entries = vec![canonical];
@@ -934,10 +943,8 @@ impl WindowedSessionStore {
             return Ok(());
         }
         let path = self.path.clone();
-        let entries = tokio::task::spawn_blocking(move || {
-            super::read::read_entries(&path)
-        })
-        .await??;
+        let entries =
+            tokio::task::spawn_blocking(move || super::read::read_entries(&path)).await??;
         self.entries = entries;
         // Re-hydrated bodies re-arm the retained copies (and with them
         // `context()`), like a fresh walk: one transition, not two flags.

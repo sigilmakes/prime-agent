@@ -121,7 +121,8 @@ fn in_memory_from_header_keeps_metadata_after_verified_window_adoption() {
             "message": {"role": "user", "content": "canonical question", "timestamp": 0}
         })
     );
-    std::fs::write(&path, &bytes).unwrap();
+    write_log_fixture(&path, &bytes).unwrap();
+    let bytes = std::fs::read_to_string(&path).unwrap();
     let window = window::WindowedSessionStore::open(&path)
         .unwrap()
         .expect("a verified canonical window");
@@ -199,27 +200,28 @@ fn append_compaction_serializes_the_full_ts_record() {
             harness_state_fingerprint: None,
         })
         .unwrap();
-    let line = serialize_entry(
+    let line = serde_json::to_string(
         manager
             .get_entries()
             .iter()
             .rev()
             .find(|entry| matches!(entry, FileEntry::Compaction { .. }))
             .expect("compaction entry appended"),
-    );
+    )
+    .unwrap();
     assert!(line.contains("\"fromHook\":false"));
     assert!(line.contains("\"tokensBefore\":214"));
     assert!(line.contains("\"usage\":"));
 }
 
 #[test]
-fn persist_appends_after_first_assistant() {
+fn persist_appends_before_first_assistant() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("sessions");
     let mut manager = SessionManager::persisted(tmp.path(), &dir);
-    // Pre-model entries are not flushed until an assistant message exists.
+    // Every row is durable before publication, including before inference.
     let first = manager.append_thinking_level_change("high");
-    assert!(!manager.get_session_file().unwrap().exists());
+    assert!(manager.get_session_file().unwrap().exists());
     manager
         .append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
             content: vec![],
@@ -251,7 +253,7 @@ fn persist_appends_after_first_assistant() {
 }
 
 #[test]
-fn open_repairs_and_resumes() {
+fn open_rejects_torn_tail_without_modifying_source() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
@@ -275,9 +277,8 @@ fn open_repairs_and_resumes() {
     let file = manager.get_session_file().unwrap().to_path_buf();
     let content = std::fs::read_to_string(&file).unwrap();
     std::fs::write(&file, content.trim_end()).unwrap();
-    let reopened = SessionManager::open(tmp.path(), &dir, &file);
-    assert_eq!(reopened.get_entries().len(), 1); // assistant (header excluded)
-    assert_eq!(reopened.get_session_id(), manager.get_session_id());
+    assert!(SessionManager::open(tmp.path(), &dir, &file).is_err());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), content.trim_end());
 }
 
 #[test]
@@ -416,14 +417,8 @@ fn fork_from_never_rewrites_the_source() {
     let content = "{\"type\":\"session\",\"version\":3,\"id\":\"torn-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n{\"type\":\"custom\",\"customType\":\"kept\",\"data\":{},\"id\":\"keep1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:00.000Z\"}\n{\"type\":\"custo";
     std::fs::write(&file, content).unwrap();
     let target_dir = tmp.path().join("fork-sessions");
-    let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
-        .expect("the torn tail is skipped, not fatal");
+    assert!(SessionManager::fork_from(&file, tmp.path(), &target_dir).is_err());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
-    let entries = forked.get_all_entries();
-    assert!(
-        entries.iter().any(|entry| entry.id() == Some("keep1")),
-        "the complete rows copied"
-    );
 }
 
 #[test]
@@ -438,7 +433,7 @@ fn fork_from_terminates_on_cyclic_git_state_parents() {
     let git_a = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc01\",\"parentId\":\"cyc02\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
     let git_b = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc02\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
     let custom = "{\"type\":\"custom\",\"customType\":\"survivor\",\"data\":{},\"id\":\"cyc03\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
-    std::fs::write(&file, format!("{header}\n{git_a}\n{git_b}\n{custom}\n")).unwrap();
+    write_log_fixture(&file, format!("{header}\n{git_a}\n{git_b}\n{custom}\n")).unwrap();
 
     let target_dir = tmp.path().join("fork-sessions");
     let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
@@ -523,29 +518,11 @@ fn open_treats_a_path_shaped_header_id_as_corrupted() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
-    let artifacts_root = tmp.path().join("session-artifacts");
     let file = dir.join("crafted.jsonl");
-    for crafted in ["../../outside", "/abs/outside"] {
-        let line = serde_json::json!({
-            "type": "session", "version": 3, "id": crafted,
-            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w"
-        })
-        .to_string();
-        std::fs::write(&file, format!("{line}\n")).unwrap();
-        let manager = SessionManager::open(tmp.path(), &dir, &file);
-        let artifact_dir = manager.get_session_artifact_dir().unwrap();
-        assert_eq!(
-            (
-                artifact_dir.parent(),
-                read_session_header(&file).map(|header| header.id),
-            ),
-            (
-                Some(artifacts_root.as_path()),
-                Some(manager.get_session_id().to_owned()),
-            ),
-            "{crafted}: the corrupted-header reset mints a fresh id and rewrites the file",
-        );
-    }
+    let bytes = b"unsupported old session format\n";
+    std::fs::write(&file, bytes).unwrap();
+    assert!(SessionManager::open(tmp.path(), &dir, &file).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
 }
 
 /// Replay validation must stay on the retained index: the full-history query
@@ -582,7 +559,8 @@ fn replay_admitted_user_rows_stays_windowed_and_reuses_only_registered_ids() {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    std::fs::write(&path, &bytes).unwrap();
+    write_log_fixture(&path, &bytes).unwrap();
+    let bytes = std::fs::read_to_string(&path).unwrap();
     let window = super::super::window::WindowedSessionStore::open(&path)
         .unwrap()
         .expect("windowed transcript");
@@ -597,13 +575,11 @@ fn replay_admitted_user_rows_stays_windowed_and_reuses_only_registered_ids() {
     manager
         .replay_admitted_user_rows(vec!["accepted".to_string()])
         .unwrap();
-    let (id, error) = manager.append_message_retained(message.clone());
+    let id = manager.append_message_retained(message.clone()).unwrap();
     assert_eq!(id, "accepted");
-    assert!(error.is_none());
     assert_eq!(manager.retained_entries(), retained);
-    let (next_id, error) = manager.append_message_retained(message);
+    let next_id = manager.append_message_retained(message).unwrap();
     assert_ne!(next_id, "accepted");
-    assert!(error.is_none());
     assert_eq!(manager.retained_entries().len(), retained.len() + 1);
     assert!(manager.window.is_some(), "no full-history hydration");
     assert_eq!(
@@ -618,6 +594,13 @@ fn host_writer_receives_exact_entry_before_publication() {
     use std::sync::{Arc, Mutex};
     struct Writer(Arc<Mutex<Vec<FileEntry>>>);
     impl super::SessionEntryWriter for Writer {
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+
         fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
             self.0.lock().unwrap().push(entry.clone());
             Ok(())
@@ -641,6 +624,13 @@ fn host_writer_receives_exact_entry_before_publication() {
 fn host_writer_failure_does_not_publish_an_entry() {
     struct Writer;
     impl super::SessionEntryWriter for Writer {
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+
         fn append(&self, _: &mut FileEntry) -> std::io::Result<()> {
             Err(std::io::Error::other("injected append refusal"))
         }
@@ -657,6 +647,13 @@ fn host_writer_does_not_repeat_accepted_user_rows() {
     use std::sync::{Arc, Mutex};
     struct Writer(Arc<Mutex<Vec<FileEntry>>>);
     impl super::SessionEntryWriter for Writer {
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+
         fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
             self.0.lock().unwrap().push(entry.clone());
             Ok(())
@@ -681,6 +678,13 @@ fn host_writer_does_not_repeat_accepted_user_rows() {
 fn host_sink_returns_the_committed_identity_and_parent() {
     struct Writer;
     impl super::SessionEntryWriter for Writer {
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+
         fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
             let mut value = serde_json::to_value(&*entry)?;
             value["id"] = "committed-id".into();
@@ -706,9 +710,79 @@ fn host_sink_returns_the_committed_identity_and_parent() {
 fn admitted_custom_identity_is_consumed_once_without_content_deduplication() {
     let tmp = tempfile::tempdir().unwrap();
     let mut manager = SessionManager::in_memory(tmp.path());
-    let id = manager.append_custom_message("accepted", pa_types::ai::UserContent::Text("same".into()), true, None).unwrap();
-    manager.replay_admitted_custom_rows(vec![id.clone()]).unwrap();
+    let id = manager
+        .append_custom_message(
+            "accepted",
+            pa_types::ai::UserContent::Text("same".into()),
+            true,
+            None,
+        )
+        .unwrap();
+    manager
+        .replay_admitted_custom_rows(vec![id.clone()])
+        .unwrap();
     assert_eq!(manager.consume_admitted_custom_row(), Some(id));
     assert_eq!(manager.consume_admitted_custom_row(), None);
-    assert!(manager.replay_admitted_custom_rows(vec!["missing".into()]).is_err());
+    assert!(manager
+        .replay_admitted_custom_rows(vec!["missing".into()])
+        .is_err());
+}
+
+fn write_log_fixture(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut log =
+        crate::session_log::SessionLog::open(temp.path(), "fixture", std::time::Instant::now())
+            .map_err(std::io::Error::other)?;
+    for line in content
+        .as_ref()
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let row: serde_json::Value = serde_json::from_slice(line)?;
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            crate::session_log::Outcome::Committed { .. }
+        ));
+    }
+    std::fs::copy(temp.path().join("fixture.jsonl"), path)?;
+    Ok(())
+}
+
+#[test]
+fn external_commits_enter_context_before_inference_and_parent_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::persisted(dir.path(), dir.path());
+    manager.append_custom_entry("initial", None).unwrap();
+    let path = manager.get_session_file().unwrap().to_owned();
+    let id = path.file_stem().unwrap().to_str().unwrap();
+    let mut external =
+        crate::session_log::SessionLog::open(dir.path(), id, std::time::Instant::now()).unwrap();
+    let row = serde_json::json!({"type":"message","id":"foreign-user","parentId":manager.get_leaf_id(),"timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"external prompt","timestamp":0}});
+    assert!(matches!(
+        external.append(&row, std::time::Instant::now()),
+        crate::session_log::Outcome::Committed { .. }
+    ));
+    manager.refresh_committed_entries().unwrap();
+    assert_eq!(manager.active_context().messages.len(), 1);
+    let row = serde_json::json!({"type":"custom_message","id":"foreign-custom","parentId":"foreign-user","timestamp":"2026-01-01T00:00:00Z","customType":"external","content":"external notice","display":true});
+    assert!(matches!(
+        external.append(&row, std::time::Instant::now()),
+        crate::session_log::Outcome::Committed { .. }
+    ));
+    let appended = manager.append_session_info("after external").unwrap();
+    assert_eq!(
+        manager.get_entry_by_id(&appended).unwrap().parent_id(),
+        Some("foreign-custom")
+    );
+}
+
+#[test]
+fn unsupported_and_torn_prefixes_never_repair_or_recreate_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unsupported.jsonl");
+    for bytes in [b"".as_slice(), b"{\"type\":\"session\",\"id\":\"old\"}\n".as_slice(), b"{\"seq\":1,\"row\":{".as_slice()] {
+        std::fs::write(&path, bytes).unwrap();
+        assert!(SessionManager::open(dir.path(), dir.path(), &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 }

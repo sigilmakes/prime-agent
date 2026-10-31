@@ -29,9 +29,7 @@ impl SessionManager {
                 "metadata intent supplied canonical identity",
             ));
         }
-        *base = self.next_base();
-        let id = base.id.clone().expect("local base minted identity");
-        self.append_entry(entry)?;
-        Ok(id)
+        *base = self.next_base()?;
+        self.append_entry(entry)
     }
 }

@@ -3,10 +3,10 @@ pub mod discovery;
 pub mod manager;
 pub mod manager_ext;
 pub mod metadata;
+pub mod read;
 pub mod tree;
 pub mod window;
 mod window_cache;
-pub mod read;
 
 use std::collections::HashMap;
 

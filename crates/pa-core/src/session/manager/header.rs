@@ -8,7 +8,8 @@ pub fn read_session_header(file_path: &Path) -> Option<SessionHeader> {
     use std::io::BufRead;
     let mut first = Vec::new();
     std::io::BufReader::new(std::fs::File::open(file_path).ok()?)
-        .read_until(b'\n', &mut first).ok()?;
+        .read_until(b'\n', &mut first)
+        .ok()?;
     if first.pop() != Some(b'\n') {
         return None;
     }

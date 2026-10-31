@@ -52,7 +52,7 @@ fn older_path_stats_fold_child_usage_attributions() {
 "
         })
         .collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     // The discarded assistant reports the aggregate (150/15/5, $0.165), never the raw row
     // (100/10/5, $0.11).
@@ -102,7 +102,7 @@ fn older_path_stats_keep_a_targets_last_aggregate() {
         "cost":{"input":0.18,"output":0.018,"cacheRead":0,"cacheWrite":0,"total":0.198}}}));
     rows.push(json!({"type":"message","id":"leaf","parentId":"attr2","message":{"role":"user","content":"latest","timestamp":0}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     let stats = store.older_path_stats();
     // The LAST aggregate folds the row (newest-first first-seen).
@@ -134,7 +134,7 @@ fn older_path_stats_skip_malformed_aggregates() {
         "aggregateUsage":null}));
     rows.push(json!({"type":"message","id":"leaf","parentId":"attr","message":{"role":"user","content":"latest","timestamp":0}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     let stats = store.older_path_stats();
     // The malformed aggregate never folds (the raw row's $0.125 stays the bill).
@@ -163,7 +163,7 @@ fn boundary_model_is_the_prefixs_newest_model_change_not_the_leafs() {
     rows.push(json!({"type":"model_change","id":"m-b","parentId":"compact","provider":"anthropic","modelId":"gpt-b"}));
     rows.push(json!({"type":"message","id":"leaf","parentId":"m-b","message":{"role":"user","content":"latest","timestamp":0}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert_eq!(
         store.boundary_model(),
@@ -182,7 +182,7 @@ fn warm_cache_reads_only_header_and_suffix_and_append_stays_warm() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("warm.jsonl");
     let body = fixture();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let cold = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(!cold.read_stats().cache_hit);
     let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
@@ -194,7 +194,7 @@ fn warm_cache_reads_only_header_and_suffix_and_append_stays_warm() {
     );
     let row =
         json!({"type":"thinking_level_change","id":"new","parentId":"leaf","thinkingLevel":"low"});
-    append_cached(
+    append_fixture(
         &path,
         format!("{row}\n").as_bytes(),
         AppendOwnership::SessionLeaseHeld,
@@ -228,7 +228,7 @@ async fn historical_refinement_is_read_only_on_trigger_not_in_hot_cache() {
     rows.insert(position, json!({"type":"custom","id":"audit","parentId":parent,"customType":"prime-agent.refinement","data":{"summary":marker}}));
     rows[position + 1]["parentId"] = json!("audit");
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let cold = WindowedSessionStore::open(&path).unwrap().unwrap();
     let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(warm.read_stats().cache_hit);
@@ -248,7 +248,7 @@ fn blank_rows_and_uncompacted_context_are_warm() {
     let dir = tempfile::tempdir().unwrap();
     for (name, body) in [("blank", fixture().replace('\n', "\n\n")), ("plain", r#"{"type":"session","version":3,"id":"s","cwd":"/tmp","timestamp":"now"}\n{"type":"message","id":"m","parentId":null,"message":{"role":"user","content":"hi","timestamp":0}}\n"#.replace("\\n", "\n"))] {
         let path = dir.path().join(name);
-        std::fs::write(&path, &body).unwrap();
+        write_fixture(&path, &body).unwrap();
         WindowedSessionStore::open(&path).unwrap().unwrap();
         let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
         assert!(warm.read_stats().cache_hit);
@@ -270,7 +270,7 @@ fn valid_goal_and_physical_metadata_survive_invalid_newer_branch_goal() {
     rows.push(json!({"type":"session_info","id":"offpath","parentId":null,"name":"physical"}));
     rows.push(json!({"type":"custom","id":"invalid-goal","parentId":"leaf","customType":"thread_goal_state","data":{"bad":true}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, body).unwrap();
+    write_fixture(&path, body).unwrap();
     for _ in 0..2 {
         let store = WindowedSessionStore::open(&path).unwrap().unwrap();
         assert_eq!(store.goal_state().unwrap().goal_id.as_deref(), Some("goal"));
@@ -303,7 +303,7 @@ fn anthropic_warning_marker_hydrates_from_before_the_boundary() {
         json!({"type":"custom","id":"marked","parentId":"settings","customType":crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,"data":{"shown":true}}),
     );
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, body).unwrap();
+    write_fixture(&path, body).unwrap();
     // Twice: the cold walk, then the warm sidecar reload — both must
     // serve the hydrated gate.
     for _ in 0..2 {
@@ -316,7 +316,7 @@ fn anthropic_warning_marker_hydrates_from_before_the_boundary() {
     }
     // The plain fixture never hydrates the gate.
     let plain = dir.path().join("plain.jsonl");
-    std::fs::write(&plain, fixture()).unwrap();
+    write_fixture(&plain, fixture()).unwrap();
     let store = WindowedSessionStore::open(&plain).unwrap().unwrap();
     assert!(!store.anthropic_warning_shown());
 }
@@ -338,7 +338,7 @@ fn an_unshown_marker_row_never_hydrates_the_gate() {
         json!({"type":"custom","id":"unshown","parentId":"settings","customType":crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,"data":{"shown":false}}),
     );
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, body).unwrap();
+    write_fixture(&path, body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(!store.anthropic_warning_shown());
 }
@@ -347,10 +347,10 @@ fn an_unshown_marker_row_never_hydrates_the_gate() {
 fn unleased_append_invalidates_without_certification() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unleased.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     WindowedSessionStore::open(&path).unwrap().unwrap();
     let row = json!({"type":"session_info","id":"info","parentId":"leaf","name":"updated"});
-    append_cached(
+    append_fixture(
         &path,
         format!("{row}\n").as_bytes(),
         AppendOwnership::Unleased,
@@ -376,11 +376,11 @@ fn cached_accounting_preserves_subtotal_bits() {
 fn explicit_null_tier_append_stays_warm() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tier.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     WindowedSessionStore::open(&path).unwrap().unwrap();
     let first =
         json!({"type":"service_tier_change","id":"tier","parentId":"leaf","serviceTier":"default"});
-    append_cached(
+    append_fixture(
         &path,
         format!("{first}\n").as_bytes(),
         AppendOwnership::SessionLeaseHeld,
@@ -388,7 +388,7 @@ fn explicit_null_tier_append_stays_warm() {
     .unwrap();
     let clear =
         json!({"type":"service_tier_change","id":"clear","parentId":"tier","serviceTier":null});
-    append_cached(
+    append_fixture(
         &path,
         format!("{clear}\n").as_bytes(),
         AppendOwnership::SessionLeaseHeld,
@@ -404,7 +404,7 @@ fn explicit_null_tier_append_stays_warm() {
 fn stale_corrupt_and_replaced_cache_rebuild() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stale.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     WindowedSessionStore::open(&path).unwrap().unwrap();
     let changed = fixture().replace("high", "low ");
     std::fs::write(&path, changed).unwrap();
@@ -423,7 +423,7 @@ fn stale_corrupt_and_replaced_cache_rebuild() {
             .cache_hit
     );
     let replacement = dir.path().join("replacement");
-    std::fs::write(&replacement, fixture()).unwrap();
+    write_fixture(&replacement, fixture()).unwrap();
     std::fs::rename(replacement, &path).unwrap();
     assert!(
         !WindowedSessionStore::open(&path)
@@ -439,7 +439,7 @@ async fn context_and_hydration_match_full_reader() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let body = fixture();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let full = super::super::parse_session_entries(&body);
     let expected = build_session_context(&full, Some("leaf"));
     let mut window = WindowedSessionStore::open(&path).unwrap().unwrap();
@@ -471,7 +471,7 @@ async fn metadata_and_concurrent_disk_append_survive_hydration() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.jsonl");
     let body = fixture();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let mut store = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert_eq!(store.message_count(), 221);
     assert_eq!(store.older_path_stats().user_messages, 210);
@@ -500,7 +500,7 @@ async fn manager_opens_window_and_appends_without_hydration() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("manager.jsonl");
     let body = fixture();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let mut manager =
         super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
@@ -515,7 +515,7 @@ async fn manager_opens_window_and_appends_without_hydration() {
     assert!(!manager.is_full_history());
     let after = std::fs::read_to_string(&path).unwrap();
     assert!(after.starts_with(&body));
-    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path);
+    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path).unwrap();
     assert_eq!(
         serde_json::to_vec(&manager.active_context().messages).unwrap(),
         serde_json::to_vec(&reopened.active_context().messages).unwrap()
@@ -526,7 +526,7 @@ async fn manager_opens_window_and_appends_without_hydration() {
 async fn failed_window_append_returns_error_without_id_or_listener() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("manager.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     let mut manager =
         super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
@@ -557,7 +557,7 @@ fn sparse_settings_and_sibling_changes_match_full_context() {
     rows.insert(2, json!({"type":"service_tier_change","id":"tier","parentId":"model","serviceTier":"default"}));
     rows.insert(rows.len() - 1, json!({"type":"thinking_level_change","id":"other-settings","parentId":"sibling","thinkingLevel":"low"}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let expected = build_session_context(&super::super::parse_session_entries(&body), Some("leaf"));
     let actual = WindowedSessionStore::open(&path)
         .unwrap()
@@ -591,7 +591,7 @@ fn reverse_reader_preserves_long_lines_and_unterminated_tail() {
     let path = dir.path().join("lines");
     let long = "é".repeat(CHUNK_BYTES * 2);
     let body = format!("first\n{long}\nlast");
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let mut reader = ReverseLines {
         file: std::fs::File::open(path).unwrap(),
         position: body.len() as u64,
@@ -616,7 +616,7 @@ fn no_retained_boundary_matches_cold_context_and_keeps_only_the_physical_suffix(
         .collect();
     rows.iter_mut().find(|row| row["id"] == "compact").unwrap()["firstKeptEntryId"] = json!(null);
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let reference = build_session_context(&super::super::parse_session_entries(&body), None);
     assert_eq!(reference.messages.len(), 2);
     let expected = serde_json::to_vec(&(
@@ -660,7 +660,7 @@ fn windowed_context_is_byte_identical_to_the_cold_parse() {
     rows.push(serde_json::json!({"type":"model_change","id":"model","parentId":"leaf","provider":"openai","modelId":"gpt-5"}));
     rows.push(serde_json::json!({"type":"message","id":"leaf2","parentId":"model","message":{"role":"user","content":"after the switch","timestamp":0}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let reference = build_session_context(&super::super::parse_session_entries(&body), None);
     let reference_bytes = serde_json::to_vec(&(
         &reference.messages,
@@ -694,7 +694,7 @@ fn sequential_appends_keep_reopens_amortized() {
     // pre-window history.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flat.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     WindowedSessionStore::open(&path).unwrap().unwrap();
     let baseline = WindowedSessionStore::open(&path)
         .unwrap()
@@ -708,7 +708,7 @@ fn sequential_appends_keep_reopens_amortized() {
         let row = serde_json::json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("appended {i}"),"timestamp":0}});
         let line = format!("{row}\n");
         appended_bytes += line.len() as u64;
-        append_cached(&path, line.as_bytes(), AppendOwnership::SessionLeaseHeld).unwrap();
+        append_fixture(&path, line.as_bytes(), AppendOwnership::SessionLeaseHeld).unwrap();
         let store = WindowedSessionStore::open(&path).unwrap().unwrap();
         let stats = store.read_stats();
         assert!(stats.cache_hit, "append {i} invalidated the cache");
@@ -734,7 +734,7 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
     rows.push(json!({"type":"model_change","id":"model","parentId":"leaf","provider":"openai","modelId":"gpt-5"}));
     rows.push(json!({"type":"message","id":"leaf2","parentId":"model","message":{"role":"user","content":"after the switch","timestamp":0}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     for phase in ["cold", "warm"] {
         // The reference opens FIRST in the cold pass (the adopted open
         // warms the sidecar; the parity is about WHO holds the rows, not
@@ -781,7 +781,7 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
 fn detached_window_serves_lookups_but_not_its_own_context() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("detached.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     let mut window = WindowedSessionStore::open(&path).unwrap().unwrap();
     let (bodies, raw) = window.take_retained();
     assert!(!bodies.is_empty());
@@ -825,7 +825,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
         "cost":{"input":0.01,"output":0.002,"cacheRead":0.0,"cacheWrite":0.0,"total":0.012}}}}));
     rows.push(json!({"type":"message","id":"leaf","parentId":"a1","message":{"role":"user","content":"latest","timestamp":0}}));
     let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
 
     let mut manager =
         super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
@@ -869,7 +869,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
         )
         .unwrap();
     let live = manager.active_context();
-    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path);
+    let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path).unwrap();
     let reopened_ctx = reopened.active_context();
     let live_bytes = serde_json::to_vec(&(
         &live.messages,
@@ -919,7 +919,7 @@ async fn full_history_snapshot_serves_retained_rows_without_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("full.jsonl");
     let body = full_history_fixture();
-    std::fs::write(&path, &body).unwrap();
+    write_fixture(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(
         store.retained_whole_file(),
@@ -960,7 +960,7 @@ async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
     use std::io::Write as _;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unleased-full.jsonl");
-    std::fs::write(&path, full_history_fixture()).unwrap();
+    write_fixture(&path, full_history_fixture()).unwrap();
     let manager =
         super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
@@ -984,7 +984,7 @@ async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
 async fn boundary_window_snapshot_keeps_the_historical_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("boundary.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
+    write_fixture(&path, fixture()).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(
         !store.retained_whole_file(),
@@ -1020,27 +1020,53 @@ async fn boundary_window_snapshot_keeps_the_historical_read() {
 /// guard writes one newline first, so the appended row parses on its own
 /// line and the torn row alone stays skipped.
 #[test]
-fn append_cached_bounds_an_unterminated_tail() {
+fn append_refuses_a_torn_source_without_repairing_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("torn.jsonl");
-    std::fs::write(
-        &path,
-        "{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"2026-10-08T00:00:00.000Z\"}\n{\"type\":\"message\",\"id\":\"torn\",\"timestamp\":\"2026-10-08T00:00:00.000Z\"",
-    )
-    .unwrap();
-    let appended =
-        b"{\"type\":\"message\",\"id\":\"after\",\"timestamp\":\"2026-10-08T00:00:00.000Z\"}\n";
-    append_cached(&path, appended, AppendOwnership::Unleased).unwrap();
-    let text = std::fs::read_to_string(&path).unwrap();
-    let mut parsed = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        if serde_json::from_str::<serde_json::Value>(line).is_ok() {
-            parsed.push(index);
-        }
+    write_fixture(&path, full_history_fixture()).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.pop();
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(append_fixture(&path, b"{\"type\":\"custom\"}\n", AppendOwnership::Unleased).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+fn write_fixture(path: &Path, content: impl AsRef<[u8]>) -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut log =
+        crate::session_log::SessionLog::open(dir.path(), "fixture", std::time::Instant::now())
+            .map_err(io::Error::other)?;
+    for line in content
+        .as_ref()
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let row: serde_json::Value = serde_json::from_slice(line)?;
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            crate::session_log::Outcome::Committed { .. }
+        ));
     }
-    assert_eq!(
-        parsed,
-        vec![0, 2],
-        "the header and the appended row parse on their own lines; the torn row alone stays skipped:\n{text}"
-    );
+    std::fs::copy(dir.path().join("fixture.jsonl"), path)?;
+    Ok(())
+}
+
+fn append_fixture(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> io::Result<()> {
+    let id = path.file_stem().unwrap().to_str().unwrap();
+    let mut log =
+        crate::session_log::SessionLog::open(path.parent().unwrap(), id, std::time::Instant::now())
+            .map_err(io::Error::other)?;
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let value: serde_json::Value = serde_json::from_slice(line)?;
+        assert!(matches!(
+            log.append(&value, std::time::Instant::now()),
+            crate::session_log::Outcome::Committed { .. }
+        ));
+        let entry = serde_json::from_value(value)?;
+        super::super::window_cache::committed(path, &entry, ownership);
+    }
+    Ok(())
 }
