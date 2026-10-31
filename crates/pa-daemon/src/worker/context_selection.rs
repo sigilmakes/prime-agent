@@ -18,7 +18,6 @@ use super::SessionCore;
 pub(super) struct CoreInitialContextSelectionStore(pub(super) Arc<Mutex<SessionCore>>);
 
 fn current_lease(core: &SessionCore) -> Result<Arc<SessionLease>> {
-    ensure!(!core.shutdown_requested, "session is shutting down");
     let store = core
         .store
         .as_ref()
@@ -60,6 +59,7 @@ fn commit_with(
     selection: &ContextSelection,
     write: impl FnOnce(&mut SessionFile, &ContextSelection) -> Result<()>,
 ) -> Result<()> {
+    ensure!(!core.shutdown_requested, "session is shutting down");
     validate_source(core, source)?;
     ensure!(
         selection.version == 1 && selection.strategy.split_once('/').is_some(),
@@ -89,24 +89,15 @@ struct CoreSessionEntryWriter {
 }
 
 impl pa_core::session::manager::SessionEntryWriter for CoreSessionEntryWriter {
-    fn append(&self, entry: &pa_types::session::FileEntry) -> std::io::Result<()> {
-        let write = || -> Result<()> {
+    fn append(&self, entry: &mut pa_types::session::FileEntry) -> std::io::Result<()> {
+        let mut write = || -> Result<()> {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
             validate_source(&core, &self.source)?;
-            let row: crate::session_store::SessionEntry =
-                serde_json::from_value(serde_json::to_value(entry)?)?;
             let store = core.store.as_mut().context("session store unavailable")?;
-            if let Some(existing) = store.entry(&row.id) {
-                ensure!(
-                    serde_json::to_value(existing)? == serde_json::to_value(&row)?,
-                    "session row ID collision"
-                );
-                return Ok(());
-            }
-            store.persist_built_log_entry(row)?;
+            store.persist_sdk_entry(entry)?;
             Ok(())
         };
         write().map_err(std::io::Error::other)
@@ -149,6 +140,7 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
 
     fn capture(&self, expected_file: &std::path::Path) -> Result<ContextSelectionSource> {
         let core = self.0.lock().expect("session core lock");
+        ensure!(!core.shutdown_requested, "session is shutting down");
         let lease = current_lease(&core)?;
         let store = core.store.as_ref().expect("current_lease proved the store");
         let path = canonical_session_path(&store.path);

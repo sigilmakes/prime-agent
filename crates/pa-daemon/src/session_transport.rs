@@ -106,6 +106,8 @@ pub(crate) fn log_exists(agent_dir: &Path, session_path: &Path) -> bool {
 /// Why one wire step failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LogWireError {
+    #[error("unsupported legacy session format; the file was not changed")]
+    LegacyUnsupported,
     /// Another writer holds the log.
     #[error("session log is held by {holder}")]
     Busy {
@@ -525,6 +527,23 @@ pub(crate) fn open_repaired_dir(
     directory: &Path,
     session_id: &str,
 ) -> Result<(SessionLog, Option<session_log::RepairReport>), LogWireError> {
+    let path = directory.join(format!("{session_id}.jsonl"));
+    if path.exists() {
+        use std::io::BufRead as _;
+        let file = std::fs::File::open(&path)?;
+        let mut first = String::new();
+        std::io::BufReader::new(file).read_line(&mut first)?;
+        if !first.is_empty() {
+            let envelope: Value =
+                serde_json::from_str(first.trim()).map_err(|_| LogWireError::LegacyUnsupported)?;
+            if !["seq", "ts", "crc", "row"]
+                .iter()
+                .all(|key| envelope.get(key).is_some())
+            {
+                return Err(LogWireError::LegacyUnsupported);
+            }
+        }
+    }
     match SessionLog::open(directory, session_id, deadline()) {
         Ok(log) => Ok((log, None)),
         Err(session_log::Error::Damaged { .. }) => {

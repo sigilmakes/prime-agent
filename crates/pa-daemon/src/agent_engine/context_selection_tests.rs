@@ -67,7 +67,7 @@ impl InitialContextSelectionStore for RefusingSelectionStore {
     ) -> Arc<dyn pa_core::session::manager::SessionEntryWriter> {
         struct RefusingWriter;
         impl pa_core::session::manager::SessionEntryWriter for RefusingWriter {
-            fn append(&self, _entry: &FileEntry) -> std::io::Result<()> {
+            fn append(&self, _entry: &mut FileEntry) -> std::io::Result<()> {
                 Err(std::io::Error::other(ACK_ERROR))
             }
         }

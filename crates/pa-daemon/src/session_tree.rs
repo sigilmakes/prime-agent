@@ -672,4 +672,13 @@ mod tests {
         store.branch_to(None).unwrap();
         assert_eq!(SessionFile::open(&path).unwrap().leaf_id(), None);
     }
+    #[test]
+    fn legacy_open_never_repairs_or_rewrites_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.jsonl");
+        let bytes = b"{\"type\":\"session\",\"id\":\"legacy\"}\n";
+        std::fs::write(&path, bytes).unwrap();
+        assert!(SessionFile::open(&path).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 }

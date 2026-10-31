@@ -446,7 +446,11 @@ impl Worker {
                         if let Some(goal) = continuation.goal_update {
                             {
                                 let mut core = self.core.lock().unwrap();
-                                if let Some(store) = core.store.as_mut() {
+                                if let Some(store) = core
+                                    .store
+                                    .as_mut()
+                                    .filter(|_| !engine.persists_session_entries())
+                                {
                                     let _ = store.persist_entry(
                                         "custom",
                                         json!({

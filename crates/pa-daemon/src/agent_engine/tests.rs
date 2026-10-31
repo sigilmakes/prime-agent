@@ -44,7 +44,7 @@ fn bare_engine(dir: &std::path::Path) -> AgentSessionEngine {
 
 /// A standalone engine fixture still needs the real canonical owner. Transfer
 /// its existing store into one `SessionCore`; no second SDK writer is enabled.
-fn own_canonical_store(
+fn own_log_store(
     engine: &AgentSessionEngine,
     mut store: crate::session_store::SessionFile,
 ) -> std::sync::Arc<std::sync::Mutex<crate::worker::SessionCore>> {

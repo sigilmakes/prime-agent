@@ -220,7 +220,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         queued_steering_probe: None,
     })
     .unwrap();
-    let store = own_canonical_store(&engine, store);
+    let store = own_log_store(&engine, store);
     let expected_content = json!([
         { "type": "text", "text": "repeat this exact prompt" },
         { "type": "image", "mimeType": "image/png", "data": "QUJD" },
@@ -275,7 +275,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                             .store
                             .as_mut()
                             .unwrap()
-                            .persist_delivered_user(message)
+                            .persist_entry("message", json!({"message":message}))
                             .expect("worker durably stages actual accepted prompt");
                     }
                     EngineEvent::AssistantMessage(message)
@@ -313,7 +313,6 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
             let persistence = core.session.shared_persistence();
             let terminal_ids = {
                 let inner = persistence.lock().await;
-                assert!(inner.canonical_binding().is_some());
                 inner
                     .retained_entries()
                     .iter()
@@ -511,7 +510,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
     let source_values: Vec<Value> = std::str::from_utf8(&source)
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
         .collect();
     drop(producer);
     let reopened = crate::session_store::SessionFile::open(&path).unwrap();
@@ -531,7 +530,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
         queued_steering_probe: None,
     })
     .unwrap();
-    let owner = own_canonical_store(&engine, reopened);
+    let owner = own_log_store(&engine, reopened);
     let model = engine.resolve_model().unwrap();
     engine
         .runtime
@@ -598,7 +597,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
                         .store
                         .as_mut()
                         .unwrap()
-                        .persist_delivered_user(message.clone())
+                        .persist_entry("message", json!({"message":message}))
                         .unwrap();
                     accepted_message = Some(message);
                 }
@@ -652,7 +651,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
     let suffix: Vec<Value> = std::str::from_utf8(&physical[source.len()..])
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
         .collect();
     let [user, assistant] = suffix.as_slice() else {
         panic!("only the accepted User and ACKed Assistant may append")
@@ -695,31 +694,21 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
     };
     assert_eq!(owner_leaf.as_deref(), assistant["id"].as_str());
     let core = engine.session.blocking_lock().clone().unwrap();
-    core.session
-        .canonical_live_session()
-        .unwrap()
-        .ensure_ready()
-        .unwrap();
     engine.runtime.block_on(async {
         let persistence = core.session.shared_persistence();
         let manager = persistence.lock().await;
-        let rows = manager.canonical_raw_full_rows().unwrap();
-        let mut certified = manager.canonical_raw_header().unwrap().raw().to_vec();
-        assert_eq!(rows.len(), owner_rows.len());
-        for (row, actual) in rows.iter().zip(&owner_rows) {
-            certified.extend_from_slice(row.raw());
-            let value: Value = serde_json::from_slice(row.raw()).unwrap();
-            assert_eq!(
-                &value, actual,
-                "every raw owner row and unknown field stays exact and ordered"
-            );
-        }
-        assert_eq!(certified, physical);
+        let actual: Vec<Value> = manager
+            .get_entries()
+            .iter()
+            .filter(|entry| entry.id().is_some())
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect();
         assert_eq!(
-            manager.canonical_binding().unwrap().selected_leaf,
-            owner_leaf
+            actual, owner_rows,
+            "every envelope and unknown field stays exact and ordered"
         );
-        let visible = manager.canonical_visible_context();
+        assert_eq!(manager.get_leaf_id(), owner_leaf.as_deref());
+        let visible = manager.active_context();
         let legacy = visible
             .messages
             .iter()
@@ -746,10 +735,6 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
 
 #[test]
 fn malformed_typed_legacy_payload_is_rejected_by_the_real_owner_before_projection() {
-    use pa_core::session::canonical::{
-        CanonicalFailureKind, CanonicalRequestedWrite, CanonicalSourceDisposition,
-    };
-
     for kind in ["harness_digest", "refinement_notice", "refinement_outcome"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -765,21 +750,11 @@ fn malformed_typed_legacy_payload_is_rejected_by_the_real_owner_before_projectio
             .unwrap();
         let original = std::fs::read(&path).unwrap();
         let engine = bare_engine(dir.path());
-        let owner = own_canonical_store(&engine, store);
-        let error = owner
-            .lock()
-            .unwrap()
-            .store
-            .as_mut()
-            .unwrap()
-            .attach_canonical_owner()
-            .unwrap_err();
-        assert_eq!(error.kind, CanonicalFailureKind::InvalidRequest);
-        assert_eq!(error.requested, CanonicalRequestedWrite::NotWritten);
-        assert_eq!(error.source, CanonicalSourceDisposition::Unchanged);
-        assert_eq!(
-            error.detail,
-            "Malformed: malformed known payload: custom_message"
+        let owner = own_log_store(&engine, store);
+        let adapter = crate::worker::context_selection_store_for_tests(Arc::clone(&owner));
+        assert!(
+            adapter.mirror_seed().is_err(),
+            "malformed known custom payload must fail typed replay"
         );
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -804,7 +779,7 @@ fn cached_sdk_acceptance_waits_for_build_gate_before_user_receipt() {
     store.set_path(path.clone());
     store.rewrite().unwrap();
     engine.set_session_file(path);
-    let owner = own_canonical_store(&engine, store);
+    let owner = own_log_store(&engine, store);
     let model = engine.session_model().unwrap();
     engine.runtime.block_on(async {
         engine.ensure_core_session_async(&model).await.unwrap();
@@ -841,7 +816,7 @@ fn cached_sdk_acceptance_waits_for_build_gate_before_user_receipt() {
                         .store
                         .as_mut()
                         .unwrap()
-                        .persist_delivered_user(message)
+                        .persist_entry("message", json!({"message":message}))
                         .unwrap();
                     accepted += 1;
                 }
@@ -880,7 +855,7 @@ fn refused_canonical_model_and_thinking_switches_do_not_publish_new_state() {
     store.set_path(path.clone());
     store.rewrite().unwrap();
     engine.set_session_file(path);
-    let owner = own_canonical_store(&engine, store);
+    let owner = own_log_store(&engine, store);
     let model = engine.session_model().unwrap();
     engine
         .runtime
@@ -895,8 +870,10 @@ fn refused_canonical_model_and_thinking_switches_do_not_publish_new_state() {
         .store
         .as_mut()
         .unwrap()
-        .invalidate_canonical_owner()
-        .unwrap();
+        .lease
+        .as_ref()
+        .unwrap()
+        .release();
 
     assert!(!engine.switch_thinking_level(pa_types::ai::ModelThinkingLevel::High));
     assert_eq!(
@@ -944,7 +921,7 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
     store.set_path(path.clone());
     store.rewrite().unwrap();
     engine.set_session_file(path.clone());
-    let owner = own_canonical_store(&engine, store);
+    let owner = own_log_store(&engine, store);
     // This is the same preacceptance boundary and persistence API used by
     // worker/turn.rs. Neither delivery constructs the lazy SDK.
     engine.set_prompt_context_boundary(None);
@@ -961,7 +938,7 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
                 .store
                 .as_mut()
                 .unwrap()
-                .persist_delivered_user(message.clone())
+                .persist_entry("message", json!({"message":message}))
                 .unwrap()
         })
         .collect();
@@ -973,12 +950,9 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
         .block_on(engine.ensure_core_session_async(&model))
         .unwrap();
     let sdk = engine.session.blocking_lock().clone().unwrap();
-    let live = sdk.session.canonical_live_session().unwrap();
     engine.runtime.block_on(async {
         let persistence = sdk.session.shared_persistence();
         let manager = persistence.lock().await;
-        assert!(manager.canonical_pending_admitted_users().is_empty());
-        assert!(manager.canonical_visible_context().messages.is_empty());
         assert!(sdk
             .session
             .agent()
@@ -988,20 +962,6 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
             .iter()
             .all(|message| message.role() != "user"));
     });
-    {
-        let core = owner.lock().unwrap();
-        let snapshot = core.store.as_ref().unwrap().canonical_snapshot().unwrap();
-        assert!(snapshot.admitted_users.is_empty());
-        assert_eq!(
-            snapshot.pending_users.iter().collect::<Vec<_>>(),
-            ids.iter().collect::<Vec<_>>()
-        );
-        assert_eq!(snapshot.safe_visible_leaf, None);
-    }
-    // A second observation before named delivery must remain ready.
-    // This is not an engine abort: that separate lifecycle case remains uncovered.
-    engine.runtime.block_on(live.observe()).unwrap();
-    live.ensure_ready().unwrap();
     for (index, text) in ["first accepted", "second accepted"].iter().enumerate() {
         let mut done = None;
         engine.run_prompt(
@@ -1032,10 +992,9 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
         engine.runtime.block_on(async {
             let persistence = sdk.session.shared_persistence();
             let manager = persistence.lock().await;
-            assert!(manager.canonical_pending_admitted_users().is_empty());
             for (id, expected) in ids.iter().zip(&messages) {
-                let row = manager.canonical_raw_entry(id).unwrap();
-                let actual: Value = serde_json::from_slice(row.raw()).unwrap();
+                let row = manager.get_entry_by_id(id).unwrap();
+                let actual: Value = serde_json::to_value(row).unwrap();
                 assert_eq!(&actual["message"], expected);
             }
             let actual: Vec<_> = sdk
@@ -1064,15 +1023,6 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
         });
         let core = owner.lock().unwrap();
         let store = core.store.as_ref().unwrap();
-        let snapshot = store.canonical_snapshot().unwrap();
-        assert_eq!(
-            snapshot.pending_users.iter().collect::<Vec<_>>(),
-            ids[index + 1..].iter().collect::<Vec<_>>()
-        );
-        assert_eq!(snapshot.admitted_users.len(), index + 1);
-        for id in &ids[..=index] {
-            assert!(snapshot.admitted_users.contains(id));
-        }
         assert_eq!(
             store
                 .entries()
@@ -1096,7 +1046,6 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
     struct Captured {
         id: String,
         bytes: Vec<u8>,
-        snapshot: pa_core::session_engine::canonical_live::CanonicalLiveSnapshot,
     }
     struct MetadataStream {
         inner: Box<dyn ModelStream>,
@@ -1123,11 +1072,9 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
                                 }),
                             )
                             .expect("live provider must allow exact owner metadata");
-                        let snapshot = store.canonical_snapshot().unwrap();
                         *captured = Some(Captured {
                             id,
                             bytes: std::fs::read(&store.path).unwrap(),
-                            snapshot,
                         });
                     }
                 }
@@ -1159,7 +1106,7 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
     store.set_path(path.clone());
     store.rewrite().unwrap();
     engine.set_session_file(path.clone());
-    let owner = own_canonical_store(&engine, store);
+    let owner = own_log_store(&engine, store);
     let captured = Arc::new(Mutex::new(None));
     let calls = Arc::new(AtomicUsize::new(0));
     let decorated_owner = Arc::clone(&owner);
@@ -1212,7 +1159,7 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
                             .store
                             .as_mut()
                             .unwrap()
-                            .persist_delivered_user(message)
+                            .persist_entry("message", json!({"message":message}))
                             .unwrap();
                     }
                     EngineEvent::AssistantMessage(message) => published.push(message),
@@ -1235,11 +1182,6 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
         } else {
             first_sdk = Some(Arc::clone(&sdk));
         }
-        sdk.session
-            .canonical_live_session()
-            .unwrap()
-            .ensure_ready()
-            .unwrap();
         let capture = captured.lock().unwrap();
         let capture = capture
             .as_ref()
@@ -1263,8 +1205,6 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
             .collect();
         assert_eq!(assistants.len(), index + 1);
         assert_eq!(assistants.last().unwrap().fields["message"], published[0]);
-        assert!(capture.snapshot.pending_users.is_empty());
-        assert_eq!(capture.snapshot.admitted_users.len(), 1);
         assert_eq!(
             calls.load(Ordering::SeqCst),
             index + 1,

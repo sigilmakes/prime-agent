@@ -120,6 +120,8 @@ impl super::AgentSessionEngine {
         }
 
         manager.set_entry_writer(store.entry_writer(source.clone()));
+        self.row_sink_ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =
             std::sync::Arc::new(move |selection| store.commit(source.clone(), selection));
         Ok((manager, Some(commit)))

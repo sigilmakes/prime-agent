@@ -12,7 +12,8 @@ use super::{
 
 impl SessionEngine for AgentSessionEngine {
     fn persists_session_entries(&self) -> bool {
-        true
+        self.row_sink_ready
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The worker owns the slot; the engine only writes into it.

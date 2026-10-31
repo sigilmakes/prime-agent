@@ -117,6 +117,7 @@ impl AgentSessionEngine {
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
+            row_sink_ready: std::sync::atomic::AtomicBool::new(false),
             runtime,
             config,
             #[cfg(test)]
@@ -877,31 +878,32 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) -> anyhow::Result<()> {
         let mut completion_state = self.session_build.lock().await;
         let built = self.session.lock().await.clone();
-        drop(built);
+        if let Some(built) = built {
+            built.session.agent().retire_completed_runtime()?;
+        }
         *completion_state = None;
         self.clear_retired_runtime().await;
         Ok(())
     }
 
-    /// Reopen a quarantined session runtime at a certified owner boundary.
-    ///
-    /// The actual owner must prove its last certified source unchanged and no
-    /// outstanding receipt before the cached SDK mirror is discarded. A refusal
-    /// keeps the cached runtime and its blocked view; nothing is retried.
-
-    /// A prompt is a new demand, never a retry: a blocked canonical view is
-    /// reopened once at a certified boundary before this prompt is admitted.
-
     /// Authorized cancel-and-replace already aborts and settles at the worker.
     /// It does not grant permission to reuse the old physical owner.
     pub(crate) async fn discard_replaced_session_runtime(&self) {
         let mut completion_state = self.session_build.lock().await;
+        if let Some(built) = self.session.lock().await.as_ref() {
+            built
+                .session
+                .agent()
+                .close_runtime_admission_for_replacement();
+        }
         *completion_state = None;
         self.clear_retired_runtime().await;
     }
 
     /// Callers hold `session_build` across this cache and kernel teardown.
     async fn clear_retired_runtime(&self) {
+        self.row_sink_ready
+            .store(false, std::sync::atomic::Ordering::Release);
         let built = self.session.lock().await.take();
         *self
             .prompt_context_boundary

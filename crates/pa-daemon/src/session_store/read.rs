@@ -235,10 +235,9 @@ impl SessionFile {
                 };
                 continue;
             }
-            match serde_json::from_value::<SessionEntry>(row.body.clone()) {
-                Ok(entry) => file.push_index(entry),
-                Err(_) => file.skipped_lines += 1,
-            }
+            let entry = serde_json::from_value::<SessionEntry>(row.body.clone())
+                .with_context(|| format!("invalid session entry at log seq {}", row.seq))?;
+            file.push_index(entry);
         }
         fold_child_usage_attributions(&mut file.entries);
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);

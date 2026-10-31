@@ -120,6 +120,9 @@ pub(crate) type TestStreamDecorator =
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
+    /// Whether the current SDK writes exact rows through the serving log sink.
+    pub(crate) row_sink_ready: std::sync::atomic::AtomicBool,
+
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     #[cfg(test)]
