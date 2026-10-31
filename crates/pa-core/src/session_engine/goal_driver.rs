@@ -85,7 +85,7 @@ impl GoalMutationDrafts {
 impl GoalStateStore for GoalMutationDrafts {
     fn persist_goal_state(&mut self, state: &GoalState) -> anyhow::Result<()> {
         self.entries.push(pa_types::session::FileEntry::Custom {
-            base: super::canonical_live::draft_base(),
+            base: crate::session::metadata::draft_base(),
             payload: pa_types::session::CustomEntry {
                 custom_type: GOAL_STATE_CUSTOM_TYPE.to_owned(),
                 data: Some(serde_json::to_value(state)?),
@@ -118,81 +118,19 @@ pub async fn persist_goal_mutation<R: Send>(
     session: &std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
     mutation: impl FnOnce(&mut GoalDriver, &mut GoalMutationDrafts) -> anyhow::Result<R> + Send,
 ) -> anyhow::Result<R> {
-    // Owner-staged lifecycle rows must be adopted and ACKed before policy
-    // derives an intent from the mirror. Later source changes still fail CAS.
-    let writer = {
-        let manager = session.lock().await;
-        manager.canonical_metadata_writer()
-    };
-    if let Some(writer) = writer {
-        writer.observe_metadata_source().await?;
-    }
-    let (plan, mut expected) = {
+    let plan = {
         let mut driver = driver.lock().await;
         let manager = session.lock().await;
-        let expected = manager.canonical_binding().cloned();
-        anyhow::ensure!(
-            manager.canonical_metadata_writer().is_none() || expected.is_some(),
-            "goal policy requires a certified canonical source before preparation"
-        );
         let branch_seedable = GoalDriver::is_branch_seedable(&manager);
-        let plan = driver.prepare_mutation(|candidate, drafts| {
+        driver.prepare_mutation(|candidate, drafts| {
             drafts.branch_seedable = branch_seedable;
             mutation(candidate, drafts)
-        })?;
-        (plan, expected)
+        })?
     };
-    for (index, entry) in plan.drafts.entries.iter().enumerate() {
-        expected = if let Some(ref cursor) = expected {
-            let receipt = match crate::session::canonical::persist_metadata_entry_from(
-                session,
-                entry.clone(),
-                cursor.clone(),
-            )
-            .await
-            {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    use crate::session::canonical::{
-                        CanonicalRequestedWrite, CanonicalSourceDisposition, CanonicalStoreError,
-                    };
-                    // Only the first refusal can prove the whole transaction did
-                    // no I/O. A prior successful draft retains adoption debt.
-                    if index == 0
-                        && error
-                            .downcast_ref::<CanonicalStoreError>()
-                            .is_some_and(|error| {
-                                error.requested == CanonicalRequestedWrite::NotRequested
-                                    && error.source
-                                        == CanonicalSourceDisposition::ReadyForObservation
-                            })
-                    {
-                        let mut current = driver.lock().await;
-                        if current
-                            .mutation_flight
-                            .as_ref()
-                            .is_some_and(|flight| std::sync::Arc::ptr_eq(flight, &plan.flight))
-                        {
-                            current.mutation_flight = None;
-                        }
-                    }
-                    return Err(error);
-                }
-            };
-            Some(receipt.cursor)
-        } else {
-            crate::session::canonical::persist_metadata_entry(session, entry.clone()).await?;
-            let mut manager = session.lock().await;
-            manager.flush_now()?;
-            None
-        };
+    for entry in &plan.drafts.entries {
+        crate::session::metadata::persist_metadata_entry(session, entry.clone()).await?;
     }
     let mut current = driver.lock().await;
-    let manager = session.lock().await;
-    anyhow::ensure!(
-        manager.canonical_binding() == expected.as_ref(),
-        "canonical source changed before goal candidate publication"
-    );
     anyhow::ensure!(
         current.revision == plan.revision
             && current.pending_continuation() == plan.pending
@@ -1013,6 +951,3 @@ impl Default for GoalDriver {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod transaction_tests;

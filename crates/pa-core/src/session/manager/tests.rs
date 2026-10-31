@@ -612,3 +612,67 @@ fn replay_admitted_user_rows_stays_windowed_and_reuses_only_registered_ids() {
         "the worker-owned durable file is untouched by mirrored replay"
     );
 }
+
+#[test]
+fn host_writer_receives_exact_entry_before_publication() {
+    use std::sync::{Arc, Mutex};
+    struct Writer(Arc<Mutex<Vec<FileEntry>>>);
+    impl super::SessionEntryWriter for Writer {
+        fn append(&self, entry: &FileEntry) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
+    }
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let mut manager = SessionManager::in_memory(Path::new("/tmp"));
+    manager.set_entry_writer(Arc::new(Writer(rows.clone())));
+    let id = manager
+        .append_custom_entry("host-metadata", Some(serde_json::json!({"value":1})))
+        .unwrap();
+    let entries = manager.retained_entries();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.id() == Some(id.as_str()))
+        .unwrap();
+    assert_eq!(*rows.lock().unwrap(), vec![entry.clone()]);
+}
+
+#[test]
+fn host_writer_failure_does_not_publish_an_entry() {
+    struct Writer;
+    impl super::SessionEntryWriter for Writer {
+        fn append(&self, _: &FileEntry) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected append refusal"))
+        }
+    }
+    let mut manager = SessionManager::in_memory(Path::new("/tmp"));
+    let before = manager.retained_entries().to_vec();
+    manager.set_entry_writer(std::sync::Arc::new(Writer));
+    assert!(manager.append_custom_entry("host-metadata", None).is_err());
+    assert_eq!(manager.retained_entries(), before);
+}
+
+#[test]
+fn host_writer_does_not_repeat_accepted_user_rows() {
+    use std::sync::{Arc, Mutex};
+    struct Writer(Arc<Mutex<Vec<FileEntry>>>);
+    impl super::SessionEntryWriter for Writer {
+        fn append(&self, entry: &FileEntry) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
+    }
+    let mut manager = SessionManager::in_memory(Path::new("/tmp"));
+    let message: AgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"user", "content":"accepted once", "timestamp":1
+    }))
+    .unwrap();
+    let accepted = manager.append_message(message.clone()).unwrap();
+    manager
+        .replay_admitted_user_rows(vec![accepted.clone()])
+        .unwrap();
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    manager.set_entry_writer(Arc::new(Writer(rows.clone())));
+    assert_eq!(manager.append_message(message).unwrap(), accepted);
+    assert!(rows.lock().unwrap().is_empty());
+}

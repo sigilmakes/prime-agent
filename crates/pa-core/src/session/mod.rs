@@ -1,8 +1,8 @@
 //! Session entry parsing, migration, context reconstruction, and tree.
-pub mod canonical;
 pub mod discovery;
 pub mod manager;
 pub mod manager_ext;
+pub mod metadata;
 pub mod tree;
 pub mod window;
 mod window_cache;

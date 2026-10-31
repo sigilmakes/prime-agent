@@ -686,3 +686,22 @@ async fn run_boundaries_record_git_state() {
         ]
     );
 }
+
+#[tokio::test]
+async fn durable_event_failure_refuses_local_message_publication() {
+    struct RefusingWriter;
+    impl crate::session::manager::SessionEntryWriter for RefusingWriter {
+        fn append(&self, _: &pa_types::session::FileEntry) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected durable event refusal"))
+        }
+    }
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let before = manager.retained_entries().to_vec();
+    manager.set_entry_writer(std::sync::Arc::new(RefusingWriter));
+    let manager = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+    let event = pa_agent::types::AgentEvent::MessageEnd {
+        message: pa_agent::types::AgentMessage::user("must not be delivered"),
+    };
+    assert!(super::persist_event(&manager, event).await.is_err());
+    assert_eq!(manager.lock().await.retained_entries(), before);
+}

@@ -8,6 +8,11 @@ use super::{
 };
 
 impl SessionManager {
+    /// Route every new row through the host's durable log.
+    pub fn set_entry_writer(&mut self, writer: std::sync::Arc<dyn super::SessionEntryWriter>) {
+        self.entry_writer = Some(writer);
+    }
+
     pub(super) fn refresh_has_assistant_entry(&mut self, entries: &[FileEntry]) {
         self.has_assistant_entry = entries.iter().any(|entry| {
             matches!(
@@ -114,6 +119,9 @@ impl SessionManager {
         Ok(())
     }
     pub(super) fn persist_entry(&mut self, index: usize) -> std::io::Result<()> {
+        if let Some(writer) = &self.entry_writer {
+            return writer.append(&self.file_entries[index]);
+        }
         if !self.persist || self.session_file.is_none() {
             return Ok(());
         }

@@ -282,9 +282,6 @@ pub async fn execute_session_command(
 /// turn's request carries them); the rebuild is idempotent — the compaction
 /// path rebuilds mid-execution.
 async fn sync_live_context(engine: &SessionEngine) -> Result<(), String> {
-    if let Some(live) = &engine.session.canonical_live {
-        live.ensure_ready().map_err(|error| error.to_string())?;
-    }
     let _flight = engine.session.compaction_flight.lock().await;
     let rebuilt = engine
         .session
@@ -437,7 +434,7 @@ async fn persist_rows<'a>(
         engine
             .session
             .persist_metadata_entry(pa_types::session::FileEntry::CustomMessage {
-                base: super::canonical_live::draft_base(),
+                base: crate::session::metadata::draft_base(),
                 payload: pa_types::session::CustomMessageEntry {
                     custom_type: message.custom_type.clone(),
                     content: message.content.clone(),
@@ -452,9 +449,9 @@ async fn persist_rows<'a>(
     // Standalone managers retain their existing explicit flush boundary.
     let session = engine.session.session_handle().clone();
     let mut session = session.lock().await;
-    if session.canonical_binding().is_none() {
-        session.flush_now().map_err(|error| error.to_string())?;
-    }
+
+    session.flush_now().map_err(|error| error.to_string())?;
+
     Ok(())
 }
 
