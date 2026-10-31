@@ -8,7 +8,10 @@
 //! outcomes. Waiting for another writer is the caller's decision.
 
 mod crc;
-mod disk;
+// The disk seam is public so a harness crate can inject a fault-injected
+// disk at its own tests (`Disk`'s doc: real files in production,
+// fault-injected files in tests exercising the same code path).
+pub mod disk;
 mod line;
 #[cfg(test)]
 mod tests;
@@ -20,7 +23,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use disk::{Disk, RealDisk};
+pub use disk::{Disk, RealDisk};
 pub use line::Row;
 
 /// Why nothing durable was written.
@@ -310,7 +313,11 @@ impl SessionLog {
         Self::repair_with(Arc::new(RealDisk), dir, id, deadline)
     }
 
-    fn open_with(
+    /// Open a session's log over an injected [`Disk`] implementation: the
+    /// fault-injection seam. Production uses [`Self::open`]; a disk wrapper
+    /// that fails a syscall on schedule drives the same code path with the
+    /// failure the schedule names.
+    pub fn open_with(
         disk: Arc<dyn Disk>,
         dir: &Path,
         id: &str,
@@ -487,21 +494,51 @@ impl SessionLog {
         })
     }
 
-    /// Re-read what other writers appended since our last write, under the
-    /// lock, so seq assignment stays strictly increasing across writers.
+    /// Adopt what other writers appended since this handle last looked,
+    /// returning exactly the new rows and advancing the handle's cursor.
+    ///
+    /// The cursor starts at the end of the valid prefix [`Self::open`] scanned,
+    /// so this is a follower's read: the first call after a foreign append reads
+    /// only the new bytes, and a call with nothing new is a length check with no
+    /// scan. To read history, use [`Self::read_since`] or [`Self::iter_since`].
+    ///
+    /// The cursor moves past the rows this call returns and no further. A torn
+    /// tail leaves it on the last complete line and reports [`Error::Damaged`],
+    /// exactly as an append's tail check does; a complete invalid line reports
+    /// [`Error::Corrupt`] and also leaves the cursor before it. After a
+    /// [`Self::repair`] that truncated the file below the cursor, the cursor
+    /// resets to 0 and the surviving rows are returned again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Busy`] while another writer holds the lock; I/O errors; the same
+    /// damage verdicts [`Self::append`] reports.
+    pub fn refresh(&mut self, deadline: Instant) -> Result<Vec<Row>, Error> {
+        self.locked(deadline, Self::adopt_tail)
+    }
+
+    /// Re-read the tail under the lock, so seq assignment stays strictly
+    /// increasing across writers. An append only needs the adoption, not rows.
     fn sync_tail(&mut self) -> Result<(), Error> {
+        self.adopt_tail().map(|_| ())
+    }
+
+    /// Read the rows between the cursor and the end of the valid prefix, and
+    /// move the cursor past them.
+    fn adopt_tail(&mut self) -> Result<Vec<Row>, Error> {
         let len = self.file_len()?;
         if len == self.known_len {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let from = if len < self.known_len {
-            // The file was truncated or replaced: start over.
+            // Truncated or replaced below the cursor: start over, so the caller
+            // sees the rows that survived.
             self.next_seq = 1;
             0
         } else {
             self.known_len
         };
-        let scan = self.scan(from, u64::MAX)?;
+        let scan = self.scan(from, 0)?;
         if !scan.clean {
             let last_good_seq = scan.last_seq.max(self.next_seq - 1);
             if scan.corrupt {
@@ -516,7 +553,7 @@ impl SessionLog {
         }
         self.next_seq = self.next_seq.max(scan.last_seq + 1);
         self.known_len = scan.good_len;
-        Ok(())
+        Ok(scan.rows)
     }
 
     /// Read complete, valid lines, stopping at the first bad one.

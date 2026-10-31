@@ -38,6 +38,9 @@ pub use projection::ProviderMessage;
 /// The row `type` a branch selection is written as.
 pub(crate) const SELECTION: &str = "branch_selection";
 
+/// The row `type` of the session header: metadata, never a turn.
+pub(crate) const HEADER: &str = "session";
+
 /// Why the runtime could not do what was asked.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -151,9 +154,10 @@ impl SessionRuntime {
     /// `append_at`; a seq another writer took costs one tail read and one
     /// retry, never a duplicate id.
     ///
-    /// A commit is read back from the file, so rows other writers committed are
-    /// indexed too. On [`Outcome::Unknown`] the core decides; if that decision
-    /// fails, the undecided seq stays pending for the retry.
+    /// A commit is applied at its seq, then the tail is read, so rows other
+    /// writers committed around it are indexed too. On [`Outcome::Unknown`] the
+    /// core decides; if that decision fails, the undecided seq stays pending for
+    /// the retry.
     ///
     /// # Errors
     ///
@@ -176,7 +180,7 @@ impl SessionRuntime {
         let mut outcome = self.log.append_at(self.index.last_seq() + 1, row, deadline);
         if is_seq_conflict(&outcome) {
             // Another writer took the seq we pinned: read its rows, then retry.
-            self.sync_tail(deadline)?;
+            self.catch_up(deadline)?;
             if let Some(outcome) = self.retried(&envelope.id, row)? {
                 return Ok(outcome);
             }
@@ -264,6 +268,19 @@ impl SessionRuntime {
         self.commit(outcome, &row, deadline)
     }
 
+    /// Pull what other writers committed into the index, without appending.
+    ///
+    /// A delivery-only runtime (steering, follow-up, agent-message fan-out)
+    /// never appends; this is how it keeps its view current. A corrupt tail is
+    /// repaired here exactly as it is on the append path.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Log`] for log failures and a repair that could not run.
+    pub fn observe(&mut self, deadline: Instant) -> Result<(), Error> {
+        self.sync_tail(deadline)
+    }
+
     /// Committed rows with `seq > since`, read from the log itself.
     ///
     /// # Errors
@@ -283,6 +300,15 @@ impl SessionRuntime {
     #[must_use]
     pub fn leaves(&self) -> Vec<&str> {
         self.index.leaves()
+    }
+
+    /// The session header row, when the log carries one.
+    ///
+    /// The header is metadata: it is not a tree node, not a leaf, and never the
+    /// selected branch, so a flushed turn replays with its real messages.
+    #[must_use]
+    pub fn header(&self) -> Option<&Value> {
+        self.index.header()
     }
 
     /// The selected branch, root first.
@@ -330,8 +356,9 @@ impl SessionRuntime {
 
     /// Apply a committed row, or reconcile what the log decided.
     ///
-    /// Not applied from the intent: the tail is read first, so rows this
-    /// runtime did not write are indexed too and the row at `seq` is the file's.
+    /// A committed body is applied at its seq, which is the exact bytes the core
+    /// fsynced; the tail is then read, so rows other writers committed around it
+    /// are indexed too. An undecided write is decided by the file alone.
     fn commit(
         &mut self,
         outcome: Outcome,
@@ -342,7 +369,12 @@ impl SessionRuntime {
         match outcome {
             Outcome::Committed { seq, ts } => {
                 self.resolve_pending(&id);
-                self.reconcile(Outcome::Committed { seq, ts }, deadline)
+                // `refresh` never re-yields the row this handle just wrote, so the
+                // committed body is applied at its seq (the core fsynced exactly
+                // these bytes), then the tail picks up what other writers added.
+                self.absorb(seq, ts.clone(), intended.clone())?;
+                self.sync_tail(deadline)?;
+                Ok(Outcome::Committed { seq, ts })
             }
             Outcome::Unknown { recover } => {
                 self.pending = Some(Pending {
@@ -399,9 +431,36 @@ impl SessionRuntime {
 
     /// Read what the log holds beyond the index's newest row.
     ///
-    /// A complete but invalid line is damage, not a verdict: the tail is
-    /// repaired and reading resumes from the index's newest row.
+    /// `refresh` reads from the handle's own cursor, so an idle call is one
+    /// `fstat` and an append costs the delta, not the file. Damage leaves the
+    /// cursor before the bad line, so repair and a re-read cannot skip a row.
+    ///
+    /// The cursor can only be trusted while the index is in step with it: the
+    /// core advances it inside a refused write too, so a lost race calls
+    /// [`Self::catch_up`] instead.
     pub(crate) fn sync_tail(&mut self, deadline: Instant) -> Result<(), Error> {
+        loop {
+            match self.log.refresh(deadline) {
+                Ok(rows) => {
+                    for row in rows {
+                        self.absorb(row.seq, row.ts, row.body)?;
+                    }
+                    return Ok(());
+                }
+                Err(log_core::Error::Damaged { .. } | log_core::Error::Corrupt { .. }) => {
+                    self.repair_log(deadline)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Read history the cursor cannot supply, from the index's newest row.
+    ///
+    /// A refused append still moves the core's cursor past the rows it read
+    /// while refusing, so after a lost race the index catches up from the file
+    /// rather than from the cursor. Rows already held are ignored.
+    fn catch_up(&mut self, deadline: Instant) -> Result<(), Error> {
         loop {
             let newest = self.index.last_seq();
             let rows = self.log.iter_since(newest)?;
@@ -409,12 +468,7 @@ impl SessionRuntime {
             for row in rows {
                 match row {
                     Ok(row) => self.absorb(row.seq, row.ts, row.body)?,
-                    Err(log_core::Error::Corrupt { after_seq }) => {
-                        tracing::warn!(
-                            session = self.id,
-                            after_seq,
-                            "repaired a corrupt session log line"
-                        );
+                    Err(log_core::Error::Corrupt { .. }) => {
                         corrupt = true;
                         break;
                     }
@@ -424,9 +478,16 @@ impl SessionRuntime {
             if !corrupt {
                 return Ok(());
             }
-            SessionLog::repair(&self.dir, &self.id, deadline)?;
-            self.log = SessionLog::open(&self.dir, &self.id, deadline)?;
+            self.repair_log(deadline)?;
         }
+    }
+
+    /// Repair the damaged tail and reopen, so the cursor starts at a good line.
+    fn repair_log(&mut self, deadline: Instant) -> Result<(), Error> {
+        tracing::warn!(session = self.id, "repaired a damaged session log tail");
+        SessionLog::repair(&self.dir, &self.id, deadline)?;
+        self.log = SessionLog::open(&self.dir, &self.id, deadline)?;
+        Ok(())
     }
 
     /// Index one row and follow the branch selection it implies.

@@ -266,7 +266,12 @@ impl SessionFile {
         }
         fold_child_usage_attributions(&mut file.entries);
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
-        let wire = crate::session_transport::LogWire::held(log, agent_dir, file.entries.len());
+        let wire = crate::session_transport::LogWire::held(
+            log,
+            agent_dir,
+            file.entries.len(),
+            rows.last().map_or(1, |row| row.seq),
+        );
         file.log_transport = Some(wire);
         Ok(file)
     }
@@ -306,9 +311,6 @@ impl SessionFile {
             skipped_lines: 0,
             epoch: None,
             rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
             log_transport: None,
         };
         // The raw rows are consumed in place: each line String drops as soon as its

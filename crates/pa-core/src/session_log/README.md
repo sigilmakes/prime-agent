@@ -85,6 +85,13 @@ never waits, never sleeps, and never declares a session dead.
   skipping a corrupt row would hide data loss.
 - **Rows are JSON objects.** The core rejects a non-object row at the boundary
   instead of writing a line that its own reader would call bad.
+- **A follower has a cursor, not a rescan.** `refresh` adopts the bytes appended
+  since the handle last looked: the cursor starts at the end of the prefix
+  `open` scanned, moves past the rows a call returns and no further, and an idle
+  call is a length check with no scan. A torn tail leaves the cursor on the last
+  complete line (nothing is skipped); a complete bad line stops the cursor
+  before it. If a repair truncates below the cursor, the cursor resets to 0 and
+  the surviving rows are returned again.
 - **Idempotency is the seq plus the body, not an op id.** The spec asked for a
   caller-chosen `op_id` with an in-memory `op_id -> seq` map. That map would be
   rebuilt by scanning at open, would cost one entry per row for the life of the
