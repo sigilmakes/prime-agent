@@ -457,13 +457,13 @@ impl LogWire {
         agent_dir: &Path,
         disk: std::sync::Arc<D>,
     ) -> Self {
-        let mut wire = Self::deferred(agent_dir);
+        let wire = Self::deferred(agent_dir);
         let state = std::sync::Arc::clone(&wire.state);
         let mut guard = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.disk = Some(disk);
-        let _ = guard;
+        drop(guard);
         wire
     }
 }
@@ -539,7 +539,7 @@ mod tests {
     use crate::worker::{Worker, WorkerConfig};
     use serde_json::json;
     use std::fs::{File, TryLockError};
-    use std::io::{self, Write};
+    use std::io;
     use std::path::Path;
     use std::sync::atomic::Ordering;
 
@@ -685,10 +685,10 @@ mod tests {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(rival),
-                    Err(std::fs::TryLockError::WouldBlock) => {
+                    Err(TryLockError::WouldBlock) => {
                         panic!("the rival could not take the log's lock")
                     }
-                    Err(std::fs::TryLockError::Error(error)) => {
+                    Err(TryLockError::Error(error)) => {
                         panic!("the rival's lock attempt failed: {error}")
                     }
                 }

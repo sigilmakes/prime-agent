@@ -22,6 +22,32 @@ pub struct Row {
     pub body: serde_json::Value,
 }
 
+impl Row {
+    /// Decode one complete log line and enforce its order after `after_seq`.
+    /// The caller removes the terminating newline; an unterminated tail must
+    /// not be passed here. This read-only decoder never repairs or locks a log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::Error::Corrupt`] for an invalid envelope, checksum,
+    /// row body, size, or sequence order.
+    pub fn decode(line: &[u8], after_seq: u64) -> Result<Self, super::Error> {
+        let corrupt = || super::Error::Corrupt { after_seq };
+        if line.len() >= MAX_LINE_BYTES {
+            return Err(corrupt());
+        }
+        let parsed = parse(line).ok_or_else(corrupt)?;
+        if parsed.seq <= after_seq {
+            return Err(corrupt());
+        }
+        Ok(Self {
+            seq: parsed.seq,
+            ts: parsed.ts.to_owned(),
+            body: serde_json::from_str(parsed.body).map_err(|_| corrupt())?,
+        })
+    }
+}
+
 /// A validated line, borrowing the line buffer.
 pub(crate) struct Parsed<'a> {
     pub(crate) seq: u64,
