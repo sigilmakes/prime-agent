@@ -180,10 +180,7 @@ impl AgentSessionEngine {
         // A bound owner receipt must never wait under Agent::event_delivery.
         // Its existing restore callback runs after run_turn_once has settled,
         // before the retry driver publishes restoration or starts another attempt.
-        let canonical_bound = core
-            .as_ref()
-            .is_some_and(|core| core.session.has_canonical_live_owner());
-        let restore_session: pa_core::session_engine::canonical_live::CanonicalAfterAssistantCommitFn = {
+        let restore_session: std::sync::Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync> = {
             let primary_state = primary_state.clone();
             let pending_model_changes = pending_model_changes.clone();
             let agent_weak = std::sync::Arc::downgrade(&agent);
@@ -257,22 +254,7 @@ impl AgentSessionEngine {
                 })
             })
         };
-        let restore_commit_guard = match core
-            .as_ref()
-            .and_then(|core| core.session.canonical_live_session())
-        {
-            Some(live) => match live.register_after_assistant_commit(restore_session.clone()) {
-                Ok(guard) => Some(guard),
-                Err(error) => {
-                    return TurnResult::Error {
-                        error: error.to_string(),
-                        assistant: None,
-                    };
-                }
-            },
-            None => None,
-        };
-        let restore_subscription = (!canonical_bound).then(|| {
+        let restore_subscription = Some({
             self.runtime.block_on(async {
                 let restore_session = restore_session.clone();
                 agent
@@ -650,7 +632,6 @@ impl AgentSessionEngine {
         // Also restore the previous override when an attempt/listener failed
         // before the retry driver's normal restoration path.
         agent.set_model_override(episode_model_override.clone());
-        drop(restore_commit_guard);
         if let Some(subscription) = restore_subscription {
             self.runtime.block_on(subscription.unsubscribe());
         }
@@ -697,7 +678,7 @@ async fn persist_model_change(
     provider: &str,
     model_id: &str,
 ) -> anyhow::Result<()> {
-    pa_core::session::canonical::persist_metadata_entry(
+    pa_core::session::metadata::persist_metadata_entry(
         session,
         pa_types::session::FileEntry::ModelChange {
             base: pa_types::session::EntryBase {

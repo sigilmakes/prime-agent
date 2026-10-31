@@ -12,17 +12,6 @@ use pa_core::session_engine::provider_retry::{ProviderRetryPolicy, UNBOUNDED_BAC
 use pa_core::session_engine::side_question::{SideQuestionSink, SideQuestionTurn};
 use serde_json::{json, Value};
 
-type CanonicalNavigationFuture<'a> = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<
-                    Option<Arc<pa_core::session_engine::canonical_live::CanonicalLiveSession>>,
-                >,
-            > + Send
-            + 'a,
-    >,
->;
-
 mod wire;
 pub use scripted::ScriptedEngine;
 pub(crate) use wire::session_wire_value;
@@ -49,6 +38,9 @@ pub struct PluginCommandOutcome {
 
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
+    /// Native engines commit complete rows through their manager's durable sink.
+    fn persists_session_entries(&self) -> bool { false }
+
     /// Execute a native plugin or management command without submitting a model prompt.
     /// A supplied target must match the current generation. Engines without a plugin
     /// host reject explicitly rather than treating the input as ordinary conversation.
@@ -67,11 +59,7 @@ pub trait SessionEngine: Send + Sync {
     /// Engines that admit provider steps override this; the default is a no-op so
     /// an engine with no canonical path (the scripted engine) is unchanged rather
     /// than forced to carry a slot it would never read.
-    fn set_canonical_step_admission(
-        &self,
-        _admission: Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>,
-    ) {
-    }
+
 
     /// The session's shared MCP manager, when the engine owns one: the
     /// `replace_acp_mcp_servers` command writes through it.
@@ -185,9 +173,7 @@ pub trait SessionEngine: Send + Sync {
     /// Obtain the actual live canonical session for a navigation transaction.
     /// Standalone engines return `None`; native engines build before policy
     /// preflight and release their session guard before returning the handle.
-    fn canonical_navigation_session(&self) -> CanonicalNavigationFuture<'_> {
-        Box::pin(async { Ok(None) })
-    }
+
 
     /// Run one branch summary (`navigate_tree` with `summarize`): summarize
     /// the abandoned branch's entries; the engine owns the model call.

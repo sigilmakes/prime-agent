@@ -180,7 +180,6 @@ impl Worker {
                 if let Some(store) = core
                     .store
                     .as_mut()
-                    .filter(|store| !store.is_canonical_bound())
                 {
                     // A bound live Core switch has already committed this intent.
                     let _ = store.persist_entry(
@@ -391,7 +390,7 @@ impl Worker {
             let preference_changed = core.service_tier != Some(tier);
             if preference_changed {
                 if let Some(store) = core.store.as_mut() {
-                    if let Err(error) = store.persist_owner_metadata(
+                    if let Err(error) = store.persist_entry(
                         "service_tier_change",
                         json!({ "serviceTier": tier }),
                     ) {

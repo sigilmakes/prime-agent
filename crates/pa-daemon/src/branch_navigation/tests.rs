@@ -54,7 +54,7 @@ impl SessionEngine for CountingEngine {
                 .store
                 .as_mut()
                 .unwrap()
-                .persist_owner_metadata(
+                .persist_entry(
                     "custom",
                     json!({"customType":"concurrent-owner-metadata","data":{"exact":"AA=="}}),
                 )

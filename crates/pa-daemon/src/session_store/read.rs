@@ -130,72 +130,7 @@ impl SessionFile {
     ///
     /// Returns an error when the file cannot be read, is empty, or its header is invalid.
     pub fn open(path: &Path) -> Result<Self> {
-        // Streamed line-by-line load: one line is resident at a time, so a grown session
-        // never holds the raw file bytes alongside the parsed entries.
-        let file = fs::File::open(path)
-            .with_context(|| format!("read session file {}", path.display()))?;
-        let mut lines = std::io::BufReader::new(file).lines();
-        let read_context = || format!("read session file {}", path.display());
-        let mut first = None;
-        for line in lines.by_ref() {
-            let line = line.with_context(read_context)?;
-            if !line.trim().is_empty() {
-                first = Some(line);
-                break;
-            }
-        }
-        let first = first.ok_or_else(|| anyhow!("empty session file {}", path.display()))?;
-        let header_value: Value = serde_json::from_str(first.trim())
-            .with_context(|| format!("invalid session header in {}", path.display()))?;
-        if header_value.get("type").and_then(Value::as_str) != Some("session") {
-            return Err(anyhow!("missing session header in {}", path.display()));
-        }
-        let pa_types::session::FileEntry::Header { header } = serde_json::from_value(header_value)
-            .with_context(|| format!("invalid session header in {}", path.display()))?
-        else {
-            return Err(anyhow!("missing session header in {}", path.display()));
-        };
-        let mut file = SessionFile {
-            path: path.to_path_buf(),
-            header,
-            entries: Vec::new(),
-            by_id: HashMap::new(),
-            leaf_id: None,
-            window: None,
-            lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
-            anthropic_warning_shown: false,
-            skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
-            log_transport: None,
-        };
-        for line in lines {
-            let line = line.with_context(read_context)?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            // Malformed lines are skipped, matching the TS loader. The
-            // count rides the store so the reopen that found damage can
-            // log it (the rows now STAY on disk: an append-only reopen
-            // never deletes what it skipped).
-            match serde_json::from_str::<SessionEntry>(trimmed) {
-                Ok(entry) => file.push_index(entry),
-                Err(_) => file.skipped_lines += 1,
-            }
-        }
-        fold_child_usage_attributions(&mut file.entries);
-        // The once-per-lifecycle gate rides the ACTIVE branch, exactly
-        // like the windowed walk below: a marker on an abandoned or
-        // sibling branch never suppresses the warning for the open leaf
-        // (fail-open — an off-path marker must not hide the warning on a
-        // branch that never showed it).
-        file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
-        Ok(file)
+        Self::open_log_path(path)
     }
 
     /// Load a log-transported session: the log is the source of truth, the
@@ -213,14 +148,16 @@ impl SessionFile {
     /// emptied it), a header whose type is not `session`, I/O, or a foreign
     /// writer holding the log.
     pub(crate) fn open_log(session_path: &Path, agent_dir: &Path) -> Result<Self> {
-        let Some(session_id) = crate::session_transport::session_id_of(session_path) else {
-            anyhow::bail!(
-                "session file path has no id name: {}",
-                session_path.display()
-            );
-        };
-        let (log, repair) = crate::session_transport::open_repaired(agent_dir, &session_id)
-            .map_err(|error| anyhow::Error::from(error).context("open the session log"))?;
+        let actual = crate::session_transport::log_file(agent_dir, &crate::session_transport::session_id_of(session_path).context("session path has no id")?);
+        Self::open_log_path(&actual)
+    }
+
+    fn open_log_path(session_path: &Path) -> Result<Self> {
+        anyhow::ensure!(session_path.is_file(), "session log is unavailable: {}", session_path.display());
+        let session_id = crate::session_transport::session_id_of(session_path).context("session path has no id")?;
+        let directory = session_path.parent().context("session log has no directory")?;
+        let (log, repair) = crate::session_transport::open_repaired_dir(directory, &session_id)
+            .map_err(anyhow::Error::from).context("open session log")?;
         if let Some(report) = &repair {
             eprintln!(
                 "pa-daemon: session log {} repaired: {} unusable trailing byte(s) after seq {}",
@@ -251,17 +188,20 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown: false,
             skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
             log_transport: None,
         };
         for row in rows.iter().skip(1) {
+            if row.body.get("type").and_then(Value::as_str) == Some("branch_selection") {
+                let selected = row.body.get("selectedLeaf").context("branch selection has no leaf")?;
+                file.leaf_id = match selected {
+                    Value::Null => None,
+                    Value::String(id) if file.by_id.contains_key(id) => Some(id.clone()),
+                    _ => anyhow::bail!("branch selection names an absent entry"),
+                };
+                continue;
+            }
             match serde_json::from_value::<SessionEntry>(row.body.clone()) {
                 Ok(entry) => file.push_index(entry),
                 Err(_) => file.skipped_lines += 1,
@@ -271,7 +211,7 @@ impl SessionFile {
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
         let wire = crate::session_transport::LogWire::held(
             log,
-            agent_dir,
+            directory,
             file.entries.len(),
             rows.last().map_or(1, |row| row.seq),
         );
@@ -286,80 +226,9 @@ impl SessionFile {
     /// Returns an error when the windowed load fails or holds no header; a
     /// malformed retained row falls back to [`SessionFile::open`].
     pub fn open_windowed(path: &Path) -> Result<Self> {
-        let Some(mut window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
-            return Self::open(path);
-        };
-        let header = window
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                pa_types::session::FileEntry::Header { header } => Some(header.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow!("window has no session header"))?;
-        // The window's walk already hydrated the once-per-session-lifecycle
-        // warning gate from the whole active branch (the row may sit in the
-        // discarded prefix, far outside this store's retained rows).
-        let anthropic_warning_shown = window.anthropic_warning_shown();
-        let mut file = Self {
-            path: path.to_owned(),
-            header,
-            entries: Vec::new(),
-            by_id: HashMap::new(),
-            leaf_id: None,
-            window: None,
-            lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
-            anthropic_warning_shown,
-            skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
-            log_transport: None,
-        };
-        // The raw rows are consumed in place: each line String drops as soon as its
-        // parsed entry joins the store.
-        let raw_count = window.raw_entries().len();
-        for line in window
-            .take_metadata_entries()
-            .into_iter()
-            .chain(window.take_raw_entries())
-        {
-            let Ok(entry) = serde_json::from_str(&line) else {
-                return Self::open(path);
-            };
-            file.push_index(entry);
-        }
-        // The window parses the retained-target attributions BEFORE the raw
-        // retained rows, so the fold runs once every row is in.
-        fold_child_usage_attributions(&mut file.entries);
-        file.leaf_id = Some(window.leaf_id().to_owned());
-        let settings = window.settings();
-        file.window = Some(SessionWindow {
-            message_count: window.message_count(),
-            first_message: window
-                .first_user_message()
-                .map(message_text)
-                .filter(|text| !text.is_empty()),
-            loaded_entries: file.entries.len(),
-            compaction_count: window.compaction_count(),
-            has_thinking_level: window.has_thinking_level(),
-            has_service_tier: window.has_service_tier(),
-            model: settings.model.clone(),
-            boundary_model: window.boundary_model().cloned(),
-            thinking_level: settings.thinking_level.clone(),
-            service_tier: settings.service_tier,
-            // The retained rows joined the store verbatim above, so their ids are
-            // exactly the trailing `raw_count` store ids — no third parse pass.
-            retained_ids: file.entries[file.entries.len() - raw_count..]
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect(),
-            older_path_stats: window.older_path_stats().clone(),
-        });
-        Ok(file)
+        // One validated log replay owns history. Context projection remains the
+        // existing branch/compaction fold, not a second storage implementation.
+        Self::open(path)
     }
 
     #[cfg(test)]
@@ -383,15 +252,6 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
-        full.canonical_live.clone_from(&self.canonical_live);
-        full.canonical_delivered
-            .clone_from(&self.canonical_delivered);
-        full.canonical_delivered_custom
-            .clone_from(&self.canonical_delivered_custom);
-        full.epoch.clone_from(&self.epoch);
-        full.rows_written_without_epoch = self.rows_written_without_epoch;
-        full.child_usage_recovery
-            .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
         // can disagree, a post-snapshot marker must hydrate, and an
@@ -420,14 +280,8 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown: false,
             skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
             log_transport: None,
         }
     }
