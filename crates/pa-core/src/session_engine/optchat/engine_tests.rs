@@ -333,7 +333,8 @@ async fn public_engine_resume_window_uses_full_source_and_fresh_session_never_im
         manager.flush_now().unwrap();
     }
     let before = std::fs::read(&f.journal).unwrap();
-    let mut manager = SessionManager::open(&f.cwd, f.journal.parent().unwrap(), &f.journal).unwrap();
+    let mut manager =
+        SessionManager::open(&f.cwd, f.journal.parent().unwrap(), &f.journal).unwrap();
     let window = crate::session::window::WindowedSessionStore::open(&f.journal)
         .unwrap()
         .unwrap();

@@ -630,6 +630,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         .clone()
         .or_else(|| super::provider_adapter::native_model(&model).ok());
     let context_archive_state = Arc::new(std::sync::RwLock::new(context_archive.clone()));
+    let context_model_state = Arc::new(std::sync::RwLock::new(full_model.clone()));
 
     let thinking_level = config.thinking_level.unwrap_or(ThinkingLevel::Off);
 
@@ -738,7 +739,12 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         // wraps a pass-through that marks the turn's dispatch moment.
         transform_context: Some(super::request_timing::instrument_transform_context(
             std::sync::Arc::clone(&request_timing_wiring),
-            super::request_timing::pass_through_transform(),
+            super::context_strategy::before_model(
+                Arc::clone(&wiring.session),
+                Arc::clone(&plugins),
+                Arc::clone(&context_archive_state),
+                Arc::clone(&context_model_state),
+            ),
         )),
         should_stop_after_turn: {
             let steering = config.queued_steering_probe.take();
@@ -859,7 +865,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     session.plugin_jobs = Some(jobs);
     session.turn_activity = turn_activity;
     session.context_archive = Arc::clone(&context_archive_state);
-    session.context_model = std::sync::RwLock::new(full_model);
+    session.context_model = context_model_state;
     super::plugins::observe_turns(&agent, Arc::clone(&plugins)).await;
     super::plugin_observers::observe_runs(&agent, plugins, Arc::clone(&wiring.session)).await;
     session.ollama_cloud = ollama_cloud;

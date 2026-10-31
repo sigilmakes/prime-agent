@@ -756,6 +756,47 @@ impl AgentSession {
     }
 }
 
+/// Refresh the durable conversation before deriving each model-facing view.
+/// No manager guard crosses strategy callbacks or provider work.
+pub(super) fn before_model(
+    session: std::sync::Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>,
+    plugins: std::sync::Arc<SessionPlugins>,
+    archive: std::sync::Arc<std::sync::RwLock<Option<ContextArchive>>>,
+    model: std::sync::Arc<std::sync::RwLock<Option<pa_types::ai::Model>>>,
+) -> pa_agent::agent_loop::TransformContextFn {
+    std::sync::Arc::new(move |_messages, signal| {
+        let session = std::sync::Arc::clone(&session);
+        let plugins = std::sync::Arc::clone(&plugins);
+        let archive = std::sync::Arc::clone(&archive);
+        let model = model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move {
+            pa_agent::abort::throw_if_aborted_signal(Some(&signal))?;
+            let snapshot = {
+                let mut session = session.lock().await;
+                session.refresh_committed_entries()?;
+                context_snapshot(&plugins, &session)?
+            };
+            let (context, leaf) = snapshot.await?;
+            let messages = assemble_at(
+                &plugins,
+                context.messages,
+                context.archive.as_ref(),
+                model.as_ref(),
+                leaf.as_deref(),
+            )
+            .await?;
+            pa_agent::abort::throw_if_aborted_signal(Some(&signal))?;
+            *archive
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = context.archive;
+            Ok(super::rebuilt_loop_messages(messages))
+        })
+    })
+}
+
 fn generated_model_messages(value: Value) -> anyhow::Result<Vec<pa_agent::types::Message>> {
     let selected: Vec<AgentMessage> = serde_json::from_value(value)?;
     super::messages::convert_to_llm(&selected)

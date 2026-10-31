@@ -2110,3 +2110,44 @@ async fn oversized_legacy_compactor_remains_a_failed_stage_not_a_chain_bypass() 
         "oversized JSON callback must not receive empty bodies"
     );
 }
+
+#[tokio::test]
+async fn before_model_refreshes_foreign_committed_rows_without_appending() {
+    struct Tail(std::sync::Mutex<Vec<FileEntry>>);
+    impl crate::session::manager::SessionEntryWriter for Tail {
+        fn append(&self, _: &mut FileEntry) -> std::io::Result<()> {
+            panic!("model context refresh must not append");
+        }
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            Ok(std::mem::take(&mut *self.0.lock().unwrap()))
+        }
+    }
+    let f = Fixture::new(ORDERED, "policy/view", false).await;
+    let persistence = f.engine.session.shared_persistence();
+    let parent = persistence.lock().await.get_leaf_id().map(str::to_owned);
+    let entry: FileEntry = serde_json::from_value(json!({
+        "type":"message", "id":"foreign", "parentId":parent,
+        "timestamp":"2026-01-01T00:00:00Z", "message":user("foreign committed input")
+    }))
+    .unwrap();
+    persistence
+        .lock()
+        .await
+        .set_entry_writer(Arc::new(Tail(std::sync::Mutex::new(vec![entry]))));
+    let hook = before_model(
+        persistence.clone(),
+        f.engine.session.plugins.as_ref().unwrap().clone(),
+        f.engine.session.context_archive.clone(),
+        f.engine.session.context_model.clone(),
+    );
+    let messages = hook(Vec::new(), pa_agent::abort::AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(serde_json::to_string(&messages)
+        .unwrap()
+        .contains("foreign committed input"));
+    assert_eq!(persistence.lock().await.get_leaf_id(), Some("foreign"));
+}
