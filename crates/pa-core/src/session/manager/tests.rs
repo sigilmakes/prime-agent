@@ -618,7 +618,7 @@ fn host_writer_receives_exact_entry_before_publication() {
     use std::sync::{Arc, Mutex};
     struct Writer(Arc<Mutex<Vec<FileEntry>>>);
     impl super::SessionEntryWriter for Writer {
-        fn append(&self, entry: &FileEntry) -> std::io::Result<()> {
+        fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
             self.0.lock().unwrap().push(entry.clone());
             Ok(())
         }
@@ -641,7 +641,7 @@ fn host_writer_receives_exact_entry_before_publication() {
 fn host_writer_failure_does_not_publish_an_entry() {
     struct Writer;
     impl super::SessionEntryWriter for Writer {
-        fn append(&self, _: &FileEntry) -> std::io::Result<()> {
+        fn append(&self, _: &mut FileEntry) -> std::io::Result<()> {
             Err(std::io::Error::other("injected append refusal"))
         }
     }
@@ -657,7 +657,7 @@ fn host_writer_does_not_repeat_accepted_user_rows() {
     use std::sync::{Arc, Mutex};
     struct Writer(Arc<Mutex<Vec<FileEntry>>>);
     impl super::SessionEntryWriter for Writer {
-        fn append(&self, entry: &FileEntry) -> std::io::Result<()> {
+        fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
             self.0.lock().unwrap().push(entry.clone());
             Ok(())
         }
@@ -675,4 +675,40 @@ fn host_writer_does_not_repeat_accepted_user_rows() {
     manager.set_entry_writer(Arc::new(Writer(rows.clone())));
     assert_eq!(manager.append_message(message).unwrap(), accepted);
     assert!(rows.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_sink_returns_the_committed_identity_and_parent() {
+    struct Writer;
+    impl super::SessionEntryWriter for Writer {
+        fn append(&self, entry: &mut FileEntry) -> std::io::Result<()> {
+            let mut value = serde_json::to_value(&*entry)?;
+            value["id"] = "committed-id".into();
+            value["parentId"] = "committed-parent".into();
+            value["timestamp"] = "2001-02-03T04:05:06.789Z".into();
+            *entry = serde_json::from_value(value)?;
+            Ok(())
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::in_memory(tmp.path());
+    manager.set_entry_writer(std::sync::Arc::new(Writer));
+    assert!(manager.is_persisted());
+    let id = manager.append_session_info("name").unwrap();
+    assert_eq!(id, "committed-id");
+    assert_eq!(manager.get_leaf_id(), Some(id.as_str()));
+    let stored = manager.get_entry_by_id(&id).unwrap();
+    assert_eq!(stored.parent_id(), Some("committed-parent"));
+    assert_eq!(stored.timestamp(), "2001-02-03T04:05:06.789Z");
+}
+
+#[test]
+fn admitted_custom_identity_is_consumed_once_without_content_deduplication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::in_memory(tmp.path());
+    let id = manager.append_custom_message("accepted", pa_types::ai::UserContent::Text("same".into()), true, None).unwrap();
+    manager.replay_admitted_custom_rows(vec![id.clone()]).unwrap();
+    assert_eq!(manager.consume_admitted_custom_row(), Some(id));
+    assert_eq!(manager.consume_admitted_custom_row(), None);
+    assert!(manager.replay_admitted_custom_rows(vec!["missing".into()]).is_err());
 }

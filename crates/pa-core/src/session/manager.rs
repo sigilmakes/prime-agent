@@ -49,7 +49,7 @@ pub use repair::{load_entries_from_file, repair_jsonl_damage};
 /// Implementations preserve the complete entry envelope and return only after
 /// the row is durable. They must not call back into the session manager.
 pub trait SessionEntryWriter: Send + Sync {
-    fn append(&self, entry: &FileEntry) -> std::io::Result<()>;
+    fn append(&self, entry: &mut FileEntry) -> std::io::Result<()>;
 }
 
 /// A persist observer; must not break session writes (panics are contained).
@@ -86,6 +86,7 @@ pub struct SessionManager {
     leaf_id: Option<String>,
     /// Exact worker-owned rows replayed by the current prompt admission.
     admitted_user_rows: std::collections::VecDeque<String>,
+    admitted_custom_rows: std::collections::VecDeque<String>,
     persist_listeners: Vec<SessionPersistListener>,
     entry_writer: Option<std::sync::Arc<dyn SessionEntryWriter>>,
 }

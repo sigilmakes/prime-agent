@@ -119,6 +119,7 @@ impl SessionManager {
             label_timestamps_by_id: HashMap::new(),
             leaf_id: None,
             admitted_user_rows: std::collections::VecDeque::new(),
+            admitted_custom_rows: std::collections::VecDeque::new(),
             persist_listeners: Vec::new(),
             entry_writer: None,
         }
@@ -316,6 +317,7 @@ impl SessionManager {
     /// requires an owner-certified checkpoint instead of local window adoption.
     pub fn adopt_window(&mut self, mut window: super::window::WindowedSessionStore) {
         self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
         // One-copy adoption: the parsed trees move in (no `to_vec` clone); the
         // window stays attached for its snapshot/settings/metadata state, and
         // `active_context` walks `file_entries` with the window's settings overlay.
@@ -446,6 +448,7 @@ impl SessionManager {
         };
         self.file_entries = vec![header];
         self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
         self.window = None;
         self.has_assistant_entry = false;
         self.by_id.clear();
@@ -532,6 +535,7 @@ impl SessionManager {
     /// requires an owner-certified checkpoint instead of local entry adoption.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
         self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
         // The caller supplies the complete selected branch after explicit navigation.
         self.window = None;
         let header = self

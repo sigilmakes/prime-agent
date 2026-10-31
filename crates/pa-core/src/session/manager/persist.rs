@@ -99,7 +99,7 @@ impl SessionManager {
 
     #[must_use]
     pub fn is_persisted(&self) -> bool {
-        self.persist
+        self.persist || self.entry_writer.is_some()
     }
     /// Force-write all in-memory entries immediately (pre-model durability).
     ///
@@ -120,7 +120,7 @@ impl SessionManager {
     }
     pub(super) fn persist_entry(&mut self, index: usize) -> std::io::Result<()> {
         if let Some(writer) = &self.entry_writer {
-            return writer.append(&self.file_entries[index]);
+            return writer.append(&mut self.file_entries[index]);
         }
         if !self.persist || self.session_file.is_none() {
             return Ok(());

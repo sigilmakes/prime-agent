@@ -56,8 +56,7 @@ impl SessionManager {
     /// The underlying I/O error when the durable append fails.
     pub fn append_git_state(&mut self, git: GitContext) -> std::io::Result<String> {
         let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::GitState {
+        let id = self.append_entry(FileEntry::GitState {
             payload: GitStateEntry { git },
             base,
         })?;
@@ -66,7 +65,7 @@ impl SessionManager {
 
     /// Append `git` as a `git_state` row when it differs from the nearest
     /// git context on the active branch (or the header); returns the new id.
-    pub fn record_git_state_if_changed(&mut self, git: GitContext) -> Option<String> {
+    pub fn record_git_state_if_changed(&mut self, git: GitContext) -> std::io::Result<Option<String>> {
         // Match TS gitContextsEqual: preserved future metadata is not part of
         // repository identity and must not create a new git_state row.
         if self.active_git_context().as_ref().is_some_and(|active| {
@@ -74,9 +73,9 @@ impl SessionManager {
                 && active.commit == git.commit
                 && active.branch == git.branch
         }) {
-            return None;
+            return Ok(None);
         }
-        self.append_git_state(git).ok()
+        self.append_git_state(git).map(Some)
     }
 
     fn active_git_context(&self) -> Option<GitContext> {
@@ -100,8 +99,7 @@ impl SessionManager {
         details: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
         let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::CustomMessage {
+        let id = self.append_entry(FileEntry::CustomMessage {
             payload: CustomMessageEntry {
                 custom_type: custom_type.to_string(),
                 content,
@@ -131,9 +129,8 @@ impl SessionManager {
             "Entry {target_id} not found"
         );
         let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
         let timestamp = base.timestamp.clone().unwrap_or_default();
-        self.append_entry(FileEntry::Label {
+        let id = self.append_entry(FileEntry::Label {
             payload: LabelEntry {
                 target_id: target_id.to_string(),
                 label: label.map(str::to_string),
@@ -243,7 +240,6 @@ impl SessionManager {
             self.set_leaf_id(None);
         }
         let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
         let appended = self.append_entry(FileEntry::BranchSummary {
             payload: pa_types::session::BranchSummaryEntry {
                 from_id: branch_from_id.map_or_else(|| "root".to_string(), str::to_string),
@@ -254,11 +250,14 @@ impl SessionManager {
             },
             base,
         });
-        if let Err(error) = appended {
+        let id = match appended {
+            Ok(id) => id,
+            Err(error) => {
             // The move must not outlive the failed append.
             self.set_leaf_id(previous_leaf.as_deref());
             return Err(error);
-        }
+            }
+        };
         Ok(id)
     }
 }
