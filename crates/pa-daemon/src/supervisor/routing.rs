@@ -699,7 +699,8 @@ impl Supervisor {
                 }
             }
             DaemonCommand::Kill { .. } => {
-                self.route_command_ready(&resident, worker_command, payload, timeout, admission).await
+                self.route_command_ready(&resident, worker_command, payload, timeout, admission)
+                    .await
             }
             _ => {
                 self.route_command_ready(&resident, worker_command, payload, timeout, admission)

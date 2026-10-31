@@ -39,7 +39,9 @@ pub struct PluginCommandOutcome {
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
     /// Native engines commit complete rows through their manager's durable sink.
-    fn persists_session_entries(&self) -> bool { false }
+    fn persists_session_entries(&self) -> bool {
+        false
+    }
 
     /// Execute a native plugin or management command without submitting a model prompt.
     /// A supplied target must match the current generation. Engines without a plugin
@@ -59,7 +61,6 @@ pub trait SessionEngine: Send + Sync {
     /// Engines that admit provider steps override this; the default is a no-op so
     /// an engine with no canonical path (the scripted engine) is unchanged rather
     /// than forced to carry a slot it would never read.
-
 
     /// The session's shared MCP manager, when the engine owns one: the
     /// `replace_acp_mcp_servers` command writes through it.
@@ -173,7 +174,6 @@ pub trait SessionEngine: Send + Sync {
     /// Obtain the actual live canonical session for a navigation transaction.
     /// Standalone engines return `None`; native engines build before policy
     /// preflight and release their session guard before returning the handle.
-
 
     /// Run one branch summary (`navigate_tree` with `summarize`): summarize
     /// the abandoned branch's entries; the engine owns the model call.

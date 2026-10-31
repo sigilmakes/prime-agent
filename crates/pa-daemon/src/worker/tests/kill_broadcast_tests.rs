@@ -257,7 +257,8 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
     assert_eq!(cancelled.next_run_at, None);
     // The close archived the session (the wake scan's state gate): the
     // archived session_state row is durable in the log.
-    let rows = crate::session_transport::test_support::log_row_bodies(&dir.join("agent"), session_id);
+    let rows =
+        crate::session_transport::test_support::log_row_bodies(&dir.join("agent"), session_id);
     eprintln!("DEBUG rows: {rows:?}");
     let state = rows
         .iter()

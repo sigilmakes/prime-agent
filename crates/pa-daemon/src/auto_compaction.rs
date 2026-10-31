@@ -109,7 +109,9 @@ impl AgentSessionEngine {
                     .compact(None, &model, api_key, Some(&signal))
                     .await
             };
-            let outcome = self.runtime.block_on(pa_agent::abort::race_with_abort(compact, &signal));
+            let outcome = self
+                .runtime
+                .block_on(pa_agent::abort::race_with_abort(compact, &signal));
             self.clear_auto_compaction_abort(&controller);
             outcome
         };

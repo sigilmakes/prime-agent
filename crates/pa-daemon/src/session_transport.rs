@@ -208,14 +208,19 @@ impl WireState {
         // wire never pins a seq the log already named.
         let rows = log.read_since(0).map_err(|error| {
             LogWireError::Refused(
-                anyhow::Error::from(open_error(error))
-                    .context("read the session log at its open"),
+                anyhow::Error::from(open_error(error)).context("read the session log at its open"),
             )
         })?;
         if let Some(row) = rows.first() {
             if row.body.get("type").and_then(Value::as_str) == Some("session") {
                 self.header_written = true;
-                self.flushed_entries = rows.iter().skip(1).filter(|row| row.body.get("type").and_then(Value::as_str) != Some("branch_selection")).count();
+                self.flushed_entries = rows
+                    .iter()
+                    .skip(1)
+                    .filter(|row| {
+                        row.body.get("type").and_then(Value::as_str) != Some("branch_selection")
+                    })
+                    .count();
             }
         }
         if let Some(last) = rows.last() {
@@ -235,10 +240,7 @@ impl WireState {
     /// re-present the same bytes and must re-pin at the pending's seq for
     /// the core to answer from the landed row instead of repeating it.
     fn refresh_tail(&mut self) -> Result<(), LogWireError> {
-        let log = self
-            .log
-            .as_mut()
-            .expect("the caller ran ensure_open first");
+        let log = self.log.as_mut().expect("the caller ran ensure_open first");
         let rows = log.refresh(deadline()).map_err(open_error)?;
         if let Some(last) = rows.last() {
             self.next_seq = last.seq + 1;
@@ -258,10 +260,7 @@ impl WireState {
         // conflict: beyond that the log keeps moving under the wire and a
         // reopen must settle it.
         for _attempt in 0..2 {
-            let log = self
-                .log
-                .as_mut()
-                .expect("the caller ran ensure_open first");
+            let log = self.log.as_mut().expect("the caller ran ensure_open first");
             let seq = self
                 .pending
                 .as_ref()
@@ -329,10 +328,7 @@ impl WireState {
                     // stays; a re-present of its bytes still resolves
                     // through the core's body match.
                     {
-                        let log = self
-                            .log
-                            .as_mut()
-                            .expect("the caller ran ensure_open first");
+                        let log = self.log.as_mut().expect("the caller ran ensure_open first");
                         let rows = log
                             .read_since(self.next_seq.saturating_sub(1))
                             .map_err(open_error)?;
@@ -370,15 +366,25 @@ impl LogWire {
     /// A lazy writer for an exact durable log path, including an overridden directory.
     pub(crate) fn for_path(path: &Path) -> Self {
         let wire = Self::deferred(Path::new("."));
-        wire.state.lock().expect("log wire lock").directory =
-            path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        wire.state.lock().expect("log wire lock").directory = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         wire
     }
 
-    pub(crate) fn flush_selection(&self, session_id: &str, header: &Value, leaf: Option<&str>) -> Result<(), LogWireError> {
+    pub(crate) fn flush_selection(
+        &self,
+        session_id: &str,
+        header: &Value,
+        leaf: Option<&str>,
+    ) -> Result<(), LogWireError> {
         self.flush(session_id, header, &[])?;
         let mut state = self.state.lock().expect("log wire lock");
-        state.append_pinned(&serde_json::json!({"type": "branch_selection", "selectedLeaf": leaf}), false)
+        state.append_pinned(
+            &serde_json::json!({"type": "branch_selection", "selectedLeaf": leaf}),
+            false,
+        )
     }
 
     /// A reopened wire wrapping the log the fold was replayed from. The
@@ -453,7 +459,9 @@ impl LogWire {
     ) -> Self {
         let mut wire = Self::deferred(agent_dir);
         let state = std::sync::Arc::clone(&wire.state);
-        let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.disk = Some(disk);
         let _ = guard;
         wire
@@ -495,10 +503,9 @@ pub(crate) fn open_repaired_dir(
     match SessionLog::open(directory, session_id, deadline()) {
         Ok(log) => Ok((log, None)),
         Err(session_log::Error::Damaged { .. }) => {
-            let report = SessionLog::repair(directory, session_id, deadline())
-                .map_err(open_error)?;
-            let log = SessionLog::open(directory, session_id, deadline())
-                .map_err(open_error)?;
+            let report =
+                SessionLog::repair(directory, session_id, deadline()).map_err(open_error)?;
+            let log = SessionLog::open(directory, session_id, deadline()).map_err(open_error)?;
             Ok((log, Some(report)))
         }
         Err(error) => Err(open_error(error)),
@@ -700,7 +707,10 @@ mod tests {
                 SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("rival open");
             assert!(
                 matches!(
-                    log.append(&json!({ "type": "session", "id": "rival-header" }), deadline()),
+                    log.append(
+                        &json!({ "type": "session", "id": "rival-header" }),
+                        deadline()
+                    ),
                     Outcome::Committed { .. }
                 ),
                 "the rival's header row commits"
@@ -736,17 +746,12 @@ mod tests {
         // the rival, so the recovery answers busy and the wire returns with
         // the write pending; the re-presented row re-pins the same seq and
         // the core answers from the landed bytes.
-        let fake = std::sync::Arc::new(FailNextFsync::new(
-            log_dir(&dir).join("undecided.lock"),
-        ));
+        let fake = std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("undecided.lock")));
         fake.arm_fsync_failure(3);
         let session_path = dir.join("undecided.jsonl");
         let mut store = SessionFile::create("test", None, 0);
         store.set_path(session_path.clone());
-        store.attach_log_wire(LogWire::defer_with_disk(
-            &dir,
-            std::sync::Arc::clone(&fake),
-        ));
+        store.attach_log_wire(LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)));
         store.rekey_log_session_id(&session_path).expect("re-key");
         let entry = crate::session_store::SessionEntry {
             type_: "message".to_owned(),
@@ -758,7 +763,10 @@ mod tests {
         let refused = store
             .persist_built_log_entry(entry.clone())
             .expect_err("undecided");
-        assert!(refused.to_string().contains("undecided write open"), "{refused:#}");
+        assert!(
+            refused.to_string().contains("undecided write open"),
+            "{refused:#}"
+        );
         // The row is not in the fold, but its bytes are in the file: the
         // barrier was lost, not the write.
         assert!(store.entries().is_empty());

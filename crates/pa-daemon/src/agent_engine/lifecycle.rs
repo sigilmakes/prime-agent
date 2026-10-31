@@ -866,10 +866,8 @@ impl AgentSessionEngine {
     /// outstanding receipt before the cached SDK mirror is discarded. A refusal
     /// keeps the cached runtime and its blocked view; nothing is retried.
 
-
     /// A prompt is a new demand, never a retry: a blocked canonical view is
     /// reopened once at a certified boundary before this prompt is admitted.
-
 
     /// Authorized cancel-and-replace already aborts and settles at the worker.
     /// It does not grant permission to reuse the old physical owner.

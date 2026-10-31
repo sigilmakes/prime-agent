@@ -482,10 +482,7 @@ pub(crate) fn admit_goal_follow_up(
     if let Some(goal) = &follow_up.goal_update {
         {
             let mut guard = core.lock().unwrap();
-            if let Some(store) = guard
-                .store
-                .as_mut()
-            {
+            if let Some(store) = guard.store.as_mut() {
                 let _ = store.persist_entry(
                     "custom",
                     json!({

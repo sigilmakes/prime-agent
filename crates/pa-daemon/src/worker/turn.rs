@@ -620,7 +620,9 @@ impl TurnRunner {
                     // without touching the slot.
                     EngineEvent::AssistantMessage(message) if !rows_persisted => {
                         if let Some(store) = core.store.as_mut() {
-                            if let Err(error) = store.persist_entry("message", json!({ "message": message })) {
+                            if let Err(error) =
+                                store.persist_entry("message", json!({ "message": message }))
+                            {
                                 eprintln!("pa-daemon: assistant persistence failed: {error:#}");
                                 return false;
                             }
@@ -631,7 +633,9 @@ impl TurnRunner {
                         // The exact returned ID enters the delivery FIFO; the live SDK
                         // later adopts this same row and never writes a second copy.
                         if let Some(store) = core.store.as_mut() {
-                            if let Err(error) = store.persist_entry("message", json!({"message": message})) {
+                            if let Err(error) =
+                                store.persist_entry("message", json!({"message": message}))
+                            {
                                 eprintln!("pa-daemon: accepted user row refused: {error:#}");
                                 return false;
                             }

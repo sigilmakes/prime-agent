@@ -890,9 +890,7 @@ impl Worker {
             .as_ref()
             .and_then(|store| store.session_name().map(str::to_string));
         if let Some(store) = core.store.as_mut() {
-            if let Err(error) =
-                store.persist_entry("session_info", json!({ "name": name }))
-            {
+            if let Err(error) = store.persist_entry("session_info", json!({ "name": name })) {
                 return response_failure(None, command, &error.to_string(), None);
             }
         }

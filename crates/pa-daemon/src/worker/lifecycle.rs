@@ -133,8 +133,6 @@ impl Worker {
         response_success(None, "shutdown", None)
     }
 
-
-
     /// Wait until no turn or compaction run is in flight: the kernel dispose
     /// must never race a live run. The caller requests the aborts first.
     pub(crate) async fn await_session_work_settled(&self) {
@@ -448,10 +446,7 @@ impl Worker {
                         if let Some(goal) = continuation.goal_update {
                             {
                                 let mut core = self.core.lock().unwrap();
-                                if let Some(store) = core
-                                    .store
-                                    .as_mut()
-                                {
+                                if let Some(store) = core.store.as_mut() {
                                     let _ = store.persist_entry(
                                         "custom",
                                         json!({

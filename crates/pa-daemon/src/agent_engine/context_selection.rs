@@ -46,7 +46,10 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         Ok(None)
     }
 
-    fn entry_writer(&self, source: ContextSelectionSource) -> std::sync::Arc<dyn pa_core::session::manager::SessionEntryWriter>;
+    fn entry_writer(
+        &self,
+        source: ContextSelectionSource,
+    ) -> std::sync::Arc<dyn pa_core::session::manager::SessionEntryWriter>;
 
     /// Capture only the current owner and header, never a new lease or writer.
     fn capture(&self, expected_file: &Path) -> anyhow::Result<ContextSelectionSource>;
@@ -57,7 +60,6 @@ pub(crate) trait InitialContextSelectionStore: Send + Sync {
         source: ContextSelectionSource,
         selection: ContextSelection,
     ) -> ContextSelectionCommitFuture;
-
 }
 
 impl super::AgentSessionEngine {
@@ -81,7 +83,6 @@ impl super::AgentSessionEngine {
     ) -> anyhow::Result<(
         pa_core::session::manager::SessionManager,
         Option<pa_core::session_engine::engine::InitialContextSelectionCommit>,
-
     )> {
         let Some(path) = session_file else {
             let manager = session_dir.map_or_else(
@@ -100,14 +101,20 @@ impl super::AgentSessionEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("persistent session has no canonical context selection owner")
             })?;
-        let seed = store.mirror_seed()?.ok_or_else(|| anyhow::anyhow!("session log fold is unavailable"))?;
+        let seed = store
+            .mirror_seed()?
+            .ok_or_else(|| anyhow::anyhow!("session log fold is unavailable"))?;
         let source = store.capture(&path)?;
         let dir = session_dir.unwrap_or_else(|| {
-            path.parent().map_or_else(|| std::path::PathBuf::from("."), Path::to_owned)
+            path.parent()
+                .map_or_else(|| std::path::PathBuf::from("."), Path::to_owned)
         });
         let mut manager = pa_core::session::manager::SessionManager::in_memory_from_header(
-            &cwd, &dir, seed.header,
-        ).map_err(anyhow::Error::msg)?;
+            &cwd,
+            &dir,
+            seed.header,
+        )
+        .map_err(anyhow::Error::msg)?;
         manager.adopt_entries(seed.entries);
         manager.set_entry_writer(store.entry_writer(source.clone()));
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =

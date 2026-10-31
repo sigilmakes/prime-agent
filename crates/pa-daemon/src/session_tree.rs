@@ -241,8 +241,7 @@ impl SessionFile {
             Some(label) => fields["label"] = json!(label),
             None => fields["label"] = Value::Null,
         }
-        self.persist_entry("label", fields)
-            .map_err(Into::into)
+        self.persist_entry("label", fields).map_err(Into::into)
     }
 
     /// The root-to-leaf path of the (new) current leaf as typed entries.
@@ -685,8 +684,18 @@ mod tests {
         let path = dir.path().join("selection.jsonl");
         let mut store = SessionFile::create("/fixture", None, 0);
         store.set_path(path.clone());
-        let first = store.persist_entry("message", json!({"message": {"role": "user", "content": "first", "timestamp": 1}})).unwrap();
-        store.persist_entry("message", json!({"message": {"role": "assistant", "content": [], "timestamp": 2}})).unwrap();
+        let first = store
+            .persist_entry(
+                "message",
+                json!({"message": {"role": "user", "content": "first", "timestamp": 1}}),
+            )
+            .unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message": {"role": "assistant", "content": [], "timestamp": 2}}),
+            )
+            .unwrap();
         store.branch_to(Some(&first)).unwrap();
         let reopened = SessionFile::open(&path).unwrap();
         assert_eq!(reopened.leaf_id(), Some(first.as_str()));
@@ -694,5 +703,4 @@ mod tests {
         store.branch_to(None).unwrap();
         assert_eq!(SessionFile::open(&path).unwrap().leaf_id(), None);
     }
-
 }

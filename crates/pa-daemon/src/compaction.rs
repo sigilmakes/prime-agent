@@ -257,10 +257,7 @@ impl CompactionManager {
     fn persist_and_emit_ipython_state(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
-            if let Some(store) = core
-                .store
-                .as_mut()
-            {
+            if let Some(store) = core.store.as_mut() {
                 let _ = store.persist_entry(
                     "custom_message",
                     json!({

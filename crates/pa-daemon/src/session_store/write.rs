@@ -2,10 +2,8 @@
 //! append-with-rewrite-bootstrap persist paths, and the store lease discipline that
 //! serializes writers onto the file.
 
-
 use super::{
-    json, new_entry_id, HashMap, PathBuf, Result, SessionEntry,
-    SessionFile, SessionHeader, Value,
+    json, new_entry_id, HashMap, PathBuf, Result, SessionEntry, SessionFile, SessionHeader, Value,
 };
 
 impl SessionEntry {
