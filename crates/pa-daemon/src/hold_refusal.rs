@@ -20,7 +20,7 @@ impl HoldIdentity {
     /// From the typed lease rejection.
     fn from_error(error: &SessionAlreadyActiveError) -> Self {
         Self {
-            pid: error.holder_pid,
+            pid: error.holder_pid.filter(|pid| *pid != 0),
             active_session_id: error.active_session_id.clone(),
         }
     }

@@ -231,7 +231,7 @@ fn read_exact_timeout(
 }
 
 #[test]
-fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
+fn the_orphan_exit_preserves_the_session_and_releases_execution_ownership() {
     let dir = tempfile::tempdir().expect("temp dir");
     let canonical_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
     let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
@@ -247,34 +247,31 @@ fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
     assert_eq!(created["success"], true, "create failed: {created}");
     drop(client);
 
-    let session_leases = dir.path().join("agent").join("session-leases");
-    let session_path_key = session_file.to_string_lossy().to_string();
-    let held_lease = std::fs::read_dir(&session_leases)
-        .expect("session-leases directory")
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            std::fs::read_to_string(path.join("owner.json"))
-                .ok()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|owner| owner["sessionPath"].as_str().map(str::to_string))
-                == Some(session_path_key.clone())
-        })
-        .unwrap_or_else(|| panic!("no session lease for {session_path_key}"));
+    let agent_dir = dir.path().join("agent");
+    assert!(pa_daemon::lease::live_lease_owner(&agent_dir, &session_file).is_some());
+    assert!(pa_daemon::lease::acquire_runtime_session_lease(&session_file, &agent_dir).is_err());
+    let lock_files: Vec<_> = std::fs::read_dir(agent_dir.join("session-leases"))
+        .expect("execution lock directory")
+        .map(|entry| entry.expect("lock entry").path())
+        .collect();
+    assert_eq!(lock_files.len(), 1);
+    let held_lock = &lock_files[0];
+    assert!(held_lock.is_file());
 
     assert!(
         wait_exit(&mut worker.child, Duration::from_secs(30)),
         "the orphaned worker exited on the supervisor-lost window"
     );
     assert!(
-        held_lease.exists(),
-        "process exit retains the dead-owner lease for safe reclamation"
+        held_lock.is_file(),
+        "the execution lock inode stays on disk"
     );
+    assert!(pa_daemon::lease::live_lease_owner(&agent_dir, &session_file).is_none());
     let reopened =
         pa_daemon::lease::acquire_runtime_session_lease(&session_file, &dir.path().join("agent"))
-            .expect("a new owner can reclaim the lease after the worker exited");
+            .expect("process exit releases the execution flock");
     reopened.release();
-    assert!(!held_lease.exists(), "the new owner released its lease");
+    assert!(held_lock.is_file(), "release never unlinks a lock inode");
     assert!(
         session_file.exists(),
         "the session file survives the lease release"

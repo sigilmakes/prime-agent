@@ -462,16 +462,15 @@ impl Supervisor {
         {
             let supervisor = Arc::clone(&self);
             tokio::task::spawn_blocking(move || {
-                let leases = crate::lease::reclaim_dead_owner_leases(&supervisor.options.agent_dir);
                 let logs = crate::worker_stderr::prune_socket_logs(
                     &supervisor.options.agent_dir,
                     &supervisor.options.socket_path,
                 );
                 let leftovers =
                     crate::ts_era::sweep_ts_era_leftovers(&supervisor.options.agent_dir);
-                if leases + logs + leftovers > 0 {
+                if logs + leftovers > 0 {
                     supervisor.log_line(&format!(
-                        "boot cleanup: removed {leases} dead-owner lease dir(s), {logs} old socket log(s), {leftovers} TS-era leftover(s)"
+                        "boot cleanup: removed {logs} old socket log(s), {leftovers} TS-era leftover(s)"
                     ));
                 }
             });

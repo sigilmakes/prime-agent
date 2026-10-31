@@ -78,7 +78,10 @@ session files, descent is membership at any parent-walk step, and
 present rows by agent id or session file are never overwritten - at
 subscribe, spawn-admission, and worker-stop moments, so subscribers see
 the full family, not just resident rows), cloud sandbox attach, session
-leases (`core/session-lease.ts` port). Daemon-owned RLM spawn ledger (`rlm_ledger.rs`):
+execution locks (`lease.rs`): OS file locks exclude duplicate resident workers,
+separate from the session log's per-append lock. Holder metadata is courtesy
+information only; process exit releases ownership without stale-owner recovery.
+Daemon-owned RLM spawn ledger (`rlm_ledger.rs`):
 one append-only JSONL per sessions dir (spawn/rename/delete admissions with
 the TS `rlm-ledger.ts` record grammar, bounds, stat-guarded replay, and
 legacy-registry seeding) plus the per-child display files; family topology

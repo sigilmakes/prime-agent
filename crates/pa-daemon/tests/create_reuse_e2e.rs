@@ -336,20 +336,11 @@ fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     let (worker_id, _created) = create_session(&mut client, "c1", &create_config);
     let session_file = session_file_of(&mut client, &worker_id, "s1");
 
-    // The lease the live worker wrote for the session file: a file acquired before it
-    // existed is keyed by its raw path (the canonicalize fallback), so the test
-    // locates the lease by the owner's sessionPath.
-    let leases_dir = agent_dir.join("session-leases");
-    let owner: Value = std::fs::read_dir(&leases_dir)
-        .expect("session-leases directory")
-        .filter_map(std::result::Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("owner.json")).ok())
-        .map(|content| serde_json::from_str::<Value>(&content).expect("owner.json"))
-        .find(|owner| owner["sessionPath"].as_str() == Some(session_file.as_str()))
-        .unwrap_or_else(|| panic!("no session lease for {session_file}"));
-    let named = owner["activeSessionId"]
-        .as_str()
-        .expect("the lease names its owner session");
+    let owner = pa_daemon::lease::live_lease_owner(&agent_dir, Path::new(&session_file))
+        .expect("the live worker holds its execution lock");
+    let named = owner
+        .active_session_id
+        .expect("the courtesy header names the worker");
     assert_eq!(
         named, worker_id,
         "the lease must name the LIVE worker's active id, not an inherited one"

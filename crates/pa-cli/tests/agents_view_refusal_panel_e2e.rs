@@ -127,16 +127,13 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
 
     // The foreign holder: this test process takes the runtime lease, the role the
     // other product's daemon worker plays on the shared session store.
-    std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
         "foreign01ab3c",
     );
-    let holder = pa_daemon::lease::acquire_session_lease(Some(&session_path), &agent_dir)
-        .expect("lease acquire probe")
-        .expect("the lease must be held");
+    let holder = pa_daemon::lease::acquire_runtime_session_lease(&session_path, &agent_dir)
+        .expect("the execution lock must be held");
     std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
-    std::env::remove_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV);
 
     let daemon = spawn_daemon(&dir.path().join("daemon.sock"), &agent_dir);
 

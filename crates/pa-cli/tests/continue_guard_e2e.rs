@@ -296,18 +296,14 @@ fn print_resume_refuses_a_foreign_lease_holder() {
 
     // The foreign holder: this test process takes the runtime lease, in
     // exactly the role the other product's daemon worker plays. The
-    // lease-enable env is consumed at the acquire itself, so it leaves this
-    // test's window immediately.
-    std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
+    // execution lock is mandatory, like the worker's lock.
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
         "foreign01ab3c",
     );
-    let holder = pa_daemon::lease::acquire_session_lease(Some(&session_path), &agent_dir)
-        .expect("lease acquire probe")
-        .expect("the lease must be held");
+    let holder = pa_daemon::lease::acquire_runtime_session_lease(&session_path, &agent_dir)
+        .expect("the execution lock must be held");
     std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
-    std::env::remove_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV);
 
     // The refusal: this test process runs a build of this product, so the
     // holder classification reads as another Rust build, never the TypeScript
