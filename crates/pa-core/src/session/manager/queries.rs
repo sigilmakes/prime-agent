@@ -51,7 +51,7 @@ impl SessionManager {
                 return Ok(retained);
             };
             let mut entries = tokio::task::spawn_blocking(move || {
-                std::fs::read_to_string(path).map(|text| super::parse_session_entries(&text))
+                super::super::read::read_entries(&path)
             })
             .await??;
             let ids: std::collections::HashSet<String> = entries

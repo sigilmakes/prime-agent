@@ -6,6 +6,7 @@ pub mod metadata;
 pub mod tree;
 pub mod window;
 mod window_cache;
+pub mod read;
 
 use std::collections::HashMap;
 

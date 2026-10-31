@@ -311,7 +311,15 @@ impl WindowedSessionStore {
         // not `model` (the leaf's).
         let mut boundary_model = None;
         let mut header = None;
-        while let Some(line) = reader.next()? {
+        let mut newer_seq = None;
+        while let Some(envelope) = reader.next()? {
+            let row = crate::session_log::Row::decode(&envelope, 0)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if newer_seq.is_some_and(|newer| row.seq >= newer) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "session log sequence is not increasing"));
+            }
+            newer_seq = Some(row.seq);
+            let line = serde_json::to_vec(&row.body)?;
             let Ok(text) = std::str::from_utf8(&line) else {
                 return Ok(None);
             };
@@ -659,11 +667,15 @@ impl WindowedSessionStore {
         }
         reads.jsonl_bytes += header.len() as u64;
         reads.jsonl_ranges.push((0, header.len() as u64));
-        let Ok(canonical) = serde_json::from_slice::<FileEntry>(&header) else {
-            return Ok(None);
-        };
+        if header.pop() != Some(b'\n') {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "session header is unterminated"));
+        }
+        let header_row = crate::session_log::Row::decode(&header, 0)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let canonical: FileEntry = serde_json::from_value(header_row.body)?;
+        let mut seq = header_row.seq;
         if serde_json::to_string(&canonical)? != snapshot.header
-            || snapshot.start < header.len() as u64
+            || snapshot.start < header.len() as u64 + 1
             || snapshot.start > file.metadata()?.len()
         {
             return Ok(None);
@@ -675,17 +687,17 @@ impl WindowedSessionStore {
         reads
             .jsonl_ranges
             .push((snapshot.start, suffix.len() as u64));
-        let raw_entries: Vec<String> = suffix
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect();
+        if !suffix.is_empty() && !suffix.ends_with('\n') {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "session suffix is unterminated"));
+        }
+        let mut raw_entries = Vec::new();
         let mut entries = vec![canonical];
-        for line in &raw_entries {
-            let Ok(entry) = serde_json::from_str::<FileEntry>(line) else {
-                return Ok(None);
-            };
-            entries.push(entry);
+        for line in suffix.lines() {
+            let row = crate::session_log::Row::decode(line.as_bytes(), seq)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            seq = row.seq;
+            raw_entries.push(serde_json::to_string(&row.body)?);
+            entries.push(serde_json::from_value(row.body)?);
         }
         if entries.last().and_then(FileEntry::id) != Some(snapshot.leaf.as_str())
             || !snapshot.generation.valid(file, path)?
@@ -923,7 +935,7 @@ impl WindowedSessionStore {
         }
         let path = self.path.clone();
         let entries = tokio::task::spawn_blocking(move || {
-            std::fs::read_to_string(path).map(|text| super::parse_session_entries(&text))
+            super::read::read_entries(&path)
         })
         .await??;
         self.entries = entries;
