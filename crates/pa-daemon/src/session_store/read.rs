@@ -138,6 +138,12 @@ impl SessionFile {
         Self::open_log_path(path, OpenPolicy::Validate)
     }
 
+    /// Open an execution owner's actual log path, repairing only after the
+    /// transport established a supported header. Read-only callers use `open`.
+    pub(crate) fn open_owned_log(path: &Path) -> Result<Self> {
+        Self::open_log_path(path, OpenPolicy::Repair)
+    }
+
     /// Load a log-transported session: the log is the source of truth, the
     /// fold replays it.
     ///
