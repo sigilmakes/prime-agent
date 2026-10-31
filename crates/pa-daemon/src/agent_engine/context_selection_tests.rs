@@ -58,6 +58,7 @@ impl InitialContextSelectionStore for RefusingSelectionStore {
             header: store.header.clone(),
             entries: crate::session_tree::file_entries(&store),
             leaf_id: store.leaf_id().map(str::to_owned),
+            cursor: store.sdk_read_cursor(),
         }))
     }
 
@@ -67,6 +68,12 @@ impl InitialContextSelectionStore for RefusingSelectionStore {
     ) -> Arc<dyn pa_core::session::manager::SessionEntryWriter> {
         struct RefusingWriter;
         impl pa_core::session::manager::SessionEntryWriter for RefusingWriter {
+            fn read_tail(
+                &self,
+                _cursor: &mut pa_core::session_log::ReadCursor,
+            ) -> std::io::Result<Vec<FileEntry>> {
+                Ok(Vec::new())
+            }
             fn append(&self, _entry: &mut FileEntry) -> std::io::Result<()> {
                 Err(std::io::Error::other(ACK_ERROR))
             }
@@ -386,12 +393,12 @@ fn admitted_current_has_empty_proof_without_traversing_suffix() {
     // Current is intentionally not a graph validator; SDK owns prefix validation.
     let entries = vec![user_entry("cycle", Some("cycle"), "body")];
     assert!(
-        admitted_user_ids(&entries, Some("cycle"), &ContextStartupBoundary::Current)
+        admitted_input_ids(&entries, Some("cycle"), &ContextStartupBoundary::Current)
             .unwrap()
             .is_empty()
     );
     assert!(
-        admitted_user_ids(&[], None, &ContextStartupBoundary::Current)
+        admitted_input_ids(&[], None, &ContextStartupBoundary::Current)
             .unwrap()
             .is_empty()
     );
@@ -407,12 +414,14 @@ fn admitted_empty_returns_exact_fifo_users_on_selected_branch() {
         metadata_entry("tip", Some("u2")),
     ];
     assert_eq!(
-        admitted_user_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap(),
+        admitted_input_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap(),
         vec!["u1", "u2"]
     );
-    assert!(admitted_user_ids(&[], None, &ContextStartupBoundary::Empty)
-        .unwrap()
-        .is_empty());
+    assert!(
+        admitted_input_ids(&[], None, &ContextStartupBoundary::Empty)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -426,13 +435,13 @@ fn admitted_leaf_excludes_boundary_and_unselected_sibling() {
     ];
     let boundary = ContextStartupBoundary::Leaf("boundary".to_owned());
     assert_eq!(
-        admitted_user_ids(&entries, Some("tip"), &boundary).unwrap(),
+        admitted_input_ids(&entries, Some("tip"), &boundary).unwrap(),
         vec!["new"]
     );
-    assert!(admitted_user_ids(&entries, Some("boundary"), &boundary)
+    assert!(admitted_input_ids(&entries, Some("boundary"), &boundary)
         .unwrap()
         .is_empty());
-    let error = admitted_user_ids(
+    let error = admitted_input_ids(
         &entries,
         Some("tip"),
         &ContextStartupBoundary::Leaf("sibling".to_owned()),
@@ -445,25 +454,25 @@ fn admitted_leaf_excludes_boundary_and_unselected_sibling() {
 fn admitted_missing_entry_fails_closed() {
     let entries = vec![user_entry("tip", Some("missing"), "body")];
     let error =
-        admitted_user_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap_err();
+        admitted_input_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap_err();
     assert!(
         error.to_string().contains("missing entry missing"),
         "{error}"
     );
-    assert!(admitted_user_ids(&[], Some("missing"), &ContextStartupBoundary::Empty).is_err());
+    assert!(admitted_input_ids(&[], Some("missing"), &ContextStartupBoundary::Empty).is_err());
 }
 
 #[test]
 fn admitted_missing_leaf_boundary_fails_closed() {
     let entries = vec![user_entry("tip", None, "body")];
-    let error = admitted_user_ids(
+    let error = admitted_input_ids(
         &entries,
         Some("tip"),
         &ContextStartupBoundary::Leaf("absent".to_owned()),
     )
     .unwrap_err();
     assert!(error.to_string().contains("boundary is absent"), "{error}");
-    assert!(admitted_user_ids(
+    assert!(admitted_input_ids(
         &[],
         None,
         &ContextStartupBoundary::Leaf("absent".to_owned())
@@ -477,7 +486,8 @@ fn admitted_cycle_fails_closed() {
         user_entry("a", Some("b"), "one"),
         user_entry("b", Some("a"), "two"),
     ];
-    let error = admitted_user_ids(&entries, Some("b"), &ContextStartupBoundary::Empty).unwrap_err();
+    let error =
+        admitted_input_ids(&entries, Some("b"), &ContextStartupBoundary::Empty).unwrap_err();
     assert!(error.to_string().contains("contains a cycle"), "{error}");
 }
 
@@ -488,7 +498,7 @@ fn admitted_same_body_distinct_ids_are_preserved() {
         user_entry("second", Some("first"), "same body"),
     ];
     assert_eq!(
-        admitted_user_ids(&entries, Some("second"), &ContextStartupBoundary::Empty).unwrap(),
+        admitted_input_ids(&entries, Some("second"), &ContextStartupBoundary::Empty).unwrap(),
         vec!["first", "second"]
     );
 }

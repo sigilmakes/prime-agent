@@ -243,7 +243,7 @@ impl SessionNavigation {
                 .target_lease(std::path::Path::new(path))
                 .map_err(|error| response_failure(None, command, &error.to_string(), None))?,
         };
-        let mut file = SessionFile::open(std::path::Path::new(path))
+        let mut file = SessionFile::open_owned_log(std::path::Path::new(path))
             .map_err(|error| response_failure(None, command, &error.to_string(), None))?;
         file.lease = lease;
         let cwd =

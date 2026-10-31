@@ -11,12 +11,17 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
+    fn accepted_input_entry(&self, id: String) {
+        self.accepted_input_entries
+            .lock()
+            .expect("accepted input entries")
+            .push(id);
+    }
+
     fn persists_session_entries(&self) -> bool {
         self.row_sink_ready
             .load(std::sync::atomic::Ordering::Acquire)
     }
-
-    /// The worker owns the slot; the engine only writes into it.
 
     /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
@@ -938,17 +943,6 @@ impl SessionEngine for AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock") = None;
-        self.runtime.block_on(async {
-            let core = self.session.lock().await.clone();
-            if let Some(core) = core {
-                core.session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .replay_admitted_user_rows(Vec::new())
-                    .expect("clearing admitted rows cannot fail");
-            }
-        });
     }
 
     fn run_side_question(
@@ -1400,11 +1394,7 @@ impl SessionEngine for AgentSessionEngine {
                 "timestamp": now_millis(),
             }))
         };
-        // A blocked canonical view is a quarantined mirror, not lost history:
-        // a new prompt certifies the owner boundary once and reopens cold
-        // before its accepted row persists. A refused certification keeps the
-        // view, and the prompt refuses exactly once like before.
-        // A create-owned warmup may still be adopting/ACKing metadata. Hold
+        // A create-owned warmup may still be building. Hold
         // its existing gate through accepted-row persistence, without holding
         // any SDK/owner/core guard or triggering a truly lazy build.
         let build = match self.runtime.block_on(self.prompt_acceptance_build_guard()) {
@@ -1439,6 +1429,27 @@ impl SessionEngine for AgentSessionEngine {
             }))) {
                 return;
             }
+        }
+        let accepted = std::mem::take(
+            &mut *self
+                .accepted_input_entries
+                .lock()
+                .expect("accepted input entries"),
+        );
+        if let Err(error) = self.runtime.block_on(async {
+            let built = self.session.lock().await.clone();
+            if let Some(built) = built {
+                let persistence = built.session.shared_persistence();
+                let mut manager = persistence.lock().await;
+                manager.refresh_committed_entries()?;
+                if !accepted.is_empty() {
+                    manager.replay_admitted_input_rows(accepted)?;
+                }
+            }
+            Ok::<(), std::io::Error>(())
+        }) {
+            emit(EngineEvent::Done(Err(error.to_string())));
+            return;
         }
         // The turn's ensure/build path must acquire this same gate itself.
         drop(build);

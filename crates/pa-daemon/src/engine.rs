@@ -38,6 +38,9 @@ pub struct PluginCommandOutcome {
 
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
+    /// Hand the engine the exact durable input ID before delivery to its SDK.
+    fn accepted_input_entry(&self, _id: String) {}
+
     /// Native engines commit complete rows through their manager's durable sink.
     fn persists_session_entries(&self) -> bool {
         false

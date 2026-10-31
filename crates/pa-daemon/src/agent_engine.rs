@@ -120,6 +120,8 @@ pub(crate) type TestStreamDecorator =
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
+    pub(crate) accepted_input_entries: std::sync::Mutex<Vec<String>>,
+
     /// Whether the current SDK writes exact rows through the serving log sink.
     pub(crate) row_sink_ready: std::sync::atomic::AtomicBool,
 

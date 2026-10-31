@@ -69,6 +69,23 @@ fn own_log_store(
     core
 }
 
+fn persist_accepted_user(
+    engine: &AgentSessionEngine,
+    owner: &std::sync::Arc<std::sync::Mutex<crate::worker::SessionCore>>,
+    message: serde_json::Value,
+) -> String {
+    let id = owner
+        .lock()
+        .unwrap()
+        .store
+        .as_mut()
+        .unwrap()
+        .persist_entry("message", serde_json::json!({"message":message}))
+        .unwrap();
+    engine.accepted_input_entry(id.clone());
+    id
+}
+
 /// A settings.json with an explicit compaction reserve (the f14 battery shape).
 fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
     std::fs::create_dir_all(dir.join("agent")).unwrap();

@@ -89,6 +89,24 @@ struct CoreSessionEntryWriter {
 }
 
 impl pa_core::session::manager::SessionEntryWriter for CoreSessionEntryWriter {
+    fn read_tail(
+        &self,
+        cursor: &mut pa_core::session_log::ReadCursor,
+    ) -> std::io::Result<Vec<pa_types::session::FileEntry>> {
+        let read = || -> Result<Vec<pa_types::session::FileEntry>> {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+            validate_source(&core, &self.source)?;
+            core.store
+                .as_mut()
+                .context("session store unavailable")?
+                .read_sdk_tail(cursor)
+        };
+        read().map_err(std::io::Error::other)
+    }
+
     fn append(&self, entry: &mut pa_types::session::FileEntry) -> std::io::Result<()> {
         let mut write = || -> Result<()> {
             let mut core = self
@@ -116,16 +134,17 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
     }
 
     fn mirror_seed(&self) -> Result<Option<MirrorSeed>> {
-        let core = self
+        let mut core = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
-        let Some(store) = core.store.as_ref() else {
+        let Some(store) = core.store.as_mut() else {
             return Ok(None);
         };
         if !store.is_log_served() {
             return Ok(None);
         }
+        store.observe_log_tail()?;
         let entries = store
             .entries()
             .iter()
@@ -135,6 +154,7 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
             header: store.header.clone(),
             entries,
             leaf_id: store.leaf_id().map(str::to_owned),
+            cursor: store.sdk_read_cursor(),
         }))
     }
 

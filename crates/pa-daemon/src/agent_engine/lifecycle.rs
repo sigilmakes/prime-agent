@@ -117,6 +117,7 @@ impl AgentSessionEngine {
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
+            accepted_input_entries: std::sync::Mutex::new(Vec::new()),
             row_sink_ready: std::sync::atomic::AtomicBool::new(false),
             runtime,
             config,
@@ -574,7 +575,7 @@ impl AgentSessionEngine {
                     .map(pa_core::session::window::WindowedSessionStore::entries)
             })
             .or(shared_branch.as_deref());
-        let mut admitted_user_ids = Vec::new();
+        let mut admitted_input_ids = Vec::new();
         if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
             pa_core::session_engine::compaction_trace::trace(
                 "daemon.lazy_restore_boundary",
@@ -606,7 +607,7 @@ impl AgentSessionEngine {
                                     } | pa_types::session::FileEntry::CustomMessage { .. }
                                 )
                             }) {
-                                admitted_user_ids.push(id.to_string());
+                                admitted_input_ids.push(id.to_string());
                             }
                         } else if matches!(boundary, PromptContextBoundary::Leaf(leaf)
                             if entry.id() == Some(leaf.as_str()))
@@ -640,7 +641,7 @@ impl AgentSessionEngine {
                 &serde_json::json!({
                     "priorUserRows": prompt_context.as_ref().map(|messages| messages.iter().filter(|message|
                         matches!(message, pa_types::session::AgentMessage::User(_))).count()),
-                    "replayedUserRows": admitted_user_ids.len(),
+                    "replayedUserRows": admitted_input_ids.len(),
                 }),
             );
         }
@@ -664,8 +665,8 @@ impl AgentSessionEngine {
                         .find_map(pa_types::session::FileEntry::id)
                 })
             });
-        admitted_user_ids = match entries {
-            Some(entries) => super::context_selection::admitted_user_ids(
+        admitted_input_ids = match entries {
+            Some(entries) => super::context_selection::admitted_input_ids(
                 entries,
                 canonical_leaf,
                 &startup_boundary,
@@ -733,14 +734,14 @@ impl AgentSessionEngine {
         if let Some(entries) = pending_branch {
             built
                 .session
-                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_user_ids)
+                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_input_ids)
                 .await?;
             built
                 .session
                 .shared_persistence()
                 .lock()
                 .await
-                .replay_admitted_user_rows(admitted_user_ids)?;
+                .replay_admitted_input_rows(admitted_input_ids)?;
             // A moved branch restores its own park (the early return would leave the previous
             // branch's park armed).
             self.restore_quota_park(built).await;
@@ -752,7 +753,7 @@ impl AgentSessionEngine {
         if let Some(window) = shared_window {
             built
                 .session
-                .restore_windowed_context_at(window, &startup_boundary, &admitted_user_ids)
+                .restore_windowed_context_at(window, &startup_boundary, &admitted_input_ids)
                 .await?;
             // This worker holds the runtime lease: exactly one writer per
             // lease certifies the window cache; the release flushes the
@@ -767,7 +768,7 @@ impl AgentSessionEngine {
         } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
             built
                 .session
-                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_user_ids)
+                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_input_ids)
                 .await?;
             self.flush_pending_stale_goal_terminal().await;
         }
@@ -776,7 +777,7 @@ impl AgentSessionEngine {
             .shared_persistence()
             .lock()
             .await
-            .replay_admitted_user_rows(admitted_user_ids)?;
+            .replay_admitted_input_rows(admitted_input_ids)?;
         self.restore_quota_park(built).await;
         // The walk and replay allocated transient trees several times the
         // retained size: release the freed heap.
@@ -902,6 +903,10 @@ impl AgentSessionEngine {
 
     /// Callers hold `session_build` across this cache and kernel teardown.
     async fn clear_retired_runtime(&self) {
+        self.accepted_input_entries
+            .lock()
+            .expect("accepted input entries")
+            .clear();
         self.row_sink_ready
             .store(false, std::sync::atomic::Ordering::Release);
         let built = self.session.lock().await.take();
@@ -1222,7 +1227,7 @@ impl AgentSessionEngine {
         // Capture after the verified mirror: prompt admission sets its boundary
         // before appending any user row, including a create/prewarm race.
         let context_startup_boundary = self.context_startup_boundary();
-        let context_startup_admitted_user_ids = super::context_selection::admitted_user_ids(
+        let context_startup_admitted_input_ids = super::context_selection::admitted_input_ids(
             session_manager.retained_entries(),
             session_manager.get_leaf_id(),
             &context_startup_boundary,
@@ -1297,7 +1302,7 @@ impl AgentSessionEngine {
             allow_recursion: None,
             session_manager: Some(session_manager),
             context_startup_boundary,
-            context_startup_admitted_user_ids,
+            context_startup_admitted_input_ids,
             on_initial_context_selection,
             extra_host_handlers: self.extra_host_handlers(),
             conversation_log_path: session_file,

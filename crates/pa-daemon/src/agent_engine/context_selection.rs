@@ -36,6 +36,7 @@ pub(crate) struct MirrorSeed {
     pub(crate) header: SessionHeader,
     pub(crate) entries: Vec<pa_types::session::FileEntry>,
     pub(crate) leaf_id: Option<String>,
+    pub(crate) cursor: pa_core::session_log::ReadCursor,
 }
 
 pub(crate) trait InitialContextSelectionStore: Send + Sync {
@@ -120,6 +121,7 @@ impl super::AgentSessionEngine {
         }
 
         manager.set_entry_writer(store.entry_writer(source.clone()));
+        manager.set_entry_writer_cursor(seed.cursor);
         self.row_sink_ready
             .store(true, std::sync::atomic::Ordering::Release);
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =
@@ -131,7 +133,7 @@ impl super::AgentSessionEngine {
 /// Exact delivered-user IDs on the selected canonical suffix. This is identity
 /// traversal, never content/timestamp deduplication. The SDK validates all roles
 /// and the complete prefix before invoking any strategy or initial commit.
-pub(super) fn admitted_user_ids(
+pub(super) fn admitted_input_ids(
     entries: &[pa_types::session::FileEntry],
     leaf: Option<&str>,
     boundary: &pa_core::session_engine::ContextStartupBoundary,

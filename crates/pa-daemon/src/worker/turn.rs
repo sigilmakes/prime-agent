@@ -629,15 +629,13 @@ impl TurnRunner {
                         }
                     }
                     EngineEvent::UserMessage(message) if accepted_row => {
-                        // Acceptance is durable before a lazy SDK build or an early abort.
-                        // The exact returned ID enters the delivery FIFO; the live SDK
-                        // later adopts this same row and never writes a second copy.
                         if let Some(store) = core.store.as_mut() {
-                            if let Err(error) =
-                                store.persist_entry("message", json!({"message": message}))
-                            {
-                                eprintln!("pa-daemon: accepted user row refused: {error:#}");
-                                return false;
+                            match store.persist_entry("message", json!({"message": message})) {
+                                Ok(id) => engine.accepted_input_entry(id),
+                                Err(error) => {
+                                    eprintln!("pa-daemon: accepted user row refused: {error:#}");
+                                    return false;
+                                }
                             }
                         }
                     }
@@ -675,16 +673,17 @@ impl TurnRunner {
                             fields.remove("role");
                             fields.remove("timestamp");
                             let fields = Value::Object(fields);
-                            let persisted = if accepted_row || emitting_prefix_rows.get() {
-                                store.persist_entry("custom_message", fields)
-                            } else {
-                                // Pre-build UI records (for example slash-command
-                                // results) are durable, but have no SDK delivery.
-                                store.persist_entry("custom_message", fields)
-                            };
-                            if let Err(error) = persisted {
-                                eprintln!("pa-daemon: custom row persistence refused: {error:#}");
-                                return false;
+                            match store.persist_entry("custom_message", fields) {
+                                Ok(id) if accepted_row || emitting_prefix_rows.get() => {
+                                    engine.accepted_input_entry(id)
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    eprintln!(
+                                        "pa-daemon: custom row persistence refused: {error:#}"
+                                    );
+                                    return false;
+                                }
                             }
                         }
                     }

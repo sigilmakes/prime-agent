@@ -676,9 +676,14 @@ mod tests {
     fn legacy_open_never_repairs_or_rewrites_the_source() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.jsonl");
-        let bytes = b"{\"type\":\"session\",\"id\":\"legacy\"}\n";
-        std::fs::write(&path, bytes).unwrap();
-        assert!(SessionFile::open(&path).is_err());
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        for bytes in [
+            b"{\"type\":\"session\",\"id\":\"legacy\"}\n".as_slice(),
+            b"{\"seq\":1,\"row\":",
+            b"",
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(SessionFile::open(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
     }
 }

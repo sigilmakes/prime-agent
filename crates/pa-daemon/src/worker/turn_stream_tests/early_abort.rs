@@ -10,6 +10,10 @@ struct FirstEventBoundary {
 }
 
 impl SessionEngine for FirstEventBoundary {
+    fn accepted_input_entry(&self, id: String) {
+        self.engine.accepted_input_entry(id);
+    }
+
     fn persists_session_entries(&self) -> bool {
         true
     }
