@@ -207,10 +207,10 @@ pub async fn sync_after_compaction(
         return Ok(None);
     };
     let row = notice_message(content);
-    crate::session::canonical::persist_metadata_entry(
+    crate::session::metadata::persist_metadata_entry(
         session,
         pa_types::session::FileEntry::CustomMessage {
-            base: super::canonical_live::draft_base(),
+            base: crate::session::metadata::draft_base(),
             payload: pa_types::session::CustomMessageEntry {
                 custom_type: row.custom_type.clone(),
                 content: row.content.clone(),

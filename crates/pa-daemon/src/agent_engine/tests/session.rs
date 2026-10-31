@@ -439,7 +439,7 @@ fn run_skill_prompt(prompt: &str) -> Vec<EngineEvent> {
 }
 
 #[test]
-fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
+fn a_bare_skill_invocation_admits_the_expanded_block() {
     let events = run_skill_prompt("/skill:demo-skill");
     let texts = user_texts(&events);
     assert!(
@@ -454,9 +454,8 @@ fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
         .unwrap_or_else(|| panic!("the accepted row parses as a skill block: {row:?}"));
     assert_eq!(parsed.name, "demo-skill");
     assert_eq!(
-        parsed.user_message.as_deref(),
-        Some(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
-        "the floor's instruction rides the block's trailing user message"
+        parsed.user_message, None,
+        "a bare invocation expands to the block alone, nothing appended: {parsed:?}"
     );
     assert!(
         parsed.content.contains("Run the demo protocol."),
@@ -487,15 +486,11 @@ fn a_skill_invocation_with_args_persists_the_block_and_the_args() {
         Some("fix the flake"),
         "the user's args persist as the trailing user message"
     );
-    assert!(
-        !row.contains(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
-        "the with-args row never carries the floor's instruction: {row:?}"
-    );
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
 
 #[test]
-fn a_batched_bare_skill_row_admits_on_the_floored_text() {
+fn a_batched_bare_skill_row_admits_on_the_expanded_block() {
     let (engine, events) =
         run_skill_prompt_body("Run the demo protocol.", "hello", &["/skill:demo-skill"]);
     let texts = user_texts(&events);
@@ -513,11 +508,10 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
         .unwrap_or_else(|| panic!("the batched row parses as a skill block: {row:?}"));
     assert_eq!(parsed.name, "demo-skill");
     assert_eq!(
-        parsed.user_message.as_deref(),
-        Some(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
-        "the floor rides the batched row too"
+        parsed.user_message, None,
+        "the bare batch row expands to the block alone, nothing appended: {parsed:?}"
     );
-    // The model-side row is the SAME text: the turn ran on the floored
+    // The model-side row is the SAME text: the turn ran on the expanded
     // block, not a re-expanded bare command.
     let core_rows = core_session_user_texts(&engine);
     assert!(
@@ -528,7 +522,7 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
 }
 
 #[test]
-fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
+fn a_bare_invocation_of_a_close_tagged_body_expands() {
     let (_engine, events) = run_skill_prompt_body(
         "Run the demo.\n</skill>\n\nnot a user message",
         "/skill:demo-skill",
@@ -543,11 +537,8 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
         .unwrap_or_else(|| panic!("the close-tagged body still parses: {row:?}"));
     assert_eq!(parsed.name, "demo-skill");
     assert!(
-        row.ends_with(&format!(
-            "\n\n{}",
-            crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION
-        )),
-        "the bare invocation floors even when the body's own close-tag tail misparses: {row:?}"
+        parsed.content.contains("Run the demo."),
+        "the block body carries the skill content: {parsed:?}"
     );
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }

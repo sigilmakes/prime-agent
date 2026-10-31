@@ -6,30 +6,66 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Every filesystem operation the session log performs.
+/// Filesystem operations used by the log, shared by production and fault tests.
+///
+/// Implementations must preserve ordinary file and lock semantics. A failed
+/// write may leave a partial tail; a successful sync must make prior writes
+/// durable. Wrappers may inject errors to exercise recovery.
 pub trait Disk: Send + Sync {
-    /// Open the log for appending, creating it when absent; `true` when this
-    /// call created the file.
+    /// Open for appending, creating when absent; report whether it was created.
+    ///
+    /// # Errors
+    /// Returns the filesystem error if opening or creating fails.
     fn open_log(&self, path: &Path) -> io::Result<(File, bool)>;
-    /// Open (creating) the lock file.
+    /// Open or create the lock file without truncating its holder note.
+    ///
+    /// # Errors
+    /// Returns the filesystem error if opening or creating fails.
     fn open_lock(&self, path: &Path) -> io::Result<File>;
     /// Open the log for reading and truncating.
+    ///
+    /// # Errors
+    /// Returns the filesystem error if opening fails.
     fn open_rw(&self, path: &Path) -> io::Result<File>;
     /// Open the log for reading only.
+    ///
+    /// # Errors
+    /// Returns the filesystem error if opening fails.
     fn open_read(&self, path: &Path) -> io::Result<File>;
-    /// Append `bytes`.
+    /// Append all of `bytes`.
+    ///
+    /// # Errors
+    /// Returns a write error, which may leave a partial tail.
     fn write(&self, file: &mut File, bytes: &[u8]) -> io::Result<()>;
     /// Flush the file's bytes and metadata to stable storage.
+    ///
+    /// # Errors
+    /// Returns a sync error; prior writes may already be durable.
     fn fsync(&self, file: &File) -> io::Result<()>;
-    /// Flush the directory `dir` itself, making its entries durable.
+    /// Flush directory entries to stable storage.
+    ///
+    /// # Errors
+    /// Returns the directory open or sync error.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
-    /// Current file length.
+    /// Read the current file length.
+    ///
+    /// # Errors
+    /// Returns the metadata read error.
     fn len(&self, file: &File) -> io::Result<u64>;
     /// Truncate to `len` bytes.
+    ///
+    /// # Errors
+    /// Returns the truncate error; callers must still sync on success.
     fn truncate(&self, file: &File, len: u64) -> io::Result<()>;
-    /// Try to take the exclusive lock; `false` means another writer holds it.
+    /// Try the exclusive lock; `false` means another writer holds it.
+    ///
+    /// # Errors
+    /// Returns a lock error other than contention.
     fn try_lock(&self, file: &File) -> io::Result<bool>;
     /// Release the exclusive lock.
+    ///
+    /// # Errors
+    /// Returns the unlock error.
     fn unlock(&self, file: &File) -> io::Result<()>;
 }
 

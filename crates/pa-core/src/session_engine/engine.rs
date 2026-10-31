@@ -53,8 +53,6 @@ pub struct SessionEngineConfig {
     pub allow_recursion: Option<bool>,
     /// In-memory when None.
     pub session_manager: Option<SessionManager>,
-    /// Actual external file/lease owner; None preserves standalone persistence.
-    pub canonical_live_owner: Option<Arc<dyn super::canonical_live::CanonicalLiveOwner>>,
     /// Restrict initial strategy work to the verified pre-admission prefix.
     /// The complete canonical manager and durable strategy selection stay intact.
     pub context_startup_boundary: super::ContextStartupBoundary,
@@ -210,12 +208,6 @@ pub async fn create_session(config: SessionEngineConfig) -> anyhow::Result<Sessi
 }
 
 async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
-    anyhow::ensure!(
-        config.canonical_live_owner.is_none()
-            || config.rlm_subagent_host.is_none()
-            || config.rlm_usage_store.is_some(),
-        "canonical live sessions with subagents require an owner-backed RLM usage store"
-    );
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager.
@@ -263,12 +255,6 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         config.cron_store.clone(),
     );
 
-    let canonical_live = config.canonical_live_owner.take().map(|owner| {
-        super::canonical_live::CanonicalLiveSession::new(owner, Arc::clone(&wiring.session))
-    });
-    if let Some(live) = &canonical_live {
-        live.attach_metadata_writer().await;
-    }
     let service_tier_preference = settings.get_default_service_tier();
     // Captured before `settings` moves into the resource loader: the
     // compaction budget.
@@ -418,10 +404,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     } else {
         None
     };
-    // The initial selection's real row is durable before binding the live owner.
-    if let Some(live) = &canonical_live {
-        live.observe().await?;
-    }
+
     let mut handlers = wiring.handlers.clone();
     if let Some(extra) = config.extra_host_handlers.clone() {
         handlers.merge(extra);
@@ -647,53 +630,10 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         .clone()
         .or_else(|| super::provider_adapter::native_model(&model).ok());
     let context_archive_state = Arc::new(std::sync::RwLock::new(context_archive.clone()));
-    if let Some(live) = &canonical_live {
-        live.bind_archive(Arc::clone(&context_archive_state))?;
-    }
+
     let thinking_level = config.thinking_level.unwrap_or(ThinkingLevel::Off);
-    if let Some(live) = &canonical_live {
-        use crate::session::canonical::CanonicalMutationKind::OwnerMetadata;
-        use pa_types::session::{
-            FileEntry, ModelChangeEntry, ServiceTierChangeEntry, ThinkingLevelChangeEntry,
-        };
-        if existing_messages.is_empty() {
-            live.append(
-                OwnerMetadata,
-                FileEntry::ModelChange {
-                    base: super::canonical_live::draft_base(),
-                    payload: ModelChangeEntry {
-                        provider: model.provider.clone(),
-                        model_id: model.id.clone(),
-                    },
-                },
-            )
-            .await?;
-        }
-        if existing_messages.is_empty() || !has_thinking_entry {
-            live.append(
-                OwnerMetadata,
-                FileEntry::ThinkingLevelChange {
-                    base: super::canonical_live::draft_base(),
-                    payload: ThinkingLevelChangeEntry {
-                        thinking_level: format!("{thinking_level:?}").to_lowercase(),
-                    },
-                },
-            )
-            .await?;
-        }
-        if existing_messages.is_empty() || !has_service_tier_entry {
-            live.append(
-                OwnerMetadata,
-                FileEntry::ServiceTierChange {
-                    base: super::canonical_live::draft_base(),
-                    payload: ServiceTierChangeEntry {
-                        service_tier: Some(service_tier_preference),
-                    },
-                },
-            )
-            .await?;
-        }
-    } else {
+
+    {
         let mut session = wiring.session.lock().await;
         if existing_messages.is_empty() {
             session.append_model_change(&model.provider, &model.id)?;
@@ -705,6 +645,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
             session.append_service_tier_change(Some(service_tier_preference))?;
         }
     }
+
     // Session entries cross through the shared wire shape (same conversion
     // the compaction rebuild uses).
     let initial_messages = if existing_messages.is_empty() {
@@ -736,7 +677,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     // over the timing-instrumented fn (TS `sdk.ts` instruments first, the
     // `AgentSession` constructor wraps semantic edges over it). The side
     // question keeps the pre-semantic fn, so its calls carry no id.
-    let wrap_model_stream = |source| {
+    let wrap_model_stream = || {
         super::request_timing::instrument_stream_fn(
             std::sync::Arc::clone(&request_timing_wiring),
             super::ollama_cloud::wrap_stream_fn(
@@ -748,7 +689,6 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
                     super::plugins::wrap_stream_fn(
                         Arc::clone(&plugins),
                         super::context_strategy::wrap_stream_fn(
-                            source,
                             Arc::clone(&plugins),
                             Arc::clone(&context_archive_state),
                             Arc::clone(&stream_fn),
@@ -758,14 +698,9 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
             ),
         )
     };
-    let timing_stream_fn = wrap_model_stream(if canonical_live.is_some() {
-        super::context_strategy::ModelContextSource::Canonical
-    } else {
-        super::context_strategy::ModelContextSource::Assembled
-    });
+    let timing_stream_fn = wrap_model_stream();
     // Side questions clone the accepted SDK view, not the canonical continuation.
-    let side_question_stream_fn =
-        wrap_model_stream(super::context_strategy::ModelContextSource::Assembled);
+    let side_question_stream_fn = wrap_model_stream();
     let semantic_recorder = config.semantic_edges.take().map(|identity| {
         std::sync::Arc::new(super::semantic_edges::SemanticEdgeRecorder::open(identity))
     });
@@ -775,16 +710,15 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         }
         None => timing_stream_fn,
     };
-    let agent_stream_fn = canonical_live.as_ref().map_or_else(
-        || Arc::clone(&agent_stream_fn),
-        |live| {
-            super::canonical_live::wrap_stream_fn(Arc::clone(live), Arc::clone(&agent_stream_fn))
-        },
-    );
+    let persistence = Arc::clone(&wiring.session);
     let agent = Agent::new(AgentOptions {
-        before_event: canonical_live.as_ref().map(|live| {
-            super::canonical_live::before_event(Arc::clone(live), Arc::clone(&wiring.session))
-        }),
+        before_event: Some(Arc::new(move |event, _signal| {
+            let persistence = Arc::clone(&persistence);
+            Box::pin(async move {
+                super::persist_event(&persistence, event.clone()).await?;
+                Ok(event)
+            })
+        })),
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),
             model: Some(model),
@@ -804,15 +738,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         // wraps a pass-through that marks the turn's dispatch moment.
         transform_context: Some(super::request_timing::instrument_transform_context(
             std::sync::Arc::clone(&request_timing_wiring),
-            canonical_live.as_ref().map_or_else(
-                super::request_timing::pass_through_transform,
-                |live| {
-                    super::canonical_live::wrap_transform_context(
-                        Arc::clone(live),
-                        super::request_timing::pass_through_transform(),
-                    )
-                },
-            ),
+            super::request_timing::pass_through_transform(),
         )),
         should_stop_after_turn: {
             let steering = config.queued_steering_probe.take();
@@ -922,11 +848,10 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
                 recorder: std::sync::Arc::clone(recorder),
             });
     }
-    let mut session = AgentSession::from_session_arc_live(
+    let mut session = AgentSession::from_persisted_agent(
         agent.clone(),
         wiring.session.clone(),
         resources.prompts.clone(),
-        canonical_live,
     )
     .await?;
     session.plugins = Some(Arc::clone(&plugins));
