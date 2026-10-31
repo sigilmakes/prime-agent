@@ -160,6 +160,7 @@ pub struct SessionFile {
     /// for the switch and its resolution rule). `None` keeps the pre-port
     /// canonical paths.
     pub(crate) log_transport: Option<crate::session_transport::LogWire>,
+    log_progress: log_wire::LogProgress,
 }
 
 #[derive(Debug, Clone)]

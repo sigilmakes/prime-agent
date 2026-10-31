@@ -10,6 +10,35 @@ use super::SessionEntry;
 use super::SessionFile;
 use crate::session_transport::LogWire;
 
+#[derive(Debug, Default)]
+pub(super) struct LogProgress(std::sync::Mutex<ReadPosition>);
+
+#[derive(Debug, Clone, Default)]
+struct ReadPosition {
+    cursor: pa_core::session_log::ReadCursor,
+    flushed_entries: usize,
+}
+
+impl Clone for LogProgress {
+    fn clone(&self) -> Self {
+        Self(std::sync::Mutex::new(
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        ))
+    }
+}
+
+impl LogProgress {
+    pub(super) fn opened(cursor: pa_core::session_log::ReadCursor, flushed_entries: usize) -> Self {
+        Self(std::sync::Mutex::new(ReadPosition {
+            cursor,
+            flushed_entries,
+        }))
+    }
+}
+
 impl SessionFile {
     /// Whether this store is served by the log transport.
     pub(crate) fn is_log_served(&self) -> bool {
@@ -54,22 +83,129 @@ impl SessionFile {
     /// The log's boundary policy (a foreign `Busy` holder, a refused row, or
     /// an undecided write), plus the row's encoding.
     pub(crate) fn persist_built_log_entry(&mut self, entry: SessionEntry) -> Result<String> {
+        // An undecided caller intent retains its full original envelope even if
+        // the public retry rebuilt its ID and timestamp.
+        let entry = self
+            .pending_log_entry(&entry.type_, &entry.fields)
+            .unwrap_or(entry);
+        let old_leaf = self.leaf_id.clone();
+        self.observe_log_tail()?;
+        let id = entry.id.clone();
+        if self.by_id.contains_key(&id) {
+            return Ok(id);
+        }
+        let mut entry = entry;
+        if entry.parent_id == old_leaf {
+            entry.parent_id.clone_from(&self.leaf_id);
+        }
         let row = serde_json::to_value(&entry).context("encode the session row")?;
         self.flush_log_tail_from(0, std::slice::from_ref(&row))?;
-        let id = entry.id.clone();
-        self.push_index(entry);
+        self.observe_log_tail()?;
         Ok(id)
+    }
+
+    pub(super) fn pending_log_entry(
+        &self,
+        entry_type: &str,
+        fields: &Value,
+    ) -> Option<SessionEntry> {
+        let Some(row) = self.log_transport.as_ref().and_then(LogWire::pending_row) else {
+            return None;
+        };
+        let Ok(entry) = serde_json::from_value::<SessionEntry>(row) else {
+            return None;
+        };
+        (entry.type_ == entry_type && entry.fields == *fields).then_some(entry)
+    }
+
+    /// Extend this serving fold from validated durable rows, without sharing a
+    /// read cursor with clones or indexing an unresolved durability outcome.
+    pub(crate) fn observe_log_tail(&mut self) -> Result<()> {
+        let Some(wire) = self.log_transport.clone() else {
+            return Ok(());
+        };
+        let mut position = self
+            .log_progress
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let rows = wire.observe(&self.header.id, &mut position.cursor)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // Nonfallible creation builders may already have an unflushed tail.
+        // Foreign durable rows precede that tail, never suppress its flush.
+        let local_tail = self
+            .entries
+            .split_off(position.flushed_entries.min(self.entries.len()));
+        for entry in &local_tail {
+            self.by_id.remove(&entry.id);
+        }
+        for row in rows {
+            match row.body.get("type").and_then(Value::as_str) {
+                Some("session") => {
+                    let pa_types::session::FileEntry::Header { header } =
+                        serde_json::from_value(row.body).context("invalid session header")?
+                    else {
+                        anyhow::bail!("invalid session header")
+                    };
+                    anyhow::ensure!(
+                        header.id == self.header.id,
+                        "session header identity changed; reopen the session"
+                    );
+                    self.header = header;
+                }
+                Some("branch_selection") => {
+                    self.leaf_id = match row.body.get("selectedLeaf") {
+                        Some(Value::Null) => None,
+                        Some(Value::String(id)) if self.by_id.contains_key(id) => Some(id.clone()),
+                        _ => anyhow::bail!("branch selection names an absent entry"),
+                    };
+                }
+                _ => match serde_json::from_value::<SessionEntry>(row.body) {
+                    Ok(entry) => {
+                        if self.by_id.contains_key(&entry.id) {
+                            self.leaf_id = Some(entry.id);
+                        } else {
+                            self.push_index(entry);
+                        }
+                    }
+                    Err(_) => self.skipped_lines += 1,
+                },
+            }
+        }
+        position.flushed_entries = self.entries.len();
+        for entry in local_tail {
+            if !self.by_id.contains_key(&entry.id) {
+                self.push_index(entry);
+            }
+        }
+        self.log_progress = LogProgress(std::sync::Mutex::new(position));
+        super::fold_child_usage_attributions(&mut self.entries);
+        self.hydrate_anthropic_warning_flag();
+        Ok(())
     }
 
     /// Selection is durable state but not an entry in the conversation tree.
     pub(crate) fn persist_branch_selection(&self, leaf: Option<&str>) -> Result<()> {
         self.flush_unmaterialized_log_tail(0)?;
-        let wire = self.log_transport.as_ref().context("session has no log writer")?;
+        let wire = self
+            .log_transport
+            .as_ref()
+            .context("session has no log writer")?;
+        let position = self
+            .log_progress
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         wire.flush_selection(
             &self.header.id,
             &super::session_header_line(&self.header),
             leaf,
-        ).map_err(anyhow::Error::from)
+            &position.cursor,
+        )
+        .map_err(anyhow::Error::from)
     }
 
     /// Flush every entry row the log does not hold yet, or (for
@@ -90,8 +226,13 @@ impl SessionFile {
             "log-transported flush needs a session id"
         );
         let header_row = super::session_header_line(&self.header);
-        let start = wire
-            .flushed_entries()
+        let mut position = self
+            .log_progress
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let start = position
+            .flushed_entries
             .max(requested_start)
             .min(self.entries.len());
         let mut rows: Vec<Value> = Vec::with_capacity(extra_row.len() + self.entries.len() - start);
@@ -102,7 +243,14 @@ impl SessionFile {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         rows.extend(extra_row.iter().cloned());
-        wire.flush(&session_id, &header_row, &rows)
-            .map_err(|error| anyhow::Error::from(error).context("the session log rejected a row"))
+        let cursor = position.cursor.clone();
+        wire.flush(
+            &session_id,
+            &header_row,
+            &rows,
+            &mut position.flushed_entries,
+            &cursor,
+        )
+        .map_err(|error| anyhow::Error::from(error).context("the session log rejected a row"))
     }
 }
