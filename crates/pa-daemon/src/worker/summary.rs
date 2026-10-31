@@ -258,7 +258,7 @@ pub(crate) fn persist_custom_row(
     message: &Value,
 ) -> Result<()> {
     if let Some(store) = core.store.as_mut() {
-        store.persist_owner_metadata(
+        store.persist_entry(
             "custom_message",
             json!({
                 "customType": message.get("customType").cloned().unwrap_or(Value::Null),

@@ -28,19 +28,7 @@ mod stream_tests;
 mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
-pub(crate) mod canonical_adapter;
-mod canonical_io;
-#[cfg(test)]
-mod canonical_io_seam_tests;
-#[cfg(test)]
-mod canonical_live_tests;
-#[cfg(test)]
-mod canonical_row_grant_tests;
-mod canonical_write_seam;
 mod child_usage;
-#[cfg(test)]
-#[path = "session_store/child_usage_tests.rs"]
-mod child_usage_tests;
 mod context_selection;
 mod index;
 // The log-transported half of the store (port-plan §3): the write arm the
@@ -152,7 +140,6 @@ pub struct SessionFile {
     pub(crate) leaf_id: Option<String>,
     pub(crate) window: Option<SessionWindow>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
-    child_usage_recovery: child_usage::ChildUsageRecovery,
     /// Rows the full reader skipped as unparsable (the TS loader's
     /// lenient skip): zero on a healthy file. A reopen that found damage
     /// logs this count (silent skips are how a torn session degraded
@@ -167,16 +154,6 @@ pub struct SessionFile {
     /// serve it through `get_state`
     /// (`SessionSummary::anthropic_warning_shown`).
     pub(crate) anthropic_warning_shown: bool,
-    /// The live canonical epoch for this session, when one has been attached at
-    /// serving capture. `None` in the pre-genesis window and whenever no epoch
-    /// exists yet; the canonical record of that boundary lives in the adapter.
-    pub(crate) epoch: Option<canonical_adapter::EpochHandle>,
-    /// Rows this store has persisted while no canonical epoch was attached.
-    ///
-    /// Named for the fact, never for the policy: it stays true if the policy
-    /// changes. A turn that writes content must leave this at zero, so a path
-    /// that writes a real row without an epoch moves the count instead of hiding.
-    pub(crate) rows_written_without_epoch: u64,
     /// THE transport switch's live half: `Some` serves this store's durable
     /// rows through the session-log core (see `pa_daemon::session_transport`
     /// for the switch and its resolution rule). `None` keeps the pre-port

@@ -169,17 +169,22 @@ impl SessionFile {
     ///
     /// Returns an error when the target entry does not exist; a `None` id clears the leaf.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
-        if self.is_canonical_bound() {
-            return self.advance_canonical_branch(id).map_err(Into::into);
-        }
         match id {
             Some(id) => {
                 if self.entry(id).is_none() {
                     return Err(anyhow!("Entry {id} not found"));
                 }
+                if !self.path.as_os_str().is_empty() {
+                    self.persist_branch_selection(Some(id))?;
+                }
                 self.leaf_id = Some(id.to_string());
             }
-            None => self.leaf_id = None,
+            None => {
+                if !self.path.as_os_str().is_empty() {
+                    self.persist_branch_selection(None)?;
+                }
+                self.leaf_id = None;
+            }
         }
         Ok(())
     }
@@ -200,10 +205,6 @@ impl SessionFile {
         usage: Option<Value>,
         model: Option<(&str, &str)>,
     ) -> Result<String> {
-        anyhow::ensure!(
-            !self.is_canonical_bound(),
-            "canonical branch summaries require prepared navigation and context-policy receipts"
-        );
         self.branch_to(from_id)?;
         let mut fields = json!({
             "fromId": from_id.unwrap_or("root"),
@@ -240,7 +241,7 @@ impl SessionFile {
             Some(label) => fields["label"] = json!(label),
             None => fields["label"] = Value::Null,
         }
-        self.persist_owner_metadata("label", fields)
+        self.persist_entry("label", fields)
             .map_err(Into::into)
     }
 

@@ -47,11 +47,6 @@ impl SessionNavigation {
                 .await;
         let previous = {
             let mut core = self.core.lock().unwrap();
-            if let Some(previous) = core.store.as_mut() {
-                previous
-                    .invalidate_canonical_owner()
-                    .map_err(|error| error.to_string())?;
-            }
             core.store.replace(file)
         };
         // The old store's lease release flushes the window and info

@@ -742,7 +742,7 @@ fn record_bash_result(
     if exclude_from_context {
         row["excludeFromContext"] = json!(true);
     }
-    store.persist_owner_metadata("message", json!({ "message": row }))?;
+    store.persist_entry("message", json!({ "message": row }))?;
     Ok(())
 }
 

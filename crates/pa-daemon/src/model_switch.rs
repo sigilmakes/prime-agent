@@ -97,7 +97,6 @@ impl Worker {
                 if let Some(store) = core
                     .store
                     .as_mut()
-                    .filter(|store| !store.is_canonical_bound())
                 {
                     // The live Core switch already adopted and ACKed its real row.
                     // TS `appendModelChange` records every switch, even to
@@ -207,7 +206,6 @@ impl Worker {
                 if let Some(store) = core
                     .store
                     .as_mut()
-                    .filter(|store| !store.is_canonical_bound())
                 {
                     // A bound live Core switch has already committed this intent.
                     if store

@@ -143,7 +143,7 @@ struct WireState {
     /// injected disk drives the fault-injection tests through the very same
     /// code paths ([`Disk`]'s own contract).
     disk: Option<std::sync::Arc<dyn pa_core::session_log::Disk>>,
-    agent_dir: PathBuf,
+    directory: PathBuf,
     /// Row one of the log is a session header. A fresh (deferred) wire writes
     /// it as row one; a wire whose open found a pre-existing log adopts the
     /// header it finds at row one instead of writing a second one.
@@ -195,13 +195,13 @@ impl WireState {
         if self.log.is_some() {
             return Ok(());
         }
-        std::fs::create_dir_all(log_dir(&self.agent_dir)).map_err(LogWireError::Io)?;
+        std::fs::create_dir_all(self.directory.clone()).map_err(LogWireError::Io)?;
         let log = match self.disk.clone() {
             Some(disk) => {
-                SessionLog::open_with(disk, &log_dir(&self.agent_dir), session_id, deadline())
+                SessionLog::open_with(disk, &self.directory.clone(), session_id, deadline())
                     .map_err(open_error)?
             }
-            None => SessionLog::open(&log_dir(&self.agent_dir), session_id, deadline())
+            None => SessionLog::open(&self.directory.clone(), session_id, deadline())
                 .map_err(open_error)?,
         };
         // One read decides the adoption and sets the seq cursor both, so the
@@ -358,7 +358,7 @@ impl LogWire {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: None,
                 disk: None,
-                agent_dir: agent_dir.to_path_buf(),
+                directory: log_dir(agent_dir),
                 header_written: false,
                 flushed_entries: 0,
                 next_seq: 1,
@@ -367,16 +367,30 @@ impl LogWire {
         }
     }
 
+    /// A lazy writer for an exact durable log path, including an overridden directory.
+    pub(crate) fn for_path(path: &Path) -> Self {
+        let wire = Self::deferred(Path::new("."));
+        wire.state.lock().expect("log wire lock").directory =
+            path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        wire
+    }
+
+    pub(crate) fn flush_selection(&self, session_id: &str, header: &Value, leaf: Option<&str>) -> Result<(), LogWireError> {
+        self.flush(session_id, header, &[])?;
+        let mut state = self.state.lock().expect("log wire lock");
+        state.append_pinned(&serde_json::json!({"type": "branch_selection", "selectedLeaf": leaf}), false)
+    }
+
     /// A reopened wire wrapping the log the fold was replayed from. The
     /// header is already durable (row one of the replayed log), `replayed`
     /// counts the fold's durable entry rows, and `last_seq` pins the cursor
     /// past the log's last row.
-    pub(crate) fn held(log: SessionLog, agent_dir: &Path, replayed: usize, last_seq: u64) -> Self {
+    pub(crate) fn held(log: SessionLog, directory: &Path, replayed: usize, last_seq: u64) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: Some(log),
                 disk: None,
-                agent_dir: agent_dir.to_path_buf(),
+                directory: directory.to_owned(),
                 header_written: true,
                 flushed_entries: replayed,
                 next_seq: last_seq + 1,
@@ -471,12 +485,19 @@ pub(crate) fn open_repaired(
     agent_dir: &Path,
     session_id: &str,
 ) -> Result<(SessionLog, Option<session_log::RepairReport>), LogWireError> {
-    match SessionLog::open(&log_dir(agent_dir), session_id, deadline()) {
+    open_repaired_dir(&log_dir(agent_dir), session_id)
+}
+
+pub(crate) fn open_repaired_dir(
+    directory: &Path,
+    session_id: &str,
+) -> Result<(SessionLog, Option<session_log::RepairReport>), LogWireError> {
+    match SessionLog::open(directory, session_id, deadline()) {
         Ok(log) => Ok((log, None)),
         Err(session_log::Error::Damaged { .. }) => {
-            let report = SessionLog::repair(&log_dir(agent_dir), session_id, deadline())
+            let report = SessionLog::repair(directory, session_id, deadline())
                 .map_err(open_error)?;
-            let log = SessionLog::open(&log_dir(agent_dir), session_id, deadline())
+            let log = SessionLog::open(directory, session_id, deadline())
                 .map_err(open_error)?;
             Ok((log, Some(report)))
         }

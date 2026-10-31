@@ -163,11 +163,9 @@ impl Worker {
             let mut core = self.core.lock().unwrap();
             // The step slot and the engine's admission both hold epoch clones. Clear
             // them here, under the one lock, so the handle taken below is the last one.
-            core.canonical_step.lock().unwrap().take();
             core.store.as_mut().and_then(|store| store.epoch.take())
         };
         if let Some(engine) = self.agent_engine.as_ref() {
-            engine.set_canonical_step_admission(None);
         }
         // No epoch attached is the pre-genesis window: nothing to drain, and this is
         // not an error (the counter already states that rows were uncovered).
@@ -521,7 +519,6 @@ impl Worker {
                                 if let Some(store) = core
                                     .store
                                     .as_mut()
-                                    .filter(|store| !store.is_canonical_bound())
                                 {
                                     let _ = store.persist_entry(
                                         "custom",

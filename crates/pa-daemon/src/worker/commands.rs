@@ -260,18 +260,7 @@ impl Worker {
                 None,
             ));
         }
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return Err(response_failure(
-                None,
-                command_type,
-                "Canonical source is unresolved; reconcile before reading or starting work",
-                None,
-            ));
-        }
+
         // The shutdown admission gate: a command dispatched while the graceful stop
         // is closing must not start new work the exit would orphan (an execute_bash
         // racing the shutdown would spawn a child the exit leaves running).
@@ -494,13 +483,7 @@ impl Worker {
             return response;
         }
         let (core, inputs) = self.summary_inputs();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(None, "get_state", "Canonical source is unresolved", None);
-        }
+
         let summary = self.summary_locked(&core, inputs);
         response_success(
             None,
@@ -516,18 +499,7 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(
-                None,
-                "get_session_header",
-                "Canonical source is unresolved",
-                None,
-            );
-        }
+
         let Some(store) = core.store.as_ref() else {
             return response_failure(
                 None,
@@ -550,18 +522,7 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(
-                None,
-                "get_session_stats",
-                "Canonical source is unresolved",
-                None,
-            );
-        }
+
         let Some(store) = core.store.as_ref() else {
             return response_failure(
                 None,
@@ -594,13 +555,7 @@ impl Worker {
             })
             .unwrap_or_default();
         let core = self.core.lock().unwrap();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(None, "get_messages", "Canonical source is unresolved", None);
-        }
+
         let display = super::connection::wants_display_transcript(payload);
         if display
             && payload
@@ -846,7 +801,7 @@ impl Worker {
             // live on disk; the killed and replaced closes archive.
             if reason != KillCloseReason::Shutdown {
                 if let Some(store) = core.store.as_mut() {
-                    if let Err(error) = store.persist_owner_metadata(
+                    if let Err(error) = store.persist_entry(
                         "session_state",
                         json!({ "state": { "status": "archived" } }),
                     ) {
@@ -936,7 +891,7 @@ impl Worker {
             .and_then(|store| store.session_name().map(str::to_string));
         if let Some(store) = core.store.as_mut() {
             if let Err(error) =
-                store.persist_owner_metadata("session_info", json!({ "name": name }))
+                store.persist_entry("session_info", json!({ "name": name }))
             {
                 return response_failure(None, command, &error.to_string(), None);
             }
