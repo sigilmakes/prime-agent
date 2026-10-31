@@ -140,7 +140,7 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     let context = events
@@ -462,7 +462,7 @@ pub(crate) fn admit_request(
 ) {
     engine.run_prompt(0, request, &|| false, &mut |event| {
         events.push(event);
-        true
+        true.into()
     });
 }
 
@@ -855,7 +855,7 @@ fn injected_custom_turn_holds_one_representation() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     let custom_rows: Vec<&Value> = events
@@ -1060,7 +1060,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
             &|| false,
             &mut |event| {
                 row_events.lock().unwrap().push(event);
-                true
+                true.into()
             },
         );
     });

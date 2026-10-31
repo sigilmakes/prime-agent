@@ -356,7 +356,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
                 crate::engine::EngineEvent::Done(result) => done = Some(result),
                 _ => {}
             }
-            true
+            true.into()
         },
     );
     assert!(!accepted);

@@ -117,7 +117,6 @@ impl AgentSessionEngine {
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
-            accepted_input_entries: std::sync::Mutex::new(Vec::new()),
             row_sink_ready: std::sync::atomic::AtomicBool::new(false),
             runtime,
             config,
@@ -903,10 +902,6 @@ impl AgentSessionEngine {
 
     /// Callers hold `session_build` across this cache and kernel teardown.
     async fn clear_retired_runtime(&self) {
-        self.accepted_input_entries
-            .lock()
-            .expect("accepted input entries")
-            .clear();
         self.row_sink_ready
             .store(false, std::sync::atomic::Ordering::Release);
         let built = self.session.lock().await.take();

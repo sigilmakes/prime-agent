@@ -10,12 +10,8 @@ struct FirstEventBoundary {
 }
 
 impl SessionEngine for FirstEventBoundary {
-    fn accepted_input_entry(&self, id: String) {
-        self.engine.accepted_input_entry(id);
-    }
-
     fn persists_session_entries(&self) -> bool {
-        true
+        true.into()
     }
 
     fn set_session_file(&self, path: std::path::PathBuf) {
@@ -35,7 +31,7 @@ impl SessionEngine for FirstEventBoundary {
         prompt_index: usize,
         request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         if let Some(entered) = self.entered.lock().unwrap().take() {
             entered.send(()).unwrap();

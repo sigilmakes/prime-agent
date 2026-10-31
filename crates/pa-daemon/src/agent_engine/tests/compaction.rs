@@ -1064,7 +1064,7 @@ fn threshold_below_the_headroom_stays_silent() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     assert_eq!(assistant_texts(&events), vec!["plain reply".to_string()]);

@@ -440,7 +440,8 @@ impl TurnRunner {
             // success too: one row replaces TS's per-attempt error rows
             // (operator ruling 2026-09-23).
             let mut last_retry_error: Option<String> = None;
-            let mut emit = |mut event: EngineEvent| -> bool {
+            let mut emit = |mut event: EngineEvent| -> crate::engine::EmitResult {
+                let mut admitted_id = None;
                 // A cancelled turn stops consuming its own events, except the frames
                 // TS still broadcasts for an interrupted turn: aborted row/tool settle
                 // frames and the trailing `Done` (a dropped Done hung `prompt_and_wait`
@@ -509,7 +510,7 @@ impl TurnRunner {
                     // cancels nothing.
                     if core.suppress_aborted_row || !(abort_settle || aborted_row || accepted_row) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
-                        return false;
+                        return crate::engine::EmitResult::Stop;
                     }
                     if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -607,7 +608,7 @@ impl TurnRunner {
                             )
                         }) {
                             eprintln!("pa-daemon: model-change persistence failed: {error:#}");
-                            return false;
+                            return crate::engine::EmitResult::Stop;
                         }
                     }
                     // A `message` entry per row (TS's appendMessage path).
@@ -624,17 +625,17 @@ impl TurnRunner {
                                 store.persist_entry("message", json!({ "message": message }))
                             {
                                 eprintln!("pa-daemon: assistant persistence failed: {error:#}");
-                                return false;
+                                return crate::engine::EmitResult::Stop;
                             }
                         }
                     }
                     EngineEvent::UserMessage(message) if accepted_row => {
                         if let Some(store) = core.store.as_mut() {
                             match store.persist_entry("message", json!({"message": message})) {
-                                Ok(id) => engine.accepted_input_entry(id),
+                                Ok(id) => admitted_id = Some(id),
                                 Err(error) => {
                                     eprintln!("pa-daemon: accepted user row refused: {error:#}");
-                                    return false;
+                                    return crate::engine::EmitResult::Stop;
                                 }
                             }
                         }
@@ -647,7 +648,7 @@ impl TurnRunner {
                                 store.persist_entry("message", json!({ "message": message }))
                             {
                                 eprintln!("pa-daemon: message row persistence failed: {error:#}");
-                                return false;
+                                return crate::engine::EmitResult::Stop;
                             }
                         }
                     }
@@ -666,7 +667,7 @@ impl TurnRunner {
                         if let Some(store) = core.store.as_mut() {
                             let Some(mut fields) = message.as_object().cloned() else {
                                 eprintln!("pa-daemon: custom row is not an object");
-                                return false;
+                                return crate::engine::EmitResult::Stop;
                             };
                             // These SDK envelope fields are not custom-entry payload.
                             // Keep every other field, including unknown metadata.
@@ -675,14 +676,14 @@ impl TurnRunner {
                             let fields = Value::Object(fields);
                             match store.persist_entry("custom_message", fields) {
                                 Ok(id) if accepted_row || emitting_prefix_rows.get() => {
-                                    engine.accepted_input_entry(id)
+                                    admitted_id = Some(id)
                                 }
                                 Ok(_) => {}
                                 Err(error) => {
                                     eprintln!(
                                         "pa-daemon: custom row persistence refused: {error:#}"
                                     );
-                                    return false;
+                                    return crate::engine::EmitResult::Stop;
                                 }
                             }
                         }
@@ -824,7 +825,7 @@ impl TurnRunner {
                                 delta,
                                 sequence,
                             ) {
-                                return false;
+                                return crate::engine::EmitResult::Stop;
                             }
                             Vec::new()
                         } else {
@@ -992,7 +993,7 @@ impl TurnRunner {
                                     }),
                                 ) {
                                     eprintln!("pa-daemon: provider retry outcome refused: {error:#}");
-                                    return false;
+                                    return crate::engine::EmitResult::Stop;
                                 }
                             }
                         }
@@ -1060,7 +1061,10 @@ impl TurnRunner {
                 if let Some(result) = done_result {
                     *turn_outcome_slot.lock().unwrap() = Some(result);
                 }
-                true
+                admitted_id.map_or(
+                    crate::engine::EmitResult::Continue,
+                    crate::engine::EmitResult::Accepted,
+                )
             };
             let aborted_probe = {
                 let core = Arc::clone(&core);
@@ -1077,7 +1081,7 @@ impl TurnRunner {
             };
             emitting_prefix_rows.set(!parked.is_empty());
             for row in parked {
-                if !emit(EngineEvent::CustomMessage(row)) {
+                if !emit(EngineEvent::CustomMessage(row)).continues() {
                     break;
                 }
             }

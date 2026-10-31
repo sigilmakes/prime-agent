@@ -1009,7 +1009,7 @@ fn agent_engine_reports_model_resolution_failures() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     assert_eq!(events.len(), 2);

@@ -87,13 +87,12 @@ async fn a_failed_park_entry_write_propagates_to_the_caller() {
     let engine = park_engine(dir.path());
     let session_file = dir.path().join("session.jsonl");
     // A persisting manager over the session file.
-    let handle = std::sync::Arc::new(tokio::sync::Mutex::new(
-        {
-            let mut manager = pa_core::session::manager::SessionManager::persisted(dir.path(), dir.path());
-            manager.set_session_file(session_file.clone()).unwrap();
-            manager
-        },
-    ));
+    let handle = std::sync::Arc::new(tokio::sync::Mutex::new({
+        let mut manager =
+            pa_core::session::manager::SessionManager::persisted(dir.path(), dir.path());
+        manager.set_session_file(session_file.clone()).unwrap();
+        manager
+    }));
     // Seed the first assistant entry: custom appends before it defer
     // (the pre-first-assistant buffer, TS parity).
     handle

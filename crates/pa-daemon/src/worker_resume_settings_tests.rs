@@ -35,7 +35,7 @@ mod resume_settings_tests {
             _: usize,
             _: PromptRequest,
             _: &dyn Fn() -> bool,
-            _: &mut dyn FnMut(EngineEvent) -> bool,
+            _: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
         ) {
         }
         fn run_side_question(

@@ -786,8 +786,10 @@ impl SessionEngine for NoteWitnessEngine {
         _prompt_index: usize,
         _request: PromptRequest,
         _aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
+        let mut publish = |event| emit(event).continues();
+        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         emit(EngineEvent::AgentStart);
         if self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             // Turn one: the mid-run note acceptance (the model's
@@ -1035,8 +1037,10 @@ impl SessionEngine for AbortSwallowedEngine {
         _prompt_index: usize,
         _request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
+        let mut publish = |event| emit(event).continues();
+        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         emit(EngineEvent::AgentStart);
         // The mid-run note acceptance (the model's `rlm.progress_note`).
         *self.note.lock().unwrap() = Some("halfway through the review".to_string());

@@ -15,7 +15,7 @@ impl SessionEngine for WindowedEngine {
         _: usize,
         _: PromptRequest,
         _: &dyn Fn() -> bool,
-        _: &mut dyn FnMut(crate::engine::EngineEvent) -> bool,
+        _: &mut dyn FnMut(crate::engine::EngineEvent) -> crate::engine::EmitResult,
     ) {
     }
     fn run_side_question(
@@ -66,7 +66,7 @@ impl SessionEngine for SwitchingEngine {
         _: usize,
         _: PromptRequest,
         _: &dyn Fn() -> bool,
-        _: &mut dyn FnMut(crate::engine::EngineEvent) -> bool,
+        _: &mut dyn FnMut(crate::engine::EngineEvent) -> crate::engine::EmitResult,
     ) {
     }
     fn run_side_question(

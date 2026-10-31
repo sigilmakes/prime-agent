@@ -38,7 +38,7 @@ impl SessionEngine for RecordingEngine {
         _: usize,
         _: PromptRequest,
         _: &dyn Fn() -> bool,
-        _: &mut dyn FnMut(EngineEvent) -> bool,
+        _: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
     }
 

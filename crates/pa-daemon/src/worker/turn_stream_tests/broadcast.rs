@@ -13,8 +13,10 @@ impl SessionEngine for DoneOnlyEngine {
         _prompt_index: usize,
         _request: PromptRequest,
         _aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
+        let mut publish = |event| emit(event).continues();
+        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         emit(EngineEvent::Done(Ok(())));
     }
 

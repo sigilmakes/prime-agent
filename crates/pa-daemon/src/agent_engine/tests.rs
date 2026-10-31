@@ -70,7 +70,7 @@ fn own_log_store(
 }
 
 fn persist_accepted_user(
-    engine: &AgentSessionEngine,
+    _engine: &AgentSessionEngine,
     owner: &std::sync::Arc<std::sync::Mutex<crate::worker::SessionCore>>,
     message: serde_json::Value,
 ) -> String {
@@ -82,7 +82,6 @@ fn persist_accepted_user(
         .unwrap()
         .persist_entry("message", serde_json::json!({"message":message}))
         .unwrap();
-    engine.accepted_input_entry(id.clone());
     id
 }
 
@@ -169,7 +168,7 @@ pub(crate) fn admit(engine: &AgentSessionEngine, message: String, events: &mut V
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
 }
@@ -251,7 +250,7 @@ pub(crate) fn admit_parked(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(event);
-                true
+                true.into()
             },
         );
     })
@@ -366,7 +365,7 @@ fn run_prompts(
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
     }

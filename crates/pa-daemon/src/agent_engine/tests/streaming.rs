@@ -24,7 +24,7 @@ fn prompt_images_ride_the_user_message_content() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     let user = events.iter().find_map(|event| match event {
@@ -108,7 +108,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
                 });
                 updates.push((start.elapsed(), text_len));
             }
-            true
+            true.into()
         },
     );
     assert!(
@@ -168,7 +168,7 @@ fn agent_engine_streams_updates_and_final_message() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     assert!(matches!(&events[0], EngineEvent::UserMessage(_)));
@@ -297,7 +297,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                     EngineEvent::Done(done) => result = Some(done),
                     _ => {}
                 }
-                true
+                true.into()
             },
         );
         engine.on_turn_done();
@@ -591,14 +591,18 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
         &mut |event| {
             match event {
                 EngineEvent::UserMessage(message) => {
-                    persist_accepted_user(&engine, &owner, message.clone());
+                    return crate::engine::EmitResult::Accepted(persist_accepted_user(
+                        &engine,
+                        &owner,
+                        message.clone(),
+                    ));
                     accepted_message = Some(message);
                 }
                 EngineEvent::AssistantMessage(message) => published_assistant = Some(message),
                 EngineEvent::Done(done) => result = Some(done),
                 _ => {}
             }
-            true
+            true.into()
         },
     );
     engine.on_turn_done();
@@ -803,13 +807,17 @@ fn cached_sdk_acceptance_waits_for_build_gate_before_user_receipt() {
         &mut |event| {
             match event {
                 EngineEvent::UserMessage(message) => {
-                    persist_accepted_user(&engine, &owner, message.clone());
+                    return crate::engine::EmitResult::Accepted(persist_accepted_user(
+                        &engine,
+                        &owner,
+                        message.clone(),
+                    ));
                     accepted += 1;
                 }
                 EngineEvent::Done(result) => done = Some(result),
                 _ => {}
             }
-            true
+            true.into()
         },
     );
     assert_eq!(accepted, 1);
@@ -957,7 +965,7 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
                 if let EngineEvent::Done(result) = event {
                     done = Some(result);
                 }
-                true
+                true.into()
             },
         );
         engine.on_turn_done();
@@ -1114,6 +1122,15 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
         .iter()
         .enumerate()
     {
+        let leaf = owner
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .leaf_id()
+            .map(str::to_owned);
+        engine.set_prompt_context_boundary(leaf);
         let mut done = None;
         let mut published = Vec::new();
         engine.run_prompt(
@@ -1130,13 +1147,17 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
             &mut |event| {
                 match event {
                     EngineEvent::UserMessage(message) => {
-                        persist_accepted_user(&engine, &owner, message.clone());
+                        return crate::engine::EmitResult::Accepted(persist_accepted_user(
+                            &engine,
+                            &owner,
+                            message.clone(),
+                        ));
                     }
                     EngineEvent::AssistantMessage(message) => published.push(message),
                     EngineEvent::Done(result) => done = Some(result),
                     _ => {}
                 }
-                true
+                true.into()
             },
         );
         engine.on_turn_done();
@@ -1174,6 +1195,17 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
             })
             .collect();
         assert_eq!(assistants.len(), index + 1);
+        assert_eq!(
+            store
+                .entries()
+                .iter()
+                .filter(
+                    |entry| entry.type_ == "message" && entry.fields["message"]["role"] == "user"
+                )
+                .count(),
+            index + 1,
+            "each cached input is appended once"
+        );
         assert_eq!(assistants.last().unwrap().fields["message"], published[0]);
         assert_eq!(
             calls.load(Ordering::SeqCst),

@@ -921,7 +921,7 @@ mod refresh_tests {
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
         let request = engine

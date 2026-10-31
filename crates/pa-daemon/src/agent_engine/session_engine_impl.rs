@@ -11,13 +11,6 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
-    fn accepted_input_entry(&self, id: String) {
-        self.accepted_input_entries
-            .lock()
-            .expect("accepted input entries")
-            .push(id);
-    }
-
     fn persists_session_entries(&self) -> bool {
         self.row_sink_ready
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1300,9 +1293,17 @@ impl SessionEngine for AgentSessionEngine {
         _prompt_index: usize,
         mut request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut emit = self.goal_tracking_emit(emit);
+        let accepted_inputs = std::cell::RefCell::new(Vec::new());
+        let mut publish = |event| {
+            let result = emit(event);
+            if let crate::engine::EmitResult::Accepted(id) = &result {
+                accepted_inputs.borrow_mut().push(id.clone());
+            }
+            result.continues()
+        };
+        let mut emit = self.goal_tracking_emit(&mut publish);
         // The accepted-turn row carries the skill-expanded text (the
         // transcript renders the skill card).
         if request.message.starts_with("/skill:") {
@@ -1430,12 +1431,7 @@ impl SessionEngine for AgentSessionEngine {
                 return;
             }
         }
-        let accepted = std::mem::take(
-            &mut *self
-                .accepted_input_entries
-                .lock()
-                .expect("accepted input entries"),
-        );
+        let accepted = accepted_inputs.take();
         if let Err(error) = self.runtime.block_on(async {
             let built = self.session.lock().await.clone();
             if let Some(built) = built {

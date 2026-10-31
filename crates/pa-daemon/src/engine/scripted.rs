@@ -269,8 +269,10 @@ impl SessionEngine for ScriptedEngine {
         prompt_index: usize,
         request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
+        let mut publish = |event| emit(event).continues();
+        let emit: &mut dyn FnMut(EngineEvent) -> bool = &mut publish;
         let cancelled = || EngineEvent::Done(Err("prompt cancelled".to_string()));
         let scripted = self.responses.get(prompt_index).cloned();
         let text = match &scripted {

@@ -37,10 +37,31 @@ pub struct PluginCommandOutcome {
 }
 
 /// The turn behavior a worker session runs.
-pub trait SessionEngine: Send + Sync {
-    /// Hand the engine the exact durable input ID before delivery to its SDK.
-    fn accepted_input_entry(&self, _id: String) {}
+/// Result of synchronously publishing one engine event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmitResult {
+    Continue,
+    Accepted(String),
+    Stop,
+}
 
+impl EmitResult {
+    pub fn continues(&self) -> bool {
+        !matches!(self, Self::Stop)
+    }
+}
+
+impl From<bool> for EmitResult {
+    fn from(value: bool) -> Self {
+        if value {
+            Self::Continue
+        } else {
+            Self::Stop
+        }
+    }
+}
+
+pub trait SessionEngine: Send + Sync {
     /// Native engines commit complete rows through their manager's durable sink.
     fn persists_session_entries(&self) -> bool {
         false
@@ -141,7 +162,7 @@ pub trait SessionEngine: Send + Sync {
         prompt_index: usize,
         request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     );
 
     /// Abort the in-flight turn eagerly: the live run's provider fetch

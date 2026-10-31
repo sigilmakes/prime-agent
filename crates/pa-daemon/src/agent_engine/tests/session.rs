@@ -427,7 +427,7 @@ fn run_skill_prompt_body(
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     (engine, events)
