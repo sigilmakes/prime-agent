@@ -679,4 +679,20 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id().unwrap(), a);
     }
+    #[test]
+    fn selection_survives_reopen_without_a_following_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selection.jsonl");
+        let mut store = SessionFile::create("/fixture", None, 0);
+        store.set_path(path.clone());
+        let first = store.persist_entry("message", json!({"message": {"role": "user", "content": "first", "timestamp": 1}})).unwrap();
+        store.persist_entry("message", json!({"message": {"role": "assistant", "content": [], "timestamp": 2}})).unwrap();
+        store.branch_to(Some(&first)).unwrap();
+        let reopened = SessionFile::open(&path).unwrap();
+        assert_eq!(reopened.leaf_id(), Some(first.as_str()));
+        assert_eq!(reopened.entries().len(), 2);
+        store.branch_to(None).unwrap();
+        assert_eq!(SessionFile::open(&path).unwrap().leaf_id(), None);
+    }
+
 }
