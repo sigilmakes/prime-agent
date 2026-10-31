@@ -705,3 +705,32 @@ async fn durable_event_failure_refuses_local_message_publication() {
     assert!(super::persist_event(&manager, event).await.is_err());
     assert_eq!(manager.lock().await.retained_entries(), before);
 }
+
+#[tokio::test]
+async fn custom_event_replays_exact_admitted_row_without_another_append() {
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let row = pa_types::session::CustomMessage {
+        custom_type: "accepted-custom".to_owned(),
+        content: pa_types::ai::UserContent::Text("delivered once".to_owned()),
+        display: true,
+        details: None,
+        timestamp: 1,
+        rest: pa_types::JsonMap::new(),
+    };
+    let id = manager
+        .append_custom_message(
+            &row.custom_type,
+            row.content.clone(),
+            row.display,
+            row.details.clone(),
+        )
+        .unwrap();
+    manager.replay_admitted_custom_rows(vec![id]).unwrap();
+    let before = manager.retained_entries().to_vec();
+    let manager = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+    let event = pa_agent::types::AgentEvent::MessageEnd {
+        message: session_message_to_loop(&SessionAgentMessage::Custom(row)).unwrap(),
+    };
+    super::persist_event(&manager, event).await.unwrap();
+    assert_eq!(manager.lock().await.retained_entries(), before);
+}

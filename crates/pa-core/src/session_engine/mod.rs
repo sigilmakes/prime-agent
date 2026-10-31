@@ -710,6 +710,9 @@ async fn persist_event(
             let mut session = session.lock().await;
             match session_message {
                 SessionAgentMessage::Custom(custom) => {
+                    if session.consume_admitted_custom_row().is_some() {
+                        return Ok(());
+                    }
                     session.append_metadata_intent(FileEntry::CustomMessage {
                         base: crate::session::metadata::draft_base(),
                         payload: pa_types::session::CustomMessageEntry {
@@ -744,7 +747,7 @@ async fn persist_event(
             let Some(cwd) = cwd else { return Ok(()) };
             let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
             if let Some(git) = git {
-                session.lock().await.record_git_state_if_changed(git);
+                session.lock().await.record_git_state_if_changed(git)?;
             }
         }
         _ => {}
