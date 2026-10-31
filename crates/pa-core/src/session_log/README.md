@@ -101,3 +101,22 @@ never waits, never sleeps, and never declares a session dead.
   the bytes that are really there, and `Recover` carries the seq out of an
   `Unknown` so the caller never has to remember it. The caller's `op_id` map, if
   it wants one, is its own index over the seqs this returns.
+
+
+## Live fold readers
+
+`ReadCursor` is a cloneable, independent byte position for each serving fold.
+`read_tail` validates the previous row and returns only newly appended rows under
+the operation flock. `append_at_checked` validates the same boundary and appends
+under one flock, so repair cannot remove the fold's parent between validation and
+mutation. `ReadError::Replaced` requires reopening the fold; it does not set a
+blocked state, and a fresh cursor can immediately replay the repaired log.
+
+The cursor checks one prior row plus the new tail. This detects suffix truncation
+and replacement even if another writer regrows the file beyond its previous size.
+It is not a full-history integrity audit: arbitrary earlier-prefix rewrites that
+leave the boundary byte-identical require a full replay to detect. `repair` only
+truncates a suffix; it never rewrites that prefix.
+
+A pinned retry that finds its row takes a fresh fsync before reporting Committed.
+The surviving bytes alone do not prove the failed original barrier completed.
