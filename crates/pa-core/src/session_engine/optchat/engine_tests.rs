@@ -333,7 +333,7 @@ async fn public_engine_resume_window_uses_full_source_and_fresh_session_never_im
         manager.flush_now().unwrap();
     }
     let before = std::fs::read(&f.journal).unwrap();
-    let mut manager = SessionManager::open(&f.cwd, f.journal.parent().unwrap(), &f.journal);
+    let mut manager = SessionManager::open(&f.cwd, f.journal.parent().unwrap(), &f.journal).unwrap();
     let window = crate::session::window::WindowedSessionStore::open(&f.journal)
         .unwrap()
         .unwrap();
@@ -732,7 +732,7 @@ async fn public_explicit_selection_disable_and_resume_never_fall_back() {
         .select_context_strategy("default_context/rolling")
         .await
         .unwrap();
-    let manager = SessionManager::open(&f.cwd, f.journal.parent().unwrap(), &f.journal);
+    let manager = SessionManager::open(&f.cwd, f.journal.parent().unwrap(), &f.journal).unwrap();
     let resumed = create_session(SessionEngineConfig {
         cwd: f.cwd.clone(),
         agent_dir: f.agent_dir.clone(),

@@ -1028,7 +1028,7 @@ mod tests {
         let session_dir = dir.join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
         let mut session = SessionManager::in_memory(dir);
-        session.materialize_session_file(Some(session_dir));
+        session.materialize_session_file(Some(session_dir)).unwrap();
         session
     }
 

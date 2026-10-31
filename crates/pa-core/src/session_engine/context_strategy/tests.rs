@@ -133,7 +133,7 @@ async fn public_engine_orders_failures_and_commits_once_then_restores() {
         .get_session_file()
         .unwrap()
         .to_owned();
-    let manager = SessionManager::open(&f.cwd, path.parent().unwrap(), &path);
+    let manager = SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap();
     let restored = create_session(SessionEngineConfig {
         cwd: f.cwd.clone(),
         agent_dir: f.agent.clone(),
@@ -659,7 +659,7 @@ async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuat
         model: Some(super::super::provider_adapter::json_round_trip(&model).unwrap()),
         model_info: Some(model.clone()),
         stream_fn: Some(stream),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -782,7 +782,7 @@ async fn snap_archive_expands_on_compaction_restore_and_branch_without_duplicate
         model: Some(super::super::provider_adapter::json_round_trip(&model).unwrap()),
         model_info: Some(model),
         stream_fn: Some(f.provider.stream_fn()),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -951,7 +951,7 @@ async fn selected_strategy_is_durable_before_compaction_and_not_reselected_from_
         model: Some(super::super::provider_adapter::json_round_trip(&f.model).unwrap()),
         model_info: Some(f.model.clone()),
         stream_fn: Some(f.provider.stream_fn()),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -1021,7 +1021,7 @@ async fn reopened(f: &Fixture) -> SessionEngine {
         model: Some(super::super::provider_adapter::json_round_trip(&f.model).unwrap()),
         model_info: Some(f.model.clone()),
         stream_fn: Some(f.provider.stream_fn()),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()

@@ -86,7 +86,7 @@ fn session_with_history(end_with_compaction: bool) -> SessionManager {
     let session_dir = dir.path().join("session");
     std::fs::create_dir_all(&session_dir).unwrap();
     let mut session = SessionManager::in_memory(dir.path());
-    session.materialize_session_file(Some(session_dir));
+    session.materialize_session_file(Some(session_dir)).unwrap();
     for text in ["alpha task", "beta task", "gamma task"] {
         session.append_message(user_entry(text)).unwrap();
         session
@@ -117,7 +117,7 @@ impl SessionManager {
         let session_dir = dir.path().join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
         self = SessionManager::in_memory(dir.path());
-        self.materialize_session_file(Some(session_dir));
+        self.materialize_session_file(Some(session_dir)).unwrap();
         self
     }
 }
@@ -434,7 +434,7 @@ fn context_usage_anchors_on_the_last_valid_assistant_usage() {
     let session_dir = dir.path().join("session");
     std::fs::create_dir_all(&session_dir).unwrap();
     let mut session = SessionManager::in_memory(dir.path());
-    session.materialize_session_file(Some(session_dir));
+    session.materialize_session_file(Some(session_dir)).unwrap();
     let mut assistant = assistant_entry("done");
     let SessionMessage::Assistant(ref mut message) = assistant else {
         unreachable!();

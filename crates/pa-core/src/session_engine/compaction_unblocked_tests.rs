@@ -156,7 +156,9 @@ async fn mid_summarize_writes_are_durable_now_and_ride_the_retained_tail() {
     let assistant_id = {
         let persistence = engine.shared_persistence();
         let mut session = persistence.lock().await;
-        let (id, _) = session.append_message_retained(assistant_turn("mid-window reply"));
+        let id = session
+            .append_message_retained(assistant_turn("mid-window reply"))
+            .unwrap();
         let last = session
             .retained_entries()
             .iter()
@@ -192,7 +194,7 @@ async fn mid_summarize_writes_are_durable_now_and_ride_the_retained_tail() {
         let session = session.lock().await;
         crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
     };
-    let reopened = SessionManager::open(tmp.path(), tmp.path(), &session_file);
+    let reopened = SessionManager::open(tmp.path(), tmp.path(), &session_file).unwrap();
     assert_eq!(
         reopened.active_context().messages,
         rebuilt_live,
