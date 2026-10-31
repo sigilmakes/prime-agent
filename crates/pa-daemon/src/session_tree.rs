@@ -130,37 +130,6 @@ fn message_text(message: &Value) -> String {
     }
 }
 
-/// Envelope-free context-policy intent for an already computed branch summary.
-/// The actual owner supplies its row identity and new-branch parent.
-pub(crate) fn branch_summary_intent(
-    from_id: Option<&str>,
-    summary: &str,
-    details: Option<Value>,
-    usage: Option<Value>,
-    model: Option<(&str, &str)>,
-) -> Result<FileEntry> {
-    let mut rest = pa_types::JsonMap::new();
-    if let Some((provider, model_id)) = model {
-        rest.insert("provider".into(), json!(provider));
-        rest.insert("modelId".into(), json!(model_id));
-    }
-    Ok(FileEntry::BranchSummary {
-        base: pa_types::session::EntryBase {
-            id: None,
-            parent_id: None,
-            timestamp: None,
-            rest,
-        },
-        payload: pa_types::session::BranchSummaryEntry {
-            from_id: from_id.unwrap_or("root").to_owned(),
-            summary: summary.to_owned(),
-            details,
-            from_hook: None,
-            usage: usage.map(serde_json::from_value).transpose()?,
-        },
-    })
-}
-
 impl SessionFile {
     /// `branch`: move the leaf onto an existing entry; the next append
     /// parents from there.

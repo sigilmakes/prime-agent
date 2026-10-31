@@ -37,6 +37,7 @@ pub(crate) type ContextSelectionCommitFuture =
 pub(crate) struct MirrorSeed {
     pub(crate) header: SessionHeader,
     pub(crate) entries: Vec<pa_types::session::FileEntry>,
+    pub(crate) leaf_id: Option<String>,
 }
 
 pub(crate) trait InitialContextSelectionStore: Send + Sync {
@@ -116,6 +117,11 @@ impl super::AgentSessionEngine {
         )
         .map_err(anyhow::Error::msg)?;
         manager.adopt_entries(seed.entries);
+        match seed.leaf_id {
+            Some(id) => manager.branch(&id),
+            None => manager.reset_leaf(),
+        }
+
         manager.set_entry_writer(store.entry_writer(source.clone()));
         let commit: pa_core::session_engine::engine::InitialContextSelectionCommit =
             std::sync::Arc::new(move |selection| store.commit(source.clone(), selection));
@@ -160,7 +166,7 @@ pub(super) fn admitted_user_ids(
             FileEntry::Message {
                 message: AgentMessage::User(_),
                 ..
-            }
+            } | FileEntry::CustomMessage { .. }
         ) {
             ids.push(id);
         }

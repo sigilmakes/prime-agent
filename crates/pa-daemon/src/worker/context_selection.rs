@@ -143,6 +143,7 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         Ok(Some(MirrorSeed {
             header: store.header.clone(),
             entries,
+            leaf_id: store.leaf_id().map(str::to_owned),
         }))
     }
 

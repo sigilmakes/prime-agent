@@ -14,7 +14,7 @@ use crate::session_store::{SessionEntry, SessionFile};
 use crate::session_tree;
 use crate::worker::{SessionCore, Worker};
 use pa_agent::abort::AbortController;
-use pa_types::session::{EntryBase, FileEntry, LabelEntry};
+use pa_types::session::FileEntry;
 
 /// One completed abandoned-branch summary to persist: the text, its usage block, its
 /// file-op details, and the model the summary served on (`None` keeps the attribution).
@@ -24,16 +24,6 @@ type PendingBranchSummary = (
     Option<Value>,
     Option<(String, String)>,
 );
-
-enum NavigationWork {
-    Noop,
-    Aborted,
-    Prepared {
-        new_leaf: Option<String>,
-        editor_text: Option<String>,
-        summary: Option<Box<PendingBranchSummary>>,
-    },
-}
 
 pub(crate) struct TreeNavigation {
     engine: Arc<dyn SessionEngine>,
@@ -634,6 +624,3 @@ impl Worker {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

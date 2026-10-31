@@ -768,7 +768,11 @@ impl Worker {
             // `shutdown` keeps the resume entry, so its file stays
             // live on disk; the killed and replaced closes archive.
             if reason != KillCloseReason::Shutdown {
-                if let Some(store) = core.store.as_mut() {
+                if let Some(store) = core
+                    .store
+                    .as_mut()
+                    .filter(|store| store.state().as_deref() != Some("archived"))
+                {
                     if let Err(error) = store.persist_entry(
                         "session_state",
                         json!({ "state": { "status": "archived" } }),

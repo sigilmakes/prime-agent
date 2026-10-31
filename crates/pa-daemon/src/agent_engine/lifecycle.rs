@@ -579,7 +579,7 @@ impl AgentSessionEngine {
                                     pa_types::session::FileEntry::Message {
                                         message: pa_types::session::AgentMessage::User(_),
                                         ..
-                                    }
+                                    } | pa_types::session::FileEntry::CustomMessage { .. }
                                 )
                             }) {
                                 admitted_user_ids.push(id.to_string());
