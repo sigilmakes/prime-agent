@@ -1449,7 +1449,7 @@ fn a_restored_tombstoned_child_stops_billing_the_parent_without_an_append() {
         ledger.deleted_descendant_usage_by_parent().unwrap(),
         HashMap::from([(key, usage_summary(0.25))])
     );
-    crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
+    crate::session_archive::restore_session(&dir, &archive, &sessions, "child").unwrap();
     assert_eq!(
         ledger.deleted_descendant_usage_by_parent().unwrap(),
         HashMap::new()

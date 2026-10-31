@@ -29,6 +29,8 @@ mod window_tests;
 mod child_usage;
 mod context_selection;
 mod index;
+#[cfg(test)]
+pub(crate) mod log_reader_tests;
 // One durable row writer for the serving fold.
 mod log_wire;
 
@@ -72,7 +74,6 @@ mod info;
 // The persisted scan-state sidecar.
 mod info_sidecar;
 
-pub(crate) use info::read_session_info_from;
 #[cfg(test)]
 use info::{
     append_capped_search_text, fold_scan_entry, message_content_text, raw_string, raw_u64,

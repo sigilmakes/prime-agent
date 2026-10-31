@@ -82,6 +82,7 @@ pub fn plan_archive<'a>(
 /// One sweep over the sessions directory: collect, plan, move the doomed files
 /// into the archive. Idempotent; a move failure skips that file.
 pub fn sweep_sessions(
+    agent_dir: &Path,
     sessions_dir: &Path,
     archive_dir: &Path,
     protected: &HashSet<PathBuf>,
@@ -100,11 +101,37 @@ pub fn sweep_sessions(
         .with_context(|| format!("create archive dir {}", archive_dir.display()))?;
     let mut archived = Vec::new();
     for candidate in doomed {
+        // A different supervisor may host this session while our registry
+        // has no resident row. Hold execution exclusion across the move,
+        // not merely the log's short-lived append lock.
+        let _execution =
+            match crate::lease::acquire_runtime_session_lease(&candidate.path, agent_dir) {
+                Ok(guard) => guard,
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::lease::SessionAlreadyActiveError>()
+                        .is_some() =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         let destination = archive_dir.join(session_file_name(&candidate.session_id));
         if destination.exists() {
             // A same-id file already archived: leave the live file alone
             // rather than clobber history (this guards a corrupted archive).
             continue;
+        }
+        // Serialize the move against append/repair. Keep the lock file in
+        // place: removing it could give waiting writers a different flock.
+        let lock = pa_core::session_log::Disk::open_lock(
+            &pa_core::session_log::RealDisk,
+            &candidate.path.with_extension("lock"),
+        )?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => continue,
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
         match move_file(&candidate.path, &destination) {
             Ok(()) => archived.push(candidate.session_id.clone()),
@@ -124,6 +151,7 @@ pub fn sweep_sessions(
 /// Restore an archived session into the sessions directory (the resume
 /// path): returns the restored file path.
 pub fn restore_session(
+    agent_dir: &Path,
     archive_dir: &Path,
     sessions_dir: &Path,
     session_id: &str,
@@ -144,20 +172,51 @@ pub fn restore_session(
     }
     fs::create_dir_all(sessions_dir)
         .with_context(|| format!("create sessions dir {}", sessions_dir.display()))?;
+    let _source_execution = crate::lease::acquire_runtime_session_lease(&source, agent_dir)?;
+    let _destination_execution =
+        crate::lease::acquire_runtime_session_lease(&destination, agent_dir)?;
+    let source_lock = pa_core::session_log::Disk::open_lock(
+        &pa_core::session_log::RealDisk,
+        &source.with_extension("lock"),
+    )?;
+    source_lock.try_lock().context("archived session is busy")?;
+    let destination_lock = pa_core::session_log::Disk::open_lock(
+        &pa_core::session_log::RealDisk,
+        &destination.with_extension("lock"),
+    )?;
+    destination_lock
+        .try_lock()
+        .context("live session is busy")?;
     move_file(&source, &destination)?;
     Ok(destination)
 }
 
-/// Rename with a copy+delete fallback (rename fails across filesystems).
+/// Publish without replacing an existing destination, sync it, then unlink
+/// the source. A crash may leave both names, never no durable name.
 fn move_file(source: &Path, destination: &Path) -> Result<()> {
-    if let Ok(()) = fs::rename(source, destination) {
-        Ok(())
-    } else {
-        fs::copy(source, destination)
-            .with_context(|| format!("copy {} -> {}", source.display(), destination.display()))?;
-        fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
-        Ok(())
+    match fs::hard_link(source, destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            let mut input = fs::File::open(source)?;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            pa_core::platform::perms::set_private_mode(&mut options);
+            let mut output = options.open(destination)?;
+            std::io::copy(&mut input, &mut output).with_context(|| {
+                format!("copy {} -> {}", source.display(), destination.display())
+            })?;
+            output.sync_all()?;
+        }
+        Err(error) => return Err(error.into()),
     }
+    let destination_dir = destination
+        .parent()
+        .context("archive destination has no directory")?;
+    pa_core::platform::fs::sync_directory(destination_dir)?;
+    fs::remove_file(source).with_context(|| format!("remove moved source {}", source.display()))?;
+    let source_dir = source.parent().context("archive source has no directory")?;
+    pa_core::platform::fs::sync_directory(source_dir)?;
+    Ok(())
 }
 
 /// One candidate per valid session file directly under the sessions dir
@@ -251,6 +310,7 @@ pub(crate) async fn run_archive_sweep(
         }
     }
     let archived = sweep_sessions(
+        &agent_dir,
         &sessions_dir,
         &archive_dir(&agent_dir),
         &protected,
@@ -376,6 +436,7 @@ mod tests {
         fs::write(sessions.join("junk.jsonl"), "not a session").expect("junk");
 
         let doomed = sweep_sessions(
+            dir.path(),
             &sessions,
             &archive,
             &HashSet::new(),
@@ -399,6 +460,7 @@ mod tests {
         let old = write_session(&sessions, "33333333-3333-3333-3333-333333333333");
         set_mtime_days_ago(&old, 400);
         let doomed = sweep_sessions(
+            dir.path(),
             &sessions,
             &dir.path().join("archive"),
             &HashSet::new(),
@@ -418,14 +480,26 @@ mod tests {
         fs::create_dir_all(&archive).expect("archive dir");
         let id = "44444444-4444-4444-4444-444444444444";
         let archived = write_session(&archive, id);
-        let restored = restore_session(&archive, &sessions, id).expect("restore");
+        let restored = restore_session(dir.path(), &archive, &sessions, id).expect("restore");
         assert!(restored.is_file());
         assert!(sessions.join(session_file_name(id)).is_file());
         assert!(!archived.is_file(), "left the archive");
         // Restoring again misses: the file is live again.
-        assert!(restore_session(&archive, &sessions, id).is_err());
+        assert!(restore_session(dir.path(), &archive, &sessions, id).is_err());
         // A missing id is a typed miss.
-        assert!(restore_session(&archive, &sessions, "missing").is_err());
+        assert!(restore_session(dir.path(), &archive, &sessions, "missing").is_err());
+    }
+
+    #[test]
+    fn a_destination_created_after_the_precheck_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_session(dir.path(), "source");
+        let destination = write_session(dir.path(), "destination");
+        let source_bytes = fs::read(&source).unwrap();
+        let destination_bytes = fs::read(&destination).unwrap();
+        assert!(move_file(&source, &destination).is_err());
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        assert_eq!(fs::read(&destination).unwrap(), destination_bytes);
     }
 
     /// A minimal valid session file: the `session` header line carries the
@@ -438,7 +512,13 @@ mod tests {
             "cwd": "/work",
             "timestamp": "2026-01-01T00:00:00.000Z",
         });
-        fs::write(&path, format!("{header}\n")).expect("write session");
+        let mut log =
+            pa_core::session_log::SessionLog::open(dir, id, crate::session_transport::deadline())
+                .unwrap();
+        assert!(matches!(
+            log.append(&header, crate::session_transport::deadline()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
         path
     }
 

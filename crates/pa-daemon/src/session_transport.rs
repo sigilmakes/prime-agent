@@ -310,7 +310,7 @@ impl WireState {
                         _ => {
                             return Err(LogWireError::Refused(anyhow::anyhow!(
                                 "the session log left its undecided write open; retry the flush"
-                            )))
+                            )));
                         }
                     }
                 }

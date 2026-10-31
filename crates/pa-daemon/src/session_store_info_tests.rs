@@ -14,8 +14,17 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut all_messages_text = String::new();
     let mut usage_scan = crate::session_usage::UsageScan::default();
     let mut last_activity_ms: Option<u64> = None;
-    for line in content.lines() {
-        let trimmed = line.trim();
+    let mut last_seq = 0;
+    for line in content
+        .split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+    {
+        let row =
+            pa_core::session_log::Row::decode(line.trim_end_matches('\n').as_bytes(), last_seq)
+                .ok()?;
+        last_seq = row.seq;
+        let body = row.body.to_string();
+        let trimmed = body.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -181,15 +190,31 @@ fn test_dir() -> PathBuf {
     dir
 }
 
-fn append_rows(path: &Path, rows: &[Value]) {
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .unwrap();
+pub(super) fn append_rows(path: &Path, rows: &[Value]) {
+    let id = path.file_stem().unwrap().to_str().unwrap();
+    let mut log = pa_core::session_log::SessionLog::open(
+        path.parent().unwrap(),
+        id,
+        crate::session_transport::deadline(),
+    )
+    .unwrap();
     for row in rows {
-        writeln!(file, "{row}").unwrap();
+        assert!(matches!(
+            log.append(row, crate::session_transport::deadline()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
+}
+
+fn reencode(content: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replacement.jsonl");
+    let rows: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
+        .collect();
+    append_rows(&path, &rows);
+    fs::read_to_string(path).unwrap()
 }
 
 fn assert_fold_matches(path: &Path) {
@@ -267,7 +292,7 @@ fn cache_rejects_replacement_and_same_length_in_place_rewrite() {
     );
     let saved_mtime = fs::metadata(&path).unwrap().modified().unwrap();
     let original = fs::read_to_string(&path).unwrap();
-    fs::write(&path, original.replace("bravo", "delta")).unwrap();
+    fs::write(&path, reencode(&original.replace("bravo", "delta"))).unwrap();
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(saved_mtime)).unwrap();
     assert_eq!(fs::metadata(&path).unwrap().len(), original.len() as u64);
     assert_fold_matches(&path);
@@ -342,20 +367,22 @@ fn a_torn_trailing_line_folds_once_completed() {
         &path,
         &[json!({"type":"session","id":"t","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
     );
-    // A torn trailing message - invalid JSON (the write is mid-line), no
-    // newline: the scan leaves it unconsumed and the row cannot fold it.
-    let torn_head = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn"#;
+    let encoded = reencode(&format!(
+        "{}{}\n",
+        fs::read_to_string(&path).unwrap(),
+        json!({"row": {"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn text","timestamp":1790110000000u64}}})
+    ));
+    let tail = encoded.lines().last().unwrap();
+    let split = tail.len() / 2;
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(torn_head.as_bytes()).unwrap();
+        file.write_all(&tail.as_bytes()[..split]).unwrap();
     }
     let partial = read_session_info(&path).unwrap();
     assert_eq!(partial.message_count, 0, "a torn line must not fold");
-    // The completed line folds exactly once, and the row matches the oracle.
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(br#" text","timestamp":1790110000000}}"#.as_slice())
-            .unwrap();
+        file.write_all(&tail.as_bytes()[split..]).unwrap();
         file.write_all(b"\n").unwrap();
     }
     assert_fold_matches(&path);
@@ -386,7 +413,7 @@ fn a_same_size_rewrite_rescans_from_the_top() {
     assert_eq!(rewritten.len(), content.len());
     // Force the mtime tick so the generation is not byte-equal.
     let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
-    let _ = fs::write(&path, rewritten.as_bytes());
+    let _ = fs::write(&path, reencode(&rewritten).as_bytes());
     let file = fs::File::open(&path).unwrap();
     let _ = file.set_modified(past);
     drop(file);
@@ -443,7 +470,7 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     let content = fs::read_to_string(&path).unwrap();
     let rewritten = content.replacen(&before_line, &line, 1);
     assert_eq!(rewritten.len(), content.len());
-    let _ = fs::write(&path, rewritten.as_bytes());
+    let _ = fs::write(&path, reencode(&rewritten).as_bytes());
     // The file also grows: a valid appended line enters the resume path.
     append_rows(
         &path,
@@ -605,31 +632,34 @@ fn a_symlinked_lease_release_persists_a_sidecar_the_next_read_serves() {
 }
 
 #[test]
-fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
+fn a_valid_unterminated_final_line_folds_only_after_its_newline() {
     let dir = test_dir();
     let path = dir.join("unterminated.jsonl");
     append_rows(
         &path,
         &[json!({"type":"session","id":"u","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
     );
-    // The final line is complete JSON with NO terminal newline: the row must fold it
-    // without consuming it.
-    let tail = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"tail-name"}).to_string();
+    let encoded = reencode(&format!(
+        "{}{}\n",
+        fs::read_to_string(&path).unwrap(),
+        json!({"row": {"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"tail-name"}})
+    ));
+    let tail = encoded.lines().last().unwrap();
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(tail.as_bytes()).unwrap();
     }
-    let info = read_session_info(&path).unwrap();
-    assert_eq!(info.name.as_deref(), Some("tail-name"));
+    assert!(read_session_info(&path).unwrap().name.is_none());
     assert_fold_matches(&path);
-    // Completing the line folds it into the consumed prefix exactly once.
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(b"\n").unwrap();
     }
     assert_fold_matches(&path);
-    let completed = read_session_info(&path).unwrap();
-    assert_eq!(completed.name.as_deref(), Some("tail-name"));
+    assert_eq!(
+        read_session_info(&path).unwrap().name.as_deref(),
+        Some("tail-name")
+    );
 }
 
 #[test]

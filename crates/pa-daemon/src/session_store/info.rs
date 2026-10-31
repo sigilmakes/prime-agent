@@ -234,6 +234,8 @@ pub(super) struct SessionScanState {
     pub(super) acc: SessionScanAccumulator,
     /// Bytes consumed through the end of the last complete line.
     offset: u64,
+    #[serde(default)]
+    last_seq: u64,
     pub(super) tail: [u8; SESSION_SCAN_RESUME_TAIL_BYTES],
     #[serde(skip)]
     info: Option<SessionInfo>,
@@ -249,6 +251,7 @@ impl SessionScanState {
             generation,
             acc: SessionScanAccumulator::default(),
             offset: 0,
+            last_seq: 0,
             tail: [b'\n'; SESSION_SCAN_RESUME_TAIL_BYTES],
             info: None,
             accounted_usage_entries: 0,
@@ -274,6 +277,7 @@ impl SessionScanState {
                 usage_scan: self.acc.usage_scan.clone(),
             },
             offset: self.offset,
+            last_seq: self.last_seq,
             tail: self.tail,
             info: None,
             accounted_usage_entries: 0,
@@ -468,10 +472,10 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
     if std::io::Seek::seek(file, std::io::SeekFrom::Start(state.offset)).is_err() {
         return None;
     }
-    let torn_tail = {
+    {
         let mut reader = std::io::BufReader::with_capacity(SESSION_SCAN_READ_BUF_BYTES, &mut *file);
-        state.scan_from_cursor(&mut reader, generation.len)?
-    };
+        state.scan_from_cursor(&mut reader, generation.len)?;
+    }
     // The durable last-resort value for `modified`, read lazily: `None` keeps
     // unavailable (unreadable, pre-epoch) metadata distinct from a real epoch timestamp.
     let stats_mtime_ms = || {
@@ -482,7 +486,8 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
                 .map(|duration| duration.as_millis() as u64)
         })
     };
-    let info = state.build_info(path, stats_mtime_ms, Some(&torn_tail))?;
+    // An unterminated row is not committed, even when its JSON parses.
+    let info = state.build_info(path, stats_mtime_ms)?;
     // A concurrent append/replacement must never certify stale metadata;
     // records without message timestamps never certify either.
     let modified_ms = state.acc.last_activity_ms.unwrap_or(0);
@@ -504,14 +509,13 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
 }
 
 impl SessionScanState {
-    /// Fold lines from the cursor: a complete line advances the cursor and
-    /// the tail; an unterminated final line is never consumed (it may be an
-    /// in-progress append) and is returned as the torn tail. `None` = the abort arm.
+    /// Fold complete validated log lines. An in-progress trailing append
+    /// leaves the cursor unchanged. Invalid complete rows abort the scan.
     fn scan_from_cursor(
         &mut self,
         reader: &mut std::io::BufReader<&mut fs::File>,
         size: u64,
-    ) -> Option<String> {
+    ) -> Option<()> {
         let mut line = String::new();
         loop {
             line.clear();
@@ -523,40 +527,34 @@ impl SessionScanState {
             if !complete && (self.offset + consumed as u64) >= size {
                 // A torn trailing line: the cursor stays put so the completed
                 // line folds on the next scan.
-                return Some(line);
+                return Some(());
             }
             if complete {
                 line.pop();
             }
-            fold_scan_entry(&mut self.acc, &line)?;
+            let row = pa_core::session_log::Row::decode(line.as_bytes(), self.last_seq).ok()?;
+            if self.last_seq == 0 && row.body.get("type").and_then(Value::as_str) != Some("session")
+            {
+                return None;
+            }
+            fold_scan_entry(&mut self.acc, &serde_json::to_string(&row.body).ok()?)?;
+            self.last_seq = row.seq;
             self.offset += consumed as u64;
             self.advance_tail(line.as_bytes());
             if !complete {
                 break;
             }
         }
-        Some(String::new())
+        Some(())
     }
 
-    /// Derive the listing row. A non-empty torn tail folds into a SNAPSHOT
-    /// copy of the accumulator: the valid unterminated final line reaches
-    /// the row while the resumable state stays untouched.
+    /// Derive the listing row from the committed prefix only.
     pub(super) fn build_info(
         &self,
         path: &Path,
         stats_mtime_ms: impl FnOnce() -> Option<u64>,
-        torn: Option<&str>,
     ) -> Option<SessionInfo> {
-        let snapshot;
-        let acc = match torn.filter(|tail| !tail.trim().is_empty()) {
-            Some(tail) => {
-                let mut snap = self.acc.clone();
-                fold_scan_entry(&mut snap, tail)?;
-                snapshot = snap;
-                &snapshot
-            }
-            None => &self.acc,
-        };
+        let acc = &self.acc;
         let usage = acc.usage_scan.summary();
         let header = acc.header.as_ref()?;
         // The newest user/assistant message timestamp, then the header's
@@ -753,7 +751,7 @@ mod cache_tests {
 
     #[test]
     fn cached_prefix_resume_subtracts_a_duplicate_attribution_once() {
-        use std::io::{BufReader, Seek, SeekFrom, Write};
+        use std::io::{BufReader, Seek, SeekFrom};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("isolated-prefix.jsonl");
@@ -762,8 +760,14 @@ mod cache_tests {
         for row in [assistant, attribution] {
             serde_json::from_str::<SessionInfoEntry<'_>>(row).unwrap();
         }
-        let prefix = format!("{assistant}\n{attribution}\n");
-        fs::write(&path, &prefix).unwrap();
+        super::super::info_tests::append_rows(
+            &path,
+            &[
+                serde_json::json!({"type":"session","id":"test","timestamp":"2026-10-11T00:00:00.000Z","cwd":"/test"}),
+                serde_json::from_str(assistant).unwrap(),
+                serde_json::from_str(attribution).unwrap(),
+            ],
+        );
         let mut file = fs::File::open(&path).unwrap();
         let generation = SessionInfoGeneration::from_metadata(&file.metadata().unwrap());
         let mut state = SessionScanState::fresh(generation);
@@ -777,10 +781,7 @@ mod cache_tests {
         let cached = cache.states.get(&path).unwrap().clone_for_resume();
         let mut resumed: SessionScanState =
             serde_json::from_slice(&serde_json::to_vec(&cached).unwrap()).unwrap();
-        {
-            let mut append = fs::OpenOptions::new().append(true).open(&path).unwrap();
-            writeln!(append, "{attribution}").unwrap();
-        }
+        super::super::info_tests::append_rows(&path, &[serde_json::from_str(attribution).unwrap()]);
         let grown_len = file.metadata().unwrap().len();
         assert!(grown_len > cached.offset);
         file.seek(SeekFrom::Start(resumed.offset)).unwrap();

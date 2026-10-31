@@ -102,9 +102,17 @@ fn strip_line_return(line: &[u8]) -> Vec<u8> {
 /// first line — the bounded read refuses to judge a truncated one.
 #[must_use]
 pub fn read_session_header_bounded(path: &Path) -> Option<SessionHeader> {
-    let line = read_first_line_bounded(path, SESSION_LIST_HEADER_READ_MAX_BYTES)?;
-    let text = std::str::from_utf8(&line).ok()?;
-    parse_session_header_line(text)
+    let file = fs::File::open(path).ok()?;
+    let mut line = Vec::new();
+    std::io::BufReader::new(file)
+        .take(SESSION_LIST_HEADER_READ_MAX_BYTES as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.len() > SESSION_LIST_HEADER_READ_MAX_BYTES || line.pop() != Some(b'\n') {
+        return None;
+    }
+    let row = pa_core::session_log::Row::decode(&line, 0).ok()?;
+    parse_session_header_line(&serde_json::to_string(&row.body).ok()?)
 }
 
 /// Read the first line of a session file and parse it as a header.
@@ -113,7 +121,11 @@ pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
     let file = fs::File::open(path).ok()?;
     let mut first = String::new();
     std::io::BufReader::new(file).read_line(&mut first).ok()?;
-    parse_session_header_line(&first)
+    if !first.ends_with('\n') {
+        return None;
+    }
+    let row = pa_core::session_log::Row::decode(first.trim_end_matches('\n').as_bytes(), 0).ok()?;
+    parse_session_header_line(&serde_json::to_string(&row.body).ok()?)
 }
 
 /// A session file is valid when its first line is a `session` header, judged

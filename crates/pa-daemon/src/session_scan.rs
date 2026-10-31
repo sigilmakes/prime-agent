@@ -1,66 +1,16 @@
-//! The saved-session roster scan (`list_sessions`), gated by a bounded
-//! first-line header read: a parseable non-`session` first record skips the
-//! file, while an unparseable or blank first line leaves the fold to decide
-//! (TS never invalidates on a parse failure).
+//! Saved-session roster scan over checksummed session logs. The metadata
+//! fold validates each committed row and ignores an in-progress trailing line.
 
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
-use crate::session_store::{
-    parse_session_header_line, read_first_line_bounded_from, read_session_info_from, SessionInfo,
-    SESSION_LIST_HEADER_READ_MAX_BYTES,
-};
+use crate::session_store::{read_session_info, SessionInfo};
 
-/// The bounded header read's verdict for one roster file.
-enum HeaderGate {
-    /// The complete first line is a valid `session` header: the fold fills
-    /// the row.
-    Header,
-    /// A parseable first record that is not the `session` header: TS marks
-    /// the file invalid (`acc.invalid`) — skip it without the fold.
-    NotAHeader,
-    /// The first line does not end within the bound (an over-long header, an
-    /// unreadable file): the fold decides.
-    Unjudged,
-}
-
-fn bounded_header_gate(file: &mut fs::File) -> HeaderGate {
-    let Some(line) = read_first_line_bounded_from(file, SESSION_LIST_HEADER_READ_MAX_BYTES) else {
-        return HeaderGate::Unjudged;
-    };
-    let Ok(text) = std::str::from_utf8(&line) else {
-        // A full read of the file would fail on the same bytes (`read_to_string`).
-        return HeaderGate::NotAHeader;
-    };
-    if text.trim().is_empty() {
-        // A blank first line judges nothing: the fold skips blank lines and
-        // may find the header on a later one.
-        return HeaderGate::Unjudged;
-    }
-    // Parse failures never invalidate the file (TS `foldSessionScanLine`):
-    // a later `session` header may still produce the row, so the fold decides.
-    if serde_json::from_str::<serde_json::Value>(text).is_err() {
-        return HeaderGate::Unjudged;
-    }
-    // A parseable first record that is not the `session` header marks the
-    // file invalid (TS `acc.invalid`): the gate skips it without the fold.
-    if parse_session_header_line(text).is_some() {
-        HeaderGate::Header
-    } else {
-        HeaderGate::NotAHeader
-    }
-}
-
-/// One file's roster row: `None` when the file produces none. One open serves
-/// the gate and the fold, pinning both to the same inode (a rename racing two
-/// handles could judge one file and fold another).
+/// The info scan validates log envelopes and requires the first committed
+/// row to be a session header. It ignores an in-progress trailing append.
 fn roster_session_info(path: &Path) -> Option<SessionInfo> {
-    let mut file = fs::File::open(path).ok()?;
-    match bounded_header_gate(&mut file) {
-        HeaderGate::NotAHeader => None,
-        HeaderGate::Header | HeaderGate::Unjudged => read_session_info_from(&mut file, path),
-    }
+    read_session_info(path)
 }
 
 /// List every valid session file in a directory, most recently modified first.
@@ -138,7 +88,7 @@ mod tests {
         }
         let path = dir.join(session_file_name(session.session_id()));
         session.set_path(path.clone());
-        session.rewrite().unwrap();
+        crate::session_store::log_reader_tests::write_log_fixture(&path, &session);
         path
     }
 
@@ -189,16 +139,21 @@ mod tests {
         let dir = temp_dir();
         // A session header preceded by a parseable non-session record: TS marks
         // the file invalid (`acc.invalid`) — skipped even though a header follows.
-        let mistyped = dir.join("mistyped.jsonl");
-        let mut session = SessionFile::create("/repo/mistyped", None, 0);
-        session.set_path(mistyped.clone());
-        session.rewrite().unwrap();
-        let header_line = fs::read_to_string(&mistyped).unwrap();
-        fs::write(
-            &mistyped,
-            format!("{{\"type\":\"message\",\"id\":\"x1\"}}\n{header_line}"),
+        let mut log = pa_core::session_log::SessionLog::open(
+            &dir,
+            "mistyped",
+            crate::session_transport::deadline(),
         )
         .unwrap();
+        for row in [
+            json!({"type":"message","id":"x1","timestamp":"2026-10-31T00:00:00.000Z"}),
+            json!({"type":"session","id":"mistyped","cwd":"/repo/mistyped","timestamp":"2026-10-31T00:00:00.000Z"}),
+        ] {
+            assert!(matches!(
+                log.append(&row, crate::session_transport::deadline()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
         // An unparseable first line with no header anywhere is no skip either: the fold decides
         // and finds no row.
         let foreign = dir.join("foreign.jsonl");
@@ -207,29 +162,21 @@ mod tests {
     }
 
     #[test]
-    fn still_lists_a_file_with_an_unparseable_first_line_and_a_later_header() {
+    fn rejects_a_corrupt_first_line_even_when_a_later_header_is_valid() {
         let dir = temp_dir();
-        // TS never invalidates on a parse failure: a truncated or foreign
-        // first line must not hide a recoverable session.
         let path = write_session(&dir, "/repo/junk-first", None, 1);
         let content = fs::read_to_string(&path).unwrap();
         fs::write(&path, format!("not a session file at all\n{content}")).unwrap();
-        let scanned = list_sessions(&dir);
-        assert_eq!(scanned, sequential_list_sessions(&dir));
-        assert_eq!(scanned.len(), 1);
-        assert_eq!(scanned[0].cwd, "/repo/junk-first");
+        assert!(list_sessions(&dir).is_empty());
     }
 
     #[test]
-    fn still_lists_a_file_with_a_leading_blank_line() {
+    fn rejects_a_blank_first_line_in_a_log() {
         let dir = temp_dir();
         let path = write_session(&dir, "/repo/blank-first", Some("blank"), 1);
         let content = fs::read_to_string(&path).unwrap();
         fs::write(&path, format!("\n{content}")).unwrap();
-        let scanned = list_sessions(&dir);
-        assert_eq!(scanned, sequential_list_sessions(&dir));
-        assert_eq!(scanned.len(), 1);
-        assert_eq!(scanned[0].name.as_deref(), Some("blank"));
+        assert!(list_sessions(&dir).is_empty());
     }
 
     #[test]

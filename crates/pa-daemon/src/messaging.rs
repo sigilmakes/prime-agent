@@ -82,7 +82,7 @@ impl Supervisor {
                     WakeOutcome::Unknown => {
                         return fail(format!(
                             "Unknown active session: {target_active_session_id}"
-                        ))
+                        ));
                     }
                     WakeOutcome::Failed(error) => return fail(error),
                 }
@@ -218,6 +218,7 @@ impl Supervisor {
         };
         let archive_dir = crate::session_archive::archive_dir(&self.options.agent_dir);
         let info = match crate::session_catalog::resolve_saved_session(
+            &self.options.agent_dir,
             &sessions_dir,
             &archive_dir,
             selector,
@@ -231,7 +232,7 @@ impl Supervisor {
                 return match self.wake_ledger_child(selector).await {
                     Some(outcome) => outcome,
                     None => WakeOutcome::Unknown,
-                }
+                };
             }
             Err(error) => return WakeOutcome::Failed(error.to_string()),
         };

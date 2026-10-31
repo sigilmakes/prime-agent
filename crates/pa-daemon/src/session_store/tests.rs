@@ -23,7 +23,7 @@ fn bounded_header_matches_the_line_read() {
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     assert_eq!(
         read_session_header_bounded(&path),
         read_session_header(&path)
@@ -48,24 +48,22 @@ fn bounded_header_refuses_an_over_long_first_line() {
     let mut session = SessionFile::create(&format!("/repo/{}", "x".repeat(600)), None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     assert_eq!(read_session_header_bounded(&path), None);
     assert!(read_session_header(&path).is_some());
 }
 
 #[test]
-fn bounded_header_reads_an_unterminated_first_line() {
+fn bounded_header_refuses_an_unterminated_first_line() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/repo", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     let header_line = fs::read_to_string(&path).unwrap();
     fs::write(&path, header_line.trim_end()).unwrap();
-    assert_eq!(
-        read_session_header_bounded(&path),
-        read_session_header(&path)
-    );
+    assert!(read_session_header_bounded(&path).is_none());
+    assert!(read_session_header(&path).is_none());
 }
 
 #[test]
@@ -74,7 +72,7 @@ fn bounded_header_strips_a_crlf_line_return() {
     let mut session = SessionFile::create("/repo", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     let header_line = fs::read_to_string(&path).unwrap();
     fs::write(&path, format!("{}\r\n", header_line.trim_end())).unwrap();
     assert_eq!(
@@ -937,51 +935,26 @@ fn search_text_counter_lockstep_names_every_corpus_mutation_path() {
         SESSION_LIST_SEARCH_TEXT_MAX_CHARS
     );
 
-    // (3) the torn-tail snapshot: build_info folds the torn line into a CLONE,
-    // so the durable accumulator's counter stays untouched.
+    // (3) snapshots derive only from the committed prefix.
     let durable_before = state.acc.clone();
     let capped_info = state
-            .build_info(
-                Path::new("/repo/s1.jsonl"),
-                || None,
-                Some(r#"{"type":"message","id":"m4","timestamp":"4","message":{"role":"user","content":"torn tail"}}"#),
-            )
-            .unwrap();
+        .build_info(Path::new("/repo/s1.jsonl"), || None)
+        .unwrap();
     assert_eq!(
-        capped_info.all_messages_text, durable_before.all_messages_text,
-        "the cap bounds the snapshot fold too - a torn tail past it changes no corpus byte"
+        capped_info.all_messages_text,
+        durable_before.all_messages_text
     );
     assert_eq!(
         state.acc.search_text_chars,
         durable_before.search_text_chars
     );
-    assert_eq!(
-        state.acc.search_text_chars,
-        state.acc.all_messages_text.chars().count()
-    );
     let mut uncapped = SessionScanState::fresh(generation);
     fold_scan_entry(&mut uncapped.acc, &header_line).unwrap();
     fold_scan_entry(&mut uncapped.acc, &message("user turn one", 1)).unwrap();
-    let uncapped_durable = uncapped.acc.clone();
     let uncapped_info = uncapped
-            .build_info(
-                Path::new("/repo/s1.jsonl"),
-                || None,
-                Some(r#"{"type":"message","id":"m5","timestamp":"2","message":{"role":"user","content":"user turn two"}}"#),
-            )
-            .unwrap();
-    assert_eq!(
-        uncapped_info.all_messages_text,
-        "user turn one user turn two"
-    );
-    assert_eq!(
-        uncapped.acc.all_messages_text,
-        uncapped_durable.all_messages_text
-    );
-    assert_eq!(
-        uncapped.acc.search_text_chars,
-        uncapped_durable.search_text_chars
-    );
+        .build_info(Path::new("/repo/s1.jsonl"), || None)
+        .unwrap();
+    assert_eq!(uncapped_info.all_messages_text, "user turn one");
 
     // (4) a rewritten file re-folds from a fresh accumulator: corpus and counter restart together.
     let mut rewritten = SessionScanState::fresh(generation);
