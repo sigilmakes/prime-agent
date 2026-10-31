@@ -210,10 +210,12 @@ local function automatic(input,ctx)
     if saved~=null then state=saved.value end
     local compact=input.stage=="compaction_settled"
     if not compact then state.turns=state.turns+1 end
-    local interval=math.max(1,policy.turnInterval or 25)
+    -- Typed settings preserve omitted Option fields as JSON null. The Lua
+    -- null sentinel is truthy, so `or` alone does not select the default.
+    local interval=math.max(1,(policy.turnInterval~=null and policy.turnInterval) or 25)
     local due=(compact and policy.compact~=false) or (not compact and state.turns%interval==0)
     local now=input.now_ms or 0
-    local cooled=state.last_review==nil or now-state.last_review>=(policy.cooldownMs or 1200000)
+    local cooled=state.last_review==nil or now-state.last_review>=((policy.cooldownMs~=null and policy.cooldownMs) or 1200000)
     if due and cooled then state.last_review=now end
     ctx.call("harness.store.put",{identity=key,value=state,expected=saved~=null and saved.revision or "absent"})
     if not due or not cooled then return {scheduled=false,reason="policy"} end

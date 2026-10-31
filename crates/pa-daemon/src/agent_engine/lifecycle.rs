@@ -189,6 +189,7 @@ impl AgentSessionEngine {
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
+            plugin_job_sink: std::sync::Mutex::new(None),
             turn_activity_probe: std::sync::Mutex::new(None),
             progress_notes: std::sync::Mutex::new(None),
             progress_note_emit: std::sync::Mutex::new(None),
@@ -298,6 +299,20 @@ impl AgentSessionEngine {
             .expect("compaction summary sink lock") = Some(sink);
     }
 
+    /// Install the worker's terminal plugin-job observer for current and future sessions.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink lock is poisoned.
+    pub fn set_plugin_job_sink(&self, sink: pa_core::session_engine::PluginJobSink) {
+        *self.plugin_job_sink.lock().expect("plugin job sink lock") = Some(sink.clone());
+        if let Ok(guard) = self.session.try_lock() {
+            if let Some(engine) = guard.as_deref() {
+                engine.session.set_plugin_job_sink(sink);
+            }
+        }
+    }
+
     /// Install the worker's turn-activity probe: deferred plugin jobs (the
     /// continual-harness refinement review) then wait for the turn boundary
     /// instead of treating a provider retry gap as idle.
@@ -404,6 +419,14 @@ impl AgentSessionEngine {
             .clone()
         {
             built.session.set_compaction_summary_sink(sink);
+        }
+        if let Some(sink) = self
+            .plugin_job_sink
+            .lock()
+            .expect("plugin job sink lock")
+            .clone()
+        {
+            built.session.set_plugin_job_sink(sink);
         }
         if let Some(probe) = self
             .turn_activity_probe

@@ -202,6 +202,41 @@ fn first_party_refine_drains_its_admitted_job_before_cli_exit() {
     );
 }
 
+#[test]
+fn sparse_automatic_settings_publish_refinement_before_cli_exit() {
+    let fixture = Fixture::new();
+    let network = auxiliary(&fixture, AUXILIARY);
+    fixture.settings(
+        &json!({"autoRefine":{"enabled":true},"auxiliaryModel":"aux/selected",
+        "plugins":{"fixture":{"enabled":false},"route":{"enabled":true,"path":"aux.lua"},
+        "harness":{"enabled":true}}}),
+    );
+    let mut args = vec!["--mode", "json", "-p"];
+    args.extend(std::iter::repeat_n("reusable evidence", 25));
+    let output = fixture.run(&args, &json!({"responses":vec!["ordinary answer";25]}));
+    success(&output);
+    let events: Vec<Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let jobs: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "plugin_job_update")
+        .collect();
+    assert_eq!(jobs.len(), 1, "{events:#?}");
+    assert_eq!(jobs[0]["job"]["state"]["status"], "completed", "{jobs:#?}");
+    assert_eq!(jobs[0]["job"]["state"]["result"]["summary"], "CLI learned");
+    assert!(
+        std::fs::read_to_string(fixture.agent.join("plugins/harness/store.json"))
+            .unwrap()
+            .contains("post-exit learned memory")
+    );
+    assert_eq!(
+        network.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 const FAILING_AUXILIARY: &str = r"
 return {providers={{name='aux',mode='streaming',run=function()
  error('intentional auxiliary failure')
