@@ -1188,4 +1188,60 @@ mod tests {
             "the row's aggregate matches the served fold"
         );
     }
+
+    #[test]
+    fn review_foreign_rows_join_the_serving_fold_before_append() {
+        let dir = temp_dir("review-follow");
+        let (mut first, path) = fresh_log_session(&dir, "review-follow");
+        first.persist_entry("message", json!({"message":{"role":"user","content":"seed"}})).unwrap();
+        let mut second = SessionFile::open_log(&path, &dir).unwrap();
+        let foreign = first.persist_entry("message", json!({"message":{"role":"assistant","content":"foreign"}})).unwrap();
+        second.persist_entry("message", json!({"message":{"role":"user","content":"after foreign"}})).unwrap();
+        let durable = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(serde_json::to_value(second.entries()).unwrap(), serde_json::to_value(durable.entries()).unwrap(), "a successful append must serve the full durable fold, including {foreign}");
+    }
+
+    #[test]
+    fn review_public_retry_does_not_duplicate_an_unknown_row() {
+        let dir = temp_dir("review-public-retry");
+        let fake = std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("review-public-retry.lock")));
+        fake.arm_fsync_failure(3);
+        let (mut store, path) = fresh_log_session_with(&dir, "review-public-retry", LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)));
+        let fields = json!({"message":{"role":"user","content":"same user intent"}});
+        store.persist_entry("message", fields.clone()).expect_err("unknown barrier");
+        fake.release_rival();
+        store.persist_entry("message", fields).expect("retry");
+        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(replay.entries().len(), 1, "public retry must not mint another durable entry");
+        assert_eq!(serde_json::to_value(store.entries()).unwrap(), serde_json::to_value(replay.entries()).unwrap());
+    }
+
+    #[test]
+    fn review_external_repair_cannot_leave_removed_rows_in_serving_fold() {
+        let dir = temp_dir("review-repair");
+        let (mut store, path) = fresh_log_session(&dir, "review-repair");
+        store.persist_entry("message", json!({"message":{"role":"user","content":"survivor"}})).unwrap();
+        store.persist_entry("message", json!({"message":{"role":"assistant","content":"lost in repair"}})).unwrap();
+        let log_path = log_file(&dir, "review-repair");
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        let last_line = bytes.iter().enumerate().filter(|(_, byte)| **byte == b'\n').nth(1).unwrap().0 + 1;
+        bytes[last_line] = b'!';
+        std::fs::write(&log_path, bytes).unwrap();
+        let report = SessionLog::repair(&log_dir(&dir), "review-repair", deadline()).unwrap();
+        assert_eq!(report.last_good_seq, 2);
+        store.persist_entry("message", json!({"message":{"role":"user","content":"after repair"}})).unwrap();
+        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(serde_json::to_value(store.entries()).unwrap(), serde_json::to_value(replay.entries()).unwrap(), "repair must reject or rebuild a stale live fold");
+    }
+
+    #[test]
+    fn review_selected_branch_survives_sessionfile_reopen() {
+        let dir = temp_dir("review-selection");
+        let (mut store, path) = fresh_log_session(&dir, "review-selection");
+        let root = store.persist_entry("message", json!({"message":{"role":"user","content":"root"}})).unwrap();
+        store.persist_entry("message", json!({"message":{"role":"assistant","content":"tip"}})).unwrap();
+        store.branch_to(Some(&root)).unwrap();
+        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(store.leaf_id(), replay.leaf_id(), "successful navigation must be durable without a following message");
+    }
 }

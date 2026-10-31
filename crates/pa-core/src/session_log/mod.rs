@@ -8,6 +8,8 @@
 //! outcomes. Waiting for another writer is the caller's decision.
 
 mod crc;
+mod follower;
+pub use follower::{ReadCursor, ReadError};
 // The disk seam is public so a harness crate can inject a fault-injected
 // disk at its own tests (`Disk`'s doc: real files in production,
 // fault-injected files in tests exercising the same code path).
@@ -492,7 +494,10 @@ impl SessionLog {
         let scan = self.scan(0, seq.saturating_sub(1))?;
         let existing = scan.rows.into_iter().find(|row| row.seq == seq);
         Ok(match existing {
-            Some(row) if body_matches(&row, body) => Outcome::Committed { seq, ts: row.ts },
+            Some(row) if body_matches(&row, body) => {
+                self.disk.fsync(&self.file)?;
+                Outcome::Committed { seq, ts: row.ts }
+            }
             _ => Outcome::NotWritten {
                 reason: NotWritten::SeqConflict { seq },
             },
