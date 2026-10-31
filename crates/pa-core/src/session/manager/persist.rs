@@ -28,8 +28,12 @@ impl SessionManager {
                 continue;
             }
             if let FileEntry::Unknown { rest } = entry {
-                if rest.get("type").and_then(serde_json::Value::as_str) == Some("branch_selection") {
-                    self.leaf_id = rest.get("selectedLeaf").and_then(serde_json::Value::as_str).map(str::to_owned);
+                if rest.get("type").and_then(serde_json::Value::as_str) == Some("branch_selection")
+                {
+                    self.leaf_id = rest
+                        .get("selectedLeaf")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
                     continue;
                 }
             }

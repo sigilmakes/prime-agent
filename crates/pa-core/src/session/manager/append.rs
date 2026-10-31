@@ -303,6 +303,7 @@ impl SessionManager {
         aggregate_usage: pa_types::ai::Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> std::io::Result<String> {
+        self.refresh_committed_entries()?;
         let target_index = self.by_id.get(target_id).copied().filter(|&index| {
             matches!(
                 self.file_entries[index],

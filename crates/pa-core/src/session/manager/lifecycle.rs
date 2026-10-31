@@ -3,8 +3,8 @@
 
 use super::{
     capture_git_context, create_session_id, format_iso_now, get_session_file_path,
-    resolve_session_rlm_depth, root_rlm_depth_from_env, FileEntry, HashMap,
-    NewSessionOptions, Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
+    resolve_session_rlm_depth, root_rlm_depth_from_env, FileEntry, HashMap, NewSessionOptions,
+    Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
 };
 
 /// The fork's branch copy: drop the source header and its `git_state` rows,

@@ -69,6 +69,7 @@ impl SessionManager {
         &mut self,
         git: GitContext,
     ) -> std::io::Result<Option<String>> {
+        self.refresh_committed_entries()?;
         // Match TS gitContextsEqual: preserved future metadata is not part of
         // repository identity and must not create a new git_state row.
         if self.active_git_context().as_ref().is_some_and(|active| {

@@ -703,8 +703,9 @@ fn sequential_appends_keep_reopens_amortized() {
         let id = format!("n{i}");
         let row = serde_json::json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("appended {i}"),"timestamp":0}});
         let line = format!("{row}\n");
-        appended_bytes += line.len() as u64;
+        let before = std::fs::metadata(&path).unwrap().len();
         append_fixture(&path, line.as_bytes(), AppendOwnership::SessionLeaseHeld).unwrap();
+        appended_bytes += std::fs::metadata(&path).unwrap().len() - before;
         let store = WindowedSessionStore::open(&path).unwrap().unwrap();
         let stats = store.read_stats();
         assert!(stats.cache_hit, "append {i} invalidated the cache");
