@@ -52,6 +52,28 @@ struct RefusingSelectionStore {
 }
 
 impl InitialContextSelectionStore for RefusingSelectionStore {
+    fn mirror_seed(&self) -> anyhow::Result<Option<MirrorSeed>> {
+        let store = crate::session_store::SessionFile::open(&self.source.path)?;
+        Ok(Some(MirrorSeed {
+            header: store.header.clone(),
+            entries: crate::session_tree::file_entries(&store),
+            leaf_id: store.leaf_id().map(str::to_owned),
+        }))
+    }
+
+    fn entry_writer(
+        &self,
+        _source: ContextSelectionSource,
+    ) -> Arc<dyn pa_core::session::manager::SessionEntryWriter> {
+        struct RefusingWriter;
+        impl pa_core::session::manager::SessionEntryWriter for RefusingWriter {
+            fn append(&self, _entry: &FileEntry) -> std::io::Result<()> {
+                Err(std::io::Error::other(ACK_ERROR))
+            }
+        }
+        Arc::new(RefusingWriter)
+    }
+
     fn capture(&self, expected_file: &Path) -> anyhow::Result<ContextSelectionSource> {
         anyhow::ensure!(expected_file == self.source.path, "unexpected fixture path");
         self.captures.fetch_add(1, Ordering::SeqCst);
@@ -237,16 +259,23 @@ fn branch_summary_ack_failure_reaches_no_model() {
     };
     let entries = vec![user_entry("u1", None, "Summarize this fixture branch")];
     let session_file = session_dir.join("owned-ack-fixture.jsonl");
-    let mut fixture = serde_json::to_string(&FileEntry::Header {
+    let mut log = pa_core::session_log::SessionLog::open(
+        &session_dir,
+        "owned-ack-fixture",
+        crate::session_transport::deadline(),
+    )
+    .unwrap();
+    for entry in std::iter::once(FileEntry::Header {
         header: header.clone(),
     })
-    .unwrap();
-    fixture.push('\n');
-    for entry in &entries {
-        fixture.push_str(&serde_json::to_string(entry).unwrap());
-        fixture.push('\n');
+    .chain(entries.iter().cloned())
+    {
+        assert!(matches!(
+            log.append(&entry, crate::session_transport::deadline()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
-    std::fs::write(&session_file, fixture.as_bytes()).unwrap();
+    let fixture = std::fs::read_to_string(&session_file).unwrap();
     let commits = Arc::new(AtomicUsize::new(0));
     let selections = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(RefusingSelectionStore {
@@ -293,7 +322,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
         }
     );
     assert_eq!(commits.load(Ordering::SeqCst), 1);
-    assert_eq!(store.captures.load(Ordering::SeqCst), 2);
+    assert_eq!(store.captures.load(Ordering::SeqCst), 1);
     // A failed warmup/build is the same failure at every demand seam. Do not
     // rerun its acknowledged selection callback or persist a fresh User first.
     let model = engine.session_model().unwrap();
@@ -330,7 +359,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
         1,
         "build callback must not rerun"
     );
-    assert_eq!(store.captures.load(Ordering::SeqCst), 2);
+    assert_eq!(store.captures.load(Ordering::SeqCst), 1);
     assert_eq!(
         *selections.lock().unwrap(),
         vec![ContextSelection {

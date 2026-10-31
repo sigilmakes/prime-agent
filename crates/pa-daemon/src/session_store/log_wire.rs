@@ -1,7 +1,4 @@
-//! The log-transported half of `SessionFile`: the write arm the canonical
-//! paths bypass. Everything here serves the port's minimum end-to-end path
-//! against the session-log core; the switch lives in
-//! `crate::session_transport`.
+//! Durable log append boundary for the serving conversation fold.
 
 use anyhow::{Context, Result};
 use serde_json::Value;

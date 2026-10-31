@@ -1,4 +1,4 @@
-//! Initial strategy acknowledgement through the worker's one canonical writer.
+//! Initial strategy selection through the worker's durable log writer.
 
 use std::sync::{Arc, Mutex};
 

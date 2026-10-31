@@ -1,6 +1,4 @@
-//! The write arm: the in-memory append family, the atomic full-file rewrite, the durable
-//! append-with-rewrite-bootstrap persist paths, and the store lease discipline that
-//! serializes writers onto the file.
+//! Session row builders and durable append publication.
 
 use super::{
     json, new_entry_id, HashMap, PathBuf, Result, SessionEntry, SessionFile, SessionHeader, Value,
@@ -76,14 +74,10 @@ impl SessionFile {
         )
     }
 
-    /// Write the full file atomically (header + every entry). The temp is
-    /// fsynced before the rename (TS `_rewriteFile` passes no `fsync` option),
-    /// so a hard crash cannot zero out rows the durable append landed.
+    /// Materialize the unflushed entry tail in the append-only log.
     ///
     /// # Errors
-    ///
-    /// Returns an error when the store only holds a window, or the write,
-    /// flush, sync, or rename fails; an empty path answers `Ok(())`.
+    /// Returns the log's refusal; an empty path stays in memory.
     pub fn rewrite(&self) -> Result<()> {
         if self.path.as_os_str().is_empty() {
             return Ok(());
@@ -91,14 +85,10 @@ impl SessionFile {
         self.flush_unmaterialized_log_tail(0)
     }
 
-    /// Append one entry line to the file, rewriting first when the file is
-    /// missing. The entry joins the index only after its line reaches the
-    /// file; a failed `sync_data` keeps it indexed (a reload would load it
-    /// as the leaf) and the error still surfaces.
+    /// Commit one row before publishing it in the serving fold.
     ///
     /// # Errors
-    ///
-    /// Returns an error when the append or the post-write durability sync fails.
+    /// Returns the log's refusal without indexing an uncommitted row.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
         self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
     }
