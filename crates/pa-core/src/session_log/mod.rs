@@ -36,6 +36,8 @@ pub enum NotWritten {
     /// `seq` is already named by another row, or lies below the log's next seq
     /// without naming a row; nothing was written.
     SeqConflict { seq: u64 },
+    /// A first-row append found existing bytes, even an identical or torn row.
+    NonEmpty,
     /// The log's tail is unusable because an earlier writer died mid-line;
     /// nothing was written. [`SessionLog::repair`] makes the log appendable.
     Damaged {
@@ -223,6 +225,12 @@ impl std::fmt::Debug for Recover {
     }
 }
 
+enum AppendPosition {
+    Next,
+    Pinned(u64),
+    First,
+}
+
 /// One session's append-only log.
 pub struct SessionLog {
     disk: Arc<dyn Disk>,
@@ -259,14 +267,21 @@ impl SessionLog {
 
     /// Append `row` at the log's next seq.
     pub fn append<T: Serialize>(&mut self, row: &T, deadline: Instant) -> Outcome {
-        self.append_inner(None, row, deadline)
+        self.append_inner(AppendPosition::Next, row, deadline)
     }
 
     /// Append `row` at `seq`. Re-appending the same seq with the same body is
     /// idempotent and returns the existing row's outcome, so retries need no
     /// acknowledgement from anyone.
     pub fn append_at<T: Serialize>(&mut self, seq: u64, row: &T, deadline: Instant) -> Outcome {
-        self.append_inner(Some(seq), row, deadline)
+        self.append_inner(AppendPosition::Pinned(seq), row, deadline)
+    }
+
+    /// Commit the first row only if the file has no bytes. The empty-file
+    /// check and write share one flock; unlike `append_at(1, ...)`, an
+    /// identical existing row is refused rather than adopted as this intent.
+    pub fn append_first<T: Serialize>(&mut self, row: &T, deadline: Instant) -> Outcome {
+        self.append_inner(AppendPosition::First, row, deadline)
     }
 
     /// Rows with `seq > since`, in order.
@@ -410,7 +425,7 @@ impl SessionLog {
 
     fn append_inner<T: Serialize>(
         &mut self,
-        pinned: Option<u64>,
+        position: AppendPosition,
         row: &T,
         deadline: Instant,
     ) -> Outcome {
@@ -422,7 +437,19 @@ impl SessionLog {
                 }
             }
         };
-        match self.locked(deadline, |log| log.write_at(pinned, body)) {
+        match self.locked(deadline, |log| {
+            let pinned = match position {
+                AppendPosition::First if log.file_len()? != 0 => {
+                    return Ok(Outcome::NotWritten {
+                        reason: NotWritten::NonEmpty,
+                    });
+                }
+                AppendPosition::First => Some(1),
+                AppendPosition::Next => None,
+                AppendPosition::Pinned(seq) => Some(seq),
+            };
+            log.write_at(pinned, body)
+        }) {
             Ok(outcome) => outcome,
             Err(Error::Busy { until, holder }) => Outcome::Busy { until, holder },
             Err(Error::Io(error)) => Outcome::NotWritten {

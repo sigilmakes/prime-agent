@@ -897,3 +897,33 @@ fn a_pinned_retry_reestablishes_the_failed_durability_barrier() {
     );
     assert_eq!(log.read_since(0).unwrap().len(), 1);
 }
+
+#[test]
+fn a_first_append_never_adopts_a_rivals_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = SessionLog::open(dir.path(), ID, deadline()).unwrap();
+    let mut rival = SessionLog::open(dir.path(), ID, deadline()).unwrap();
+    let header = json!({"type":"session", "id":ID});
+    assert_eq!(
+        committed_seq(&first.append_first(&header, deadline())),
+        Some(1)
+    );
+    let bytes = std::fs::read(log_path(dir.path())).unwrap();
+    assert!(matches!(
+        rival.append_first(&header, deadline()),
+        Outcome::NotWritten {
+            reason: NotWritten::NonEmpty
+        }
+    ));
+    assert_eq!(std::fs::read(log_path(dir.path())).unwrap(), bytes);
+    // A torn first attempt is existing bytes too, not permission to overwrite.
+    std::fs::write(log_path(dir.path()), b"{\"seq\":").unwrap();
+    let torn = std::fs::read(log_path(dir.path())).unwrap();
+    assert!(matches!(
+        rival.append_first(&header, deadline()),
+        Outcome::NotWritten {
+            reason: NotWritten::NonEmpty
+        }
+    ));
+    assert_eq!(std::fs::read(log_path(dir.path())).unwrap(), torn);
+}
