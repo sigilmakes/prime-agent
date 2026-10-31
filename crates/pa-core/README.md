@@ -177,3 +177,10 @@ inventory descriptor, and generation-bound invocation adapter together. They mus
 use this same retirement and capability lifecycle, not add a parallel registry or
 leak Lua values to the engine. Context strategy selection and ordered compaction
 policy remain separate from this generic callback host.
+
+Session persistence embeddings use `session::manager::SessionEntryWriter` through
+`SessionManager::set_entry_writer`. Each complete entry envelope goes to the
+embedding's durable log before the manager publishes it. Native engine event
+persistence runs before agent event delivery; metadata uses the same append path.
+The engine has no session ownership, adoption, epoch, acknowledgement, or revision
+protocol. `session_engine::runtime::SessionRuntime` remains the kernel host runtime.
