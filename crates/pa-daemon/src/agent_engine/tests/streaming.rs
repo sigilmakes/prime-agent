@@ -1212,3 +1212,71 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
         );
     }
 }
+
+#[test]
+fn cold_switch_uses_caller_persistence_and_hot_switch_commits_once_through_sink() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(&json!({"responses":["unused"]}), 1024);
+    let path = dir.path().join("switch-authority.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    engine.set_session_file(path.clone());
+    let owner = own_log_store(&engine, store);
+    let model = engine.session_model().unwrap();
+    let select = || EngineModelSelection {
+        provider: Some(model.provider.clone()),
+        model: Some(model.id.clone()),
+        api_key: None,
+        thinking: None,
+    };
+    assert!(!engine.persists_session_entries());
+    assert!(engine.switch_model(select()));
+    owner
+        .lock()
+        .unwrap()
+        .store
+        .as_mut()
+        .unwrap()
+        .persist_entry(
+            "model_change",
+            json!({"provider":model.provider,"modelId":model.id}),
+        )
+        .unwrap();
+    let count = || {
+        owner
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .entries()
+            .iter()
+            .filter(|row| row.type_ == "model_change")
+            .count()
+    };
+    assert_eq!(count(), 1, "cold caller writes the chosen model once");
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    assert!(engine.persists_session_entries());
+    let before = count();
+    assert!(engine.switch_model(select()));
+    assert_eq!(
+        count(),
+        before + 1,
+        "hot switch writes exactly one durable model row"
+    );
+    let disk = crate::session_store::SessionFile::open(&path).unwrap();
+    assert_eq!(
+        disk.entries()
+            .iter()
+            .filter(|row| row.type_ == "model_change")
+            .count(),
+        count()
+    );
+}

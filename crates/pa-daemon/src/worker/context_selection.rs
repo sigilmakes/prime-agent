@@ -177,3 +177,71 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admitted_terminal_rows_persist_during_shutdown_until_execution_lock_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shutdown.jsonl");
+        let mut store = SessionFile::create("/fixture", None, 0);
+        store.set_path(path.clone());
+        store.rewrite().unwrap();
+        store.lease = Some(Arc::new(
+            crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
+        ));
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(store),
+            "/fixture".into(),
+        )));
+        let adapter = CoreInitialContextSelectionStore(Arc::clone(&core));
+        let source = adapter.capture(&path).unwrap();
+        let writer = adapter.entry_writer(source);
+        core.lock().unwrap().shutdown_requested = true;
+        assert!(
+            adapter.capture(&path).is_err(),
+            "new startup must stop at shutdown"
+        );
+        let mut parent = None;
+        for (id, message) in [
+            (
+                "terminal-tool",
+                json!({"role":"toolResult", "toolCallId":"admitted-tool", "toolName":"fixture", "content":[{"type":"text","text":"interrupted"}], "isError":true, "timestamp":1}),
+            ),
+            (
+                "terminal-assistant",
+                json!({"role":"assistant", "api":"openai-completions", "provider":"fixture", "model":"fixture", "content":[], "stopReason":"aborted", "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "timestamp":2}),
+            ),
+        ] {
+            let mut entry = serde_json::from_value::<pa_types::session::FileEntry>(json!({"type":"message","id":id,"parentId":parent,"timestamp":"2026-10-31T00:00:00.000Z","message":message})).unwrap();
+            writer.append(&mut entry).unwrap();
+            parent = Some(id);
+        }
+        let reopened = SessionFile::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .entries()
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["terminal-tool", "terminal-assistant"]
+        );
+        core.lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .lease
+            .as_ref()
+            .unwrap()
+            .release();
+        let mut late = serde_json::from_value::<pa_types::session::FileEntry>(json!({"type":"session_info","id":"late","parentId":"terminal-assistant","timestamp":"2026-10-31T00:00:00.000Z","name":"late"})).unwrap();
+        assert!(
+            writer.append(&mut late).is_err(),
+            "released execution owner cannot publish"
+        );
+        assert!(SessionFile::open(&path).unwrap().entry("late").is_none());
+    }
+}
