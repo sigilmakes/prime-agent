@@ -35,7 +35,7 @@ pub(crate) fn publish(
     if let Err(error) = crate::worker::persist_custom_row(&mut core, &message) {
         // The job already committed. Surface the persistence diagnostic without
         // re-running it or concealing the original terminal outcome.
-        tracing::error!(%error, "cannot persist plugin job outcome");
+        eprintln!("pa-daemon: cannot persist plugin job outcome: {error:#}");
         message["content"] = json!(format!(
             "{}\nCould not save job outcome: {error:#}",
             message["content"].as_str().unwrap_or_default()
