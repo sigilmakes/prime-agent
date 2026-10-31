@@ -346,6 +346,28 @@ impl WireState {
 }
 
 impl LogWire {
+    /// Exact durable bytes on the rare known-ID retry path, before view overlays.
+    pub(crate) fn committed_row(&self, id: &str) -> Result<Value, LogWireError> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rows = state
+            .log
+            .as_ref()
+            .expect("a committed row has an open log")
+            .read_since(0)
+            .map_err(open_error)?;
+        rows.into_iter()
+            .skip(1)
+            .find(|row| row.body.get("id").and_then(Value::as_str) == Some(id))
+            .map(|row| row.body)
+            .ok_or_else(|| {
+                LogWireError::Refused(anyhow::anyhow!(
+                    "committed row {id} is no longer present; reopen the session"
+                ))
+            })
+    }
     /// The exact undecided envelope, before a public caller can mint a new ID.
     pub(crate) fn pending_row(&self) -> Option<Value> {
         self.state

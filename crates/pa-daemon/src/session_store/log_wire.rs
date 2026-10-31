@@ -82,6 +82,22 @@ impl SessionFile {
     /// The log's boundary policy (a foreign `Busy` holder, a refused row, or
     /// an undecided write), plus the row's encoding.
     pub(crate) fn persist_built_log_entry(&mut self, entry: SessionEntry) -> Result<String> {
+        self.commit_log_entry(entry).map(|entry| entry.id)
+    }
+
+    /// The SDK mirror receives the exact committed envelope, not a usage-folded
+    /// serving row or a newly minted replacement for an unresolved retry.
+    pub(crate) fn persist_sdk_entry(
+        &mut self,
+        entry: &mut pa_types::session::FileEntry,
+    ) -> Result<()> {
+        let requested = serde_json::from_value(serde_json::to_value(&*entry)?)?;
+        let committed = self.commit_log_entry(requested)?;
+        *entry = serde_json::from_value(serde_json::to_value(committed)?)?;
+        Ok(())
+    }
+
+    fn commit_log_entry(&mut self, entry: SessionEntry) -> Result<SessionEntry> {
         // An undecided caller intent retains its full original envelope even if
         // the public retry rebuilt its ID and timestamp.
         let entry = self
@@ -91,7 +107,12 @@ impl SessionFile {
         self.observe_log_tail()?;
         let id = entry.id.clone();
         if self.by_id.contains_key(&id) {
-            return Ok(id);
+            let row = self
+                .log_transport
+                .as_ref()
+                .context("session has no log writer")?
+                .committed_row(&id)?;
+            return serde_json::from_value(row).context("decode committed session row");
         }
         let mut entry = entry;
         if entry.parent_id == old_leaf {
@@ -100,7 +121,7 @@ impl SessionFile {
         let row = serde_json::to_value(&entry).context("encode the session row")?;
         self.flush_log_tail_from(0, std::slice::from_ref(&row))?;
         self.observe_log_tail()?;
-        Ok(id)
+        Ok(entry)
     }
 
     pub(super) fn pending_log_entry(
@@ -115,6 +136,35 @@ impl SessionFile {
             return None;
         };
         (entry.type_ == entry_type && entry.fields == *fields).then_some(entry)
+    }
+
+    /// Capture after `observe_log_tail`, together with the mirror entries and
+    /// selected leaf. Each bound SDK mirror owns an independent cursor clone.
+    pub(crate) fn sdk_read_cursor(&self) -> pa_core::session_log::ReadCursor {
+        self.log_progress
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cursor
+            .clone()
+    }
+
+    /// Feed the SDK from raw log rows, before serving-only usage overlays.
+    /// Selection markers deserialize as `FileEntry::Unknown`, retaining their
+    /// type and selectedLeaf fields for the SDK's branch policy.
+    pub(crate) fn read_sdk_tail(
+        &mut self,
+        cursor: &mut pa_core::session_log::ReadCursor,
+    ) -> Result<Vec<pa_types::session::FileEntry>> {
+        self.observe_log_tail()?;
+        let wire = self
+            .log_transport
+            .as_ref()
+            .context("session has no log reader")?;
+        wire.observe(&self.header.id, cursor)?
+            .into_iter()
+            .map(|row| serde_json::from_value(row.body).context("decode raw SDK session row"))
+            .collect()
     }
 
     /// Extend this serving fold from validated durable rows, without sharing a
