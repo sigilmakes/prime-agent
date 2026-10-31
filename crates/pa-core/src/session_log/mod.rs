@@ -317,6 +317,11 @@ impl SessionLog {
     /// fault-injection seam. Production uses [`Self::open`]; a disk wrapper
     /// that fails a syscall on schedule drives the same code path with the
     /// failure the schedule names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] on lock contention, [`Error::Damaged`] for an
+    /// invalid tail, or [`Error::Io`] for path, open, read, or sync failures.
     pub fn open_with(
         disk: Arc<dyn Disk>,
         dir: &Path,
