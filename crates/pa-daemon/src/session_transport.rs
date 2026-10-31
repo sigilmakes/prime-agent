@@ -97,6 +97,22 @@ pub(crate) fn resolve(agent_dir: &Path, session_path: &Path) -> SessionTransport
     SessionTransport::Canonical
 }
 
+/// The file a reader reads for this session path: the log file when the
+/// transport serves it (the log is the durable session), the canonical
+/// file when it exists, `None` when the session has no durable file — the
+/// caller's read arm answers "not found" by skipping.
+///
+/// A reader carries the agent dir explicitly: the sessions directory is
+/// env-overridable, so a session path's ancestry does not name the log
+/// directory's parent.
+pub(crate) fn reader_file(agent_dir: &Path, session_path: &Path) -> Option<PathBuf> {
+    let session_id = session_id_of(session_path)?;
+    if transports_session_log(agent_dir, session_path) {
+        return Some(log_file(agent_dir, &session_id));
+    }
+    session_path.exists().then(|| session_path.to_path_buf())
+}
+
 /// Whether the switch maps this session to the log.
 pub(crate) fn transports_session_log(agent_dir: &Path, session_path: &Path) -> bool {
     resolve(agent_dir, session_path) == SessionTransport::SessionLog
@@ -215,8 +231,7 @@ impl WireState {
         // wire never pins a seq the log already named.
         let rows = log.read_since(0).map_err(|error| {
             LogWireError::Refused(
-                anyhow::Error::from(open_error(error))
-                    .context("read the session log at its open"),
+                anyhow::Error::from(open_error(error)).context("read the session log at its open"),
             )
         })?;
         if let Some(row) = rows.first() {
@@ -242,10 +257,7 @@ impl WireState {
     /// re-present the same bytes and must re-pin at the pending's seq for
     /// the core to answer from the landed row instead of repeating it.
     fn refresh_tail(&mut self) -> Result<(), LogWireError> {
-        let log = self
-            .log
-            .as_mut()
-            .expect("the caller ran ensure_open first");
+        let log = self.log.as_mut().expect("the caller ran ensure_open first");
         let rows = log.refresh(deadline()).map_err(open_error)?;
         if let Some(last) = rows.last() {
             self.next_seq = last.seq + 1;
@@ -265,10 +277,7 @@ impl WireState {
         // conflict: beyond that the log keeps moving under the wire and a
         // reopen must settle it.
         for _attempt in 0..2 {
-            let log = self
-                .log
-                .as_mut()
-                .expect("the caller ran ensure_open first");
+            let log = self.log.as_mut().expect("the caller ran ensure_open first");
             let seq = self
                 .pending
                 .as_ref()
@@ -336,10 +345,7 @@ impl WireState {
                     // stays; a re-present of its bytes still resolves
                     // through the core's body match.
                     {
-                        let log = self
-                            .log
-                            .as_mut()
-                            .expect("the caller ran ensure_open first");
+                        let log = self.log.as_mut().expect("the caller ran ensure_open first");
                         let rows = log
                             .read_since(self.next_seq.saturating_sub(1))
                             .map_err(open_error)?;
@@ -444,11 +450,13 @@ impl LogWire {
         agent_dir: &Path,
         disk: std::sync::Arc<D>,
     ) -> Self {
-        let mut wire = Self::deferred(agent_dir);
+        let wire = Self::deferred(agent_dir);
         let state = std::sync::Arc::clone(&wire.state);
-        let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.disk = Some(disk);
-        let _ = guard;
+        drop(guard);
         wire
     }
 }
@@ -518,7 +526,7 @@ mod tests {
     use crate::worker::{Worker, WorkerConfig};
     use serde_json::json;
     use std::fs::{File, TryLockError};
-    use std::io::{self, Write};
+    use std::io;
     use std::path::Path;
     use std::sync::atomic::Ordering;
 
@@ -681,10 +689,10 @@ mod tests {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(rival),
-                    Err(std::fs::TryLockError::WouldBlock) => {
+                    Err(TryLockError::WouldBlock) => {
                         panic!("the rival could not take the log's lock")
                     }
-                    Err(std::fs::TryLockError::Error(error)) => {
+                    Err(TryLockError::Error(error)) => {
                         panic!("the rival's lock attempt failed: {error}")
                     }
                 }
@@ -703,7 +711,10 @@ mod tests {
                 SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("rival open");
             assert!(
                 matches!(
-                    log.append(&json!({ "type": "session", "id": "rival-header" }), deadline()),
+                    log.append(
+                        &json!({ "type": "session", "id": "rival-header" }),
+                        deadline()
+                    ),
                     Outcome::Committed { .. }
                 ),
                 "the rival's header row commits"
@@ -739,17 +750,12 @@ mod tests {
         // the rival, so the recovery answers busy and the wire returns with
         // the write pending; the re-presented row re-pins the same seq and
         // the core answers from the landed bytes.
-        let fake = std::sync::Arc::new(FailNextFsync::new(
-            log_dir(&dir).join("undecided.lock"),
-        ));
+        let fake = std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("undecided.lock")));
         fake.arm_fsync_failure(3);
         let session_path = dir.join("undecided.jsonl");
         let mut store = SessionFile::create("test", None, 0);
         store.set_path(session_path.clone());
-        store.attach_log_wire(LogWire::defer_with_disk(
-            &dir,
-            std::sync::Arc::clone(&fake),
-        ));
+        store.attach_log_wire(LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)));
         store.rekey_log_session_id(&session_path).expect("re-key");
         let entry = crate::session_store::SessionEntry {
             type_: "message".to_owned(),
@@ -761,7 +767,10 @@ mod tests {
         let refused = store
             .persist_built_log_entry(entry.clone())
             .expect_err("undecided");
-        assert!(refused.to_string().contains("undecided write open"), "{refused:#}");
+        assert!(
+            refused.to_string().contains("undecided write open"),
+            "{refused:#}"
+        );
         // The row is not in the fold, but its bytes are in the file: the
         // barrier was lost, not the write.
         assert!(store.entries().is_empty());
