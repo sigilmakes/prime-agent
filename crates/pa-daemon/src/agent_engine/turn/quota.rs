@@ -312,7 +312,7 @@ impl AgentSessionEngine {
         // The resume path's live clear still stands (the quota IS back),
         // so a failed write surfaces as a log; the restart's arms own
         // the recovery. No SDK guard crosses the owner receipt await.
-        if let Err(write_error) = pa_core::session::canonical::persist_metadata_entry(
+        if let Err(write_error) = pa_core::session::metadata::persist_metadata_entry(
             &persistence,
             quota_metadata_entry(
                 pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
@@ -361,7 +361,7 @@ impl AgentSessionEngine {
         let Some(persistence) = persistence else {
             return Ok(());
         };
-        pa_core::session::canonical::persist_metadata_entry(
+        pa_core::session::metadata::persist_metadata_entry(
             &persistence,
             quota_metadata_entry(
                 pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,

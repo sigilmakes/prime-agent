@@ -127,7 +127,6 @@ impl AgentSessionEngine {
             goal_runtime: std::sync::Mutex::new(None),
             pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            canonical_step: std::sync::Mutex::new(None),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             bash_completion_sink: std::sync::Mutex::new(None),
@@ -379,7 +378,7 @@ impl AgentSessionEngine {
                     },
                 };
                 if let Err(persist_error) =
-                    pa_core::session::canonical::persist_metadata_entry(&handles.session, entry)
+                    pa_core::session::metadata::persist_metadata_entry(&handles.session, entry)
                         .await
                 {
                     eprintln!("pa-daemon: stale goal terminal persist failed: {persist_error:#}");
@@ -707,17 +706,6 @@ impl AgentSessionEngine {
                 *self.published_goal.lock().expect("published goal lock") = Some(state);
             }
         }
-        if let Some(live) = built.session.canonical_live_session() {
-            // This mirror is already bound. Restore the actual owner's exact
-            // raw receipt and ACK-approved pre-admission view, never reinstall
-            // the legacy window or replay a second local admission ledger.
-            live.observe().await?;
-            built.session.rebuild_canonical_branch_context().await?;
-            self.restore_quota_park(built).await;
-            self.flush_pending_stale_goal_terminal().await;
-            self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
-            return Ok(());
-        }
         if let Some(entries) = pending_branch {
             built
                 .session
@@ -866,9 +854,7 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) -> anyhow::Result<()> {
         let mut completion_state = self.session_build.lock().await;
         let built = self.session.lock().await.clone();
-        if let Some(engine) = built {
-            engine.session.retire_completed_runtime().await?;
-        }
+        drop(built);
         *completion_state = None;
         self.clear_retired_runtime().await;
         Ok(())
@@ -879,52 +865,16 @@ impl AgentSessionEngine {
     /// The actual owner must prove its last certified source unchanged and no
     /// outstanding receipt before the cached SDK mirror is discarded. A refusal
     /// keeps the cached runtime and its blocked view; nothing is retried.
-    pub(crate) async fn reopen_quarantined_session_runtime(&self) -> anyhow::Result<()> {
-        let mut completion_state = self.session_build.lock().await;
-        let store = self
-            .initial_context_selection_store
-            .lock()
-            .expect("initial context selection store lock")
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!("persistent session has no canonical owner to reopen")
-            })?;
-        store.retire_quarantined_owner()?;
-        *completion_state = None;
-        self.clear_retired_runtime().await;
-        Ok(())
-    }
+
 
     /// A prompt is a new demand, never a retry: a blocked canonical view is
     /// reopened once at a certified boundary before this prompt is admitted.
-    pub(crate) fn reopen_blocked_canonical_runtime(&self) {
-        if self.session_is_closed() {
-            return;
-        }
-        let blocked = self
-            .session
-            .blocking_lock()
-            .as_deref()
-            .and_then(|engine| engine.session.canonical_live_session())
-            .is_some_and(|live| live.projection_blocked());
-        if !blocked {
-            return;
-        }
-        if let Err(error) = self
-            .runtime
-            .block_on(self.reopen_quarantined_session_runtime())
-        {
-            eprintln!("pa-daemon: canonical runtime reopen refused: {error:#}");
-        }
-    }
+
 
     /// Authorized cancel-and-replace already aborts and settles at the worker.
     /// It does not grant permission to reuse the old physical owner.
     pub(crate) async fn discard_replaced_session_runtime(&self) {
         let mut completion_state = self.session_build.lock().await;
-        if let Some(engine) = self.session.lock().await.as_ref() {
-            engine.session.close_runtime_admission_for_replacement();
-        }
         *completion_state = None;
         self.clear_retired_runtime().await;
     }
@@ -1243,7 +1193,7 @@ impl AgentSessionEngine {
                 .and_then(std::path::Path::parent)
                 .map(std::path::Path::to_owned)
         });
-        let (session_manager, on_initial_context_selection, canonical_live_owner) = self
+        let (session_manager, on_initial_context_selection) = self
             .build_session_mirror(cwd.clone(), session_dir, session_file.clone())
             .await?;
         // Capture after the verified mirror: prompt admission sets its boundary
@@ -1323,7 +1273,6 @@ impl AgentSessionEngine {
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager: Some(session_manager),
-            canonical_live_owner,
             context_startup_boundary,
             context_startup_admitted_user_ids,
             on_initial_context_selection,

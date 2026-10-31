@@ -218,7 +218,7 @@ impl Worker {
                         .as_mut()
                         .context("Session is still initializing")
                         .and_then(|store| {
-                            if store.is_canonical_bound() {
+                            if self.engine.persists_session_entries() {
                                 return Ok(());
                             }
                             store.persist_entry("custom_message", json!({

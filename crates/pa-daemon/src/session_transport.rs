@@ -1,17 +1,14 @@
-//! THE transport switch for the session-log wiring (`SESSIONS-LOG-SPEC.md`,
-//! port-plan §3): the one point that decides whether a session is served by
-//! the old canonical paths ([`SessionTransport::Canonical`], compiled until
-//! the final deletion step) or by the session-log core
-//! ([`SessionTransport::SessionLog`]).
+//! THE transport switch for the session-log cutover (`SESSIONS-LOG-SPEC.md`):
+//! the one point that decides whether a session rides the session-log core
+//! ([`SessionTransport::SessionLog`]) or is refused as a pre-port old-format
+//! file ([`SessionTransport::LegacyUnsupported`]).
 //!
 //! Resolution rule ([`resolve`]): a session that already has a log file is a
-//! log session; an old-format session file stays canonical (the log core
-//! cannot read that format, and the spec reports old files instead of
-//! converting them); a fresh session takes the log only when the override
-//! environment asks for it, so the default behavior of every existing flow is
-//! unchanged. The override selects between the two transports until the
-//! cutover flips the default; the final deletion step removes the canonical
-//! half together with this switch.
+//! log session; a fresh session starts one; an old-format session file is
+//! kept on disk but never read and never migrated (the spec: report old
+//! files instead of converting them), so the caller surfaces the typed
+//! refusal. There is no transport override: every served session uses the
+//! log.
 //!
 //! Row policy at this boundary (the spec: policy lives in callers; the core
 //! never waits, retries, or inspects a peer): an append resolves exactly
@@ -34,22 +31,18 @@ use serde_json::Value;
 
 use pa_core::session_log::{self, Outcome, SessionLog};
 
-/// The override that serves fresh sessions on the log transport. Absent, or
-/// any other value, keeps the canonical default.
-pub(crate) const TRANSPORT_OVERRIDE_ENV: &str = "PA_SESSION_TRANSPORT";
-pub(crate) const TRANSPORT_OVERRIDE_VALUE: &str = "session-log";
-
 /// One open/repair's budget at this transport. The daemon's own append paths
 /// run under the session's admission deadlines; the blocking open/repair here
 /// takes this bound so a wedged storage device reports instead of stalling a
 /// create. The core never waits; this is the caller's one clock.
 const LOG_OPEN_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Which transport serves a session.
+/// Which transport opens a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionTransport {
-    /// The pre-port canonical paths (the compiled default until cutover).
-    Canonical,
+    /// A pre-port old-format session file: kept on disk, never read and
+    /// never migrated. The caller surfaces this as the typed refusal.
+    LegacyUnsupported,
     /// The session-log core: the log is the source of truth, the daemon
     /// store is its fold.
     SessionLog,
@@ -82,32 +75,32 @@ pub(crate) fn deadline() -> Instant {
 /// advertised identity).
 pub(crate) fn resolve(agent_dir: &Path, session_path: &Path) -> SessionTransport {
     let Some(session_id) = session_id_of(session_path) else {
-        return SessionTransport::Canonical;
+        return SessionTransport::LegacyUnsupported;
     };
     if log_file(agent_dir, &session_id).exists() {
         return SessionTransport::SessionLog;
     }
-    // An existing old-format session keeps serving through the canonical path.
+    // A pre-port old-format file is not read and not migrated: the caller
+    // surfaces the verdict as the typed refusal.
     if session_path.exists() {
-        return SessionTransport::Canonical;
+        return SessionTransport::LegacyUnsupported;
     }
-    if new_transport_requested() {
-        return SessionTransport::SessionLog;
-    }
-    SessionTransport::Canonical
+    SessionTransport::SessionLog
 }
 
-/// Whether the switch maps this session to the log.
+/// Whether this session's rows live in its log (a fresh session starts one).
 pub(crate) fn transports_session_log(agent_dir: &Path, session_path: &Path) -> bool {
-    resolve(agent_dir, session_path) == SessionTransport::SessionLog
+    matches!(
+        resolve(agent_dir, session_path),
+        SessionTransport::SessionLog
+    )
 }
 
-/// The override's request, read once per resolve.
-pub(crate) fn new_transport_requested() -> bool {
-    match std::env::var(TRANSPORT_OVERRIDE_ENV) {
-        Ok(override_value) => override_value == TRANSPORT_OVERRIDE_VALUE,
-        Err(_) => false,
-    }
+/// Does this session's log file exist yet? The create arms' reopen decision:
+/// an existing log reopens, the absence (with no old-format file either)
+/// means the session is fresh.
+pub(crate) fn log_exists(agent_dir: &Path, session_path: &Path) -> bool {
+    session_id_of(session_path).is_some_and(|id| log_file(agent_dir, &id).exists())
 }
 
 /// Why one wire step failed.
@@ -150,7 +143,7 @@ struct WireState {
     /// injected disk drives the fault-injection tests through the very same
     /// code paths ([`Disk`]'s own contract).
     disk: Option<std::sync::Arc<dyn pa_core::session_log::Disk>>,
-    agent_dir: PathBuf,
+    directory: PathBuf,
     /// Row one of the log is a session header. A fresh (deferred) wire writes
     /// it as row one; a wire whose open found a pre-existing log adopts the
     /// header it finds at row one instead of writing a second one.
@@ -202,13 +195,13 @@ impl WireState {
         if self.log.is_some() {
             return Ok(());
         }
-        std::fs::create_dir_all(log_dir(&self.agent_dir)).map_err(LogWireError::Io)?;
+        std::fs::create_dir_all(self.directory.clone()).map_err(LogWireError::Io)?;
         let log = match self.disk.clone() {
             Some(disk) => {
-                SessionLog::open_with(disk, &log_dir(&self.agent_dir), session_id, deadline())
+                SessionLog::open_with(disk, &self.directory.clone(), session_id, deadline())
                     .map_err(open_error)?
             }
-            None => SessionLog::open(&log_dir(&self.agent_dir), session_id, deadline())
+            None => SessionLog::open(&self.directory.clone(), session_id, deadline())
                 .map_err(open_error)?,
         };
         // One read decides the adoption and sets the seq cursor both, so the
@@ -365,7 +358,7 @@ impl LogWire {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: None,
                 disk: None,
-                agent_dir: agent_dir.to_path_buf(),
+                directory: log_dir(agent_dir),
                 header_written: false,
                 flushed_entries: 0,
                 next_seq: 1,
@@ -374,16 +367,30 @@ impl LogWire {
         }
     }
 
+    /// A lazy writer for an exact durable log path, including an overridden directory.
+    pub(crate) fn for_path(path: &Path) -> Self {
+        let wire = Self::deferred(Path::new("."));
+        wire.state.lock().expect("log wire lock").directory =
+            path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        wire
+    }
+
+    pub(crate) fn flush_selection(&self, session_id: &str, header: &Value, leaf: Option<&str>) -> Result<(), LogWireError> {
+        self.flush(session_id, header, &[])?;
+        let mut state = self.state.lock().expect("log wire lock");
+        state.append_pinned(&serde_json::json!({"type": "branch_selection", "selectedLeaf": leaf}), false)
+    }
+
     /// A reopened wire wrapping the log the fold was replayed from. The
     /// header is already durable (row one of the replayed log), `replayed`
     /// counts the fold's durable entry rows, and `last_seq` pins the cursor
     /// past the log's last row.
-    pub(crate) fn held(log: SessionLog, agent_dir: &Path, replayed: usize, last_seq: u64) -> Self {
+    pub(crate) fn held(log: SessionLog, directory: &Path, replayed: usize, last_seq: u64) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: Some(log),
                 disk: None,
-                agent_dir: agent_dir.to_path_buf(),
+                directory: directory.to_owned(),
                 header_written: true,
                 flushed_entries: replayed,
                 next_seq: last_seq + 1,
@@ -478,12 +485,19 @@ pub(crate) fn open_repaired(
     agent_dir: &Path,
     session_id: &str,
 ) -> Result<(SessionLog, Option<session_log::RepairReport>), LogWireError> {
-    match SessionLog::open(&log_dir(agent_dir), session_id, deadline()) {
+    open_repaired_dir(&log_dir(agent_dir), session_id)
+}
+
+pub(crate) fn open_repaired_dir(
+    directory: &Path,
+    session_id: &str,
+) -> Result<(SessionLog, Option<session_log::RepairReport>), LogWireError> {
+    match SessionLog::open(directory, session_id, deadline()) {
         Ok(log) => Ok((log, None)),
         Err(session_log::Error::Damaged { .. }) => {
-            let report = SessionLog::repair(&log_dir(agent_dir), session_id, deadline())
+            let report = SessionLog::repair(directory, session_id, deadline())
                 .map_err(open_error)?;
-            let log = SessionLog::open(&log_dir(agent_dir), session_id, deadline())
+            let log = SessionLog::open(directory, session_id, deadline())
                 .map_err(open_error)?;
             Ok((log, Some(report)))
         }
@@ -530,23 +544,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
-    }
-
-    /// The env tests mutate process state; they serialize on this lock.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_override<T>(run: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let saved = std::env::var(TRANSPORT_OVERRIDE_ENV).ok();
-        std::env::set_var(TRANSPORT_OVERRIDE_ENV, TRANSPORT_OVERRIDE_VALUE);
-        let result = run();
-        match saved {
-            Some(saved) => std::env::set_var(TRANSPORT_OVERRIDE_ENV, saved),
-            None => std::env::remove_var(TRANSPORT_OVERRIDE_ENV),
-        }
-        result
     }
 
     fn fresh_log_session_with(
@@ -790,20 +787,18 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_serves_a_log_session_and_refuses_to_map_an_old_file() {
+    fn the_switch_serves_every_fresh_session_on_the_log_and_refuses_legacy_files() {
         let dir = temp_dir("switch");
-        // A fresh session with no files and no override: the canonical default.
+        // A fresh session with no files: the log transport, no override.
         let path = dir.join("fresh.jsonl");
-        assert!(!transports_session_log(&dir, &path));
+        assert!(transports_session_log(&dir, &path));
 
-        // An old-format session file: the log core cannot read that format,
-        // so it keeps serving canonically, override or not.
+        // An old-format session file: not read and not migrated, typed.
         std::fs::write(&path, "[]\n").expect("old file");
-        assert!(!transports_session_log(&dir, &path));
-        assert_eq!(with_override(|| transports_session_log(&dir, &path)), false);
+        assert_eq!(resolve(&dir, &path), SessionTransport::LegacyUnsupported);
         std::fs::remove_file(&path).expect("clean");
 
-        // An existing log: the log transport, override or not.
+        // An existing log: the log transport.
         let log_session = dir.join("logged.jsonl");
         let mut store = SessionFile::create("test", None, 0);
         store.set_path(log_session.clone());
@@ -811,10 +806,6 @@ mod tests {
         store.rekey_log_session_id(&log_session).expect("re-key");
         store.rewrite().expect("flush");
         assert!(log_file(&dir, "logged").exists());
-        assert_eq!(
-            with_override(|| transports_session_log(&dir, &log_session)),
-            true
-        );
         assert!(transports_session_log(&dir, &log_session));
     }
 
@@ -958,9 +949,9 @@ mod tests {
         let sessions_dir = dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
         let session_path = sessions_dir.join("log-e2e.jsonl");
-        // The log session pre-exists its worker: the create below resolves to
-        // the log transport through the log itself (the resolve() test covers
-        // the override's fresh path), so the serving run exercises the reopen.
+        // The log session pre-exists its worker: the create below resolves
+        // to the log transport through the log itself, so the serving run
+        // exercises the reopen.
         {
             let (store, _) = fresh_log_session(&dir, "log-e2e");
             store

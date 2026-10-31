@@ -485,7 +485,6 @@ pub(crate) fn admit_goal_follow_up(
             if let Some(store) = guard
                 .store
                 .as_mut()
-                .filter(|store| !store.is_canonical_bound())
             {
                 let _ = store.persist_entry(
                     "custom",

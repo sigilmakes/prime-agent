@@ -338,9 +338,6 @@ impl TurnRunner {
         // Wire the canonical step channel for this turn: the store's attached epoch
         // (if any) plus the core's slot. The engine is the only writer, the row arm
         // below is the only reader.
-        self.engine.set_canonical_step_admission(Some(
-            self.core.lock().unwrap().canonical_step_admission(),
-        ));
         let request = PromptRequest {
             batch: batched
                 .iter()
@@ -563,16 +560,13 @@ impl TurnRunner {
                 // so a verbatim copy retains nothing on the durable read.
                 // Re-pin the boundary to the durable cut (TS: one store,
                 // ids match by construction) before persist + broadcast.
-                let canonical_bound = core
-                    .store
-                    .as_ref()
-                    .is_some_and(crate::session_store::SessionFile::is_canonical_bound);
+                let rows_persisted = engine.persists_session_entries();
                 if let EngineEvent::Compaction {
                     ref mut entry,
                     event: ref mut payload,
                 } = event
                 {
-                    if !canonical_bound && !entry.is_null() {
+                    if !rows_persisted && !entry.is_null() {
                         let repin_started = std::time::Instant::now();
                         let durable_entries = core
                             .store
@@ -602,7 +596,7 @@ impl TurnRunner {
                 }
                 match &event {
                     EngineEvent::ModelChange(change) => {
-                        if canonical_bound {
+                        if rows_persisted {
                             // The awaited live receipt already committed and ACKed it.
                         } else if let Some(Err(error)) = core.store.as_mut().map(|store| {
                             store.persist_entry(
@@ -624,27 +618,11 @@ impl TurnRunner {
                     // let the user row take the step, drop the seal silently, and make
                     // every assistant row refuse. The user and tool results are written
                     // without touching the slot.
-                    EngineEvent::AssistantMessage(message) if !canonical_bound => {
-                        // The assistant row is the native final output: hand the store
-                        // the step the engine admitted for this attempt, so the row is
-                        // written under a sealed epoch grant. Taking it here keeps the
-                        // step valid for exactly one row.
-                        let step = core.canonical_step.lock().unwrap().take();
+                    EngineEvent::AssistantMessage(message) if !rows_persisted => {
                         if let Some(store) = core.store.as_mut() {
-                            let persisted = match step.as_ref() {
-                                Some(step) => store
-                                    .persist_message_with_step(json!({ "message": message }), step),
-                                None => {
-                                    store.persist_entry("message", json!({ "message": message }))
-                                }
-                            };
-                            if let Err(error) = persisted {
-                                // A refused assistant row is a bug to SURFACE, never a
-                                // row to drop quietly: the epoch had work admitted and
-                                // the row did not reach the file.
-                                eprintln!(
-                                    "pa-daemon: assistant row refused by its epoch grant: {error:#}"
-                                );
+                            if let Err(error) = store.persist_entry("message", json!({ "message": message })) {
+                                eprintln!("pa-daemon: assistant persistence failed: {error:#}");
+                                return false;
                             }
                         }
                     }
@@ -653,14 +631,14 @@ impl TurnRunner {
                         // The exact returned ID enters the delivery FIFO; the live SDK
                         // later adopts this same row and never writes a second copy.
                         if let Some(store) = core.store.as_mut() {
-                            if let Err(error) = store.persist_delivered_user(message.clone()) {
+                            if let Err(error) = store.persist_entry("message", json!({"message": message})) {
                                 eprintln!("pa-daemon: accepted user row refused: {error:#}");
                                 return false;
                             }
                         }
                     }
                     EngineEvent::UserMessage(message) | EngineEvent::ToolResultMessage(message)
-                        if !canonical_bound =>
+                        if !rows_persisted =>
                     {
                         if let Some(store) = core.store.as_mut() {
                             if let Err(error) =
@@ -681,7 +659,7 @@ impl TurnRunner {
                         core.running_tool_calls.remove(tool_call_id);
                     }
                     EngineEvent::CustomMessage(message)
-                        if accepted_row || emitting_prefix_rows.get() || !canonical_bound =>
+                        if accepted_row || emitting_prefix_rows.get() || !rows_persisted =>
                     {
                         if let Some(store) = core.store.as_mut() {
                             let Some(mut fields) = message.as_object().cloned() else {
@@ -694,11 +672,11 @@ impl TurnRunner {
                             fields.remove("timestamp");
                             let fields = Value::Object(fields);
                             let persisted = if accepted_row || emitting_prefix_rows.get() {
-                                store.persist_delivered_custom(fields)
+                                store.persist_entry("custom_message", fields)
                             } else {
                                 // Pre-build UI records (for example slash-command
                                 // results) are durable, but have no SDK delivery.
-                                store.persist_owner_metadata("custom_message", fields)
+                                store.persist_entry("custom_message", fields)
                             };
                             if let Err(error) = persisted {
                                 eprintln!("pa-daemon: custom row persistence refused: {error:#}");
@@ -706,7 +684,7 @@ impl TurnRunner {
                             }
                         }
                     }
-                    EngineEvent::Compaction { entry, .. } if !canonical_bound => {
+                    EngineEvent::Compaction { entry, .. } if !rows_persisted => {
                         // A skipped compaction carries a null entry:
                         // publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
@@ -721,7 +699,7 @@ impl TurnRunner {
                         }
                     }
                     // The durable mirror of a goal-state change: each row is the new state.
-                    EngineEvent::GoalUpdate { goal } if !canonical_bound => {
+                    EngineEvent::GoalUpdate { goal } if !rows_persisted => {
                         if let Some(store) = core.store.as_mut() {
                             let _ = store.persist_entry(
                                 "custom",
@@ -1001,7 +979,7 @@ impl TurnRunner {
                         let outcome = crate::session_commands::custom_message_value(&outcome);
                         if outcome.is_object() {
                             if let Some(store) = core.store.as_mut() {
-                                if let Err(error) = store.persist_owner_metadata(
+                                if let Err(error) = store.persist_entry(
                                     "custom_message",
                                     json!({
                                         "customType": outcome.get("customType").cloned().unwrap_or(Value::Null),

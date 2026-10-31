@@ -2,7 +2,6 @@
 //! The worker owns the session - the append-only store, the queue lanes, event sequencing, and turn
 //! execution.
 
-mod canonical_live;
 mod config;
 mod context_selection;
 mod env;
@@ -290,8 +289,6 @@ impl Worker {
             generation: crate::util::new_display_id(),
             last_event_sequence: 0,
             store: None,
-            canonical_step: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            context_selection_uncertain: None,
             cwd: String::new(),
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),

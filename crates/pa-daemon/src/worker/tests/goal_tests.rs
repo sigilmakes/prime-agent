@@ -385,7 +385,7 @@ async fn goal_pause_withdraws_the_queued_continuation() {
 }
 
 /// A scripted goal session's dispatch worker with a durable session
-/// file, so the `thread_goal_state` mirror is observable.
+/// log, so the `thread_goal_state` mirror is observable.
 async fn goal_dispatch_worker_with_store(
     goal: serde_json::Value,
 ) -> (std::sync::Arc<Worker>, PathBuf) {
@@ -418,18 +418,30 @@ async fn goal_dispatch_worker_with_store(
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
-    let file = std::fs::read_dir(&session_dir)
-        .expect("session dir readable")
+    let agent_dir = dir.join("agent");
+    let file = std::fs::read_dir(crate::session_transport::log_dir(&agent_dir))
+        .expect("session log dir readable")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        .expect("session file created");
+        .expect("session log created");
     (worker, file)
 }
 
-/// The session file's `thread_goal_state` custom rows, in order.
+/// The session log's `thread_goal_state` custom rows, in order. The log
+/// row's body is the `FileEntry` JSON the funnel wrote.
 fn thread_goal_state_rows(path: &std::path::Path) -> Vec<Value> {
-    crate::session_store::parse_session_entries(&std::fs::read_to_string(path).expect("read"))
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("log file name")
+        .to_owned();
+    let agent_dir = path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the log's agent dir")
+        .to_path_buf();
+    crate::session_transport::test_support::log_row_bodies(&agent_dir, &session_id)
         .into_iter()
         .filter(|entry| {
             entry.get("type").and_then(Value::as_str) == Some("custom")

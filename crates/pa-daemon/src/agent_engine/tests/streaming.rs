@@ -1115,7 +1115,7 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
                         let mut core = self.owner.lock().unwrap();
                         let store = core.store.as_mut().unwrap();
                         let id = store
-                            .persist_owner_metadata(
+                            .persist_entry(
                                 "session_info",
                                 json!({
                                     "name":"metadata during real stream",

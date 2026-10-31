@@ -27,24 +27,11 @@ fn current_lease(core: &SessionCore) -> Result<Arc<SessionLease>> {
         !store.path.as_os_str().is_empty(),
         "initial context selection requires a persistent canonical store"
     );
-    ensure!(
-        store.path.is_file(),
-        "canonical session file is unavailable"
-    );
     let lease = store
         .lease
         .as_ref()
         .context("canonical session store has no runtime lease")?;
-    ensure!(
-        !core
-            .context_selection_uncertain
-            .as_ref()
-            .is_some_and(|uncertain| {
-                std::sync::Weak::ptr_eq(uncertain, &Arc::downgrade(lease))
-            }),
-        "context selection write outcome is uncertain; reopen the canonical session before inference"
-    );
-    lease.with_owned_mutation(&store.path, || Ok(()))?;
+    lease.ensure_held(&store.path)?;
     Ok(Arc::clone(lease))
 }
 
@@ -63,12 +50,6 @@ fn validate_source(core: &SessionCore, source: &ContextSelectionSource) -> Resul
         canonical_session_path(&store.path) == source.path
             && canonical_mirror_header(&store.header)? == source.header,
         "canonical session identity changed during startup"
-    );
-    let header = crate::session_store::read_session_header(&store.path)
-        .context("canonical session header is unavailable")?;
-    ensure!(
-        canonical_mirror_header(&header)? == source.header,
-        "canonical session header changed during startup"
     );
     Ok(())
 }
@@ -90,24 +71,46 @@ fn commit_with(
         Some(_) => bail!("context strategy selection changed during startup"),
         None => {}
     }
-    // A write failure can follow a partial or complete durable append. Keep
-    // uncertainty on the worker owner so a new build/adapter cannot retry it.
-    if let Err(error) = write(store, selection) {
-        core.context_selection_uncertain = Some(source.lease.clone());
-        return Err(error.context("canonical context selection write outcome is uncertain; reopen the session before inference"));
-    }
+    write(store, selection)?;
     Ok(())
 }
 
 fn write_selection(store: &mut SessionFile, selection: &ContextSelection) -> Result<()> {
-    store.persist_owner_metadata(
+    store.persist_entry(
         "custom",
         json!({"customType": CONTEXT_SELECTION_CUSTOM_TYPE, "data": selection}),
     )?;
     Ok(())
 }
 
+struct CoreSessionEntryWriter {
+    core: Arc<Mutex<SessionCore>>,
+    source: ContextSelectionSource,
+}
+
+impl pa_core::session::manager::SessionEntryWriter for CoreSessionEntryWriter {
+    fn append(&self, entry: &pa_types::session::FileEntry) -> std::io::Result<()> {
+        let write = || -> Result<()> {
+            let mut core = self.core.lock().map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
+            validate_source(&core, &self.source)?;
+            let row: crate::session_store::SessionEntry = serde_json::from_value(serde_json::to_value(entry)?)?;
+            let store = core.store.as_mut().context("session store unavailable")?;
+            if let Some(existing) = store.entry(&row.id) {
+                ensure!(serde_json::to_value(existing)? == serde_json::to_value(&row)?, "session row ID collision");
+                return Ok(());
+            }
+            store.persist_built_log_entry(row)?;
+            Ok(())
+        };
+        write().map_err(std::io::Error::other)
+    }
+}
+
 impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
+    fn entry_writer(&self, source: ContextSelectionSource) -> Arc<dyn pa_core::session::manager::SessionEntryWriter> {
+        Arc::new(CoreSessionEntryWriter { core: Arc::clone(&self.0), source })
+    }
+
     fn mirror_seed(&self) -> Result<Option<MirrorSeed>> {
         let core = self
             .0
@@ -130,51 +133,9 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         }))
     }
 
-    fn live_owner(
-        &self,
-        source: ContextSelectionSource,
-    ) -> Option<Arc<dyn pa_core::session_engine::canonical_live::CanonicalLiveOwner>> {
-        // First/lazy startup may already have an attached owner and staged
-        // deliveries. Actual AgentStart/serving records, not attachment or a
-        // membership set, distinguish it from an unsupported fresh-SDK handoff.
-        // Same-owner refresh retains its SDK; replacement installs a new owner.
-        let binding = (|| -> Result<_> {
-            let mut core = self
-                .0
-                .lock()
-                .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
-            validate_source(&core, &source)?;
-            let store = core.store.as_mut().expect("validated canonical store");
-            store.validate_initial_canonical_sdk()?;
-            let cursor = store.attach_canonical_owner()?;
-            let lease = store.lease.as_ref().expect("validated canonical lease");
-            lease.with_owned_mutation(&store.path, || {
-                // Only an actual existing Core execution queue can request Replace.
-                // Startup projection exclusion IDs do not populate that queue.
-                Ok(cursor.owner)
-            })
-        })()
-        .map_err(|error| error.to_string());
-        Some(Arc::new(super::canonical_live::CoreCanonicalLiveOwner {
-            core: Arc::clone(&self.0),
-            source,
-            owner_scope: binding.clone().ok(),
-            bootstrap_admission: binding.map(|_| false),
-        }))
-    }
 
-    fn retire_quarantined_owner(&self) -> anyhow::Result<()> {
-        let mut core = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session core lock poisoned"))?;
-        let store = core
-            .store
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("canonical store is unavailable"))?;
-        store.retire_quarantined_canonical_owner()?;
-        Ok(())
-    }
+
+
 
     fn capture(&self, expected_file: &std::path::Path) -> Result<ContextSelectionSource> {
         let core = self.0.lock().expect("session core lock");
@@ -195,13 +156,7 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
     }
 
     /// The typed read refusal: a poisoned epoch may not serve its raw tail.
-    fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
-        let core = self.0.lock().expect("session core lock");
-        core.store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-            .then(crate::session_store::canonical_adapter::refused_poisoned_read)
-    }
+
 
     fn commit(
         &self,
@@ -222,376 +177,3 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture() -> (
-        tempfile::TempDir,
-        Arc<Mutex<SessionCore>>,
-        ContextSelectionSource,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = SessionFile::create("/synthetic", None, 0);
-        let path = dir.path().join("canonical.jsonl");
-        store.set_path(path.clone());
-        store.rewrite().unwrap();
-        store.lease = Some(Arc::new(
-            crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
-        ));
-        let core = Arc::new(Mutex::new(SessionCore::test_core(
-            Some(store),
-            "/synthetic".into(),
-        )));
-        let source = CoreInitialContextSelectionStore(Arc::clone(&core))
-            .capture(&path)
-            .unwrap();
-        (dir, core, source)
-    }
-
-    fn read_epoch() -> Arc<pa_core::session_engine::canonical_coordinator::CanonicalEpoch> {
-        use pa_core::session::canonical::{
-            CanonicalCursor, CanonicalFrontier, CanonicalOwnerScope,
-        };
-        Arc::new(
-            pa_core::session_engine::canonical_coordinator::CanonicalEpoch::genesis(
-                &CanonicalCursor {
-                    owner: CanonicalOwnerScope::new(),
-                    session_id: "read-refusal-session".to_owned(),
-                    source_path: std::path::PathBuf::from("/private/read-refusal.jsonl"),
-                    raw_source_generation: [3; 32],
-                    header_certificate: [4; 32],
-                    canonical_revision: 0,
-                    branch_revision: 1,
-                    selected_leaf: None,
-                    frontier: CanonicalFrontier {
-                        bytes: 5,
-                        rows: 1,
-                        prefix_certificate: [6; 32],
-                    },
-                },
-                Arc::new(String::from("run")),
-                Arc::new(String::from("model")),
-            )
-            .expect("epoch"),
-        )
-    }
-
-    fn choice(route: &str) -> ContextSelection {
-        ContextSelection {
-            version: 1,
-            strategy: route.into(),
-        }
-    }
-
-    fn choices(path: &std::path::Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|row| {
-                row["type"] == "custom" && row["customType"] == CONTEXT_SELECTION_CUSTOM_TYPE
-            })
-            .collect()
-    }
-
-    /// The read path's one question: a poisoned live epoch refuses, a clean one and
-    /// an absent one do not. `build_session_mirror` asks exactly this before it builds
-    /// anything, so the refusal cannot be skipped by a later branch.
-    #[test]
-    fn only_a_poisoned_epoch_refuses_the_read() {
-        let (_dir, core, _source) = fixture();
-        let store = CoreInitialContextSelectionStore(Arc::clone(&core));
-        assert!(
-            store.canonical_read_refusal().is_none(),
-            "no epoch attached is not a refusal: the pre-genesis window still reads"
-        );
-
-        let epoch = read_epoch();
-        {
-            let mut core = core.lock().unwrap();
-            core.store.as_mut().unwrap().epoch = Some(
-                crate::session_store::canonical_adapter::EpochHandle(Arc::clone(&epoch)),
-            );
-        }
-        assert!(
-            store.canonical_read_refusal().is_none(),
-            "a clean live epoch reads normally"
-        );
-
-        // An unclassified flight drop is the uncertain write.
-        drop(
-            epoch
-                .begin_prepare_append(
-                    pa_core::session::canonical::CanonicalIoStage::PreparePreflight,
-                )
-                .expect("flight"),
-        );
-        let refusal = store
-            .canonical_read_refusal()
-            .expect("a poisoned epoch refuses the read");
-        assert_eq!(
-            refusal.source,
-            pa_core::session::canonical::CanonicalSourceDisposition::NeedsReconcile
-        );
-        assert_eq!(
-            refusal.detail,
-            "canonical epoch is poisoned by an uncertain write"
-        );
-    }
-
-    #[tokio::test]
-    async fn fresh_ack_is_canonical_and_same_choice_appends_nothing() {
-        let (_dir, core, source) = fixture();
-        let store = CoreInitialContextSelectionStore(Arc::clone(&core));
-        store
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .unwrap();
-        let bytes = std::fs::read(&source.path).unwrap();
-        store
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
-        let rows = choices(&source.path);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0]["data"],
-            json!({"version": 1, "strategy": "policy/a"})
-        );
-        assert!(rows[0]["id"].as_str().is_some_and(|id| !id.is_empty()));
-        assert_eq!(
-            core.lock()
-                .unwrap()
-                .store
-                .as_ref()
-                .unwrap()
-                .latest_context_selection()
-                .unwrap(),
-            Some(choice("policy/a"))
-        );
-        let reopened = SessionFile::open(&source.path).unwrap();
-        assert_eq!(
-            reopened.latest_context_selection().unwrap(),
-            Some(choice("policy/a"))
-        );
-    }
-
-    #[tokio::test]
-    async fn initial_selection_commits_through_already_attached_actual_owner() {
-        let (_dir, core, source) = fixture();
-        let factory = CoreInitialContextSelectionStore(Arc::clone(&core));
-        let owner = factory.live_owner(source.clone()).unwrap();
-        let before = owner.snapshot().await.unwrap();
-        factory
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .unwrap();
-        let bytes = std::fs::read(&source.path).unwrap();
-        factory
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
-        assert_eq!(choices(&source.path).len(), 1);
-        let after = owner.snapshot().await.unwrap();
-        assert_eq!(
-            after.checkpoint.cursor.owner,
-            before.checkpoint.cursor.owner
-        );
-        assert_ne!(after.checkpoint.cursor, before.checkpoint.cursor);
-    }
-
-    #[tokio::test]
-    async fn actual_live_adapter_can_ack_pending_prepare_and_abandon() {
-        let (_dir, core, source) = fixture();
-        let factory = CoreInitialContextSelectionStore(Arc::clone(&core));
-        let owner = factory.live_owner(source).unwrap();
-        let header = core.lock().unwrap().store.as_ref().unwrap().header.clone();
-        let manager = pa_core::session::manager::SessionManager::in_memory_from_header(
-            std::path::Path::new("/isolated"),
-            std::path::Path::new("/isolated/artifacts"),
-            header,
-        )
-        .unwrap();
-        let live = pa_core::session_engine::canonical_live::CanonicalLiveSession::new(
-            owner.clone(),
-            Arc::new(tokio::sync::Mutex::new(manager)),
-        );
-        live.observe().await.unwrap();
-        let pending = live
-            .prepare_mutation(pa_core::session::canonical::CanonicalMutationKind::OwnerMetadata)
-            .await
-            .unwrap();
-        pending.abandon().await.unwrap();
-        live.ensure_ready().unwrap();
-        owner.snapshot().await.unwrap();
-        live.persist_message(
-            serde_json::from_value(
-                json!({"role":"user", "content":"actual pending admission", "timestamp":7}),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-        live.ensure_ready().unwrap();
-        owner.snapshot().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn retired_live_adapter_cannot_refresh_into_successor_owner() {
-        let (_dir, core, source) = fixture();
-        let factory = CoreInitialContextSelectionStore(Arc::clone(&core));
-        let old = factory.live_owner(source.clone()).unwrap();
-        let before = old.snapshot().await.unwrap();
-        old.retire_completed_runtime(before.checkpoint.cursor.clone())
-            .await
-            .unwrap();
-        let fresh = factory.live_owner(source).unwrap();
-        let after = fresh.snapshot().await.unwrap();
-        assert_ne!(
-            before.checkpoint.cursor.owner,
-            after.checkpoint.cursor.owner
-        );
-        assert!(old.snapshot().await.is_err());
-        assert!(old
-            .prepare(
-                pa_core::session_engine::canonical_live::CanonicalLivePrepareRequest {
-                    expected: Some(after.checkpoint.cursor),
-                    source: pa_core::session::canonical::CanonicalSourceRequest::Full,
-                    mode: pa_core::session::canonical::CanonicalPrepareMode::Observe,
-                    admission: pa_core::session::canonical::CanonicalAdmissionPolicy::Preserve,
-                }
-            )
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn conflicting_or_invalid_latest_choice_is_not_replaced() {
-        let (_dir, core, source) = fixture();
-        let store = CoreInitialContextSelectionStore(Arc::clone(&core));
-        store
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .unwrap();
-        let before = std::fs::read(&source.path).unwrap();
-        assert!(store
-            .commit(source.clone(), choice("policy/b"))
-            .await
-            .is_err());
-        assert_eq!(std::fs::read(&source.path).unwrap(), before);
-        core.lock().unwrap().store.as_mut().unwrap().persist_entry("custom", json!({
-            "customType": CONTEXT_SELECTION_CUSTOM_TYPE, "data": {"version": 9, "strategy": "policy/a"}
-        })).unwrap();
-        let invalid = std::fs::read(&source.path).unwrap();
-        assert!(store
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .is_err());
-        assert_eq!(std::fs::read(&source.path).unwrap(), invalid);
-    }
-
-    #[test]
-    fn write_error_before_or_after_append_poison_survives_new_adapter() {
-        for after_append in [false, true] {
-            let (_dir, core, source) = fixture();
-            let error = commit_with(
-                &mut core.lock().unwrap(),
-                &source,
-                &choice("policy/a"),
-                |store, selection| {
-                    if after_append {
-                        write_selection(store, selection)?;
-                    }
-                    bail!("injected canonical acknowledgement failure")
-                },
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains("write outcome is uncertain"));
-            let rows_before_retry = choices(&source.path).len();
-            assert_eq!(rows_before_retry, usize::from(after_append));
-            let new_adapter = CoreInitialContextSelectionStore(Arc::clone(&core));
-            assert!(new_adapter
-                .capture(&source.path)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("uncertain"));
-            assert!(commit_with(
-                &mut core.lock().unwrap(),
-                &source,
-                &choice("policy/a"),
-                write_selection
-            )
-            .is_err());
-            assert_eq!(choices(&source.path).len(), rows_before_retry);
-        }
-    }
-
-    #[tokio::test]
-    async fn stale_epoch_refuses_and_reopened_owner_revalidates_actual_row() {
-        let (dir, core, source) = fixture();
-        commit_with(
-            &mut core.lock().unwrap(),
-            &source,
-            &choice("policy/a"),
-            |store, selection| {
-                write_selection(store, selection)?;
-                bail!("acknowledgement lost after complete canonical append")
-            },
-        )
-        .unwrap_err();
-        let path = source.path.clone();
-        let previous = {
-            let mut core = core.lock().unwrap();
-            let lease = core.store.as_mut().unwrap().lease.take().unwrap();
-            lease.release();
-            let mut reopened = SessionFile::open(&path).unwrap();
-            reopened.lease = Some(Arc::new(
-                crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
-            ));
-            core.store.replace(reopened)
-        };
-        drop(previous);
-        let adapter = CoreInitialContextSelectionStore(Arc::clone(&core));
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(adapter.commit(source, choice("policy/a")).await.is_err());
-        let fresh = adapter.capture(&path).unwrap();
-        adapter.commit(fresh, choice("policy/a")).await.unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
-    }
-
-    #[tokio::test]
-    async fn changed_header_path_shutdown_and_released_lease_refuse() {
-        let (_dir, core, source) = fixture();
-        let adapter = CoreInitialContextSelectionStore(Arc::clone(&core));
-        let mut wrong = source.clone();
-        wrong.header.id = "foreign-session".into();
-        assert!(adapter.commit(wrong, choice("policy/a")).await.is_err());
-        let mut wrong = source.clone();
-        wrong.path = wrong.path.with_file_name("foreign.jsonl");
-        assert!(adapter.commit(wrong, choice("policy/a")).await.is_err());
-        core.lock().unwrap().shutdown_requested = true;
-        assert!(adapter
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .is_err());
-        core.lock().unwrap().shutdown_requested = false;
-        core.lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .unwrap()
-            .lease
-            .as_ref()
-            .unwrap()
-            .release();
-        assert!(adapter
-            .commit(source.clone(), choice("policy/a"))
-            .await
-            .is_err());
-        assert!(choices(&source.path).is_empty());
-    }
-}
