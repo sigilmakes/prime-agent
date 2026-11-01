@@ -136,7 +136,7 @@ fn saved_context_windowed_matches_full_parse_with_thinking_only_before_the_bound
 }
 
 #[test]
-fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_row() {
+fn saved_context_refuses_a_corrupt_committed_row_without_repair() {
     let (mut file, path, _dir) = oracle_session();
     let mut kept = String::new();
     for i in 0..12 {
@@ -155,14 +155,16 @@ fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_ro
         json!({"provider":"battery","modelId":"mock-1"}),
     );
     file.rewrite().unwrap();
-    // Corrupt one DISCARDED-PREFIX row: the walk must bail to the
-    // full-open fallback, which still answers the reference exactly.
+    // A complete corrupt row is not a readable committed prefix.
     let content = std::fs::read_to_string(&path).unwrap();
     let mut lines: Vec<&str> = content.lines().collect();
     assert!(lines.len() > 8, "fixture must hold a discardable prefix");
     lines[2] = "{not json}";
     std::fs::write(&path, lines.join("\n") + "\n").unwrap();
-    assert_saved_context_equals_reference("malformed retained row fallback", &path);
+    let damaged = std::fs::read(&path).unwrap();
+    assert!(super::super::model::saved_session_context(&path).is_none());
+    assert!(full_parse_saved_session_context(&path).is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
 }
 
 #[test]

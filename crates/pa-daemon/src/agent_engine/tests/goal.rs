@@ -1220,15 +1220,26 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
     for (name, rows, terminated, window_serves) in classes {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
-        let mut content = rows
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if terminated {
-            content.push('\n');
+        let mut log = pa_core::session_log::SessionLog::open(
+            dir.path(),
+            "session",
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        for mut row in rows {
+            if row["type"] == "session" {
+                row["id"] = json!("session");
+            }
+            assert!(matches!(
+                log.append(&row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
         }
-        std::fs::write(&path, content).unwrap();
+        if !terminated {
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
         let opened = pa_core::session::window::WindowedSessionStore::open(&path);
         let window_served = opened.as_ref().is_ok_and(std::option::Option::is_some);
         assert_eq!(
@@ -1248,6 +1259,11 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             shared,
             crate::goal_state_persist::persisted_goal_state(Some(&path)),
             "goal class {name}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "read-only goal restoration does not repair"
         );
     }
 }

@@ -268,7 +268,9 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
             cold.runtime.block_on(async {
                 let manager = persistence.lock().await;
                 let actual: Vec<serde_json::Value> = manager
-                    .get_entries()
+                    .history_snapshot()
+                    .await
+                    .unwrap()
                     .iter()
                     .filter(|entry| entry.id().is_some())
                     .map(|entry| serde_json::to_value(entry).unwrap())
