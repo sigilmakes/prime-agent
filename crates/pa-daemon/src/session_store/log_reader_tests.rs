@@ -38,7 +38,7 @@ fn fixture(dir: &Path, id: &str) -> (SessionLog, PathBuf) {
         &mut log,
         &json!({
             "type": "message", "id": "user", "timestamp": "2026-10-31T00:00:01.000Z",
-            "message": { "role": "user", "content": "first prompt", "timestamp": 1793404801000u64 }
+            "message": { "role": "user", "content": "first prompt", "timestamp": 1_793_404_801_000_u64 }
         }),
     );
     (log, dir.join(session_file_name(id)))

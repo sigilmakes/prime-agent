@@ -775,6 +775,8 @@ mod tests {
 
     #[test]
     fn read_own_usage_summary_scans_a_file() {
+        use std::io::Write;
+
         let dir = std::env::temp_dir().join(format!("session-usage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.jsonl");
@@ -806,7 +808,6 @@ mod tests {
                 cost: 1.0
             })
         );
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)

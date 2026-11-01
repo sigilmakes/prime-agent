@@ -276,7 +276,7 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
                 None
             }
         })
-        .last()
+        .next_back()
         .expect("the close wrote a session_state row");
     assert_eq!(state, "archived");
 }

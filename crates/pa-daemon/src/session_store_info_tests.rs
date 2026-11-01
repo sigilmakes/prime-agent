@@ -370,7 +370,7 @@ fn a_torn_trailing_line_folds_once_completed() {
     let encoded = reencode(&format!(
         "{}{}\n",
         fs::read_to_string(&path).unwrap(),
-        json!({"row": {"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn text","timestamp":1790110000000u64}}})
+        json!({"row": {"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn text","timestamp":1_790_110_000_000_u64}}})
     ));
     let tail = encoded.lines().last().unwrap();
     let split = tail.len() / 2;
