@@ -87,7 +87,7 @@ fn replay() -> Result<()> {
         Some(p) => std::path::PathBuf::from(p),
         None => newest_session()?,
     };
-    let entries = pa_core::session::read_entries(&path)
+    let entries = pa_core::session::read::read_entries(&path)
         .with_context(|| format!("reading session {}", path.display()))?;
     let stream = JsonlSessionStream::from_entries(entries);
     let _ = args.show_thinking;
@@ -149,7 +149,7 @@ mod tests {
                 Outcome::Committed { .. }
             ));
         }
-        let entries = pa_core::session::read_entries(&path).unwrap();
+        let entries = pa_core::session::read::read_entries(&path).unwrap();
         let mut stream = JsonlSessionStream::from_entries(entries);
         assert!(
             matches!(stream.poll().unwrap(), pa_tui::session::SessionEvent::Item(TranscriptItem::UserMessage{text}) if text == "validated replay")
@@ -157,9 +157,9 @@ mod tests {
         let mut corrupt = std::fs::read(&path).unwrap();
         corrupt.pop();
         std::fs::write(&path, &corrupt).unwrap();
-        assert!(pa_core::session::read_entries(&path).is_err());
+        assert!(pa_core::session::read::read_entries(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), corrupt);
         std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
-        assert!(pa_core::session::read_entries(&path).is_err());
+        assert!(pa_core::session::read::read_entries(&path).is_err());
     }
 }

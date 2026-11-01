@@ -178,7 +178,7 @@ fn replay_stream() -> pa_tui::session::JsonlSessionStream {
     }
     std::mem::forget(dir);
     pa_tui::session::JsonlSessionStream::from_entries(
-        pa_core::session::read_entries(&path).expect("replay log"),
+        pa_core::session::read::read_entries(&path).expect("replay log"),
     )
 }
 

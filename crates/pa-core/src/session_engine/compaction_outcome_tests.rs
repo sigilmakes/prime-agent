@@ -136,7 +136,7 @@ async fn record_appends_row_to_entries_and_live_context_but_not_llm_input() {
 /// The disclosure survives a failed disk write: the entry chain keeps
 /// the row in memory, so a rebuild never drops it.
 #[tokio::test]
-async fn record_survives_a_failed_disk_write() {
+async fn record_refuses_a_failed_disk_write_without_publishing() {
     let tmp = tempfile::tempdir().unwrap();
     let sessions = tmp.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -144,44 +144,23 @@ async fn record_survives_a_failed_disk_write() {
     manager.append_message(seeded_assistant()).unwrap();
     let file = manager.get_session_file().unwrap().to_path_buf();
     assert!(file.exists(), "the session file materialized");
-    // Replace the session file with a directory at the same path: every
-    // disk write path fails, even for root.
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let session = scripted_session_over(manager).await;
-    session
+    let before = session.entries().await;
+    assert!(session
         .record_compaction_outcome(
             CompactionOutcomeReason::Threshold,
             CompactionOutcomeKind::Skipped,
             "Auto-compaction skipped: Already compacted",
         )
         .await
-        .unwrap();
-    let entries = session.entries().await;
-    assert!(
-        entries.iter().any(
-            |entry| matches!(entry, FileEntry::CustomMessage { payload, .. }
-            if payload.custom_type == "compaction_outcome")
-        ),
-        "the outcome row stays in the entry chain after the failed write"
-    );
-    let guard = session.session.lock().await;
-    let context =
-        crate::session::build_session_context(guard.get_all_entries(), guard.get_leaf_id());
-    drop(guard);
-    assert!(
-        context
-            .messages
-            .iter()
-            .any(|message| matches!(message, SessionAgentMessage::Custom(custom) if custom.custom_type == "compaction_outcome")),
-        "a rebuild cannot drop the disclosure"
-    );
+        .is_err());
+    assert_eq!(session.entries().await, before);
 }
 
-/// The subscriber arm never fails the run for a write error: the session
-/// retains the row and the error only logs.
 #[tokio::test]
-async fn message_end_persist_failure_retains_the_row_and_swallows() {
+async fn message_end_persist_failure_refuses_publication() {
     let tmp = tempfile::tempdir().unwrap();
     let sessions = tmp.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -191,46 +170,14 @@ async fn message_end_persist_failure_retains_the_row_and_swallows() {
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let session = scripted_session_over(manager).await;
-    let before = session
-        .session
-        .lock()
-        .await
-        .get_all_entries()
-        .to_vec()
-        .len();
-    persist_event(
+    let before = session.entries().await;
+    assert!(persist_event(
         &session.session,
-        None,
         AgentEvent::MessageEnd {
-            message: AgentMessage::user("retained after the failed write"),
+            message: AgentMessage::user("not published after the failed write"),
         },
     )
     .await
-    .expect("a failed disk write must not fail the event queue");
-    let guard = session.session.lock().await;
-    let entries = guard.get_all_entries().to_vec();
-    drop(guard);
-    assert_eq!(entries.len(), before + 1, "the row stays live-indexed");
-    assert!(
-        !entries
-            .iter()
-            .any(|entry| matches!(entry, FileEntry::Message {
-                message: SessionAgentMessage::Assistant(assistant),
-                ..
-            } if assistant.error_message.is_some())),
-        "no phantom error row for a persistence failure"
-    );
-    let context = crate::session::build_session_context(
-        &entries,
-        entries
-            .last()
-            .and_then(|entry| entry.id().map(str::to_owned))
-            .as_deref(),
-    );
-    assert!(
-        serde_json::to_string(&context.messages)
-            .unwrap()
-            .contains("retained after the failed write"),
-        "a context rebuild keeps the retained row"
-    );
+    .is_err());
+    assert_eq!(session.entries().await, before);
 }

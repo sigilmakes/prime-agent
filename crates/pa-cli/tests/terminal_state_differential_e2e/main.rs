@@ -178,7 +178,7 @@ fn diff_replay_child_mode() {
     let flags = std::env::var(CHILD_REPLAY_FLAGS_ENV).unwrap_or_default();
     let panic_after_frame = flags.split(',').any(|flag| flag == "panic");
     let stream = pa_tui::session::JsonlSessionStream::from_entries(
-        pa_core::session::read_entries(Path::new(&fixture)).expect("fixture log"),
+        pa_core::session::read::read_entries(Path::new(&fixture)).expect("fixture log"),
     );
     let options = pa_tui::app::AppOptions {
         theme: "prime".to_string(),

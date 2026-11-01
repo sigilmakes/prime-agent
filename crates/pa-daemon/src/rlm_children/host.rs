@@ -678,7 +678,7 @@ fn session_file_carries_spawn_kickoff(
     let path = session_file
         .filter(|path| !path.is_empty())
         .ok_or_else(|| anyhow::anyhow!("cannot verify child kickoff without a session file"))?;
-    let entries = pa_core::session::read_entries(std::path::Path::new(path))
+    let entries = pa_core::session::read::read_entries(std::path::Path::new(path))
         .context("cannot verify durable child kickoff")?;
     Ok(entries.into_iter().any(|entry| match entry {
         pa_types::session::FileEntry::CustomMessage { payload, .. } => {

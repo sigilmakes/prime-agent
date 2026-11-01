@@ -815,7 +815,7 @@ pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
 /// wins; a file with no assistant rows (the prompt arm's never-started
 /// turn) answers nothing.
 pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String> {
-    let entries = pa_core::session::read_entries(std::path::Path::new(session_file)).ok()?;
+    let entries = pa_core::session::read::read_entries(std::path::Path::new(session_file)).ok()?;
     for entry in entries.into_iter().rev() {
         let pa_types::session::FileEntry::Message {
             message: pa_types::session::AgentMessage::Assistant(assistant),

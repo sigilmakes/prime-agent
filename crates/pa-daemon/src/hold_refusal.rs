@@ -181,7 +181,7 @@ fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
 /// A bounded-cost scan, not a full load: reads line by line (constant
 /// memory); the latest `session_info` candidate wins.
 fn session_name_of(session_path: Option<&Path>) -> Option<String> {
-    let entries = pa_core::session::read_entries(session_path?).ok()?;
+    let entries = pa_core::session::read::read_entries(session_path?).ok()?;
     let mut name = None;
     for entry in entries {
         if let pa_types::session::FileEntry::SessionInfo { payload, .. } = entry {

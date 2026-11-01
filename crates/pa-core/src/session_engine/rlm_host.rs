@@ -324,7 +324,7 @@ pub fn rlm_child_session_dir(
 /// resumed session re-seeds its depth bound from. `None` when absent or
 /// unreadable.
 pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    crate::session::read_entries(std::path::Path::new(path?))
+    crate::session::read::read_entries(std::path::Path::new(path?))
         .ok()?
         .iter()
         .rev()

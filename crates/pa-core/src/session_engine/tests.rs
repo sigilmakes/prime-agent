@@ -691,8 +691,14 @@ async fn run_boundaries_record_git_state() {
 async fn durable_event_failure_refuses_local_message_publication() {
     struct RefusingWriter;
     impl crate::session::manager::SessionEntryWriter for RefusingWriter {
-        fn append(&self, _: &pa_types::session::FileEntry) -> std::io::Result<()> {
+        fn append(&self, _: &mut pa_types::session::FileEntry) -> std::io::Result<()> {
             Err(std::io::Error::other("injected durable event refusal"))
+        }
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<pa_types::session::FileEntry>> {
+            Ok(Vec::new())
         }
     }
     let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
