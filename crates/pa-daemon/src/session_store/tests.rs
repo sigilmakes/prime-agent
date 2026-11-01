@@ -1353,11 +1353,7 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
         "childUsage": usage(20, 2, 2.0), "aggregateUsage": usage(120, 12, 10.0)
     });
     serde_json::from_str::<super::info::SessionInfoEntry<'_>>(&attributed.to_string()).unwrap();
-    let append = || {
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file, "{attributed}").unwrap();
-    };
+    let append = || super::info_tests::append_rows(&path, std::slice::from_ref(&attributed));
     append();
     let expected = Some(crate::session_usage::SessionUsageSummary {
         input_tokens: 100,
@@ -1384,8 +1380,8 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
 #[test]
 fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reopened-canonical.jsonl");
     let mut original = SessionFile::create("/repo", None, 0);
+    let path = dir.path().join(session_file_name(original.session_id()));
     original.header.rest.insert(
         "vendor".to_owned(),
         json!({
@@ -1406,15 +1402,17 @@ fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() 
         "wire discriminator is not a header extension"
     );
     let mut scan = SessionScanAccumulator::default();
-    fold_scan_entry(
-        &mut scan,
+    let row = pa_core::session_log::Row::decode(
         std::str::from_utf8(&before)
             .unwrap()
             .lines()
             .next()
-            .unwrap(),
+            .unwrap()
+            .as_bytes(),
+        0,
     )
     .unwrap();
+    fold_scan_entry(&mut scan, &row.body.to_string()).unwrap();
     assert_eq!(
         serde_json::to_value(&scan).unwrap()["header"],
         serde_json::to_value(&expected).unwrap()
@@ -1422,12 +1420,10 @@ fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() 
     reopened.lease = Some(std::sync::Arc::new(
         crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
     ));
-    let cursor = reopened.attach_canonical_owner().unwrap();
-    assert_eq!(
-        reopened.attach_canonical_owner().unwrap(),
-        cursor,
-        "real loaded header passes both unchanged strict owner checks"
-    );
+    let execution = reopened.lease.as_ref().unwrap();
+    execution.ensure_held(&path).unwrap();
+    execution.ensure_held(&path).unwrap();
+    assert_eq!(SessionFile::open_owned_log(&path).unwrap().header, expected);
     assert_eq!(
         fs::read(&path).unwrap(),
         before,

@@ -40,12 +40,10 @@ pub(crate) use index::new_entry_id;
 // The read arm lives in session_store::read; the facade re-exports keep the crate paths stable.
 mod read;
 
+pub(crate) use read::read_first_line_bounded;
 pub use read::{
     is_valid_session_file, parse_session_entries, read_session_header, read_session_header_bounded,
     session_file_name, SESSION_LIST_HEADER_READ_MAX_BYTES,
-};
-pub(crate) use read::{
-    parse_session_header_line, read_first_line_bounded, read_first_line_bounded_from,
 };
 
 // The write arm lives in session_store::write; the facade re-export keeps the API path stable.

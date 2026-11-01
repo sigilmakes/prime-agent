@@ -3,8 +3,8 @@
 
 use super::view::is_warning_shown_row;
 use super::{
-    anyhow, fold_child_usage_attributions, fs, message_text, BufRead, Context, HashMap, Map, Path,
-    PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader, SessionWindow, Value,
+    fold_child_usage_attributions, fs, BufRead, Context, HashMap, Map, Path, PathBuf, Read, Result,
+    SessionEntry, SessionFile, SessionHeader, Value,
 };
 
 const CURRENT_SESSION_VERSION: u32 = 3;
