@@ -257,14 +257,21 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
     assert_eq!(cancelled.next_run_at, None);
     // The close archived the session (the wake scan's state gate): the
     // archived session_state row is durable in the log.
-    let rows =
-        crate::session_transport::test_support::log_row_bodies(&dir.join("agent"), session_id);
-    eprintln!("DEBUG rows: {rows:?}");
+    let rows = pa_core::session_log::SessionLog::open(
+        std::path::Path::new(session_file)
+            .parent()
+            .expect("actual log directory"),
+        session_id,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .expect("open archived serving log")
+    .read_since(0)
+    .expect("read archived serving log");
     let state = rows
         .iter()
         .filter_map(|row| {
-            if row.get("type").and_then(Value::as_str) == Some("session_state") {
-                row.get("state").and_then(Value::as_str)
+            if row.body.get("type").and_then(Value::as_str) == Some("session_state") {
+                row.body["state"]["status"].as_str()
             } else {
                 None
             }
@@ -567,6 +574,12 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         created.success,
         "create failed before any turn: {created:?}"
     );
+    let session_file = PathBuf::from(
+        created.data.as_ref().expect("create summary")["sessionFile"]
+            .as_str()
+            .expect("actual durable session path"),
+    );
+    assert_eq!(session_file.parent(), Some(session_dir.as_path()));
     let mut subscription = worker.events.subscribe();
 
     // Readiness errors are values until the held run has been cancelled and
@@ -609,7 +622,6 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
             );
             store.session_id().to_owned()
         };
-        let agent_dir = dir.path().join("agent");
         fixture.release();
         // No abort command and no aborted signal in this case: the provider
         // itself returns Error(Aborted, []) with a distinctive response id.
@@ -621,7 +633,7 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         anyhow::ensure!(idle.success, "native provider turn never settled: {idle:?}");
         let messages = worker.dispatch("get_messages", &json!({})).await;
         anyhow::ensure!(messages.success, "get_messages failed: {messages:?}");
-        Ok((before, session_id, agent_dir, messages))
+        Ok((before, session_id, messages))
     }
     .await;
     let mut cleanup_error = None;
@@ -651,7 +663,7 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
         cleanup_error.is_none(),
         "{cleanup_error:?}; observation: {observed:?}"
     );
-    let (before, session_id, agent_dir, messages) = observed.expect("native abort fixture settled");
+    let (before, session_id, messages) = observed.expect("native abort fixture settled");
     let events = session_events_since(&mut subscription);
     let named = |kind: &str| -> &Value {
         let matching: Vec<_> = events
@@ -715,11 +727,9 @@ async fn provider_aborted_empty_content_survives_worker_wire_and_journal() {
     let killed = worker.dispatch("kill", &json!({})).await;
     assert!(killed.success, "kill failed: {killed:?}");
     drop(worker);
-    let reopened = crate::session_store::SessionFile::open_log(
-        &session_dir.join(crate::session_store::session_file_name(&session_id)),
-        &agent_dir,
-    )
-    .expect("reopen the session log");
+    let reopened = crate::session_store::SessionFile::open(&session_file)
+        .expect("reopen the actual session log");
+    assert_eq!(reopened.session_id(), session_id);
     let let_binding = reopened.messages();
     let restored = let_binding
         .iter()

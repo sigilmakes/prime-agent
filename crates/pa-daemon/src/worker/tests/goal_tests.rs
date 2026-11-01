@@ -418,13 +418,12 @@ async fn goal_dispatch_worker_with_store(
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
-    let agent_dir = dir.join("agent");
-    let file = std::fs::read_dir(crate::session_transport::log_dir(&agent_dir))
-        .expect("session log dir readable")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        .expect("session log created");
+    let file = PathBuf::from(
+        created.data.as_ref().expect("create summary")["sessionFile"]
+            .as_str()
+            .expect("actual durable session path"),
+    );
+    assert_eq!(file.parent(), Some(session_dir.as_path()));
     (worker, file)
 }
 
@@ -436,19 +435,22 @@ fn thread_goal_state_rows(path: &std::path::Path) -> Vec<Value> {
         .and_then(|stem| stem.to_str())
         .expect("log file name")
         .to_owned();
-    let agent_dir = path
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the log's agent dir")
-        .to_path_buf();
-    crate::session_transport::test_support::log_row_bodies(&agent_dir, &session_id)
-        .into_iter()
-        .filter(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("custom")
-                && entry.get("customType").and_then(Value::as_str)
-                    == Some(pa_core::goals::GOAL_STATE_CUSTOM_TYPE)
-        })
-        .collect()
+    pa_core::session_log::SessionLog::open(
+        path.parent().expect("actual log directory"),
+        &session_id,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .expect("open the actual serving log")
+    .read_since(0)
+    .expect("read durable goal rows")
+    .into_iter()
+    .map(|row| row.body)
+    .filter(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("custom")
+            && entry.get("customType").and_then(Value::as_str)
+                == Some(pa_core::goals::GOAL_STATE_CUSTOM_TYPE)
+    })
+    .collect()
 }
 
 /// The mirror row is what a recovery rebuild replays.
