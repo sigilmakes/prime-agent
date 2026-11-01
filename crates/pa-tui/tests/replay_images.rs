@@ -18,7 +18,7 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use pa_tui::session::{parse_jsonl, JsonlSessionStream, SessionStream};
+use pa_tui::session::{JsonlSessionStream, SessionStream};
 use pa_tui::theme::{ColorMode, Theme};
 use pa_tui::view::AgentView;
 
@@ -32,7 +32,11 @@ fn tiny_png_base64() -> String {
 }
 
 fn frame_text(session: &str, width: u16, height: u16, show_images: bool) -> Vec<String> {
-    let entries = parse_jsonl(session).expect("session parses");
+    let entries = session
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("typed render fixture"))
+        .collect();
     let mut stream = JsonlSessionStream::from_entries(entries);
     let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
     view.show_images = show_images;

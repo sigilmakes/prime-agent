@@ -100,41 +100,15 @@ impl JsonlSessionStream {
         }
     }
 
-    /// Load all entries from a session JSONL file (skip undecodable lines).
+    /// Read a persisted session through its validated log envelopes.
     ///
     /// # Errors
-    ///
-    /// Returns `Err` when the file cannot be read or a non-empty line fails
-    /// to decode as an entry (the error carries the line's 1-based number).
+    /// Rejects unreadable, unsupported or damaged session logs without repair.
     pub fn from_path(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
+        let entries = pa_core::session::read_entries(path)
             .with_context(|| format!("reading session {}", path.display()))?;
-        let entries = parse_jsonl(&raw)?;
         Ok(Self::from_entries(entries))
     }
-}
-
-/// Parse session JSONL text into file entries, ignoring blank lines.
-///
-/// # Errors
-///
-/// Returns `Err` on the first non-blank line that does not decode as a
-/// `FileEntry` (the error carries the line's 1-based number).
-pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
-    let mut entries = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<FileEntry>(line) {
-            Ok(entry) => entries.push(entry),
-            Err(e) => {
-                return Err(anyhow::anyhow!("line {}: {}", i + 1, e))
-                    .with_context(|| format!("parsing session entry {}", i + 1))
-            }
-        }
-    }
-    Ok(entries)
 }
 
 /// Fold a session entry into the transcript (paired tool results attach to
@@ -405,7 +379,7 @@ mod tests {
         // A replayed assistant message keeps its thinking blocks' type (dim/gated) alongside the
         // text, and flags its tool calls for the trailing spacer.
         let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"probe the replay trace","thinkingSignature":"sig-1"},{"type":"text","text":"body after thinking"},{"type":"toolCall","id":"toolu_1","name":"bash","arguments":{"command":"ls"}}],"api":"openai-completions","provider":"prime-inference","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1},"id":"e1"}"#;
-        let entries = parse_jsonl(line).unwrap();
+        let entries: Vec<FileEntry> = vec![serde_json::from_str(line).unwrap()];
         let items = entry_to_items(&entries[0]);
         let [TranscriptItem::Assistant {
             blocks,
@@ -431,7 +405,7 @@ mod tests {
         // verbatim, so a resumed session can replay its reasoning context to the provider
         // unchanged.
         let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"keep my signature","thinkingSignature":"sig-abc","redacted":false},{"type":"text","text":"done"}],"api":"openai-completions","provider":"prime-inference","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1},"id":"e1"}"#;
-        let entries = parse_jsonl(line).unwrap();
+        let entries: Vec<FileEntry> = vec![serde_json::from_str(line).unwrap()];
         let wire = serde_json::to_string(&entries[0]).unwrap();
         let reloaded: FileEntry = serde_json::from_str(&wire).unwrap();
         let rewire = serde_json::to_string(&reloaded).unwrap();
@@ -460,23 +434,31 @@ mod tests {
     }
 
     #[test]
-    fn loads_real_session() {
-        let dir = std::path::Path::new("/home/ubuntu/.prime/agent/sessions");
-        if !dir.is_dir() {
-            return; // sandbox without agent state
+    fn loads_validated_session_log_and_rejects_raw_or_corrupt_rows() {
+        use pa_core::session_log::{Outcome, SessionLog};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.jsonl");
+        let header = serde_json::json!({"type":"session", "id":"replay", "version":3,
+            "cwd":"/tmp", "timestamp":"2026-01-01T00:00:00Z"});
+        let message = serde_json::json!({"type":"message", "id":"input", "parentId":null,
+            "message":{"role":"user", "content":"validated replay", "timestamp":0}});
+        let mut log = SessionLog::open(dir.path(), "replay", std::time::Instant::now()).unwrap();
+        for row in [&header, &message] {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                Outcome::Committed { .. }
+            ));
         }
-        let mut loaded = 0;
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if parse_jsonl(&raw).is_ok() {
-                    loaded += 1;
-                }
-            }
-        }
-        assert!(loaded > 0, "no sessions parsed");
+        let mut stream = JsonlSessionStream::from_path(&path).unwrap();
+        assert!(
+            matches!(stream.poll().unwrap(), SessionEvent::Item(TranscriptItem::UserMessage{text}) if text == "validated replay")
+        );
+        let mut corrupt = std::fs::read(&path).unwrap();
+        corrupt.pop();
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(JsonlSessionStream::from_path(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+        assert!(JsonlSessionStream::from_path(&path).is_err());
     }
 }

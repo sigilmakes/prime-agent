@@ -199,7 +199,23 @@ fn write_replay_fixture() -> String {
         r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"replay row 1 https://example.com/replay"}],"api":"faux:1","provider":"faux","model":"faux-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":2}}"#,
         "\n",
     );
-    std::fs::write(&path, fixture).expect("write fixture");
+    let mut log =
+        pa_core::session_log::SessionLog::open(dir.path(), "fixture", std::time::Instant::now())
+            .expect("fixture log");
+    let header = serde_json::json!({"type":"session","version":3,"id":"fixture","cwd":"/tmp",
+        "timestamp":"2026-01-01T00:00:00Z"});
+    assert!(matches!(
+        log.append(&header, std::time::Instant::now()),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
+    for (index, line) in fixture.lines().enumerate() {
+        let mut row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        row["id"] = serde_json::json!(format!("replay-{index}"));
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
     // The child reads the file across the process boundary.
     std::mem::forget(dir);
     path.display().to_string()
