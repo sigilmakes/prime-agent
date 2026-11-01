@@ -125,7 +125,9 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     ]);
 
     let mut session = SessionManager::in_memory(&cwd);
-    session.materialize_session_file(Some(sessions_dir));
+    session
+        .materialize_session_file(Some(sessions_dir))
+        .expect("persist kernel test session");
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));

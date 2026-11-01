@@ -139,7 +139,9 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
 
     // Persist the session so the cell output can be verified in canonical history.
     let mut session = SessionManager::in_memory(&cwd);
-    session.materialize_session_file(Some(sessions_dir));
+    session
+        .materialize_session_file(Some(sessions_dir))
+        .expect("persist kernel test session");
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));

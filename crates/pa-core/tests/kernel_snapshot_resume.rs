@@ -274,7 +274,8 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
         ),
         text_step("read back"),
     ]);
-    let resumed_manager = SessionManager::open(&fixture.cwd, &fixture.sessions_dir, &session_file);
+    let resumed_manager = SessionManager::open(&fixture.cwd, &fixture.sessions_dir, &session_file)
+        .expect("open persisted snapshot session");
     assert_eq!(
         resumed_manager.get_session_id(),
         session_id,
