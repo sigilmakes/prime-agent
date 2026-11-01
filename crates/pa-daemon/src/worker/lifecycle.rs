@@ -5,7 +5,6 @@ use super::{
     AgentSessionEngine, DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile,
     TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
-use crate::engine::SessionEngine;
 
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a read-only

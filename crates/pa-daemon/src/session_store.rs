@@ -2,7 +2,7 @@
 //! Entries keep their original parent graph; branch selection and context
 //! projection do not rewrite canonical history.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use pa_types::ai::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};

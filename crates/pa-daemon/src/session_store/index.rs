@@ -89,19 +89,6 @@ impl SessionFile {
         self.entries.push(entry);
     }
 
-    /// Fold one already-indexed attribution entry's aggregate (the rewrite-persist path
-    /// calls this after the durable write succeeds).
-    pub(super) fn fold_attribution_id(&mut self, id: &str) {
-        let Some(&row) = self.by_id.get(id) else {
-            return;
-        };
-        if self.entries[row].type_ != "child_usage_attributed" {
-            return;
-        }
-        let entry = self.entries[row].clone();
-        self.fold_live_attribution(&entry);
-    }
-
     /// Fold one attribution entry's aggregate into its already-indexed
     /// target assistant row, when the row has joined the index.
     fn fold_live_attribution(&mut self, entry: &SessionEntry) {

@@ -538,13 +538,6 @@ fn wire_error(outcome: Outcome) -> LogWireError {
 /// Open a session's log for the fold's replay: a torn or corrupt tail is
 /// repaired first (the report returns so the caller can log it), then the log
 /// opens for appends.
-pub(crate) fn open_repaired(
-    agent_dir: &Path,
-    session_id: &str,
-) -> Result<(SessionLog, Option<session_log::RepairReport>), LogWireError> {
-    open_repaired_dir(&log_dir(agent_dir), session_id)
-}
-
 pub(crate) fn open_repaired_dir(
     directory: &Path,
     session_id: &str,
