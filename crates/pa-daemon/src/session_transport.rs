@@ -874,7 +874,7 @@ mod tests {
             .persist_built_log_entry(entry.clone())
             .expect_err("undecided");
         assert!(
-            refused.to_string().contains("undecided write open"),
+            format!("{refused:#}").contains("undecided write open"),
             "{refused:#}"
         );
         // The row is not in the fold, but its bytes are in the file: the
@@ -1078,15 +1078,11 @@ mod tests {
             let log = SessionLog::open(&log_dir(&dir), "log-e2e", deadline()).expect("log");
             assert_eq!(log.read_since(0).expect("read").len(), 1, "header only");
         }
-        std::fs::rename(log_file(&dir, "log-e2e"), dir.join("staged-log.jsonl"))
-            .expect("move the seeded log");
+        // The actual selected path is the log; custom directories have no
+        // parallel default-directory file.
+        std::fs::rename(log_file(&dir, "log-e2e"), &session_path)
+            .expect("seed the log at the selected worker path");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
-        std::fs::create_dir_all(log_dir(&agent_dir)).expect("log dir");
-        std::fs::rename(
-            dir.join("staged-log.jsonl"),
-            log_file(&agent_dir, "log-e2e"),
-        )
-        .expect("seed the log at the worker's agent dir");
 
         let config = WorkerConfig {
             socket_path: dir.join("worker.sock"),
@@ -1190,8 +1186,7 @@ mod tests {
         // Restart: the fold replays from the log with the same rows, and the
         // old-format session file stays absent (the log is the session).
         drop(worker);
-        let reloaded =
-            SessionFile::open_log(&session_path, &agent_dir).expect("restart from the log");
+        let reloaded = SessionFile::open(&session_path).expect("restart from the actual log");
         let replayed = reloaded.entries();
         assert_eq!(
             replayed.len(),
@@ -1213,7 +1208,14 @@ mod tests {
             Some(123),
             "the replayed assistant folds the attribution's aggregate (the scripted 120 plus the child's 3)"
         );
-        assert!(!session_path.exists(), "the canonical write path never ran");
+        assert!(
+            session_path.is_file(),
+            "the selected path is the durable log"
+        );
+        assert!(
+            !log_file(&agent_dir, "log-e2e").exists(),
+            "no parallel default log"
+        );
     }
 
     async fn messages_of(worker: &Worker) -> Vec<Value> {
