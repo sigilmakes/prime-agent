@@ -614,17 +614,14 @@ async fn public_branch_navigation_builds_candidate_tree_not_previous_sibling() {
     let candidate = {
         let persistence = f.engine.session.shared_persistence();
         let mut manager = persistence.lock().await;
-        manager.adopt_entries(prefix);
+        manager.refresh_committed_entries().unwrap();
+        let branch_leaf = prefix.last().unwrap().id().unwrap();
+        manager.branch(branch_leaf);
         manager
             .append_message(user("sibling-only request"))
             .unwrap();
         manager.flush_now().unwrap();
-        let candidate = manager
-            .retained_entries()
-            .iter()
-            .filter(|entry| !matches!(entry, FileEntry::Header { .. }))
-            .cloned()
-            .collect();
+        let candidate = manager.get_branch(None).into_iter().cloned().collect();
         manager.adopt_entries(before);
         candidate
     };

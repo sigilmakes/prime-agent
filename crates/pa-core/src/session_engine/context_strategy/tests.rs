@@ -2138,7 +2138,6 @@ async fn before_model_refreshes_foreign_committed_rows_without_appending() {
         persistence.clone(),
         f.engine.session.plugins.as_ref().unwrap().clone(),
         f.engine.session.context_archive.clone(),
-        f.engine.session.context_model.clone(),
     );
     let messages = hook(Vec::new(), pa_agent::abort::AbortSignal::default())
         .await

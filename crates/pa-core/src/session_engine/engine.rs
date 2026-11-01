@@ -630,22 +630,10 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         .clone()
         .or_else(|| super::provider_adapter::native_model(&model).ok());
     let context_archive_state = Arc::new(std::sync::RwLock::new(context_archive.clone()));
-    let context_model_state = Arc::new(std::sync::RwLock::new(full_model.clone()));
+    let bootstrap_model = (model.provider.clone(), model.id.clone());
 
     let thinking_level = config.thinking_level.unwrap_or(ThinkingLevel::Off);
-
-    {
-        let mut session = wiring.session.lock().await;
-        if existing_messages.is_empty() {
-            session.append_model_change(&model.provider, &model.id)?;
-            session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
-        } else if !has_thinking_entry {
-            session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
-        }
-        if existing_messages.is_empty() || !has_service_tier_entry {
-            session.append_service_tier_change(Some(service_tier_preference))?;
-        }
-    }
+    let initial_context_empty = existing_messages.is_empty();
 
     // Session entries cross through the shared wire shape (same conversion
     // the compaction rebuild uses).
@@ -735,15 +723,13 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
             std::sync::Arc::clone(&request_timing_wiring),
             super::refinement_gate::convert_to_llm(),
         )),
-        // The Rust engine wires no transform, so the instrumented seam
-        // wraps a pass-through that marks the turn's dispatch moment.
+        // Refresh the durable projection before the model-phase strategy callback.
         transform_context: Some(super::request_timing::instrument_transform_context(
             std::sync::Arc::clone(&request_timing_wiring),
             super::context_strategy::before_model(
                 Arc::clone(&wiring.session),
                 Arc::clone(&plugins),
                 Arc::clone(&context_archive_state),
-                Arc::clone(&context_model_state),
             ),
         )),
         should_stop_after_turn: {
@@ -823,6 +809,19 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         startup_leaf.as_deref(),
     )
     .await?;
+    {
+        let mut session = wiring.session.lock().await;
+        if initial_context_empty {
+            session.append_model_change(&bootstrap_model.0, &bootstrap_model.1)?;
+            session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
+        } else if !has_thinking_entry {
+            session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
+        }
+        if initial_context_empty || !has_service_tier_entry {
+            session.append_service_tier_change(Some(service_tier_preference))?;
+        }
+    }
+
     if stored_context_selection.is_none() && config.on_initial_context_selection.is_none() {
         let selection = pa_types::session::ContextSelection {
             version: 1,
@@ -865,7 +864,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     session.plugin_jobs = Some(jobs);
     session.turn_activity = turn_activity;
     session.context_archive = Arc::clone(&context_archive_state);
-    session.context_model = context_model_state;
+    session.context_model = std::sync::RwLock::new(full_model);
     super::plugins::observe_turns(&agent, Arc::clone(&plugins)).await;
     super::plugin_observers::observe_runs(&agent, plugins, Arc::clone(&wiring.session)).await;
     session.ollama_cloud = ollama_cloud;
