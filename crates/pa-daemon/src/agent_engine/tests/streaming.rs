@@ -1283,7 +1283,7 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, dir) =
-        faux_engine_with_settings(&json!({"responses":["one", "two", "three"]}), 1024);
+        faux_engine_with_settings(&json!({"responses":["one", "two", "three", "four"]}), 1024);
     let path = dir.path().join("cached-mixed-inputs.jsonl");
     let mut store =
         crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
@@ -1311,6 +1311,8 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
         "cached-first-input",
         "cached-custom-input",
         "cached-last-input",
+        "cached-aborted-input",
+        "cached-recovery-input",
     ];
     let mut accepted = Vec::new();
     let mut first_sdk = None;
@@ -1329,7 +1331,7 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
             message: (*text).to_owned(), batch: Vec::new(), images: Vec::new(), source: "user".to_owned(),
             agent_message_id: None,
             custom_message: (index == 1).then(|| json!({"role":"custom", "customType":"cached-input", "content":text, "display":true, "timestamp":1})),
-        }, &|| false, &mut |event| {
+        }, &|| index == 3, &mut |event| {
             let input = match event {
                 EngineEvent::UserMessage(message) => Some(("message", json!({"message":message}))),
                 EngineEvent::CustomMessage(message) => {
@@ -1338,6 +1340,7 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
                     Some(("custom_message", serde_json::Value::Object(fields)))
                 }
                 EngineEvent::Done(result) => { done = Some(result); None }
+                EngineEvent::DoneAborted => { done = Some(Err("aborted".to_owned())); None }
                 _ => None,
             };
             if let Some((kind, fields)) = input {
@@ -1347,7 +1350,11 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
             } else { crate::engine::EmitResult::Continue }
         });
         engine.on_turn_done();
-        assert_eq!(done, Some(Ok(())));
+        if index == 3 {
+            assert!(done.is_some_and(|result| result.is_err()));
+        } else {
+            assert_eq!(done, Some(Ok(())));
+        }
         let sdk = engine.session.blocking_lock().clone().unwrap();
         if let Some(first) = &first_sdk {
             assert!(std::sync::Arc::ptr_eq(first, &sdk));
@@ -1356,8 +1363,8 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
         }
     }
     let contexts = contexts.lock().unwrap();
-    assert_eq!(contexts.len(), 3);
-    for (index, context) in contexts.iter().enumerate() {
+    assert_eq!(contexts.len(), 4);
+    for (index, context) in [0, 1, 2, 4].into_iter().zip(contexts.iter()) {
         let encoded = context.to_string();
         for text in &texts[..=index] {
             assert_eq!(encoded.matches(text).count(), 1, "{encoded}");
@@ -1374,7 +1381,7 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
             1
         );
     }
-    assert_eq!(accepted.len(), 3);
+    assert_eq!(accepted.len(), 5);
     assert_eq!(
         reopened
             .entries()
@@ -1382,6 +1389,6 @@ fn cached_user_and_custom_admissions_are_durable_and_visible_once() {
             .filter(|entry| entry.type_ == "custom_message"
                 || (entry.type_ == "message" && entry.fields["message"]["role"] == "user"))
             .count(),
-        3
+        5
     );
 }
