@@ -272,7 +272,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
                     .await
                     .unwrap()
                     .iter()
-                    .filter(|entry| entry.id().is_some())
+                    .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
                     .map(|entry| serde_json::to_value(entry).unwrap())
                     .collect();
                 assert_eq!(

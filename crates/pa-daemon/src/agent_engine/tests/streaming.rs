@@ -698,7 +698,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
             .await
             .unwrap()
             .iter()
-            .filter(|entry| entry.id().is_some())
+            .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
             .map(|entry| serde_json::to_value(entry).unwrap())
             .collect();
         assert_eq!(
@@ -1008,15 +1008,9 @@ fn lazy_startup_two_accepted_batch_inputs_are_excluded_then_delivered_once() {
                 _ => None,
             })
             .collect();
-        let expected: Vec<_> = messages
-            .iter()
-            .cloned()
-            .map(|mut message| {
-                message.as_object_mut().unwrap().remove("role");
-                message
-            })
-            .collect();
-        assert_eq!(actual, expected);
+        let actual: Vec<_> = actual.iter().map(|message| message["content"].clone()).collect();
+        let expected: Vec<_> = messages.iter().map(|message| message["content"].clone()).collect();
+        assert_eq!(actual, expected, "the model sees each accepted input once; durable envelopes above retain original timestamps");
     });
     let core = owner.lock().unwrap();
     let store = core.store.as_ref().unwrap();
