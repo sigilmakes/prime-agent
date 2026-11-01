@@ -96,13 +96,6 @@ pub(crate) fn transports_session_log(agent_dir: &Path, session_path: &Path) -> b
     )
 }
 
-/// Does this session's log file exist yet? The create arms' reopen decision:
-/// an existing log reopens, the absence (with no old-format file either)
-/// means the session is fresh.
-pub(crate) fn log_exists(agent_dir: &Path, session_path: &Path) -> bool {
-    session_id_of(session_path).is_some_and(|id| log_file(agent_dir, &id).exists())
-}
-
 /// Why one wire step failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LogWireError {
@@ -1510,22 +1503,5 @@ mod tests {
             serde_json::to_value(second.entries()).unwrap(),
             serde_json::to_value(replay.entries()).unwrap()
         );
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod test_support {
-    pub(crate) fn log_row_bodies(agent_dir: &std::path::Path, id: &str) -> Vec<serde_json::Value> {
-        let bytes = std::fs::read(super::log_dir(agent_dir).join(format!("{id}.jsonl"))).unwrap();
-        let mut seq = 0;
-        bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                let row = pa_core::session_log::Row::decode(line, seq).unwrap();
-                seq = row.seq;
-                row.body
-            })
-            .collect()
     }
 }

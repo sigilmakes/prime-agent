@@ -53,53 +53,6 @@ pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
     Some(header)
 }
 
-/// Read the file's first line when it ends within `max_bytes` bytes. `None`
-/// when no line ends within the bound: the caller judges with a full read,
-/// never on truncated bytes. A final line without a trailing newline still
-/// counts.
-pub(crate) fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
-    let mut file = fs::File::open(path).ok()?;
-    read_first_line_bounded_from(&mut file, max_bytes)
-}
-
-/// The bounded first-line read over an already-open handle (the roster gate shares one
-/// open with the fold).
-pub(crate) fn read_first_line_bounded_from(
-    file: &mut fs::File,
-    max_bytes: usize,
-) -> Option<Vec<u8>> {
-    // One byte over the cap separates a line that fits (judgeable) from an
-    // over-long one: a newline at index `max_bytes` still bounds a full line.
-    let mut buf = vec![0u8; max_bytes + 1];
-    let mut filled = 0;
-    while filled < buf.len() {
-        let read = file.read(&mut buf[filled..]).ok()?;
-        if read == 0 {
-            return (filled > 0).then(|| strip_line_return(&buf[..filled]));
-        }
-        if let Some(at) = buf[filled..filled + read]
-            .iter()
-            .position(|&byte| byte == b'\n')
-        {
-            if filled + at > max_bytes {
-                return None;
-            }
-            return Some(strip_line_return(&buf[..filled + at]));
-        }
-        filled += read;
-    }
-    None
-}
-
-/// Drop one `\r\n` line return off the line's own bytes, like `str::lines`.
-fn strip_line_return(line: &[u8]) -> Vec<u8> {
-    let mut line = line.to_vec();
-    if line.last() == Some(&b'\r') {
-        line.pop();
-    }
-    line
-}
-
 /// The session file's header, read from the first line bounded to
 /// [`SESSION_LIST_HEADER_READ_MAX_BYTES`]: `None` also covers an over-long
 /// first line — the bounded read refuses to judge a truncated one.
