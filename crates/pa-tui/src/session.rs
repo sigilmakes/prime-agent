@@ -3,9 +3,8 @@
 //! `SessionStream` is the seam the interactive mode and the replay binary
 //! share; `JsonlSessionStream` implements it over pa-types session entries.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use pa_types::session::{AgentMessage, FileEntry};
-use std::path::Path;
 
 /// A transcript item rendered by the agent view.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,16 +97,6 @@ impl JsonlSessionStream {
             pending: Vec::new(),
             finished: false,
         }
-    }
-
-    /// Read a persisted session through its validated log envelopes.
-    ///
-    /// # Errors
-    /// Rejects unreadable, unsupported or damaged session logs without repair.
-    pub fn from_path(path: &Path) -> Result<Self> {
-        let entries = pa_core::session::read_entries(path)
-            .with_context(|| format!("reading session {}", path.display()))?;
-        Ok(Self::from_entries(entries))
     }
 }
 
@@ -431,34 +420,5 @@ mod tests {
             rewire.contains("\"thinkingSignature\":\"sig-abc\""),
             "wire: {rewire}"
         );
-    }
-
-    #[test]
-    fn loads_validated_session_log_and_rejects_raw_or_corrupt_rows() {
-        use pa_core::session_log::{Outcome, SessionLog};
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("replay.jsonl");
-        let header = serde_json::json!({"type":"session", "id":"replay", "version":3,
-            "cwd":"/tmp", "timestamp":"2026-01-01T00:00:00Z"});
-        let message = serde_json::json!({"type":"message", "id":"input", "parentId":null,
-            "message":{"role":"user", "content":"validated replay", "timestamp":0}});
-        let mut log = SessionLog::open(dir.path(), "replay", std::time::Instant::now()).unwrap();
-        for row in [&header, &message] {
-            assert!(matches!(
-                log.append(row, std::time::Instant::now()),
-                Outcome::Committed { .. }
-            ));
-        }
-        let mut stream = JsonlSessionStream::from_path(&path).unwrap();
-        assert!(
-            matches!(stream.poll().unwrap(), SessionEvent::Item(TranscriptItem::UserMessage{text}) if text == "validated replay")
-        );
-        let mut corrupt = std::fs::read(&path).unwrap();
-        corrupt.pop();
-        std::fs::write(&path, &corrupt).unwrap();
-        assert!(JsonlSessionStream::from_path(&path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
-        std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
-        assert!(JsonlSessionStream::from_path(&path).is_err());
     }
 }

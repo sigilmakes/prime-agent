@@ -87,7 +87,9 @@ fn replay() -> Result<()> {
         Some(p) => std::path::PathBuf::from(p),
         None => newest_session()?,
     };
-    let stream = JsonlSessionStream::from_path(&path)?;
+    let entries = pa_core::session::read_entries(&path)
+        .with_context(|| format!("reading session {}", path.display()))?;
+    let stream = JsonlSessionStream::from_entries(entries);
     let _ = args.show_thinking;
 
     if let Some(size) = &args.frame {
@@ -126,4 +128,38 @@ fn replay() -> Result<()> {
             let _ = text;
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn loads_validated_session_log_and_rejects_raw_or_corrupt_rows() {
+        use pa_core::session_log::{Outcome, SessionLog};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.jsonl");
+        let header = serde_json::json!({"type":"session", "id":"replay", "version":3,
+            "cwd":"/tmp", "timestamp":"2026-01-01T00:00:00Z"});
+        let message = serde_json::json!({"type":"message", "id":"input", "parentId":null,
+            "message":{"role":"user", "content":"validated replay", "timestamp":0}});
+        let mut log = SessionLog::open(dir.path(), "replay", std::time::Instant::now()).unwrap();
+        for row in [&header, &message] {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                Outcome::Committed { .. }
+            ));
+        }
+        let entries = pa_core::session::read_entries(&path).unwrap();
+        let mut stream = JsonlSessionStream::from_entries(entries);
+        assert!(
+            matches!(stream.poll().unwrap(), pa_tui::session::SessionEvent::Item(TranscriptItem::UserMessage{text}) if text == "validated replay")
+        );
+        let mut corrupt = std::fs::read(&path).unwrap();
+        corrupt.pop();
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(pa_core::session::read_entries(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+        assert!(pa_core::session::read_entries(&path).is_err());
+    }
 }
