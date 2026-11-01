@@ -335,9 +335,6 @@ impl TurnRunner {
                 .map_or(0, crate::session_store::SessionFile::message_count)
                 / 2
         };
-        // Wire the canonical step channel for this turn: the store's attached epoch
-        // (if any) plus the core's slot. The engine is the only writer, the row arm
-        // below is the only reader.
         let request = PromptRequest {
             batch: batched
                 .iter()
@@ -598,7 +595,7 @@ impl TurnRunner {
                 match &event {
                     EngineEvent::ModelChange(change) => {
                         if rows_persisted {
-                            // The awaited live receipt already committed and ACKed it.
+                            // The SDK writer already committed this row.
                         } else if let Some(Err(error)) = core.store.as_mut().map(|store| {
                             store.persist_entry(
                                 "model_change",
@@ -613,12 +610,8 @@ impl TurnRunner {
                     }
                     // A `message` entry per row (TS's appendMessage path).
                     //
-                    // ONLY the assistant arm may consume the provider step, and this
-                    // split is load-bearing: `UserMessage` is the FIRST event of every
-                    // turn and the step is admitted before the prompt, so a shared arm
-                    // let the user row take the step, drop the seal silently, and make
-                    // every assistant row refuse. The user and tool results are written
-                    // without touching the slot.
+                    // Native SDK rows are already durable. Scripted engines use the
+                    // event arm; accepted inputs always return their stored identity.
                     EngineEvent::AssistantMessage(message) if !rows_persisted => {
                         if let Some(store) = core.store.as_mut() {
                             if let Err(error) =
