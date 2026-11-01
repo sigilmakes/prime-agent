@@ -139,7 +139,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Consume an exact admitted custom-message identity at MessageEnd.
+    /// Consume an exact admitted custom-message identity at `MessageEnd`.
     pub fn consume_admitted_custom_row(&mut self) -> Option<String> {
         self.admitted_custom_rows.pop_front()
     }

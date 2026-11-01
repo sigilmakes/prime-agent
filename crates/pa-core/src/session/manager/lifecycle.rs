@@ -400,6 +400,9 @@ impl SessionManager {
     }
     /// Materialize an in-memory session into a persisted file.
     ///
+    /// # Errors
+    /// Returns session-path, log validation, contention, or durability errors.
+    ///
     /// # Panics
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full session history first.

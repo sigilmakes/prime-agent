@@ -237,7 +237,6 @@ impl WindowedSessionStore {
     /// # Errors
     /// Reject inconsistent physical facts, header, index, retained rows or ancestry.
     #[allow(clippy::too_many_lines)]
-
     /// Return `None` for old schemas, torn rows, or ambiguous ancestry so callers
     /// can use their ordinary full reader. No size or message-count admission cap.
     ///

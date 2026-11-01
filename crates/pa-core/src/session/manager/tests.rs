@@ -822,9 +822,11 @@ fn mirrored_sink_tail_is_visible_before_model_and_next_append() {
         .replay_admitted_input_rows(vec!["foreign".to_owned()])
         .unwrap();
     assert_eq!(manager.active_context().messages.len(), 1);
-    let accepted = match row.clone() {
-        FileEntry::Message { message, .. } => message,
-        _ => unreachable!(),
+    let FileEntry::Message {
+        message: accepted, ..
+    } = row.clone()
+    else {
+        unreachable!()
     };
     assert_eq!(manager.append_message(accepted).unwrap(), "foreign");
     let mut row: FileEntry = serde_json::from_value(serde_json::json!({"type":"custom_message","id":"foreign-custom","parentId":"foreign","customType":"external","content":"external notice","display":true})).unwrap();

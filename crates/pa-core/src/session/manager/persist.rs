@@ -83,6 +83,9 @@ impl SessionManager {
     ///
     /// # Errors
     /// Returns log contention, replacement, checksum, ordering or I/O failures.
+    ///
+    /// # Panics
+    /// Panics if a successful initial flush did not initialize the standalone log.
     pub fn refresh_committed_entries(&mut self) -> io::Result<()> {
         let entries = if let Some(writer) = &self.entry_writer {
             writer.read_tail(&mut self.read_cursor)?
@@ -133,6 +136,9 @@ impl SessionManager {
     ///
     /// # Errors
     /// Returns log contention, damage, mismatch or I/O errors; never repairs.
+    ///
+    /// # Panics
+    /// Panics if an unresolved initial append has lost its retained recovery token.
     pub fn flush_now(&mut self) -> io::Result<()> {
         if !self.persist
             || self.entry_writer.is_some()

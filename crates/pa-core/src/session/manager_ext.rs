@@ -65,6 +65,9 @@ impl SessionManager {
 
     /// Append `git` as a `git_state` row when it differs from the nearest
     /// git context on the active branch (or the header); returns the new id.
+    ///
+    /// # Errors
+    /// Returns committed-history refresh or durable append errors.
     pub fn record_git_state_if_changed(
         &mut self,
         git: GitContext,

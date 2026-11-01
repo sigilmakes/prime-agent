@@ -44,8 +44,15 @@ pub use git::capture_git_context;
 /// Implementations preserve the complete entry envelope and return only after
 /// the row is durable. They must not call back into the session manager.
 pub trait SessionEntryWriter: Send + Sync {
+    /// Commit the entry and update its envelope to the stored identity.
+    ///
+    /// # Errors
+    /// Returns append contention, validation, or durability errors.
     fn append(&self, entry: &mut FileEntry) -> std::io::Result<()>;
     /// Read committed rows through this manager's independent bounded cursor.
+    ///
+    /// # Errors
+    /// Returns history replacement, validation, contention, or I/O errors.
     fn read_tail(
         &self,
         cursor: &mut crate::session_log::ReadCursor,

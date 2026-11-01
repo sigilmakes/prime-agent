@@ -1,4 +1,4 @@
-//! Read-only session history from validated SessionLog envelopes.
+//! Read-only session history from validated `SessionLog` envelopes.
 use pa_types::session::FileEntry;
 use std::io::{self, BufRead};
 use std::path::Path;

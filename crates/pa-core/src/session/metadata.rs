@@ -2,6 +2,7 @@
 use pa_types::session::{EntryBase, FileEntry};
 use std::sync::Arc;
 
+#[must_use]
 pub fn draft_base() -> EntryBase {
     EntryBase {
         id: None,
