@@ -228,6 +228,20 @@ async fn sparse_automatic_settings_review_plan_apply_and_publish_completion() {
     assert_eq!(terminal.len(), 1, "{terminal:?}");
     assert_eq!(terminal[0]["state"]["status"], "completed", "{terminal:?}");
     assert_eq!(
+        terminal[0]["state"]["result"]["message"],
+        json!({
+            "customType":"refinement_outcome", "content":"fixture learned", "display":true,
+            "details":{"summary":"fixture learned","scope":"local","edits":[{
+                "action":"create","kind":"memory","id":"learned","applied":true,
+                "after":{"content":"auxiliary route"}
+            }]}
+        })
+    );
+    assert_eq!(
+        terminal[0]["state"]["result"]["applied"][0]["current"],
+        json!({"state":"Present","value":{"content":"auxiliary route"}})
+    );
+    assert_eq!(
         f.call("get", json!({"kind":"memory","id":"learned"}))
             .await
             .unwrap()["value"]["content"],
@@ -281,6 +295,52 @@ async fn await_job(f: &Fixture, id: &Value) -> Value {
     .await
     .expect("deferred job settled")
 }
+#[tokio::test]
+async fn refinement_presentation_uses_committed_update_delete_and_empty_changes() {
+    let original = r#"{"summary":"fixture learned","edits":[{"action":"create","kind":"memory","id":"learned","value":{"content":"auxiliary route"}}]}"#;
+    for action in ["update", "delete", "none"] {
+        let edits = if action == "none" {
+            json!([])
+        } else {
+            json!([{"action":action,"kind":"memory","id":"learned","value":{"content":"changed"}}])
+        };
+        let proposal = json!({"summary":"fixture learned","edits":edits});
+        let mut config = settings(true);
+        config["auxiliaryModel"] = json!("aux/selected");
+        config["testProvider"] = json!(AUX_PROVIDER.replace(original, &proposal.to_string()));
+        config["plugins"] = json!({"route":{"enabled":true,"path":"provider.lua"}});
+        let f = Fixture::new(config, LEGACY).await;
+        f.call(
+            "create",
+            json!({"kind":"memory","id":"learned","value":{"content":"before"}}),
+        )
+        .await
+        .unwrap();
+        let job = f.call("refine", json!({})).await.unwrap();
+        let result = await_job(&f, &job["id"]).await;
+        assert_eq!(result["status"], "completed", "{result}");
+        let edits = result["result"]["message"]["details"]["edits"]
+            .as_array()
+            .unwrap();
+        if action == "none" {
+            assert!(edits.is_empty());
+        } else {
+            assert_eq!(edits[0]["action"], action);
+            assert_eq!(edits[0]["before"], json!({"content":"before"}));
+            assert_eq!(edits[0]["applied"], true);
+            if action == "update" {
+                assert_eq!(edits[0]["after"], json!({"content":"changed"}));
+            } else {
+                assert!(edits[0].get("after").is_none());
+            }
+        }
+        assert_eq!(
+            result["result"]["applied"].as_array().unwrap().len(),
+            edits.len()
+        );
+    }
+}
+
 #[tokio::test]
 async fn manual_and_interval_refinement_use_scoped_explicit_auxiliary_review_and_plan() {
     let mut settings = settings(true);

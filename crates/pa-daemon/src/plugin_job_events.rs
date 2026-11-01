@@ -32,6 +32,27 @@ pub(crate) fn publish(
     };
     let mut message = json!({"role":"custom","customType":"plugin_job_outcome",
         "content":content,"display":true,"details":job});
+    if state["status"] == "completed" {
+        if let Some(projected) = state["result"].get("message") {
+            if projected
+                .get("customType")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| !kind.is_empty())
+                && projected.get("content").is_some_and(Value::is_string)
+                && projected.get("display").is_some_and(Value::is_boolean)
+                && projected.get("details").is_none_or(Value::is_object)
+            {
+                message = json!({"role":"custom","customType":projected["customType"],
+                    "content":projected["content"],"display":projected["display"],
+                    "details":projected.get("details")});
+            } else {
+                let diagnostic = "Plugin job returned an invalid custom-message projection";
+                eprintln!("pa-daemon: {diagnostic}");
+                message["content"] = json!(format!("{content}\n{diagnostic}"));
+                message["details"]["projectionError"] = json!(diagnostic);
+            }
+        }
+    }
     if let Err(error) = crate::worker::persist_custom_row(&mut core, &message) {
         // The job already committed. Surface the persistence diagnostic without
         // re-running it or concealing the original terminal outcome.

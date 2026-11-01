@@ -226,6 +226,13 @@ fn sparse_automatic_settings_publish_refinement_before_cli_exit() {
     assert_eq!(jobs.len(), 1, "{events:#?}");
     assert_eq!(jobs[0]["job"]["state"]["status"], "completed", "{jobs:#?}");
     assert_eq!(jobs[0]["job"]["state"]["result"]["summary"], "CLI learned");
+    let message = &jobs[0]["job"]["state"]["result"]["message"];
+    let rendered = pa_tui::custom_message::custom_message_entries(message);
+    assert!(
+        matches!(rendered.as_slice(), [pa_tui::chat::ChatEntry::RefinementOutcome(row)]
+        if row.summary == "CLI learned" && row.edits.len() == 1),
+        "{rendered:?}"
+    );
     assert!(
         std::fs::read_to_string(fixture.agent.join("plugins/harness/store.json"))
             .unwrap()

@@ -239,8 +239,22 @@ local function refinement_job(input,ctx)
         input={history=snapshot.history,records=records,instructions=input.instructions,review=review}})
     local proposal=ctx.call("native.json.decode",{text=plan.text})
     assert(type(proposal.edits)=="table", "proposal needs edits")
-    return ctx.call("harness.store.apply",{scope=target,baseline=records,proposal=proposal,
+    local result=ctx.call("harness.store.apply",{scope=target,baseline=records,proposal=proposal,
         branch=snapshot.branch,reason=input.reason})
+    -- Presentation follows committed changes, never the model's proposed state.
+    local edits=proposal.edits
+    for index,change in ipairs(result.applied) do
+        local proposed=proposal.edits[index]
+        local edit={action=proposed.action,kind=proposed.kind,id=proposed.id,applied=true}
+        if change.previous.state=="Present" then edit.before=change.previous.value end
+        if change.current.state=="Present" then edit.after=change.current.value end
+        edits[index]=edit
+    end
+    local summary=type(result.summary)=="string" and result.summary or ""
+    result.message={customType="refinement_outcome",content=summary,
+        display=true,details={summary=summary,
+            scope=target=="global" and "global" or "local",edits=edits}}
+    return result
 end
 local function history(input,ctx)
     return ctx.call("harness.store.history",{identity=identity(input,ctx)})

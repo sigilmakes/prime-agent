@@ -689,18 +689,22 @@ return {
 
     #[tokio::test]
     async fn deferred_job_success_and_failure_reach_custom_message_transport_once() {
-        for fail in [false, true] {
+        for mode in ["generic", "failed", "projected", "malformed"] {
             let fixture = Fixture::new().await;
             std::fs::write(
                 fixture.cwd.join("counter.lua"),
-                r#"
+                r"
 return {commands={{name='later',run=function(input,ctx)
- return ctx.call('jobs.enqueue',{hook='later',input={fail=input.args=='fail'}})
+ return ctx.call('jobs.enqueue',{hook='later',input={mode=input.args}})
 end}},hooks={{name='later',run=function(input)
- if input.fail then error('fixture deferred failure') end
- return {summary='fixture deferred success'}
+ if input.mode=='failed' then error('fixture deferred failure') end
+ local result={summary='fixture deferred success'}
+ if input.mode=='projected' then
+  result.message={customType='fixture_outcome',content='plugin-owned presentation',display=true,details={source='fixture'}}
+ elseif input.mode=='malformed' then result.message={customType=42} end
+ return result
 end}}}
-"#,
+",
             )
             .unwrap();
             let reload = fixture.command("/reload", None).await;
@@ -727,23 +731,19 @@ end}}}
                     crate::plugin_job_events::publish(&core, &events, session, &job);
                 }));
             let mut received = fixture.worker.events.subscribe();
-            let command = fixture
-                .command(
-                    if fail {
-                        "/later fail"
-                    } else {
-                        "/later success"
-                    },
-                    None,
-                )
-                .await;
+            let command = fixture.command(&format!("/later {mode}"), None).await;
             assert!(command.success, "{command:?}");
             let row = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     let frame = received.recv().await.unwrap();
                     let frame: Value = serde_json::from_slice(&frame.payload).unwrap();
                     if frame["event"]["type"] == "message_end"
-                        && frame["event"]["message"]["customType"] == "plugin_job_outcome"
+                        && frame["event"]["message"]["customType"]
+                            == if mode == "projected" {
+                                "fixture_outcome"
+                            } else {
+                                "plugin_job_outcome"
+                            }
                     {
                         break frame["event"]["message"].clone();
                     }
@@ -753,16 +753,37 @@ end}}}
             .expect("terminal outcome reaches attached client");
             let terminal = fixture.core.drain_plugin_jobs().await;
             assert_eq!(terminal.len(), 1, "{terminal:?}");
-            assert_eq!(row["details"], terminal[0]);
+            if mode == "projected" {
+                assert_eq!(
+                    row,
+                    json!({"role":"custom","customType":"fixture_outcome",
+                    "content":"plugin-owned presentation","display":true,"details":{"source":"fixture"}})
+                );
+            } else if mode == "malformed" {
+                assert!(row["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("invalid custom-message projection"));
+                let mut expected = terminal[0].clone();
+                expected["projectionError"] =
+                    json!("Plugin job returned an invalid custom-message projection");
+                assert_eq!(row["details"], expected);
+            } else {
+                assert_eq!(row["details"], terminal[0]);
+            }
             assert_eq!(row["display"], true);
             assert_eq!(
-                row["details"]["state"]["status"],
-                if fail { "failed" } else { "completed" }
+                terminal[0]["state"]["status"],
+                if mode == "failed" {
+                    "failed"
+                } else {
+                    "completed"
+                }
             );
-            assert!(row["content"].as_str().unwrap().contains(if fail {
-                "fixture deferred failure"
-            } else {
-                "fixture deferred success"
+            assert!(row["content"].as_str().unwrap().contains(match mode {
+                "failed" => "fixture deferred failure",
+                "projected" => "plugin-owned presentation",
+                _ => "fixture deferred success",
             }));
             assert_eq!(
                 fixture.core.drain_plugin_jobs().await,
@@ -773,7 +794,12 @@ end}}}
                 fixture
                     .rows()
                     .iter()
-                    .filter(|row| row["customType"] == "plugin_job_outcome")
+                    .filter(|row| row["customType"]
+                        == if mode == "projected" {
+                            "fixture_outcome"
+                        } else {
+                            "plugin_job_outcome"
+                        })
                     .count(),
                 1
             );
