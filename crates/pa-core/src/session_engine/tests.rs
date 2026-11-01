@@ -406,11 +406,12 @@ async fn prompt_persists_tool_results() {
         .join(format!("{}.jsonl", engine.session_id().await))
         .to_string_lossy()
         .to_string();
-    let lines: Vec<serde_json::Value> = crate::session::read::read_entries(std::path::Path::new(&file))
-        .expect("validated durable tool results")
-        .iter()
-        .map(|entry| serde_json::to_value(entry).unwrap())
-        .collect();
+    let lines: Vec<serde_json::Value> =
+        crate::session::read::read_entries(std::path::Path::new(&file))
+            .expect("validated durable tool results")
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect();
     let entry = lines
         .iter()
         .find(|entry| {
