@@ -246,7 +246,7 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
     }
     AgentMessage::Standard(pa_agent::types::Message::User(
         pa_agent::types::UserMessage {
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
             content: pa_agent::types::UserContent::Parts(parts),
             timestamp: now_millis() as i64,
         },

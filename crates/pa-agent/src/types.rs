@@ -365,7 +365,7 @@ impl AgentMessage {
 
     pub fn user(content: impl Into<String>) -> Self {
         AgentMessage::Standard(Message::User(UserMessage {
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
             content: UserContent::Text(content.into()),
             timestamp: crate::now_ms(),
         }))

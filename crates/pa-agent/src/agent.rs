@@ -843,7 +843,7 @@ impl AgentInner {
                 }
                 vec![AgentMessage::Standard(crate::types::Message::User(
                     crate::types::UserMessage {
-                        rest: Default::default(),
+                        rest: serde_json::Map::default(),
                         content: crate::types::UserContent::Parts(content),
                         timestamp: crate::now_ms(),
                     },
@@ -2045,7 +2045,7 @@ mod tests {
     async fn authoritative_message_end_preserves_timestamp_and_metadata_after_abort() {
         let original =
             AgentMessage::Standard(crate::types::Message::User(crate::types::UserMessage {
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
                 content: crate::types::UserContent::Text("exact named row".into()),
                 timestamp: 999,
             }));

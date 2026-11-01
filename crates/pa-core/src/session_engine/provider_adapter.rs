@@ -712,7 +712,7 @@ mod tests {
     fn prompt_text_message_round_trips() {
         let message = pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(
             pa_agent::types::UserMessage {
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
                 content: pa_agent::types::UserContent::Parts(vec![
                     pa_agent::types::UserPart::Text(pa_agent::types::TextContent {
                         text: "reply with ok".into(),

@@ -1075,7 +1075,7 @@ mod tests {
         let mut portable = instructions.clone();
         portable.messages.push(pa_agent::types::Message::User(
             pa_agent::types::UserMessage {
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
                 content: pa_agent::types::UserContent::Text("portable".into()),
                 timestamp: 1,
             },
