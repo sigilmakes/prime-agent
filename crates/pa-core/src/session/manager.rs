@@ -35,7 +35,7 @@ pub use ids::{format_iso, format_iso_now, get_session_file_path};
 
 mod header;
 pub use header::read_session_header;
-use header::{is_valid_rlm_depth, resolve_session_rlm_depth, root_rlm_depth_from_env};
+use header::{resolve_session_rlm_depth, root_rlm_depth_from_env};
 
 mod git;
 pub use git::capture_git_context;
