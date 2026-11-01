@@ -253,7 +253,12 @@ impl SessionNavigation {
             Some(lease) => Some(lease),
             None => self
                 .target_lease(std::path::Path::new(path))
-                .map_err(|error| response_failure(None, command, &error.to_string(), None))?,
+                .map_err(|error| {
+                    let info = error
+                        .downcast_ref::<crate::lease::SessionAlreadyActiveError>()
+                        .map(crate::lease::SessionAlreadyActiveError::error_info);
+                    response_failure(None, command, &error.to_string(), info)
+                })?,
         };
         let mut file = SessionFile::open_owned_log(std::path::Path::new(path))
             .map_err(|error| response_failure(None, command, &error.to_string(), None))?;

@@ -86,7 +86,10 @@ mod resume_settings_tests {
         );
         file.rewrite().unwrap();
         for mode in [0, 1, 2, 3, 4] {
+            // Each variant is a fresh immutable log, not a rewrite of history.
+            let path = dir.path().join(format!("resume-{mode}.jsonl"));
             let mut fixture = file.clone();
+            fixture.set_path(path.clone());
             if mode == 4 {
                 for entry in &mut fixture.entries {
                     if entry.type_ == "thinking_level_change" {

@@ -525,6 +525,13 @@ async fn an_unleased_switch_never_rewrites_another_workers_damaged_file() {
         !switched.success,
         "the damaged target must fail open: {switched:?}"
     );
+    assert!(
+        matches!(
+            switched.error_info,
+            Some(crate::protocol::DaemonErrorInfo::SessionAlreadyActive { .. })
+        ),
+        "the refusal must identify the held execution lock: {switched:?}"
+    );
     assert_eq!(std::fs::read(&target).unwrap(), before);
     assert!(owner
         .core
@@ -539,7 +546,13 @@ async fn an_unleased_switch_never_rewrites_another_workers_damaged_file() {
     let killed = visitor.dispatch("kill", &json!({})).await;
     assert!(killed.success, "visitor kill failed: {killed:?}");
     let killed = owner.dispatch("kill", &json!({})).await;
-    assert!(killed.success, "owner kill failed: {killed:?}");
+    assert!(
+        !killed.success,
+        "a damaged live log must refuse archive append: {killed:?}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    let closed = owner.dispatch("shutdown", &json!({})).await;
+    assert!(closed.success, "owner shutdown failed: {closed:?}");
     drop(visitor);
     drop(owner);
 }

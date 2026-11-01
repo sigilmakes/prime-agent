@@ -95,7 +95,7 @@ async fn exact_bound_history(
         .await
         .unwrap()
         .into_iter()
-        .filter(|entry| entry.id().is_some())
+        .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
         .collect();
     assert_eq!(
         serde_json::to_value(actual).unwrap(),
