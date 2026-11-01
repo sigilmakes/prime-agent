@@ -362,7 +362,11 @@ async fn model_transitions_reach_the_worker_owned_session_file() {
         let rows: Vec<Value> = std::fs::read_to_string(&path)
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
+            .map(|line| {
+                pa_core::session_log::Row::decode(line.as_bytes(), 0)
+                    .unwrap()
+                    .body
+            })
             .collect();
         let transitions: Vec<Value> = rows
             .iter()

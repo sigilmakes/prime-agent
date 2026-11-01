@@ -204,11 +204,22 @@ fn live_summary_usage_is_the_catalog_fold() {
         user("u2", Some("c1")),
         assistant("a2", "u2", 0.5),
     ];
-    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    let mut log =
+        pa_core::session_log::SessionLog::open(&dir, "live-usage", std::time::Instant::now())
+            .unwrap();
+    for line in &lines {
+        let row: Value = serde_json::from_str(line).unwrap();
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed(_)
+        ));
+    }
     let store = crate::session_store::SessionFile::open_windowed(&path).unwrap();
     assert!(
-        store.window.is_some(),
-        "the fixture must serve a windowed open"
+        pa_core::session::window::WindowedSessionStore::open(&path)
+            .unwrap()
+            .is_some(),
+        "the compacted log must still serve sparse SDK context"
     );
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
     let summary = session_summary(&core, inputs());

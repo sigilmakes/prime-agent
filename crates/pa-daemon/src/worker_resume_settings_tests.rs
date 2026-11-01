@@ -162,14 +162,10 @@ mod resume_settings_tests {
                     }
                 );
                 assert_eq!(*capture.tier.lock().unwrap(), None);
-                assert!(worker
-                    .core
-                    .lock()
+                // The daemon owns a full serving fold; SDK context still uses
+                // the sparse compaction window over these same durable rows.
+                assert!(pa_core::session::window::WindowedSessionStore::open(&path)
                     .unwrap()
-                    .store
-                    .as_ref()
-                    .unwrap()
-                    .window
                     .is_some());
             }
             // The worker's core is Arc-shared with its handler seams, so an
@@ -218,7 +214,9 @@ mod resume_settings_tests {
         assert!(response.success, "{response:?}");
         {
             let core = worker.core.lock().unwrap();
-            assert!(core.store.as_ref().unwrap().window.is_some());
+            assert!(pa_core::session::window::WindowedSessionStore::open(&path)
+                .unwrap()
+                .is_some());
             assert_eq!(core.service_tier, Some(pa_types::ai::ServiceTier::Default));
         }
         assert_eq!(

@@ -770,6 +770,7 @@ impl Worker {
         let navigation = crate::session_navigation::SessionNavigation::new(
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
+            config.agent_dir.clone(),
         );
         Worker {
             config,

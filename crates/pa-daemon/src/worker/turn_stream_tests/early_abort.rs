@@ -91,7 +91,9 @@ async fn exact_bound_history(
     let manager = persistence.lock().await;
     let expected = crate::session_tree::file_entries(&disk);
     let actual: Vec<_> = manager
-        .get_entries()
+        .history_snapshot()
+        .await
+        .unwrap()
         .into_iter()
         .filter(|entry| entry.id().is_some())
         .collect();

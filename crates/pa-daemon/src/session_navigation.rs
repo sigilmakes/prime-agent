@@ -25,11 +25,20 @@ pub(crate) struct PreparedReplacement {
 pub(crate) struct SessionNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
+    agent_dir: std::path::PathBuf,
 }
 
 impl SessionNavigation {
-    pub(crate) fn new(engine: Arc<dyn SessionEngine>, core: Arc<Mutex<SessionCore>>) -> Self {
-        SessionNavigation { engine, core }
+    pub(crate) fn new(
+        engine: Arc<dyn SessionEngine>,
+        core: Arc<Mutex<SessionCore>>,
+        agent_dir: std::path::PathBuf,
+    ) -> Self {
+        SessionNavigation {
+            engine,
+            core,
+            agent_dir,
+        }
     }
 
     /// Swap the live session onto `file` (store, engine session file, rebuilt
@@ -83,7 +92,9 @@ impl SessionNavigation {
                 Ok(Some(source))
             }
             Some(source) => source.acquire_target(path).map(Some),
-            None => Ok(None),
+            None => crate::lease::acquire_runtime_session_lease(path, &self.agent_dir)
+                .map(Arc::new)
+                .map(Some),
         }
     }
 
