@@ -363,6 +363,7 @@ impl AgentSessionEngine {
                             model_id: primary_model.id.clone(),
                         },
                     ))
+                    .continues()
                 {
                     anyhow::bail!("Model restoration persistence was cancelled");
                 }
@@ -624,7 +625,9 @@ impl AgentSessionEngine {
                                 provider: next.provider.clone(),
                                 model_id: next.id.clone(),
                             },
-                        )) {
+                        ))
+                        .continues()
+                        {
                             anyhow::bail!("Model switch persistence was cancelled");
                         }
                         Ok(())

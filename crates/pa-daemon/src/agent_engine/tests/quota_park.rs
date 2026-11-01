@@ -90,7 +90,9 @@ async fn a_failed_park_entry_write_propagates_to_the_caller() {
     let handle = std::sync::Arc::new(tokio::sync::Mutex::new({
         let mut manager =
             pa_core::session::manager::SessionManager::persisted(dir.path(), dir.path());
-        manager.set_session_file(session_file.clone()).unwrap();
+        manager
+            .set_session_file(session_file.clone(), None)
+            .unwrap();
         manager
     }));
     // Seed the first assistant entry: custom appends before it defer

@@ -425,8 +425,9 @@ impl Worker {
                     // releases exactly this handle — never the mutable mirror, which a
                     // core rebuild may have re-swapped.
                     let mint_pending_handle = engine.goal_pending_handle();
+                    let mint_engine = std::sync::Arc::clone(&engine);
                     let continuation = tokio::task::spawn_blocking(move || {
-                        engine.mint_post_compaction_goal_continuation()
+                        mint_engine.mint_post_compaction_goal_continuation()
                     })
                     .await
                     .unwrap_or_else(|error| {

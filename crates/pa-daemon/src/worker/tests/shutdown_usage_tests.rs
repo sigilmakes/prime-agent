@@ -61,8 +61,7 @@ async fn accounting_worker(
         .store
         .as_ref()
         .unwrap()
-        .epoch
-        .is_some());
+        .is_log_served());
     (worker, path, server)
 }
 
@@ -185,7 +184,7 @@ async fn close_refuses_to_discard_owed_usage_after_source_conflict() {
             let core = worker.core.lock().unwrap();
             let store = core.store.as_ref().unwrap();
             assert!(store.lease.is_some());
-            assert!(store.epoch.is_some());
+            assert!(store.is_log_served());
         }
         let retry = worker.dispatch(command, &json!({})).await;
         assert!(

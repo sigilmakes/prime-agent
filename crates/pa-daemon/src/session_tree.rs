@@ -480,30 +480,29 @@ mod tests {
     }
 
     #[test]
-    fn branch_summary_intent_preserves_output_without_a_canonical_envelope() {
-        let entry = branch_summary_intent(
-            Some("selected-parent"),
-            "retained paid summary",
-            Some(json!({"readFiles":["one"],"native":{"bytes":"AA=="}})),
-            None,
-            Some(("actual-provider", "actual-aux-model")),
-        )
-        .unwrap();
-        let value = serde_json::to_value(&entry).unwrap();
+    fn branch_summary_preserves_paid_output_and_unknown_details() {
+        let (_dir, mut store) = temp_store();
+        let parent = message_entry(&mut store, "user", "selected parent");
+        let id = store
+            .append_branch_summary(
+                Some(&parent),
+                "retained paid summary",
+                Some(json!({"readFiles":["one"],"native":{"bytes":"AA=="}})),
+                None,
+                None,
+                Some(("actual-provider", "actual-aux-model")),
+            )
+            .unwrap();
+        let reopened = SessionFile::open(&store.path).unwrap();
+        let entry = reopened.entry(&id).unwrap();
+        assert_eq!(entry.fields["summary"], "retained paid summary");
         assert_eq!(
-            value,
-            json!({
-                "type":"branch_summary", "id":null, "parentId":null, "timestamp":null,
-                "fromId":"selected-parent", "summary":"retained paid summary",
-                "details":{"readFiles":["one"],"native":{"bytes":"AA=="}},
-                "provider":"actual-provider", "modelId":"actual-aux-model"
-            })
+            entry.fields["details"],
+            json!({"readFiles":["one"],"native":{"bytes":"AA=="}})
         );
-        assert!(pa_core::session::canonical::CanonicalEntryDraft::new(
-            pa_core::session::canonical::CanonicalMutationKind::ContextPolicy,
-            entry,
-        )
-        .is_ok());
+        assert_eq!(entry.fields["provider"], "actual-provider");
+        assert_eq!(entry.fields["modelId"], "actual-aux-model");
+        assert_eq!(entry.parent_id.as_deref(), Some(parent.as_str()));
     }
 
     #[test]

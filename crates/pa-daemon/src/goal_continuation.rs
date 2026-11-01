@@ -109,11 +109,7 @@ impl AgentSessionEngine {
                     "pa-daemon: goal terminal finish phase=return success=true error_kind=none"
                 ),
                 Err(persist_error) => {
-                    let kind = if let Some(error) = persist_error
-                        .downcast_ref::<pa_core::session::canonical::CanonicalStoreError>()
-                    {
-                        format!("canonical_{:?}", error.kind)
-                    } else if let Some(error) = persist_error.downcast_ref::<std::io::Error>() {
+                    let kind = if let Some(error) = persist_error.downcast_ref::<std::io::Error>() {
                         format!("io_{:?}", error.kind())
                     } else {
                         "other".to_string()

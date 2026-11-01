@@ -591,12 +591,10 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
         &mut |event| {
             match event {
                 EngineEvent::UserMessage(message) => {
+                    accepted_message = Some(message.clone());
                     return crate::engine::EmitResult::Accepted(persist_accepted_user(
-                        &engine,
-                        &owner,
-                        message.clone(),
+                        &engine, &owner, message,
                     ));
-                    accepted_message = Some(message);
                 }
                 EngineEvent::AssistantMessage(message) => published_assistant = Some(message),
                 EngineEvent::Done(done) => result = Some(done),
@@ -807,12 +805,10 @@ fn cached_sdk_acceptance_waits_for_build_gate_before_user_receipt() {
         &mut |event| {
             match event {
                 EngineEvent::UserMessage(message) => {
-                    return crate::engine::EmitResult::Accepted(persist_accepted_user(
-                        &engine,
-                        &owner,
-                        message.clone(),
-                    ));
                     accepted += 1;
+                    return crate::engine::EmitResult::Accepted(persist_accepted_user(
+                        &engine, &owner, message,
+                    ));
                 }
                 EngineEvent::Done(result) => done = Some(result),
                 _ => {}
@@ -936,8 +932,6 @@ fn lazy_startup_two_preaccepted_users_are_excluded_then_delivered_once() {
         .unwrap();
     let sdk = engine.session.blocking_lock().clone().unwrap();
     engine.runtime.block_on(async {
-        let persistence = sdk.session.shared_persistence();
-        let manager = persistence.lock().await;
         assert!(sdk
             .session
             .agent()

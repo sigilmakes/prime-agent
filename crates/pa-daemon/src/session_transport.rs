@@ -1468,3 +1468,20 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn log_row_bodies(agent_dir: &std::path::Path, id: &str) -> Vec<serde_json::Value> {
+        let bytes = std::fs::read(super::log_dir(agent_dir).join(format!("{id}.jsonl"))).unwrap();
+        let mut seq = 0;
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let row = pa_core::session_log::Row::decode(line, seq).unwrap();
+                seq = row.seq;
+                row.body
+            })
+            .collect()
+    }
+}

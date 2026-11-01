@@ -47,11 +47,7 @@ impl AgentSessionEngine {
                     }
                 }
                 Err(error) => {
-                    let kind = if let Some(error) =
-                        error.downcast_ref::<pa_core::session::canonical::CanonicalStoreError>()
-                    {
-                        format!("canonical_{:?}", error.kind)
-                    } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                    let kind = if let Some(error) = error.downcast_ref::<std::io::Error>() {
                         format!("io_{:?}", error.kind())
                     } else {
                         "other".to_string()
@@ -82,5 +78,6 @@ impl AgentSessionEngine {
             entry: Value::Null,
             event,
         })
+        .continues()
     }
 }
