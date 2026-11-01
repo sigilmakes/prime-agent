@@ -110,8 +110,8 @@ fn cancellation_stops_the_prompt() {
         &mut |event| {
             seen_clone.fetch_add(1, Ordering::SeqCst);
             match event {
-                EngineEvent::UserMessage(_) => false, // cancel right away
-                _ => true,
+                EngineEvent::UserMessage(_) => crate::engine::EmitResult::Stop, // cancel right away
+                _ => crate::engine::EmitResult::Continue,
             }
         },
     );

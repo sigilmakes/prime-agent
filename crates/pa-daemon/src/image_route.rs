@@ -214,7 +214,7 @@ impl AgentSessionEngine {
         };
         let target = route.target.clone();
         *self.provider_target.write().expect("provider target lock") = Some(target);
-        true.into()
+        true
     }
 
     /// Clear the armed route and restore the session's serving target (a

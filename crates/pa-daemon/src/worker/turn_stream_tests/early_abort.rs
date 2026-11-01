@@ -11,7 +11,7 @@ struct FirstEventBoundary {
 
 impl SessionEngine for FirstEventBoundary {
     fn persists_session_entries(&self) -> bool {
-        true.into()
+        true
     }
 
     fn set_session_file(&self, path: std::path::PathBuf) {
