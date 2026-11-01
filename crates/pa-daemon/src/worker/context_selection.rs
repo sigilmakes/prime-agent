@@ -93,7 +93,7 @@ impl pa_core::session::manager::SessionEntryWriter for CoreSessionEntryWriter {
         &self,
         cursor: &mut pa_core::session_log::ReadCursor,
     ) -> std::io::Result<Vec<pa_types::session::FileEntry>> {
-        let read = || -> Result<Vec<pa_types::session::FileEntry>> {
+        let mut read = || -> Result<Vec<pa_types::session::FileEntry>> {
             let mut core = self
                 .core
                 .lock()
