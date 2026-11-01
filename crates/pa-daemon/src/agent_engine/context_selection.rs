@@ -76,7 +76,7 @@ impl super::AgentSessionEngine {
     /// The fileless path retains its existing in-memory semantics.
     pub(super) fn build_session_mirror(
         &self,
-        cwd: std::path::PathBuf,
+        cwd: &Path,
         session_dir: Option<std::path::PathBuf>,
         session_file: Option<std::path::PathBuf>,
     ) -> anyhow::Result<(
@@ -85,9 +85,9 @@ impl super::AgentSessionEngine {
     )> {
         let Some(path) = session_file else {
             let manager = session_dir.map_or_else(
-                || pa_core::session::manager::SessionManager::in_memory(&cwd),
+                || pa_core::session::manager::SessionManager::in_memory(cwd),
                 |dir| {
-                    pa_core::session::manager::SessionManager::in_memory_in_session_dir(&cwd, &dir)
+                    pa_core::session::manager::SessionManager::in_memory_in_session_dir(cwd, &dir)
                 },
             );
             return Ok((manager, None));
@@ -109,7 +109,7 @@ impl super::AgentSessionEngine {
                 .map_or_else(|| std::path::PathBuf::from("."), Path::to_owned)
         });
         let mut manager = pa_core::session::manager::SessionManager::in_memory_from_header(
-            &cwd,
+            cwd,
             &dir,
             seed.header,
         )
