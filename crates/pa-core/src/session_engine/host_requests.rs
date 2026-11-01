@@ -345,13 +345,13 @@ mod tests {
     use crate::cron::store::AgentCronJobStore;
     use crate::session::manager::SessionManager;
 
-    fn persisted_session() -> SessionManager {
+    fn persisted_session() -> (tempfile::TempDir, SessionManager) {
         let dir = tempfile::TempDir::new().unwrap();
         let session_dir = dir.path().join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
         let mut session = SessionManager::in_memory(dir.path());
         session.materialize_session_file(Some(session_dir)).unwrap();
-        session
+        (dir, session)
     }
 
     fn binding() -> SessionBinding {
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn goal_host_requests() {
-        let mut session = persisted_session();
+        let (_session_dir, mut session) = persisted_session();
         let mut driver = GoalDriver::new();
         let response =
             handle_goal_host_request("goal.get", &json!({}), &mut driver, &mut session).unwrap();
@@ -421,7 +421,7 @@ mod tests {
             .starts_with("Goal achieved."));
         // Completing with no goal errors.
         let mut bare = GoalDriver::new();
-        let mut other_session = persisted_session();
+        let (_other_session_dir, mut other_session) = persisted_session();
         let error =
             handle_goal_host_request("goal.complete", &json!({}), &mut bare, &mut other_session)
                 .unwrap_err();
