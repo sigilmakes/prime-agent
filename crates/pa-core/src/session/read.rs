@@ -8,7 +8,14 @@ use std::path::Path;
 /// # Errors
 /// Rejects unsupported formats, invalid envelopes, ordering, checksums or rows.
 pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
-    let mut reader = io::BufReader::new(std::fs::File::open(path)?);
+    read_entries_from(io::BufReader::new(std::fs::File::open(path)?))
+}
+
+/// Validate an immutable session-log snapshot without opening or changing files.
+///
+/// # Errors
+/// Rejects unsupported formats, invalid envelopes, ordering, checksums or rows.
+pub fn read_entries_from(mut reader: impl BufRead) -> io::Result<Vec<FileEntry>> {
     let mut line = Vec::new();
     let mut seq = 0;
     let mut entries = Vec::new();

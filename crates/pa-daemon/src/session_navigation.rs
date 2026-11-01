@@ -203,21 +203,22 @@ impl SessionNavigation {
                 ));
             }
         };
+        // Validate the exact source snapshot before acquiring or touching the target.
+        let bytes = std::fs::read(resolved)
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
+        pa_core::session::read::read_entries_from(std::io::Cursor::new(&bytes))
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
         std::fs::create_dir_all(target.parent().unwrap_or(std::path::Path::new(".")))
-            .map_err(|error| error.to_string())
-            .ok();
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
         let lease = self
             .target_lease(&target)
             .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
-        if std::fs::canonicalize(&target).ok() != std::fs::canonicalize(resolved).ok() {
-            if let Err(error) = std::fs::copy(resolved, &target) {
-                return Err(response_failure(
-                    None,
-                    "import_jsonl",
-                    &error.to_string(),
-                    None,
-                ));
-            }
+        if crate::lease::canonical_session_path(&target)
+            != crate::lease::canonical_session_path(resolved)
+        {
+            publish_import(&target, &bytes).map_err(|error| {
+                response_failure(None, "import_jsonl", &error.to_string(), None)
+            })?;
         }
         self.open_replacement(
             &target.to_string_lossy(),
@@ -274,6 +275,32 @@ impl SessionNavigation {
         }
         Ok(PreparedReplacement { file, cwd })
     }
+}
+
+/// Publish only into an absent destination while excluding append and repair.
+/// The execution lease is held by the caller; it is a separate lock.
+fn publish_import(target: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    let lock = pa_core::session_log::Disk::open_lock(
+        &pa_core::session_log::RealDisk,
+        &target.with_extension("lock"),
+    )?;
+    lock.try_lock().map_err(anyhow::Error::from)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let parent = target.parent().unwrap_or(std::path::Path::new("."));
+    let staged = parent.join(format!(".session-import-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = options.open(&staged)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // Like archive/ledger publication, hard_link is atomic and never replaces
+    // an existing name. Only complete, synced bytes become the session file.
+    std::fs::hard_link(&staged, target)?;
+    pa_core::platform::fsync_directory(parent)?;
+    std::fs::remove_file(&staged)?;
+    Ok(())
 }
 
 /// Rebuild the engine's live context onto the moved session (the same
@@ -442,6 +469,96 @@ mod tests {
             .await;
         assert!(created.success, "create failed: {created:?}");
         worker
+    }
+
+    fn write_import_log(path: &std::path::Path) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            crate::session_transport::deadline(),
+        )
+        .unwrap();
+        assert!(matches!(
+            log.append(
+                &json!({
+                    "type": "session", "version": 3, "id": "import", "cwd": "/tmp",
+                    "timestamp": "2026-10-31T00:00:00.000Z"
+                }),
+                crate::session_transport::deadline()
+            ),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
+
+    #[test]
+    fn import_publication_never_overwrites_and_respects_the_append_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        write_import_log(&source);
+        let bytes = std::fs::read(&source).unwrap();
+        let target = dir.path().join("target.jsonl");
+        std::fs::write(&target, b"original bytes").unwrap();
+        assert!(publish_import(&target, &bytes).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+        let absent = dir.path().join("absent.jsonl");
+        let lock = pa_core::session_log::Disk::open_lock(
+            &pa_core::session_log::RealDisk,
+            &absent.with_extension("lock"),
+        )
+        .unwrap();
+        lock.try_lock().unwrap();
+        assert!(publish_import(&absent, &bytes).is_err());
+        assert!(!absent.exists());
+        drop(lock);
+        publish_import(&absent, &bytes).unwrap();
+        assert_eq!(std::fs::read(&absent).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn import_prepare_preserves_current_bytes_on_invalid_sources_and_collisions() {
+        let worker = created_worker().await;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        let target = sessions.join("current.jsonl");
+        write_import_log(&target);
+        let original = std::fs::read(&target).unwrap();
+        {
+            let mut core = worker.core.lock().unwrap();
+            let mut store = SessionFile::open(&target).unwrap();
+            store.lease = Some(Arc::new(
+                crate::lease::acquire_runtime_session_lease(&target, &dir.path().join("agent"))
+                    .unwrap(),
+            ));
+            core.store = Some(store);
+        }
+        let source = external.join("current.jsonl");
+        for bad in [
+            b"{\"type\":\"session\",\"id\":\"legacy\"}\n".as_slice(),
+            b"corrupt\n",
+        ] {
+            std::fs::write(&source, bad).unwrap();
+            assert!(worker
+                .navigation
+                .prepare_import_jsonl(&json!({"inputPath": source}))
+                .is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+            assert_eq!(std::fs::read(&source).unwrap(), bad);
+        }
+        // A valid external log with the same basename must not clobber current state either.
+        std::fs::write(&source, &original).unwrap();
+        assert!(worker
+            .navigation
+            .prepare_import_jsonl(&json!({"inputPath": source}))
+            .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        let prepared = worker
+            .navigation
+            .prepare_import_jsonl(&json!({"inputPath": target}));
+        assert!(prepared.is_ok(), "a valid exact-path import is a no-op");
+        assert_eq!(std::fs::read(&target).unwrap(), original);
     }
 
     #[tokio::test]
