@@ -238,7 +238,9 @@ fn no_git_state_entry_when_nothing_changed() {
 
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
     assert_eq!(
-        manager.record_git_state_if_changed(capture_git_context(repo.path()).unwrap()),
+        manager
+            .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+            .unwrap(),
         None
     );
     assert!(!manager
@@ -258,6 +260,7 @@ fn records_git_state_when_commit_changes() {
     let second_sha = commit(repo.path(), "second");
     assert!(manager
         .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .unwrap()
         .is_some());
     let entries = manager.get_entries();
     let git_states: Vec<_> = entries
@@ -273,7 +276,9 @@ fn records_git_state_when_commit_changes() {
     }
     // Unchanged context dedupes away.
     assert_eq!(
-        manager.record_git_state_if_changed(capture_git_context(repo.path()).unwrap()),
+        manager
+            .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+            .unwrap(),
         None
     );
 }
@@ -290,6 +295,7 @@ fn re_records_git_state_on_branch_without_it_on_active_path() {
     commit(repo.path(), "second");
     assert!(manager
         .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .unwrap()
         .is_some());
 
     // Move the leaf before the git_state entry: the nearest git context on this path is the header
@@ -297,6 +303,7 @@ fn re_records_git_state_on_branch_without_it_on_active_path() {
     manager.branch(&msg_id);
     assert!(manager
         .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .unwrap()
         .is_some());
 }
 
@@ -309,7 +316,9 @@ fn git_state_entries_stay_out_of_llm_context() {
 
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
     commit(repo.path(), "second");
-    manager.record_git_state_if_changed(capture_git_context(repo.path()).unwrap());
+    manager
+        .record_git_state_if_changed(capture_git_context(repo.path()).unwrap())
+        .unwrap();
     let context = pa_core::session::build_session_context(
         &manager.get_entries(),
         manager.get_leaf_id().map(str::to_string).as_deref(),
