@@ -20,16 +20,19 @@ pub fn session_file_name(session_id: &str) -> String {
 
 #[must_use]
 pub fn parse_session_entries(content: &str) -> Vec<Value> {
-    content
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            serde_json::from_str(trimmed).ok()
-        })
-        .collect()
+    let mut seq = 0;
+    let mut rows = Vec::new();
+    for line in content.split_inclusive('\n') {
+        let Some(line) = line.strip_suffix('\n') else {
+            break;
+        };
+        let Ok(row) = pa_core::session_log::Row::decode(line.as_bytes(), seq) else {
+            return Vec::new();
+        };
+        seq = row.seq;
+        rows.push(row.body);
+    }
+    rows
 }
 
 /// The bounded first-line read cap for header-only judgments: a session

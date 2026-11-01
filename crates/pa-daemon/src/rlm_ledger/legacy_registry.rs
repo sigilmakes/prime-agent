@@ -132,13 +132,23 @@ pub(super) const LEGACY_REGISTRY_HEADER_READ_MAX_BYTES: usize = 64 * 1024;
 /// — the passive walk probes every parent once, so a whole-file read
 /// would be linear in transcript bytes.
 pub(super) fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
-    let line = crate::session_store::read_first_line_bounded(
-        session_file,
-        LEGACY_REGISTRY_HEADER_READ_MAX_BYTES,
-    )?;
-    let text = std::str::from_utf8(&line).ok()?;
-    let header: Value = serde_json::from_str(text.trim()).ok()?;
-    let header_id = header.get("id")?.as_str()?;
+    use std::io::{BufRead as _, Read as _};
+
+    let file = fs::File::open(session_file).ok()?;
+    let mut line = Vec::new();
+    std::io::BufReader::new(file)
+        .take(LEGACY_REGISTRY_HEADER_READ_MAX_BYTES as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.len() > LEGACY_REGISTRY_HEADER_READ_MAX_BYTES || line.pop() != Some(b'\n') {
+        return None;
+    }
+    let row = pa_core::session_log::Row::decode(&line, 0).ok()?;
+    let pa_types::session::FileEntry::Header { header } = serde_json::from_value(row.body).ok()?
+    else {
+        return None;
+    };
+    let header_id = header.id;
     // TS `getSessionArtifactsRoot`: the artifacts tree is the sibling of
     // the session file's directory, keyed by the session header id.
     let artifacts_root = session_file.parent()?.parent()?.join("session-artifacts");

@@ -18,14 +18,29 @@ fn ledger_over(agent_dir: &Path, sessions_dir: &Path) -> RlmSpawnLedger {
     RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {})
 }
 
+fn write_session_log(path: &Path, rows: &[Value]) {
+    let mut log = pa_core::session_log::SessionLog::open(
+        path.parent().unwrap(),
+        path.file_stem().unwrap().to_str().unwrap(),
+        crate::session_transport::deadline(),
+    )
+    .unwrap();
+    for row in rows {
+        assert!(matches!(
+            log.append(row, crate::session_transport::deadline()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
+}
+
 #[test]
 fn legacy_registry_probe_reads_the_header_line_bounded() {
     let dir = temp_dir("legacy-bounded");
     let parent = dir.join("p.jsonl");
-    let mut content = json!({"type": "session", "id": "p1"}).to_string();
-    content.push('\n');
-    content.push_str(&"x".repeat(LEGACY_REGISTRY_HEADER_READ_MAX_BYTES * 2));
-    fs::write(&parent, content).unwrap();
+    write_session_log(&parent, &[json!({"type": "session", "id": "p1"})]);
+    let mut file = fs::OpenOptions::new().append(true).open(&parent).unwrap();
+    file.write_all(&vec![b'x'; LEGACY_REGISTRY_HEADER_READ_MAX_BYTES * 2])
+        .unwrap();
     let registry = legacy_registry_path(&parent).expect("registry path");
     assert!(
         registry
@@ -49,12 +64,13 @@ fn legacy_registry_probe_reads_the_header_line_bounded() {
 fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
     let dir = temp_dir("legacy-corrupt-tail");
     let parent = dir.join("p.jsonl");
-    let mut bytes = json!({"type": "session", "id": "p1"})
-        .to_string()
-        .into_bytes();
-    bytes.push(b'\n');
-    bytes.extend_from_slice(&[0xff_u8; 4096]);
-    fs::write(&parent, bytes).unwrap();
+    write_session_log(&parent, &[json!({"type": "session", "id": "p1"})]);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&parent)
+        .unwrap()
+        .write_all(&[0xff_u8; 4096])
+        .unwrap();
     let registry = legacy_registry_path(&parent).expect("registry path over a corrupt tail");
     assert!(
         registry
@@ -62,6 +78,23 @@ fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
             .ends_with("session-artifacts/p1/rlm-subagents.jsonl"),
         "a torn-write tail no longer masks the readable header"
     );
+}
+
+#[test]
+fn legacy_registry_probe_rejects_uncommitted_or_corrupt_log_headers() {
+    let dir = temp_dir("legacy-header-invalid");
+    let parent = dir.join("p.jsonl");
+    write_session_log(&parent, &[json!({"type": "session", "id": "p1"})]);
+    let original = fs::read(&parent).unwrap();
+    fs::write(&parent, &original[..original.len() - 1]).unwrap();
+    assert_eq!(legacy_registry_path(&parent), None);
+    let mut corrupt = original;
+    let index = corrupt.iter().position(|byte| *byte == b'p').unwrap();
+    corrupt[index] = b'q';
+    fs::write(&parent, corrupt).unwrap();
+    assert_eq!(legacy_registry_path(&parent), None);
+    fs::write(&parent, b"{\"type\":\"session\",\"id\":\"p1\"}\n").unwrap();
+    assert_eq!(legacy_registry_path(&parent), None);
 }
 
 #[test]
@@ -695,11 +728,10 @@ fn seeds_from_legacy_registries_once_and_atomically() {
     fs::create_dir_all(&sessions).unwrap();
     fs::create_dir_all(&artifacts).unwrap();
     let parent = sessions.join("p1.jsonl");
-    fs::write(
+    write_session_log(
         &parent,
-        "{\"type\":\"session\",\"id\":\"p1\",\"cwd\":\"/x\"}",
-    )
-    .unwrap();
+        &[json!({"type": "session", "id": "p1", "cwd": "/x"})],
+    );
     let child = dir.join("child.jsonl");
     fs::write(&child, "{}").unwrap();
     fs::write(
@@ -1189,7 +1221,11 @@ fn bucket_bills_tombstoned_children_without_catalog_rows() {
         .to_string(),
     );
     legacy.push('\n');
-    fs::write(&legacy_child, legacy).unwrap();
+    let rows = legacy
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect::<Vec<Value>>();
+    write_session_log(&legacy_child, &rows);
     let spawn = |child_id: &str, child: &Path| {
         ledger
             .append_spawn(&RlmSpawnInput {
