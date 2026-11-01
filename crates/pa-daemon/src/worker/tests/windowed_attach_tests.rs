@@ -666,7 +666,7 @@ async fn display_transcript_restores_precompaction_history_without_sibling_leaka
     let window = pa_core::session::window::WindowedSessionStore::open(&path)
         .expect("open SDK window")
         .expect("compacted log yields a sparse window");
-    assert!(!window.is_full_history(), "SDK window must stay sparse");
+    assert!(!window.full_history(), "SDK window must stay sparse");
     assert!(
         window.entries().len() < fixture.id,
         "older bodies are omitted"
