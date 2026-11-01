@@ -58,9 +58,9 @@ mod display;
 #[cfg(test)]
 mod display_tests;
 
-use view::normalize_state_status;
 #[cfg(test)]
 use view::message_text;
+use view::normalize_state_status;
 
 // The message-role helper's remaining bare-path callers are the test children; the binding
 // rides the test builds only.
