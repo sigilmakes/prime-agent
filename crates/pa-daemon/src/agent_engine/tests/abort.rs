@@ -202,7 +202,7 @@ fn abort_at_registered_run_start_preserves_the_accepted_turn_without_a_provider_
                 agent.signal().is_some(),
                 "cancel consult must own a live run"
             );
-            true.into()
+            true
         },
         &mut |event| {
             events.push(event);

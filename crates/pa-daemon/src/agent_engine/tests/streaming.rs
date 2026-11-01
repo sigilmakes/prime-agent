@@ -594,7 +594,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
                 EngineEvent::UserMessage(message) => {
                     accepted_message = Some(message.clone());
                     return crate::engine::EmitResult::Accepted(persist_accepted_user(
-                        &engine, &owner, message,
+                        &engine, &owner, &message,
                     ));
                 }
                 EngineEvent::AssistantMessage(message) => published_assistant = Some(message),
@@ -814,7 +814,7 @@ fn cached_sdk_acceptance_waits_for_build_gate_before_user_receipt() {
                 EngineEvent::UserMessage(message) => {
                     accepted += 1;
                     return crate::engine::EmitResult::Accepted(persist_accepted_user(
-                        &engine, &owner, message,
+                        &engine, &owner, &message,
                     ));
                 }
                 EngineEvent::Done(result) => done = Some(result),
@@ -928,7 +928,7 @@ fn lazy_startup_two_accepted_batch_inputs_are_excluded_then_delivered_once() {
     ];
     let ids: Vec<_> = messages
         .iter()
-        .map(|message| persist_accepted_user(&engine, &owner, message.clone()))
+        .map(|message| persist_accepted_user(&engine, &owner, message))
         .collect();
     assert!(engine.session.blocking_lock().is_none());
     let accepted_bytes = std::fs::read(&path).unwrap();
@@ -1151,9 +1151,7 @@ fn live_stream_metadata_snapshot_preserves_provider_terminal_and_next_epoch() {
                 match event {
                     EngineEvent::UserMessage(message) => {
                         return crate::engine::EmitResult::Accepted(persist_accepted_user(
-                            &engine,
-                            &owner,
-                            message.clone(),
+                            &engine, &owner, &message,
                         ));
                     }
                     EngineEvent::AssistantMessage(message) => published.push(message),

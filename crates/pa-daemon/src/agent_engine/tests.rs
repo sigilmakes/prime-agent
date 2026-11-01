@@ -72,7 +72,7 @@ fn own_log_store(
 fn persist_accepted_user(
     _engine: &AgentSessionEngine,
     owner: &std::sync::Arc<std::sync::Mutex<crate::worker::SessionCore>>,
-    message: serde_json::Value,
+    message: &serde_json::Value,
 ) -> String {
     let id = owner
         .lock()
