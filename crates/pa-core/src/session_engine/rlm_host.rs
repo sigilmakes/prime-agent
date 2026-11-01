@@ -324,39 +324,18 @@ pub fn rlm_child_session_dir(
 /// resumed session re-seeds its depth bound from. `None` when absent or
 /// unreadable.
 pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    let path = std::path::Path::new(path?);
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
-        &mut bytes,
-    )
-    .ok()?;
-    let content = std::str::from_utf8(&bytes).ok()?;
-    content
-        .lines()
+    crate::session::read_entries(std::path::Path::new(path?))
+        .ok()?
+        .iter()
         .rev()
-        // The exact union gate: a matching row's raw text carries either the
-        // `customType` literal or a `\u`-escape (serde never letter-escapes),
-        // so the union admits every line the reference could match;
-        // `rlm_max_depth_row` judges the candidates by the decoded fields.
-        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
-        .find_map(rlm_max_depth_row)
-}
-
-/// One candidate line's depth bound: `Some(depth)` for a matching custom
-/// row with a parseable `data.maxDepth`, `None` otherwise.
-fn rlm_max_depth_row(line: &str) -> Option<u64> {
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("custom") {
-        return None;
-    }
-    if value.get("customType").and_then(serde_json::Value::as_str) != Some("rlm_max_depth_state") {
-        return None;
-    }
-    value
-        .get("data")
-        .and_then(|data| data.get("maxDepth"))
-        .and_then(serde_json::Value::as_u64)
+        .find_map(|entry| match entry {
+            pa_types::session::FileEntry::Custom { payload, .. }
+                if payload.custom_type == "rlm_max_depth_state" =>
+            {
+                payload.data.as_ref()?.get("maxDepth")?.as_u64()
+            }
+            _ => None,
+        })
 }
 
 /// The depth-bound resolution and its precedence: chat override >
