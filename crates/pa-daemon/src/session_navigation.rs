@@ -298,7 +298,7 @@ fn publish_import(target: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
     // Like archive/ledger publication, hard_link is atomic and never replaces
     // an existing name. Only complete, synced bytes become the session file.
     std::fs::hard_link(&staged, target)?;
-    pa_core::platform::fsync_directory(parent)?;
+    pa_core::platform::fs::sync_directory(parent)?;
     std::fs::remove_file(&staged)?;
     Ok(())
 }
