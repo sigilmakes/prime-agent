@@ -682,16 +682,23 @@ async fn display_transcript_restores_precompaction_history_without_sibling_leaka
     assert_eq!(legacy[0]["role"], "compactionSummary");
     let mut capabilities = TUI_CAPABILITIES.to_vec();
     capabilities.push("display_transcript");
-    // A failed display read cannot make an existing session unattachable.
-    let held_path = path.with_extension("held");
-    std::fs::rename(&path, &held_path).unwrap();
-    let fallback = attach(&worker, &capabilities).await;
+    // The daemon already holds full history, so a missing source no longer
+    // triggers hydration. Exercise the existing display-error projection directly.
+    let fallback = worker.handle_attach_projection(
+        &json!({
+            "activeSessionId": "windowed-session",
+            "clientId": "windowed-client",
+            "capabilities": capabilities,
+        }),
+        Some("display history unavailable".to_string()),
+    );
+    assert!(fallback.success, "fallback attach failed: {fallback:?}");
+    let fallback = fallback.data.expect("fallback attach data");
     assert_eq!(fallback["snapshot"]["messages"], json!(legacy));
     assert!(fallback["snapshot"]["displayTranscriptError"].is_string());
     assert!(fallback["snapshot"].get("displayTranscript").is_none());
     assert!(fallback["snapshot"].get("historyBefore").is_none());
-    std::fs::rename(&held_path, &path).unwrap();
-    // A retry hydrates the full branch; the failed read never poisons the store.
+    // A normal retry serves the full branch; the display error never poisons the store.
     let data = attach(&worker, &capabilities).await;
     let snapshot = &data["snapshot"];
     assert_eq!(snapshot["displayTranscript"], true);
