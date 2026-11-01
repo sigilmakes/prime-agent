@@ -225,6 +225,7 @@ impl std::fmt::Debug for Recover {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AppendPosition {
     Next,
     Pinned(u64),
