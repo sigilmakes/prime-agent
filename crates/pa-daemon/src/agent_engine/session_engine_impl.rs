@@ -1400,7 +1400,7 @@ impl SessionEngine for AgentSessionEngine {
         // A create-owned warmup may still be building. Hold
         // its existing gate through accepted-row persistence, without holding
         // any SDK/owner/core guard or triggering a truly lazy build.
-        let build = match self.runtime.block_on(self.prompt_acceptance_build_guard()) {
+        let acceptance_guard = match self.runtime.block_on(self.prompt_acceptance_build_guard()) {
             Ok(build) => build,
             Err(error) => {
                 emit(EngineEvent::Done(Err(error.to_string())));
@@ -1450,7 +1450,7 @@ impl SessionEngine for AgentSessionEngine {
             return;
         }
         // The turn's ensure/build path must acquire this same gate itself.
-        drop(build);
+        drop(acceptance_guard);
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),
             None => TurnPrompt::User {

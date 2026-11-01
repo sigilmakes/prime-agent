@@ -1216,9 +1216,8 @@ impl AgentSessionEngine {
                 .and_then(std::path::Path::parent)
                 .map(std::path::Path::to_owned)
         });
-        let (session_manager, on_initial_context_selection) = self
-            .build_session_mirror(cwd.clone(), session_dir, session_file.clone())
-            .await?;
+        let (session_manager, on_initial_context_selection) =
+            self.build_session_mirror(cwd.clone(), session_dir, session_file.clone())?;
         // Capture after the verified mirror: prompt admission sets its boundary
         // before appending any user row, including a create/prewarm race.
         let context_startup_boundary = self.context_startup_boundary();

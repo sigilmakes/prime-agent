@@ -6,6 +6,12 @@ use super::{
     TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
 };
 
+type SessionRestore = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 impl AgentSessionEngine {
     /// Drive one admitted prompt through the retry-driver model loop and
     /// emit the turn outcome (provider-failure retries + final-row
@@ -180,12 +186,7 @@ impl AgentSessionEngine {
         // A bound owner receipt must never wait under Agent::event_delivery.
         // Its existing restore callback runs after run_turn_once has settled,
         // before the retry driver publishes restoration or starts another attempt.
-        let restore_session: std::sync::Arc<
-            dyn Fn() -> std::pin::Pin<
-                    Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>,
-                > + Send
-                + Sync,
-        > = {
+        let restore_session: SessionRestore = {
             let primary_state = primary_state.clone();
             let pending_model_changes = pending_model_changes.clone();
             let agent_weak = std::sync::Arc::downgrade(&agent);

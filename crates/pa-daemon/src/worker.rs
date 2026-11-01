@@ -627,10 +627,10 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
-                let job_core = Arc::clone(&core);
+                let plugin_core = Arc::clone(&core);
                 let job_events = Arc::clone(&events);
                 concrete.set_plugin_job_sink(Arc::new(move |session, job| {
-                    crate::plugin_job_events::publish(&job_core, &job_events, session, job);
+                    crate::plugin_job_events::publish(&plugin_core, &job_events, session, &job);
                 }));
                 // The bash-completion wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed`): the handler validates, the sink

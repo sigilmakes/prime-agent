@@ -295,9 +295,6 @@ impl TreeNavigation {
         response_success(None, "navigate_tree", Some(data))
     }
 
-    /// Canonical navigation certifies the old source before paid work, closes
-    /// that operation, then adopts one ordered branch successor before any summary.
-
     /// One paid callback. Navigation retains the result across its owner
     /// boundary and never calls this again when source validation fails.
     async fn run_branch_summary_once(

@@ -93,11 +93,6 @@ pub(crate) struct SessionCore {
 }
 
 impl SessionCore {
-    /// The legacy standalone step channel for the next turn. A live owner admits
-    /// the actual provider callback in Core, so this unused legacy channel must
-    /// not retain its previous serving epoch across the next ordered boundary.
-    /// Without an epoch, standalone writes remain covered by their counter.
-
     /// Whether a turn, compaction, or queued action is in flight (TS
     /// `hasOngoingSessionWork`); the supervisor-lost exit waits for it to settle.
     pub(crate) fn has_ongoing_work(&self) -> bool {

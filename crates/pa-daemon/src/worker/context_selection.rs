@@ -177,8 +177,6 @@ impl InitialContextSelectionStore for CoreInitialContextSelectionStore {
         Ok(source)
     }
 
-    /// The typed read refusal: a poisoned epoch may not serve its raw tail.
-
     fn commit(
         &self,
         source: ContextSelectionSource,

@@ -138,22 +138,19 @@ impl SessionFile {
     ///
     /// Returns an error when the target entry does not exist; a `None` id clears the leaf.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
-        match id {
-            Some(id) => {
-                if self.entry(id).is_none() {
-                    return Err(anyhow!("Entry {id} not found"));
-                }
-                if !self.path.as_os_str().is_empty() {
-                    self.persist_branch_selection(Some(id))?;
-                }
-                self.leaf_id = Some(id.to_string());
+        if let Some(id) = id {
+            if self.entry(id).is_none() {
+                return Err(anyhow!("Entry {id} not found"));
             }
-            None => {
-                if !self.path.as_os_str().is_empty() {
-                    self.persist_branch_selection(None)?;
-                }
-                self.leaf_id = None;
+            if !self.path.as_os_str().is_empty() {
+                self.persist_branch_selection(Some(id))?;
             }
+            self.leaf_id = Some(id.to_string());
+        } else {
+            if !self.path.as_os_str().is_empty() {
+                self.persist_branch_selection(None)?;
+            }
+            self.leaf_id = None;
         }
         Ok(())
     }
@@ -210,7 +207,7 @@ impl SessionFile {
             Some(label) => fields["label"] = json!(label),
             None => fields["label"] = Value::Null,
         }
-        self.persist_entry("label", fields).map_err(Into::into)
+        self.persist_entry("label", fields)
     }
 
     /// The root-to-leaf path of the (new) current leaf as typed entries.

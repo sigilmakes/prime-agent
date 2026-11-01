@@ -74,7 +74,7 @@ impl super::AgentSessionEngine {
 
     /// Build the full canonical mirror before any session-scoped SDK service.
     /// The fileless path retains its existing in-memory semantics.
-    pub(super) async fn build_session_mirror(
+    pub(super) fn build_session_mirror(
         &self,
         cwd: std::path::PathBuf,
         session_dir: Option<std::path::PathBuf>,
