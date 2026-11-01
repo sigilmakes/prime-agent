@@ -860,7 +860,11 @@ async fn snap_archive_switches_to_a_nonvision_model_as_text_and_keeps_the_archiv
         !body.contains("\"type\":\"image\""),
         "nonvision model received an image block"
     );
-    assert!(body.contains("Text fallback"));
+    assert_eq!(
+        body.matches("Text fallback").count(),
+        1,
+        "archive expanded more than once"
+    );
     assert!(body.contains("switch-source-"));
     let entries = f.engine.session.entries().await;
     assert!(

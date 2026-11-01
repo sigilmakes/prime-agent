@@ -795,6 +795,47 @@ fn generated_model_messages(value: Value) -> anyhow::Result<Vec<pa_agent::types:
         .collect()
 }
 
+/// Expand the durable archive once for the main loop's fresh projection.
+/// Already-assembled side questions bypass this wrapper.
+pub(super) fn expand_archive_stream_fn(
+    plugins: std::sync::Arc<SessionPlugins>,
+    archive: std::sync::Arc<std::sync::RwLock<Option<ContextArchive>>>,
+    stream: pa_agent::stream::StreamFn,
+) -> pa_agent::stream::StreamFn {
+    std::sync::Arc::new(move |model, mut context, options| {
+        let plugins = std::sync::Arc::clone(&plugins);
+        let archive = archive
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let stream = std::sync::Arc::clone(&stream);
+        Box::pin(async move {
+            if let Some(archive) = &archive {
+                let target = plugins.context_selection()?;
+                let current_model = super::provider_adapter::native_model(&model)?;
+                let expanded = guarded(
+                    &plugins,
+                    &target,
+                    None,
+                    Some(&options.signal),
+                    native::expand(&plugins, archive, Some(&current_model)),
+                )
+                .await?;
+                let mut prefix = crate::session_engine::messages::convert_to_llm(&expanded)
+                    .iter()
+                    .map(|message| {
+                        super::provider_adapter::json_round_trip(message)
+                            .context("invalid expanded archive message")
+                    })
+                    .collect::<anyhow::Result<Vec<pa_agent::types::Message>>>()?;
+                prefix.extend(context.messages);
+                context.messages = prefix;
+            }
+            stream(model, context, options).await
+        })
+    })
+}
+
 /// Apply current strategy policy at every actual model call. Native archive items
 /// remain typed and route-bound; only uncovered ordinary continuation is converted.
 pub(crate) fn wrap_stream_fn(

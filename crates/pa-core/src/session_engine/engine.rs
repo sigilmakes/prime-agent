@@ -666,7 +666,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     // over the timing-instrumented fn (TS `sdk.ts` instruments first, the
     // `AgentSession` constructor wraps semantic edges over it). The side
     // question keeps the pre-semantic fn, so its calls carry no id.
-    let wrap_model_stream = || {
+    let wrap_model_stream = |context_stream| {
         super::request_timing::instrument_stream_fn(
             std::sync::Arc::clone(&request_timing_wiring),
             super::ollama_cloud::wrap_stream_fn(
@@ -675,21 +675,23 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
                 Arc::clone(&ollama_cloud),
                 super::plugin_context::wrap_stream_fn(
                     Arc::clone(&plugins),
-                    super::plugins::wrap_stream_fn(
-                        Arc::clone(&plugins),
-                        super::context_strategy::wrap_stream_fn(
-                            Arc::clone(&plugins),
-                            Arc::clone(&context_archive_state),
-                            Arc::clone(&stream_fn),
-                        ),
-                    ),
+                    super::plugins::wrap_stream_fn(Arc::clone(&plugins), context_stream),
                 ),
             ),
         )
     };
-    let timing_stream_fn = wrap_model_stream();
-    // Side questions clone the accepted SDK view, not the canonical continuation.
-    let side_question_stream_fn = wrap_model_stream();
+    let context_policy_stream = super::context_strategy::wrap_stream_fn(
+        Arc::clone(&plugins),
+        Arc::clone(&context_archive_state),
+        Arc::clone(&stream_fn),
+    );
+    let timing_stream_fn = wrap_model_stream(super::context_strategy::expand_archive_stream_fn(
+        Arc::clone(&plugins),
+        Arc::clone(&context_archive_state),
+        Arc::clone(&context_policy_stream),
+    ));
+    // Side questions already clone the accepted SDK view, including archive expansion.
+    let side_question_stream_fn = wrap_model_stream(context_policy_stream);
     let semantic_recorder = config.semantic_edges.take().map(|identity| {
         std::sync::Arc::new(super::semantic_edges::SemanticEdgeRecorder::open(identity))
     });
