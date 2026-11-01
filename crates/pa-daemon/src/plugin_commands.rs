@@ -649,7 +649,7 @@ return {
             &fixture.worker.core,
             &fixture.worker.events,
             "replaced-session",
-            job.clone(),
+            &job,
         );
         assert!(received.try_recv().is_err(), "stale session cannot publish");
         assert!(fixture.rows().is_empty());
@@ -668,7 +668,7 @@ return {
             &fixture.worker.core,
             &fixture.worker.events,
             &session,
-            job.clone(),
+            &job,
         );
         let start: Value = serde_json::from_slice(&received.recv().await.unwrap().payload).unwrap();
         let end: Value = serde_json::from_slice(&received.recv().await.unwrap().payload).unwrap();
@@ -724,7 +724,7 @@ end}}}
                 .as_ref()
                 .unwrap()
                 .set_plugin_job_sink(Arc::new(move |session, job| {
-                    crate::plugin_job_events::publish(&core, &events, session, job);
+                    crate::plugin_job_events::publish(&core, &events, session, &job);
                 }));
             let mut received = fixture.worker.events.subscribe();
             let command = fixture

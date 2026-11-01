@@ -61,9 +61,6 @@ impl WorkerReply {
         }
     }
 
-    /// A worker's canonical owner refuses every write while an adoption is
-    /// unacknowledged; the refusal is a "not yet" the route may re-ask.
-
     pub(crate) fn relayed_active_session_id(&self) -> Option<&str> {
         match self {
             WorkerReply::Relayed(relay) => relay.active_session_id.as_deref(),

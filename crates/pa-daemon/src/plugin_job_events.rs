@@ -8,7 +8,7 @@ pub(crate) fn publish(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     session: &str,
-    job: Value,
+    job: &Value,
 ) {
     let mut core = core.lock().unwrap();
     // A replaced session must not inherit a retired session's background work.
