@@ -119,6 +119,9 @@ impl SessionLease {
     /// Release execution ownership after the caller has stopped session work.
     /// Explicit unlock also releases descriptors inherited by a child before exec.
     /// Process exit releases the lock when the last inherited descriptor closes.
+    ///
+    /// # Panics
+    /// Panics if the execution-lock mutex is poisoned.
     pub fn release(&self) {
         let mut file = self.file.lock().expect("session execution lock");
         if file.is_some() {
@@ -190,7 +193,7 @@ pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLea
     }
 }
 
-/// Acquire resident execution ownership without waiting. SessionLog acquires its
+/// Acquire resident execution ownership without waiting. `SessionLog` acquires its
 /// own distinct append lock per operation; holding this handle cannot block it.
 ///
 /// # Errors
