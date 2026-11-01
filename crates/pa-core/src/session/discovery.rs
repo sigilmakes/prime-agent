@@ -338,11 +338,15 @@ mod tests {
                 rest: serde_json::Map::default(),
             },
         };
-        std::fs::write(
-            &path,
-            format!("{}\n", serde_json::to_string(&header).unwrap()),
-        )
-        .unwrap();
+        let mut log = crate::session_log::SessionLog::open(dir, id, std::time::Instant::now())
+            .expect("create discovery fixture log");
+        assert!(matches!(
+            log.append(
+                &serde_json::to_value(header).unwrap(),
+                std::time::Instant::now()
+            ),
+            crate::session_log::Outcome::Committed { .. }
+        ));
         path
     }
 
