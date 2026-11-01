@@ -224,6 +224,9 @@ fn resolves_symlinked_user_and_project_resources_once() {
     let previous_home = std::env::var("HOME").ok();
     let mut fixture = Fixture::new();
     std::env::set_var("HOME", &fixture.temp_dir);
+    // TMPDIR can live below a real user's home. Bound project discovery so
+    // unrelated ancestor .agents/skills do not enter this exact-count fixture.
+    std::fs::create_dir(fixture.manager.cwd().join(".git")).unwrap();
 
     let shared = fixture.temp_dir.join("shared-resources");
     let shared_skills = shared.join("skills");
