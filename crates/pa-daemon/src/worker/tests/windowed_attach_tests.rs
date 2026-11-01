@@ -661,19 +661,22 @@ async fn display_transcript_restores_precompaction_history_without_sibling_leaka
         )
     });
     write_fixture_log(&path, &fixture.content);
-    let worker = worker_over(dir.path(), &path).await;
+    // The SDK model reader remains sparse; the daemon serving fold now owns
+    // the full log. Prove the window on this same persisted fixture directly.
+    let window = pa_core::session::window::WindowedSessionStore::open(&path)
+        .expect("open SDK window")
+        .expect("compacted log yields a sparse window");
+    assert!(!window.is_full_history(), "SDK window must stay sparse");
     assert!(
-        worker
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .unwrap()
-            .window
-            .is_some(),
-        "exercise trimmed create/rehydrate path"
+        window.entries().len() < fixture.id,
+        "older bodies are omitted"
     );
+    assert_eq!(
+        window.context().messages.len(),
+        3,
+        "summary, kept user, and new user"
+    );
+    let worker = worker_over(dir.path(), &path).await;
     let legacy = full_messages(&worker).await;
     assert_eq!(legacy.len(), 3);
     assert_eq!(legacy[0]["role"], "compactionSummary");
