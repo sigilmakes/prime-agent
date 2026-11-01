@@ -256,7 +256,7 @@ impl Wire {
 /// through the template's generic fallback with the `renderedTools`
 /// section omitted. The TS wire usage shape (`input`/`output`/`cost`) is
 /// required: the daemon computes usage summaries at create.
-fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
+fn write_fixture(path: &Path, cwd: &Path, ts_side: bool) -> Vec<Value> {
     // Synthetic retained history uses the complete native message schema.
     // These model fields are fixture data, not a live provider admission.
     let usage = json!({
@@ -315,40 +315,49 @@ fn write_fixture(path: &Path, cwd: &Path) -> Vec<Value> {
         "timestamp": "2026-09-01T10:00:00.000Z",
         "cwd": cwd.to_string_lossy(),
     });
-    let lines = std::iter::once(header)
+    // Both implementations receive the same logical rows. Only the external
+    // TS reference uses its own raw format; the Rust side uses the real log.
+    let rows: Vec<_> = std::iter::once(header)
         .chain(entries.iter().cloned())
-        .map(|line| serde_json::to_string(&line).expect("serialize entry"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(path, format!("{lines}\n")).expect("write fixture");
-    // Use the physical bytes and the same known-message fallback rule as
-    // RawCapture. A malformed fixture must not look like a missing tool registry.
-    let physical = std::fs::read(path).expect("read fixture wire precondition");
-    let mut offset = 0_u64;
-    for (ordinal, bytes) in physical.split_inclusive(|byte| *byte == b'\n').enumerate() {
-        let row = pa_core::session::canonical::CanonicalJournalRow::parse(
-            std::sync::Arc::from(bytes),
-            offset,
-            u64::try_from(ordinal).expect("fixture row ordinal"),
-        )
-        .unwrap_or_else(|_| panic!("[live-export-wire] kind=parse_error ordinal={ordinal}"));
+        .collect();
+    for (ordinal, body) in rows.iter().enumerate() {
+        let row: pa_types::session::FileEntry = serde_json::from_value(body.clone())
+            .unwrap_or_else(|_| panic!("[live-export-wire] kind=parse_error ordinal={ordinal}"));
         if ordinal == 0 {
             assert!(
-                matches!(row.entry(), pa_types::session::FileEntry::Header { .. }),
+                matches!(row, pa_types::session::FileEntry::Header { .. }),
                 "[live-export-wire] kind=invalid_header ordinal={ordinal}"
             );
         } else {
-            let wire: Value = serde_json::from_slice(bytes)
-                .unwrap_or_else(|_| panic!("[live-export-wire] kind=json_error ordinal={ordinal}"));
             assert!(
-                !(wire["type"] == "message"
-                    && matches!(row.entry(), pa_types::session::FileEntry::Unknown { .. })),
+                !(body["type"] == "message"
+                    && matches!(row, pa_types::session::FileEntry::Unknown { .. })),
                 "[live-export-wire] kind=unknown_known_message ordinal={ordinal}"
             );
         }
-        offset = offset
-            .checked_add(u64::try_from(bytes.len()).expect("fixture row length"))
-            .expect("fixture physical offset");
+    }
+    if ts_side {
+        let lines = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).expect("serialize entry"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{lines}\n")).expect("write TS reference fixture");
+    } else {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().expect("fixture directory"),
+            path.file_stem().unwrap().to_str().unwrap(),
+            Instant::now(),
+        )
+        .expect("fixture log");
+        for row in &rows {
+            assert!(matches!(
+                log.append(row, Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+        let loaded = pa_core::session::read::read_entries(path).expect("strict fixture log read");
+        assert_eq!(loaded.len(), rows.len());
     }
     entries
 }
@@ -374,7 +383,7 @@ fn live_export(binary: &Path, base: &Path, ts_side: bool) -> Value {
     let session_dir = base.join("agent").join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let fixture = base.join("fixture.jsonl");
-    let expected_entries = write_fixture(&fixture, &work);
+    let expected_entries = write_fixture(&fixture, &work, ts_side);
     let mut wire = Wire::connect(&supervisor.socket);
     // TS resolves its faux provider explicitly; the Rust worker drives
     // the same real engine through the `engine: "faux"` script seam.

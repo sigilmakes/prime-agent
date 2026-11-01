@@ -70,7 +70,7 @@ async fn faux_engine_with_settings(
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
-        context_startup_admitted_user_ids: Vec::new(),
+        context_startup_admitted_input_ids: Vec::new(),
         on_initial_context_selection: None,
         ollama_cloud: None,
         semantic_edges: None,
