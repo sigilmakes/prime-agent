@@ -103,7 +103,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
             gate.interrupted(gate.signal.SIGTERM, None)
 
     def test_sigterm_cleans_a_term_resistant_cargo_group(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix="pa-ws-", dir="/tmp") as tmp:
             root = Path(tmp)
             cargo = root / "cargo"
             cargo.write_text(f"#!{sys.executable}\n" +
@@ -150,7 +150,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
                 server.close()
 
     def run_probe(self, fail):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix="pa-ws-", dir="/tmp") as tmp:
             root = Path(tmp)
             cargo = root / "cargo"
             cargo.write_text(f"#!{sys.executable}\n" +
