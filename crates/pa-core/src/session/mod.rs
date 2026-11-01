@@ -15,7 +15,6 @@ use pa_types::session::{
     AgentMessage, CompactionEntry, CompactionSummaryMessage, CustomMessage, CustomMessageEntry,
     FileEntry,
 };
-use pa_types::JsonMap;
 
 /// Current on-disk session format version.
 pub const CURRENT_SESSION_VERSION: u32 = 3;
