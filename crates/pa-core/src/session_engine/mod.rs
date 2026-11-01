@@ -297,15 +297,15 @@ impl AgentSession {
                 })
             })
             .await;
-        Self::from_persisted_agent(agent, session, prompt_templates)
+        Ok(Self::from_persisted_agent(agent, session, prompt_templates))
     }
 
     fn from_persisted_agent(
         agent: Arc<Agent>,
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         prompt_templates: Vec<PromptTemplate>,
-    ) -> anyhow::Result<Self> {
-        let this = Self {
+    ) -> Self {
+        Self {
             agent,
             ollama_cloud: Arc::default(),
             session,
@@ -330,8 +330,7 @@ impl AgentSession {
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
             compaction_flight: tokio::sync::Mutex::new(()),
-        };
-        Ok(this)
+        }
     }
 
     /// Seal a cancelled replacement's retained execution handles without retiring

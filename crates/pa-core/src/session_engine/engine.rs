@@ -856,7 +856,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         agent.clone(),
         wiring.session.clone(),
         resources.prompts.clone(),
-    )?;
+    );
     session.plugins = Some(Arc::clone(&plugins));
     session.plugin_command_barrier = plugin_command_barrier;
     session.plugin_jobs = Some(jobs);
