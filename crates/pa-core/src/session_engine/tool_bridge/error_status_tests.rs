@@ -250,7 +250,7 @@ async fn assert_persisted_status(is_error: bool) {
         ["user", "assistant", "toolResult", "assistant"]
     );
     assert_eq!(normalized_message(messages[2].clone()), expected);
-    let rows = crate::session::read_entries(&path)
+    let rows = crate::session::read::read_entries(&path)
         .expect("validated durable tool rows")
         .iter()
         .map(|entry| serde_json::to_value(entry).unwrap())
