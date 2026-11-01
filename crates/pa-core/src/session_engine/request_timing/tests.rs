@@ -197,6 +197,7 @@ async fn run_timed_request(
         Arc::new(|_messages: Vec<AgentMessage>| {
             Box::pin(async move {
                 Ok(vec![Message::User(UserMessage {
+                    rest: Default::default(),
                     content: UserContent::Text("hello".to_string()),
                     timestamp: 0,
                 })])
@@ -456,6 +457,7 @@ async fn a_cloned_stream_seam_never_steals_the_parent_correlation() {
         Arc::new(|_messages: Vec<AgentMessage>| {
             Box::pin(async move {
                 Ok(vec![Message::User(UserMessage {
+                    rest: Default::default(),
                     content: UserContent::Text("hello".to_string()),
                     timestamp: 0,
                 })])
@@ -469,6 +471,7 @@ async fn a_cloned_stream_seam_never_steals_the_parent_correlation() {
     let side_context = LlmContext {
         system_prompt: None,
         messages: vec![Message::User(UserMessage {
+            rest: Default::default(),
             content: UserContent::Text("meanwhile".to_string()),
             timestamp: 0,
         })],

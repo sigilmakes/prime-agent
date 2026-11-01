@@ -700,35 +700,51 @@ impl AgentSession {
 async fn persist_event(
     session: &Arc<tokio::sync::Mutex<SessionManager>>,
     event: AgentEvent,
-) -> std::io::Result<()> {
-    match event {
+) -> std::io::Result<AgentEvent> {
+    match event.clone() {
         AgentEvent::MessageEnd { message, .. } => {
             let Some(session_message) = loop_message_to_session(&message) else {
-                return Ok(());
+                return Ok(event);
             };
 
             let mut session = session.lock().await;
-            match session_message {
+            let id = match session_message {
                 SessionAgentMessage::Custom(custom) => {
-                    if session.consume_admitted_custom_row().is_some() {
-                        return Ok(());
+                    match session.consume_admitted_custom_row() {
+                        Some(id) => id,
+                        None => session.append_metadata_intent(FileEntry::CustomMessage {
+                            base: crate::session::metadata::draft_base(),
+                            payload: pa_types::session::CustomMessageEntry {
+                                custom_type: custom.custom_type,
+                                content: custom.content,
+                                display: custom.display,
+                                details: custom.details,
+                                rest: custom.rest,
+                            },
+                        })?,
                     }
-                    session.append_metadata_intent(FileEntry::CustomMessage {
-                        base: crate::session::metadata::draft_base(),
-                        payload: pa_types::session::CustomMessageEntry {
-                            custom_type: custom.custom_type,
-                            content: custom.content,
-                            display: custom.display,
-                            details: custom.details,
-                            rest: custom.rest,
-                        },
-                    })?;
                 }
-                other => {
-                    session.append_message(other)?;
-                }
-            }
+                other => session.append_message(other)?,
+            };
             session.flush_now()?;
+            let row = session
+                .retained_entries()
+                .iter()
+                .find(|entry| entry.id() == Some(id.as_str()))
+                .ok_or_else(|| std::io::Error::other("committed message row is absent"))?;
+            let canonical = match row {
+                FileEntry::Message { message, .. } => message.clone(),
+                FileEntry::CustomMessage { payload, .. } => {
+                    SessionAgentMessage::Custom(crate::session::create_custom_message(payload, row))
+                }
+                _ => {
+                    return Err(std::io::Error::other(
+                        "committed message ID names a non-message row",
+                    ))
+                }
+            };
+            let message = serde_json::from_value(serde_json::to_value(canonical)?)?;
+            return Ok(AgentEvent::MessageEnd { message });
         }
         // Git state is captured at both run boundaries, exactly like the
         // TS run-boundary event path: a commit or branch switch made during the run
@@ -744,7 +760,7 @@ async fn persist_event(
                     .is_persisted()
                     .then(|| session.get_cwd().to_path_buf())
             };
-            let Some(cwd) = cwd else { return Ok(()) };
+            let Some(cwd) = cwd else { return Ok(event) };
             let git = tokio::task::spawn_blocking(move || capture_git_context(&cwd)).await?;
             if let Some(git) = git {
                 session.lock().await.record_git_state_if_changed(git)?;
@@ -752,7 +768,7 @@ async fn persist_event(
         }
         _ => {}
     }
-    Ok(())
+    Ok(event)
 }
 
 /// Custom rows persist as session custom messages.
@@ -779,6 +795,7 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
     }
     AgentMessage::Standard(pa_agent::types::Message::User(
         pa_agent::types::UserMessage {
+            rest: Default::default(),
             content: pa_agent::types::UserContent::Parts(parts),
             timestamp: now_millis() as i64,
         },

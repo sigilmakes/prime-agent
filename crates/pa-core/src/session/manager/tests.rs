@@ -818,9 +818,14 @@ fn mirrored_sink_tail_is_visible_before_model_and_next_append() {
     manager.set_entry_writer(writer.clone());
     let mut row: FileEntry = serde_json::from_value(serde_json::json!({"type":"message","id":"foreign","parentId":null,"message":{"role":"user","content":"external input","timestamp":0}})).unwrap();
     writer.append(&mut row).unwrap();
-    manager.replay_admitted_input_rows(vec!["foreign".to_owned()]).unwrap();
+    manager
+        .replay_admitted_input_rows(vec!["foreign".to_owned()])
+        .unwrap();
     assert_eq!(manager.active_context().messages.len(), 1);
-    let accepted = match row.clone() { FileEntry::Message { message, .. } => message, _ => unreachable!() };
+    let accepted = match row.clone() {
+        FileEntry::Message { message, .. } => message,
+        _ => unreachable!(),
+    };
     assert_eq!(manager.append_message(accepted).unwrap(), "foreign");
     let mut row: FileEntry = serde_json::from_value(serde_json::json!({"type":"custom_message","id":"foreign-custom","parentId":"foreign","customType":"external","content":"external notice","display":true})).unwrap();
     writer.append(&mut row).unwrap();
@@ -829,13 +834,18 @@ fn mirrored_sink_tail_is_visible_before_model_and_next_append() {
         manager.get_entry_by_id(&id).unwrap().parent_id(),
         Some("foreign-custom")
     );
-    let mut selection: FileEntry = serde_json::from_value(serde_json::json!({"type":"branch_selection","selectedLeaf":"foreign"})).unwrap();
+    let mut selection: FileEntry = serde_json::from_value(
+        serde_json::json!({"type":"branch_selection","selectedLeaf":"foreign"}),
+    )
+    .unwrap();
     writer.append(&mut selection).unwrap();
     manager.refresh_committed_entries().unwrap();
     assert_eq!(manager.get_leaf_id(), Some("foreign"));
     let next = manager.append_session_info("selected branch").unwrap();
-    assert_eq!(manager.get_entry_by_id(&next).unwrap().parent_id(), Some("foreign"));
-
+    assert_eq!(
+        manager.get_entry_by_id(&next).unwrap().parent_id(),
+        Some("foreign")
+    );
 }
 
 #[test]

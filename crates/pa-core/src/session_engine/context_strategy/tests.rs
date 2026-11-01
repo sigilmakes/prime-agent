@@ -1809,6 +1809,7 @@ async fn reference_replay_is_rejected_before_actual_provider_or_selection_public
     let context = pa_agent::stream::LlmContext {
         messages: vec![pa_agent::types::Message::User(
             pa_agent::types::UserMessage {
+                rest: Default::default(),
                 content: pa_agent::types::UserContent::Text("not persisted".into()),
                 timestamp: 0,
             },
@@ -1928,6 +1929,7 @@ async fn reference_model_echo_matches_prior_tool_image_signature_conversion_and_
     ])).unwrap();
     messages.push(pa_agent::types::Message::User(
         pa_agent::types::UserMessage {
+            rest: Default::default(),
             content: pa_agent::types::UserContent::Text("x".repeat(32 * 1024 * 1024)),
             timestamp: 4,
         },

@@ -127,6 +127,7 @@ mod tests {
             context
                 .messages
                 .push(Message::User(pa_agent::types::UserMessage {
+                    rest: Default::default(),
                     content: UserContent::Text(format!("{index}{}", "界".repeat(600))),
                     timestamp: index,
                 }));

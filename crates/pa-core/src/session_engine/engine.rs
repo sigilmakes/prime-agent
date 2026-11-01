@@ -703,10 +703,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     let agent = Agent::new(AgentOptions {
         before_event: Some(Arc::new(move |event, _signal| {
             let persistence = Arc::clone(&persistence);
-            Box::pin(async move {
-                super::persist_event(&persistence, event.clone()).await?;
-                Ok(event)
-            })
+            Box::pin(async move { Ok(super::persist_event(&persistence, event).await?) })
         })),
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),

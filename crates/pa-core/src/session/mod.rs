@@ -526,7 +526,7 @@ pub(crate) fn create_custom_message(
         display: payload.display,
         details: payload.details.clone(),
         timestamp: timestamp_to_millis(entry.timestamp()),
-        rest: JsonMap::new(),
+        rest: payload.rest.clone(),
     }
 }
 
