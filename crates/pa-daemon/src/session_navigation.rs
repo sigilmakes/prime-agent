@@ -472,6 +472,10 @@ mod tests {
     }
 
     fn write_import_log(path: &std::path::Path) {
+        write_navigation_log(path, "/tmp");
+    }
+
+    fn write_navigation_log(path: &std::path::Path, cwd: &str) {
         let mut log = pa_core::session_log::SessionLog::open(
             path.parent().unwrap(),
             path.file_stem().unwrap().to_str().unwrap(),
@@ -481,7 +485,8 @@ mod tests {
         assert!(matches!(
             log.append(
                 &json!({
-                    "type": "session", "version": 3, "id": "import", "cwd": "/tmp",
+                    "type": "session", "version": 3,
+                    "id": path.file_stem().unwrap().to_str().unwrap(), "cwd": cwd,
                     "timestamp": "2026-10-31T00:00:00.000Z"
                 }),
                 crate::session_transport::deadline()
@@ -733,19 +738,7 @@ mod tests {
         // A target session file recording another existing cwd.
         let target_cwd = tempfile::TempDir::new().expect("target cwd");
         let target = target_cwd.path().join("switch-target.jsonl");
-        std::fs::write(
-            &target,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "session",
-                    "id": "switch-target",
-                    "timestamp": "2026-09-21T00:00:00.000Z",
-                    "cwd": target_cwd.path().to_string_lossy(),
-                })
-            ),
-        )
-        .expect("write switch target");
+        write_navigation_log(&target, &target_cwd.path().to_string_lossy());
         let switched = worker
             .dispatch(
                 "switch_session",
@@ -766,19 +759,10 @@ mod tests {
         // (TS `MissingSessionCwdError`); the live session keeps its rebound cwd.
         let gone_dir = tempfile::TempDir::new().expect("gone dir");
         let gone = gone_dir.path().join("gone-target.jsonl");
-        std::fs::write(
+        write_navigation_log(
             &gone,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "session",
-                    "id": "gone-target",
-                    "timestamp": "2026-09-21T00:00:00.000Z",
-                    "cwd": gone_dir.path().join("missing-cwd"),
-                })
-            ),
-        )
-        .expect("write gone target");
+            &gone_dir.path().join("missing-cwd").to_string_lossy(),
+        );
         let failed = worker
             .dispatch(
                 "switch_session",
@@ -845,7 +829,7 @@ mod tests {
             let store = core.store.as_mut().expect("created store");
             let entry_id = store
                 .append_message(&json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
-            let _ = store.rewrite();
+            store.rewrite().expect("persist the fork branch point");
             entry_id
         };
         let added = worker
