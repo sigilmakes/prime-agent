@@ -1,14 +1,4 @@
-//! THE transport switch for the session-log cutover (`SESSIONS-LOG-SPEC.md`):
-//! the one point that decides whether a session rides the session-log core
-//! ([`SessionTransport::SessionLog`]) or is refused as a pre-port old-format
-//! file ([`SessionTransport::LegacyUnsupported`]).
-//!
-//! Resolution rule ([`resolve`]): a session that already has a log file is a
-//! log session; a fresh session starts one; an old-format session file is
-//! kept on disk but never read and never migrated (the spec: report old
-//! files instead of converting them), so the caller surfaces the typed
-//! refusal. There is no transport override: every served session uses the
-//! log.
+//! Durable session-log transport for each session's exact selected path.
 //!
 //! Row policy at this boundary (the spec: policy lives in callers; the core
 //! never waits, retries, or inspects a peer): an append resolves exactly
@@ -37,27 +27,6 @@ use pa_core::session_log::{self, Outcome, SessionLog};
 /// create. The core never waits; this is the caller's one clock.
 const LOG_OPEN_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Which transport opens a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionTransport {
-    /// A pre-port old-format session file: kept on disk, never read and
-    /// never migrated. The caller surfaces this as the typed refusal.
-    LegacyUnsupported,
-    /// The session-log core: the log is the source of truth, the daemon
-    /// store is its fold.
-    SessionLog,
-}
-
-/// The log directory: one append-only log file per session id.
-pub(crate) fn log_dir(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("session-logs")
-}
-
-/// One session's log file path.
-pub(crate) fn log_file(agent_dir: &Path, session_id: &str) -> PathBuf {
-    log_dir(agent_dir).join(format!("{session_id}.jsonl"))
-}
-
 /// The session id a session file path names: its stem.
 pub(crate) fn session_id_of(session_path: &Path) -> Option<String> {
     session_path
@@ -69,31 +38,6 @@ pub(crate) fn session_id_of(session_path: &Path) -> Option<String> {
 /// The bounded instant for one open/append/repair decision at this transport.
 pub(crate) fn deadline() -> Instant {
     Instant::now() + LOG_OPEN_DEADLINE
-}
-
-/// THE switch point. `session_path` is the session's file path (the daemon's
-/// advertised identity).
-pub(crate) fn resolve(agent_dir: &Path, session_path: &Path) -> SessionTransport {
-    let Some(session_id) = session_id_of(session_path) else {
-        return SessionTransport::LegacyUnsupported;
-    };
-    if log_file(agent_dir, &session_id).exists() {
-        return SessionTransport::SessionLog;
-    }
-    // A pre-port old-format file is not read and not migrated: the caller
-    // surfaces the verdict as the typed refusal.
-    if session_path.exists() {
-        return SessionTransport::LegacyUnsupported;
-    }
-    SessionTransport::SessionLog
-}
-
-/// Whether this session's rows live in its log (a fresh session starts one).
-pub(crate) fn transports_session_log(agent_dir: &Path, session_path: &Path) -> bool {
-    matches!(
-        resolve(agent_dir, session_path),
-        SessionTransport::SessionLog
-    )
 }
 
 /// Why one wire step failed.
@@ -168,6 +112,7 @@ impl std::fmt::Debug for WireState {
             .debug_struct("WireState")
             .field("has_log", &self.log.is_some())
             .field("has_disk", &self.disk.is_some())
+            .field("directory", &self.directory)
             .field("header_written", &self.header_written)
             .field("next_seq", &self.next_seq)
             .field("pending", &self.pending)
@@ -272,8 +217,7 @@ impl WireState {
                 .pending
                 .as_ref()
                 .filter(|pending| pending.row == *row)
-                .map(|pending| pending.seq)
-                .unwrap_or(self.next_seq);
+                .map_or(self.next_seq, |pending| pending.seq);
             let outcome = if !self.header_written
                 && row.get("type").and_then(Value::as_str) == Some("session")
             {
@@ -396,29 +340,23 @@ impl LogWire {
             .read_tail(cursor, deadline())
             .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))
     }
-    /// A fresh creation intent. The header must win an atomic first append;
-    /// existing bytes are never implicitly reopened or adopted.
-    pub(crate) fn deferred(agent_dir: &Path) -> Self {
+    /// A fresh intent for an exact durable path, including a custom directory.
+    /// The initial header must win an atomic first append; existing bytes
+    /// are never implicitly reopened or adopted.
+    pub(crate) fn fresh(path: &Path) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
                 log: None,
                 disk: None,
-                directory: log_dir(agent_dir),
+                directory: path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
                 header_written: false,
                 next_seq: 1,
                 pending: None,
             })),
         }
-    }
-
-    /// A lazy writer for an exact durable log path, including an overridden directory.
-    pub(crate) fn fresh(path: &Path) -> Self {
-        let wire = Self::deferred(Path::new("."));
-        wire.state.lock().expect("log wire lock").directory = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        wire
     }
 
     pub(crate) fn flush_selection(
@@ -497,10 +435,10 @@ impl LogWire {
     /// fault-injection seam: the tests drive the very same code paths).
     #[cfg(test)]
     pub(crate) fn defer_with_disk<D: pa_core::session_log::Disk + 'static>(
-        agent_dir: &Path,
+        path: &Path,
         disk: std::sync::Arc<D>,
     ) -> Self {
-        let wire = Self::deferred(agent_dir);
+        let wire = Self::fresh(path);
         let state = std::sync::Arc::clone(&wire.state);
         let mut guard = state
             .lock()
@@ -622,7 +560,11 @@ mod tests {
     }
 
     fn fresh_log_session(dir: &std::path::Path, name: &str) -> (SessionFile, std::path::PathBuf) {
-        fresh_log_session_with(dir, name, LogWire::deferred(dir))
+        let session_path = dir.join(format!("{name}.jsonl"));
+        let mut store = SessionFile::create("test", None, 0);
+        store.set_path(session_path.clone());
+        store.rekey_log_session_id(&session_path).expect("re-key");
+        (store, session_path)
     }
 
     /// A [`pa_core::session_log::Disk`] wrapper that fails exactly one fsync —
@@ -762,13 +704,13 @@ mod tests {
             if !same_header {
                 rival_header["cwd"] = json!("different rival cwd");
             }
-            std::fs::create_dir_all(log_dir(&dir)).unwrap();
-            let mut rival = SessionLog::open(&log_dir(&dir), "fresh-rival", deadline()).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut rival = SessionLog::open(&dir, "fresh-rival", deadline()).unwrap();
             assert!(matches!(
                 rival.append_first(&rival_header, deadline()),
                 Outcome::Committed { .. }
             ));
-            let bytes = std::fs::read(log_file(&dir, "fresh-rival")).unwrap();
+            let bytes = std::fs::read(dir.join("fresh-rival.jsonl")).unwrap();
             store
                 .persist_entry(
                     "message",
@@ -776,9 +718,9 @@ mod tests {
                 )
                 .expect_err("a fresh intent cannot adopt a rival header");
             assert!(store.entries().is_empty());
-            assert_eq!(std::fs::read(log_file(&dir, "fresh-rival")).unwrap(), bytes);
+            assert_eq!(std::fs::read(dir.join("fresh-rival.jsonl")).unwrap(), bytes);
             // Explicit reopen is separate and may continue the existing log.
-            let mut reopened = SessionFile::open_log(&session_path, &dir).unwrap();
+            let mut reopened = SessionFile::open(&session_path).unwrap();
             reopened
                 .persist_entry(
                     "message",
@@ -793,8 +735,8 @@ mod tests {
     fn a_fresh_wire_refuses_torn_bytes_without_repairing_them() {
         let dir = temp_dir("fresh-torn");
         let (store, _) = fresh_log_session(&dir, "fresh-torn");
-        std::fs::create_dir_all(log_dir(&dir)).unwrap();
-        let path = log_file(&dir, "fresh-torn");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fresh-torn.jsonl");
         let bytes = b"{\"seq\":1";
         std::fs::write(&path, bytes).unwrap();
         store
@@ -806,26 +748,28 @@ mod tests {
     #[test]
     fn an_unknown_first_header_keeps_its_recovery_and_retries_once() {
         let dir = temp_dir("unknown-first");
-        let fake =
-            std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("unknown-first.lock")));
+        let fake = std::sync::Arc::new(FailNextFsync::new(dir.join("unknown-first.lock")));
         // File creation sync is first; the header barrier is second.
         fake.arm_fsync_failure(2);
         let (mut store, path) = fresh_log_session_with(
             &dir,
             "unknown-first",
-            LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)),
+            LogWire::defer_with_disk(
+                &dir.join("unknown-first.jsonl"),
+                std::sync::Arc::clone(&fake),
+            ),
         );
         store
             .rewrite()
             .expect_err("header barrier lost, recovery busy");
-        let bytes = std::fs::read(log_file(&dir, "unknown-first")).unwrap();
+        let bytes = std::fs::read(dir.join("unknown-first.jsonl")).unwrap();
         assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
         fake.release_rival();
         store
             .rewrite()
             .expect("the original header recovery resolves");
         assert_eq!(
-            std::fs::read(log_file(&dir, "unknown-first")).unwrap(),
+            std::fs::read(dir.join("unknown-first.jsonl")).unwrap(),
             bytes
         );
         store
@@ -834,9 +778,9 @@ mod tests {
                 json!({"message":{"role":"user","content":"after recovery"}}),
             )
             .unwrap();
-        let reopened = SessionFile::open_log(&path, &dir).unwrap();
+        let reopened = SessionFile::open(&path).unwrap();
         assert_eq!(reopened.entries().len(), 1);
-        let log = SessionLog::open(&log_dir(&dir), "unknown-first", deadline()).unwrap();
+        let log = SessionLog::open(&dir, "unknown-first", deadline()).unwrap();
         assert_eq!(log.read_since(0).unwrap().len(), 2);
     }
 
@@ -849,12 +793,15 @@ mod tests {
         // the rival, so the recovery answers busy and the wire returns with
         // the write pending; the re-presented row re-pins the same seq and
         // the core answers from the landed bytes.
-        let fake = std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("undecided.lock")));
+        let fake = std::sync::Arc::new(FailNextFsync::new(dir.join("undecided.lock")));
         fake.arm_fsync_failure(3);
         let session_path = dir.join("undecided.jsonl");
         let mut store = SessionFile::create("test", None, 0);
         store.set_path(session_path.clone());
-        store.attach_log_wire(LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)));
+        store.attach_log_wire(LogWire::defer_with_disk(
+            &session_path,
+            std::sync::Arc::clone(&fake),
+        ));
         store.rekey_log_session_id(&session_path).expect("re-key");
         let entry = crate::session_store::SessionEntry {
             type_: "message".to_owned(),
@@ -873,7 +820,7 @@ mod tests {
         // The row is not in the fold, but its bytes are in the file: the
         // barrier was lost, not the write.
         assert!(store.entries().is_empty());
-        let raw = std::fs::read_to_string(log_file(&dir, "undecided")).expect("log text");
+        let raw = std::fs::read_to_string(dir.join("undecided.jsonl")).expect("log text");
         assert_eq!(
             raw.lines().count(),
             2,
@@ -888,9 +835,9 @@ mod tests {
             .expect("the retry");
         assert_eq!(store.entries().len(), 1, "one index entry");
         assert_eq!(store.entries()[0].id, entry.id);
-        let raw = std::fs::read_to_string(log_file(&dir, "undecided")).expect("log text");
+        let raw = std::fs::read_to_string(dir.join("undecided.jsonl")).expect("log text");
         assert_eq!(raw.lines().count(), 2, "no second copy of the row: {raw}");
-        let log = SessionLog::open(&log_dir(&dir), "undecided", deadline()).expect("open");
+        let log = SessionLog::open(&dir, "undecided", deadline()).expect("open");
         let rows = log.read_since(0).expect("read");
         let body = serde_json::to_value(&entry).expect("encode");
         assert_eq!(rows[1].seq, 2);
@@ -898,26 +845,21 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_serves_every_fresh_session_on_the_log_and_refuses_legacy_files() {
-        let dir = temp_dir("switch");
-        // A fresh session with no files: the log transport, no override.
-        let path = dir.join("fresh.jsonl");
-        assert!(transports_session_log(&dir, &path));
+    fn an_exact_path_refuses_legacy_bytes_and_creates_fresh_log_rows() {
+        let dir = temp_dir("exact-path");
+        let legacy = dir.join("legacy.jsonl");
+        let bytes = b"[]\n";
+        std::fs::write(&legacy, bytes).expect("old file");
+        assert!(SessionFile::open(&legacy).is_err());
+        assert!(SessionFile::open_owned_log(&legacy).is_err());
+        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
 
-        // An old-format session file: not read and not migrated, typed.
-        std::fs::write(&path, "[]\n").expect("old file");
-        assert_eq!(resolve(&dir, &path), SessionTransport::LegacyUnsupported);
-        std::fs::remove_file(&path).expect("clean");
-
-        // An existing log: the log transport.
-        let log_session = dir.join("logged.jsonl");
-        let mut store = SessionFile::create("test", None, 0);
-        store.set_path(log_session.clone());
-        store.attach_log_wire(LogWire::deferred(&dir));
-        store.rekey_log_session_id(&log_session).expect("re-key");
-        store.rewrite().expect("flush");
-        assert!(log_file(&dir, "logged").exists());
-        assert!(transports_session_log(&dir, &log_session));
+        let (store, path) = fresh_log_session(&dir, "fresh");
+        assert!(!path.exists());
+        store.rewrite().expect("fresh header");
+        let replay = SessionFile::open(&path).expect("exact selected path");
+        assert_eq!(replay.session_id(), "fresh");
+        assert!(replay.entries().is_empty());
     }
 
     #[test]
@@ -925,7 +867,7 @@ mod tests {
         let dir = temp_dir("fresh-wire");
         let (mut store, session_path) = fresh_log_session(&dir, "fresh-wire");
         // The log does not exist before the store's first flush.
-        assert!(!log_file(&dir, "fresh-wire").exists());
+        assert!(!dir.join("fresh-wire.jsonl").exists());
 
         let user = store
             .persist_entry(
@@ -937,11 +879,9 @@ mod tests {
             .persist_entry("message", json!({ "message": { "role": "assistant", "content": [{ "type": "text", "text": "one" }], "timestamp": 2 } }))
             .expect("persist");
 
-        // The rows are durable in the log, and the old file was never written.
-        assert!(log_file(&dir, "fresh-wire").exists());
-        assert!(!session_path.exists());
-        let log = SessionLog::open(&log_dir(&dir), "fresh-wire", deadline())
-            .expect("reopen the written log");
+        // The selected session path is the durable log.
+        assert!(session_path.exists());
+        let log = SessionLog::open(&dir, "fresh-wire", deadline()).expect("reopen the written log");
         let rows = log.read_since(0).expect("read back");
         assert_eq!(rows.len(), 3, "header row plus two entry rows");
         assert_eq!(
@@ -958,18 +898,17 @@ mod tests {
     fn a_payload_pathed_fresh_session_rekeys_to_its_path_id() {
         let dir = temp_dir("rekey");
         let session_path = dir.join("payload-stem.jsonl");
-        // The payload-pathed fresh arm's steps: the deferred wire, then the
+        // The payload-pathed fresh arm's steps: the exact-path wire, then the
         // re-key to the path's id, then the materialization rewrite.
         let mut created = SessionFile::create("test", None, 0);
         created.set_path(session_path.clone());
-        created.attach_log_wire(LogWire::deferred(&dir));
         created.rekey_log_session_id(&session_path).expect("re-key");
         created.append_session_state("active");
         created
             .rewrite()
             .expect("the header and state rows are durable");
 
-        let reopened = SessionFile::open_log(&session_path, &dir).expect("reopen");
+        let reopened = SessionFile::open(&session_path).expect("reopen");
         assert_eq!(
             reopened.header.id, "payload-stem",
             "the path names the session"
@@ -998,7 +937,7 @@ mod tests {
         store.rewrite().expect("flush");
 
         drop(store);
-        let mut reloaded = SessionFile::open_log(&session_path, &dir).expect("reopen from the log");
+        let mut reloaded = SessionFile::open(&session_path).expect("reopen from the log");
         assert_eq!(reloaded.entries().len(), 1);
         assert_eq!(reloaded.header.id, "reopen");
         assert!(reloaded.is_log_served());
@@ -1012,7 +951,7 @@ mod tests {
             )
             .expect("persist");
         reloaded.persist_appended(start).expect("flush the tail");
-        let log = SessionLog::open(&log_dir(&dir), "reopen", deadline()).expect("open");
+        let log = SessionLog::open(&dir, "reopen", deadline()).expect("open");
         let rows = log.read_since(0).expect("read");
         assert_eq!(
             rows.len(),
@@ -1029,13 +968,13 @@ mod tests {
     #[test]
     fn a_refused_row_is_durable_nowhere_never_indexed() {
         let dir = temp_dir("refused");
-        let session_path = dir.join("refused.jsonl");
+        let blocked = dir.join("blocked");
+        let session_path = blocked.join("refused.jsonl");
         // A file where the log directory belongs: the wire's open cannot run,
         // the write refuses, and the entry stays out of the fold.
-        std::fs::write(log_dir(&dir), "not a directory").expect("blocker file");
+        std::fs::write(&blocked, "not a directory").expect("blocker file");
         let mut store = SessionFile::create("test", None, 0);
         store.set_path(session_path.clone());
-        store.attach_log_wire(LogWire::deferred(&dir));
         store.rekey_log_session_id(&session_path).expect("re-key");
         let refused = store.persist_entry(
             "message",
@@ -1060,21 +999,14 @@ mod tests {
         let sessions_dir = dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
         let session_path = sessions_dir.join("log-e2e.jsonl");
-        // The log session pre-exists its worker: the create below resolves
-        // to the log transport through the log itself, so the serving run
-        // exercises the reopen.
+        // Seed the exact selected path before its worker reopens it.
         {
-            let (store, _) = fresh_log_session(&dir, "log-e2e");
-            store
-                .rewrite()
-                .expect("the header row is durable before the worker");
-            let log = SessionLog::open(&log_dir(&dir), "log-e2e", deadline()).expect("log");
+            let (store, path) = fresh_log_session(&sessions_dir, "log-e2e");
+            assert_eq!(path, session_path);
+            store.rewrite().expect("durable header before worker");
+            let log = SessionLog::open(&sessions_dir, "log-e2e", deadline()).expect("log");
             assert_eq!(log.read_since(0).expect("read").len(), 1, "header only");
         }
-        // The actual selected path is the log; custom directories have no
-        // parallel default-directory file.
-        std::fs::rename(log_file(&dir, "log-e2e"), &session_path)
-            .expect("seed the log at the selected worker path");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
 
         let config = WorkerConfig {
@@ -1206,7 +1138,7 @@ mod tests {
             "the selected path is the durable log"
         );
         assert!(
-            !log_file(&agent_dir, "log-e2e").exists(),
+            !agent_dir.join("session-logs/log-e2e.jsonl").exists(),
             "no parallel default log"
         );
     }
@@ -1304,7 +1236,7 @@ mod tests {
                 json!({"message":{"role":"user","content":"seed"}}),
             )
             .unwrap();
-        let mut second = SessionFile::open_log(&path, &dir).unwrap();
+        let mut second = SessionFile::open(&path).unwrap();
         let foreign = first
             .persist_entry(
                 "message",
@@ -1317,7 +1249,7 @@ mod tests {
                 json!({"message":{"role":"user","content":"after foreign"}}),
             )
             .unwrap();
-        let durable = SessionFile::open_log(&path, &dir).unwrap();
+        let durable = SessionFile::open(&path).unwrap();
         assert_eq!(
             serde_json::to_value(second.entries()).unwrap(),
             serde_json::to_value(durable.entries()).unwrap(),
@@ -1328,14 +1260,15 @@ mod tests {
     #[test]
     fn review_public_retry_does_not_duplicate_an_unknown_row() {
         let dir = temp_dir("review-public-retry");
-        let fake = std::sync::Arc::new(FailNextFsync::new(
-            log_dir(&dir).join("review-public-retry.lock"),
-        ));
+        let fake = std::sync::Arc::new(FailNextFsync::new(dir.join("review-public-retry.lock")));
         fake.arm_fsync_failure(3);
         let (mut store, path) = fresh_log_session_with(
             &dir,
             "review-public-retry",
-            LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)),
+            LogWire::defer_with_disk(
+                &dir.join("review-public-retry.jsonl"),
+                std::sync::Arc::clone(&fake),
+            ),
         );
         let fields = json!({"message":{"role":"user","content":"same user intent"}});
         store
@@ -1343,7 +1276,7 @@ mod tests {
             .expect_err("unknown barrier");
         fake.release_rival();
         store.persist_entry("message", fields).expect("retry");
-        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        let replay = SessionFile::open(&path).unwrap();
         assert_eq!(
             replay.entries().len(),
             1,
@@ -1371,7 +1304,7 @@ mod tests {
                 json!({"message":{"role":"assistant","content":"lost in repair"}}),
             )
             .unwrap();
-        let log_path = log_file(&dir, "review-repair");
+        let log_path = dir.join("review-repair.jsonl");
         let mut bytes = std::fs::read(&log_path).unwrap();
         let last_line = bytes
             .iter()
@@ -1383,7 +1316,7 @@ mod tests {
             + 1;
         bytes[last_line] = b'!';
         std::fs::write(&log_path, bytes).unwrap();
-        let report = SessionLog::repair(&log_dir(&dir), "review-repair", deadline()).unwrap();
+        let report = SessionLog::repair(&dir, "review-repair", deadline()).unwrap();
         assert_eq!(report.last_good_seq, 2);
         let refusal = store
             .persist_entry(
@@ -1392,14 +1325,14 @@ mod tests {
             )
             .expect_err("stale live fold requires reopen");
         assert!(format!("{refusal:#}").contains("reopen"));
-        let mut store = SessionFile::open_log(&path, &dir).unwrap();
+        let mut store = SessionFile::open(&path).unwrap();
         store
             .persist_entry(
                 "message",
                 json!({"message":{"role":"user","content":"after repair"}}),
             )
             .unwrap();
-        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        let replay = SessionFile::open(&path).unwrap();
         assert_eq!(
             serde_json::to_value(store.entries()).unwrap(),
             serde_json::to_value(replay.entries()).unwrap(),
@@ -1424,7 +1357,7 @@ mod tests {
             )
             .unwrap();
         store.branch_to(Some(&root)).unwrap();
-        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        let replay = SessionFile::open(&path).unwrap();
         assert_eq!(
             store.leaf_id(),
             replay.leaf_id(),
@@ -1435,14 +1368,15 @@ mod tests {
     #[test]
     fn review_new_intent_resolves_the_previous_unknown_before_minting() {
         let dir = temp_dir("review-next-intent");
-        let fake = std::sync::Arc::new(FailNextFsync::new(
-            log_dir(&dir).join("review-next-intent.lock"),
-        ));
+        let fake = std::sync::Arc::new(FailNextFsync::new(dir.join("review-next-intent.lock")));
         fake.arm_fsync_failure(3);
         let (mut store, path) = fresh_log_session_with(
             &dir,
             "review-next-intent",
-            LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)),
+            LogWire::defer_with_disk(
+                &dir.join("review-next-intent.jsonl"),
+                std::sync::Arc::clone(&fake),
+            ),
         );
         store
             .persist_entry(
@@ -1457,7 +1391,7 @@ mod tests {
                 json!({"message":{"role":"user","content":"new intent"}}),
             )
             .unwrap();
-        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        let replay = SessionFile::open(&path).unwrap();
         assert_eq!(
             serde_json::to_value(store.entries()).unwrap(),
             serde_json::to_value(replay.entries()).unwrap()
@@ -1494,7 +1428,7 @@ mod tests {
             )
             .unwrap();
         first.observe_log_tail().unwrap();
-        let replay = SessionFile::open_log(&path, &dir).unwrap();
+        let replay = SessionFile::open(&path).unwrap();
         assert_eq!(
             serde_json::to_value(first.entries()).unwrap(),
             serde_json::to_value(replay.entries()).unwrap()

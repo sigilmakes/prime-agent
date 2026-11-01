@@ -44,7 +44,8 @@ impl SessionFile {
         self.log_transport.is_some()
     }
 
-    /// Attach the log transport (the worker create arms' wire).
+    /// Inject a fault-test wire in place of the exact-path production wire.
+    #[cfg(test)]
     pub(crate) fn attach_log_wire(&mut self, wire: LogWire) {
         self.log_transport = Some(wire);
     }
@@ -129,9 +130,7 @@ impl SessionFile {
         entry_type: &str,
         fields: &Value,
     ) -> Option<SessionEntry> {
-        let Some(row) = self.log_transport.as_ref().and_then(LogWire::pending_row) else {
-            return None;
-        };
+        let row = self.log_transport.as_ref().and_then(LogWire::pending_row)?;
         let Ok(entry) = serde_json::from_value::<SessionEntry>(row) else {
             return None;
         };

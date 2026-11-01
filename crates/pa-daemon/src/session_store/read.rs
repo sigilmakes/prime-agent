@@ -91,6 +91,7 @@ pub fn is_valid_session_file(path: &Path) -> bool {
     read_session_header_bounded(path).is_some()
 }
 
+#[derive(Clone, Copy)]
 enum OpenPolicy {
     Validate,
     Repair,
@@ -110,29 +111,6 @@ impl SessionFile {
     /// transport established a supported header. Read-only callers use `open`.
     pub(crate) fn open_owned_log(path: &Path) -> Result<Self> {
         Self::open_log_path(path, OpenPolicy::Repair)
-    }
-
-    /// Load a log-transported session: the log is the source of truth, the
-    /// fold replays it.
-    ///
-    /// The entry chain mirrors [`SessionFile::open`]'s old-format loader
-    /// (malformed-but-complete rows are skipped, never truncated), so
-    /// serving code sees the same fold either transport produced. The
-    /// returned store carries the held wire: its cursor counts exactly the
-    /// replayed entry rows, so later flushes only move durability.
-    ///
-    /// # Errors
-    ///
-    /// A log that no longer yields a session header (the repair truncation
-    /// emptied it), a header whose type is not `session`, I/O, or a foreign
-    /// writer holding the log.
-    pub(crate) fn open_log(session_path: &Path, agent_dir: &Path) -> Result<Self> {
-        let actual = crate::session_transport::log_file(
-            agent_dir,
-            &crate::session_transport::session_id_of(session_path)
-                .context("session path has no id")?,
-        );
-        Self::open_log_path(&actual, OpenPolicy::Repair)
     }
 
     fn open_log_path(session_path: &Path, policy: OpenPolicy) -> Result<Self> {
