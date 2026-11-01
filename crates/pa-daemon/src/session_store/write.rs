@@ -169,7 +169,7 @@ impl SessionFile {
             self.lease = None;
         }
         if self.path != path && !path.as_os_str().is_empty() {
-            self.log_transport = Some(crate::session_transport::LogWire::for_path(&path));
+            self.log_transport = Some(crate::session_transport::LogWire::fresh(&path));
             if let Some(id) = crate::session_transport::session_id_of(&path) {
                 self.header.id = id;
             }

@@ -146,9 +146,8 @@ struct WireState {
     /// code paths ([`Disk`]'s own contract).
     disk: Option<std::sync::Arc<dyn pa_core::session_log::Disk>>,
     directory: PathBuf,
-    /// Row one of the log is a session header. A fresh (deferred) wire writes
-    /// it as row one; a wire whose open found a pre-existing log adopts the
-    /// header it finds at row one instead of writing a second one.
+    /// True only after this fresh intent committed its header, or when
+    /// `held` explicitly reopened an existing validated log.
     header_written: bool,
     /// The next seq this wire pins: the log's last row's seq plus one, set
     /// at the open and moved by committed rows and tail adoptions only —
@@ -167,6 +166,7 @@ struct WireState {
 struct PendingRow {
     seq: u64,
     row: Value,
+    recover: session_log::Recover,
 }
 
 impl std::fmt::Debug for WireState {
@@ -183,10 +183,9 @@ impl std::fmt::Debug for WireState {
 }
 
 impl WireState {
-    /// Resolve the log this wire writes through, exactly once per wire
-    /// object: create the log when absent; for a log that already holds
-    /// rows, adopt row one when it is a session header (no wire writes a
-    /// second header) and take the seq cursor from the log's last row.
+    /// Open a fresh intent's file without adopting any existing row. Only
+    /// `held` constructs a reopened wire; the first append atomically decides
+    /// whether this fresh file is still empty.
     fn ensure_open(&mut self, session_id: &str) -> Result<(), LogWireError> {
         if self.log.is_some() {
             return Ok(());
@@ -200,21 +199,6 @@ impl WireState {
             None => SessionLog::open(&self.directory.clone(), session_id, deadline())
                 .map_err(open_error)?,
         };
-        // One read decides the adoption and sets the seq cursor both, so the
-        // wire never pins a seq the log already named.
-        let rows = log.read_since(0).map_err(|error| {
-            LogWireError::Refused(
-                anyhow::Error::from(open_error(error)).context("read the session log at its open"),
-            )
-        })?;
-        if let Some(row) = rows.first() {
-            if row.body.get("type").and_then(Value::as_str) == Some("session") {
-                self.header_written = true;
-            }
-        }
-        if let Some(last) = rows.last() {
-            self.next_seq = last.seq + 1;
-        }
         self.log = Some(log);
         Ok(())
     }
@@ -235,6 +219,31 @@ impl WireState {
             self.next_seq = last.seq + 1;
         }
         Ok(())
+    }
+
+    /// Reuse the original recovery capability until it decides durability.
+    /// True means the pending row committed; false means it did not land.
+    fn recover_pending(&mut self) -> Result<bool, LogWireError> {
+        let pending = self.pending.as_ref().expect("a pending recovery exists");
+        let seq = pending.seq;
+        match pending.recover.recover(deadline()) {
+            Ok(Outcome::Committed { .. }) => {
+                self.next_seq = self.next_seq.max(seq + 1);
+                self.pending = None;
+                Ok(true)
+            }
+            Ok(Outcome::NotWritten { .. }) => {
+                self.pending = None;
+                self.refresh_tail()?;
+                Ok(false)
+            }
+            Ok(Outcome::Busy { .. } | Outcome::Unknown { .. }) => Err(LogWireError::Refused(
+                anyhow::anyhow!("the session log left its undecided write open; retry the flush"),
+            )),
+            Err(error) => Err(LogWireError::Refused(anyhow::Error::from(error).context(
+                "the session log left its undecided write open; retry the flush",
+            ))),
+        }
     }
 
     /// Append `row`, pinned, and resolve its outcome against the log before
@@ -258,6 +267,9 @@ impl WireState {
                 "resolve the pending session row before another write"
             )));
         }
+        if self.pending.is_some() && self.recover_pending()? {
+            return Ok(());
+        }
         // At most the first attempt plus one re-pin after a provable
         // conflict: beyond that the log keeps moving under the wire and a
         // reopen must settle it.
@@ -269,11 +281,16 @@ impl WireState {
                 .filter(|pending| pending.row == *row)
                 .map(|pending| pending.seq)
                 .unwrap_or(self.next_seq);
-            let outcome = log
-                .append_at_checked(seq, row, cursor, deadline())
-                .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))?;
+            let outcome = if !self.header_written
+                && row.get("type").and_then(Value::as_str) == Some("session")
+            {
+                log.append_first(row, deadline())
+            } else {
+                log.append_at_checked(seq, row, cursor, deadline())
+                    .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))?
+            };
             match outcome {
-                Outcome::Committed { .. } => {
+                Outcome::Committed { seq, .. } => {
                     // A committed row may be an earlier pending's landed
                     // bytes re-presented while younger rows already moved
                     // the cursor; the cursor only ever advances.
@@ -289,29 +306,10 @@ impl WireState {
                     self.pending = Some(PendingRow {
                         seq: recover.seq(),
                         row: row.clone(),
+                        recover,
                     });
-                    match recover.recover(deadline()) {
-                        Ok(Outcome::Committed { .. }) => {
-                            // The row is the file's row (the core matched the
-                            // body); the caller indexes it.
-                            self.next_seq = self.next_seq.max(seq + 1);
-                            self.pending = None;
-                            return Ok(());
-                        }
-                        // The log's verdict: this row's bytes never took the
-                        // pinned seq. Sync the tail's cursor; the loop's next
-                        // attempt re-pins.
-                        Ok(Outcome::NotWritten { .. }) => {
-                            self.pending = None;
-                            self.refresh_tail()?;
-                        }
-                        // An undecided recovery (Busy/error): the seq stays
-                        // pending; nothing else of this flush runs.
-                        _ => {
-                            return Err(LogWireError::Refused(anyhow::anyhow!(
-                                "the session log left its undecided write open; retry the flush"
-                            )));
-                        }
+                    if self.recover_pending()? {
+                        return Ok(());
                     }
                 }
                 Outcome::NotWritten {
@@ -395,6 +393,9 @@ impl LogWire {
                 state.header_written = true;
             }
         }
+        if !state.header_written {
+            return Ok(Vec::new());
+        }
         state
             .log
             .as_mut()
@@ -402,8 +403,8 @@ impl LogWire {
             .read_tail(cursor, deadline())
             .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))
     }
-    /// A fresh wire: the log opens (creating file, lock, and row one) at the
-    /// first flush.
+    /// A fresh creation intent. The header must win an atomic first append;
+    /// existing bytes are never implicitly reopened or adopted.
     pub(crate) fn deferred(agent_dir: &Path) -> Self {
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(WireState {
@@ -418,7 +419,7 @@ impl LogWire {
     }
 
     /// A lazy writer for an exact durable log path, including an overridden directory.
-    pub(crate) fn for_path(path: &Path) -> Self {
+    pub(crate) fn fresh(path: &Path) -> Self {
         let wire = Self::deferred(Path::new("."));
         wire.state.lock().expect("log wire lock").directory = path
             .parent()
@@ -443,8 +444,8 @@ impl LogWire {
     }
 
     /// A reopened wire wrapping the log the fold was replayed from. The
-    /// header is already durable (row one of the replayed log), `replayed`
-    /// counts the fold's durable entry rows, and `last_seq` pins the cursor
+    /// header is already durable (row one of the replayed log), and
+    /// `last_seq` pins the cursor
     /// past the log's last row.
     pub(crate) fn held(log: SessionLog, directory: &Path, last_seq: u64) -> Self {
         Self {
@@ -459,8 +460,8 @@ impl LogWire {
         }
     }
 
-    /// THE one durable-write API: the pending header row first (exactly once
-    /// per wire; a pre-existing log's header is adopted at the open), then
+    /// THE one durable-write API: this intent's pending header first (an
+    /// initial attempt refuses every pre-existing byte), then
     /// `rows`, in order, each pinned at the wire's seq cursor. Every write
     /// starts with the log's tail, adopted from the log's own cursor, so a
     /// landed-but-undecided row is answered instead of repeated, and a
@@ -759,43 +760,91 @@ mod tests {
     }
 
     #[test]
-    fn a_rival_created_log_is_adopted_not_re_headed() {
-        let dir = temp_dir("rival-header");
-        // The rival creates the log, writes row one (a session header this
-        // wire did not write), and releases its handle.
-        {
-            let mut log =
-                SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("rival open");
-            assert!(
-                matches!(
-                    log.append(
-                        &json!({ "type": "session", "id": "rival-header", "timestamp": "2026-10-30T00:00:00Z", "cwd": "test" }),
-                        deadline()
-                    ),
-                    Outcome::Committed { .. }
-                ),
-                "the rival's header row commits"
-            );
+    fn a_fresh_wire_refuses_identical_and_different_rival_headers() {
+        for same_header in [true, false] {
+            let dir = temp_dir("fresh-rival");
+            let (mut store, session_path) = fresh_log_session(&dir, "fresh-rival");
+            let own_header = crate::session_store::session_header_line(&store.header);
+            let mut rival_header = own_header;
+            if !same_header {
+                rival_header["cwd"] = json!("different rival cwd");
+            }
+            std::fs::create_dir_all(log_dir(&dir)).unwrap();
+            let mut rival = SessionLog::open(&log_dir(&dir), "fresh-rival", deadline()).unwrap();
+            assert!(matches!(
+                rival.append_first(&rival_header, deadline()),
+                Outcome::Committed { .. }
+            ));
+            let bytes = std::fs::read(log_file(&dir, "fresh-rival")).unwrap();
+            store
+                .persist_entry(
+                    "message",
+                    json!({"message":{"role":"user","content":"new intent"}}),
+                )
+                .expect_err("a fresh intent cannot adopt a rival header");
+            assert!(store.entries().is_empty());
+            assert_eq!(std::fs::read(log_file(&dir, "fresh-rival")).unwrap(), bytes);
+            // Explicit reopen is separate and may continue the existing log.
+            let mut reopened = SessionFile::open_log(&session_path, &dir).unwrap();
+            reopened
+                .persist_entry(
+                    "message",
+                    json!({"message":{"role":"user","content":"explicit reopen"}}),
+                )
+                .unwrap();
+            assert_eq!(rival.read_since(0).unwrap().len(), 2);
         }
-        let (mut store, session_path) = fresh_log_session(&dir, "rival-header");
-        // The wire's flush adopts row one and writes no header of its own.
+    }
+
+    #[test]
+    fn a_fresh_wire_refuses_torn_bytes_without_repairing_them() {
+        let dir = temp_dir("fresh-torn");
+        let (store, _) = fresh_log_session(&dir, "fresh-torn");
+        std::fs::create_dir_all(log_dir(&dir)).unwrap();
+        let path = log_file(&dir, "fresh-torn");
+        let bytes = b"{\"seq\":1";
+        std::fs::write(&path, bytes).unwrap();
+        store
+            .rewrite()
+            .expect_err("a new intent cannot repair existing bytes");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn an_unknown_first_header_keeps_its_recovery_and_retries_once() {
+        let dir = temp_dir("unknown-first");
+        let fake =
+            std::sync::Arc::new(FailNextFsync::new(log_dir(&dir).join("unknown-first.lock")));
+        // File creation sync is first; the header barrier is second.
+        fake.arm_fsync_failure(2);
+        let (mut store, path) = fresh_log_session_with(
+            &dir,
+            "unknown-first",
+            LogWire::defer_with_disk(&dir, std::sync::Arc::clone(&fake)),
+        );
+        store
+            .rewrite()
+            .expect_err("header barrier lost, recovery busy");
+        let bytes = std::fs::read(log_file(&dir, "unknown-first")).unwrap();
+        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+        fake.release_rival();
+        store
+            .rewrite()
+            .expect("the original header recovery resolves");
+        assert_eq!(
+            std::fs::read(log_file(&dir, "unknown-first")).unwrap(),
+            bytes
+        );
         store
             .persist_entry(
                 "message",
-                json!({ "message": { "role": "user", "content": "hi", "timestamp": 1 } }),
+                json!({"message":{"role":"user","content":"after recovery"}}),
             )
-            .expect("persist");
-        let log = SessionLog::open(&log_dir(&dir), "rival-header", deadline()).expect("reopen");
-        let rows = log.read_since(0).expect("read");
-        assert_eq!(rows.len(), 2, "the rival's header plus the entry row only");
-        assert_eq!(rows[0].body["type"].as_str(), Some("session"));
-        // The header is metadata, never a conversation root: the served fold
-        // is unaffected. One entry live; one entry on the replay; and if the
-        // header ever leaked into the fold, both counts would be two.
-        assert_eq!(store.entries().len(), 1);
-        drop(store);
-        let replay = SessionFile::open_log(&session_path, &dir).expect("replay");
-        assert_eq!(replay.entries().len(), 1);
+            .unwrap();
+        let reopened = SessionFile::open_log(&path, &dir).unwrap();
+        assert_eq!(reopened.entries().len(), 1);
+        let log = SessionLog::open(&log_dir(&dir), "unknown-first", deadline()).unwrap();
+        assert_eq!(log.read_since(0).unwrap().len(), 2);
     }
 
     #[test]
