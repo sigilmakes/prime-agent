@@ -527,10 +527,17 @@ mod tests {
             .get_session_file()
             .expect("session file")
             .to_path_buf();
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
+        let bytes = std::fs::read(path).expect("durable attribution log");
+        let mut seq = 0;
+        bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(|line| {
+                let line = line.strip_suffix(b"\n").expect("complete durable row");
+                let row = crate::session_log::Row::decode(line, seq)
+                    .expect("validated raw attribution row");
+                seq = row.seq;
+                row.body
+            })
             .collect()
     }
 

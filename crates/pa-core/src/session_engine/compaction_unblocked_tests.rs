@@ -124,7 +124,7 @@ fn release(summarizer: &HeldSummarizer) {
 
 /// The session file's rows, parsed straight off disk.
 fn file_entries(path: &std::path::Path) -> Vec<FileEntry> {
-    crate::session::parse_session_entries(&std::fs::read_to_string(path).expect("the file reads"))
+    crate::session::read_entries(path).expect("validated durable session rows")
 }
 
 fn spawn_compact(
