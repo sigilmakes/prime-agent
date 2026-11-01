@@ -133,8 +133,7 @@ async fn record_appends_row_to_entries_and_live_context_but_not_llm_input() {
     assert!(convert_to_llm(std::slice::from_ref(&SessionAgentMessage::Custom(row))).is_empty());
 }
 
-/// The disclosure survives a failed disk write: the entry chain keeps
-/// the row in memory, so a rebuild never drops it.
+/// A failed disclosure append cannot publish a row absent from durable history.
 #[tokio::test]
 async fn record_refuses_a_failed_disk_write_without_publishing() {
     let tmp = tempfile::tempdir().unwrap();
