@@ -37,7 +37,12 @@ fn write_session_log(path: &Path, rows: &[Value]) {
 fn legacy_registry_probe_reads_the_header_line_bounded() {
     let dir = temp_dir("legacy-bounded");
     let parent = dir.join("p.jsonl");
-    write_session_log(&parent, &[json!({"type": "session", "id": "p1"})]);
+    write_session_log(
+        &parent,
+        &[
+            json!({"type": "session", "version": 3, "id": "p1", "cwd": "/fixture", "timestamp": "2026-10-31T00:00:00.000Z"}),
+        ],
+    );
     let mut file = fs::OpenOptions::new().append(true).open(&parent).unwrap();
     file.write_all(&vec![b'x'; LEGACY_REGISTRY_HEADER_READ_MAX_BYTES * 2])
         .unwrap();
@@ -64,7 +69,12 @@ fn legacy_registry_probe_reads_the_header_line_bounded() {
 fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
     let dir = temp_dir("legacy-corrupt-tail");
     let parent = dir.join("p.jsonl");
-    write_session_log(&parent, &[json!({"type": "session", "id": "p1"})]);
+    write_session_log(
+        &parent,
+        &[
+            json!({"type": "session", "version": 3, "id": "p1", "cwd": "/fixture", "timestamp": "2026-10-31T00:00:00.000Z"}),
+        ],
+    );
     fs::OpenOptions::new()
         .append(true)
         .open(&parent)
@@ -84,7 +94,12 @@ fn legacy_registry_probe_resolves_a_readable_header_over_a_corrupt_tail() {
 fn legacy_registry_probe_rejects_uncommitted_or_corrupt_log_headers() {
     let dir = temp_dir("legacy-header-invalid");
     let parent = dir.join("p.jsonl");
-    write_session_log(&parent, &[json!({"type": "session", "id": "p1"})]);
+    write_session_log(
+        &parent,
+        &[
+            json!({"type": "session", "version": 3, "id": "p1", "cwd": "/fixture", "timestamp": "2026-10-31T00:00:00.000Z"}),
+        ],
+    );
     let original = fs::read(&parent).unwrap();
     fs::write(&parent, &original[..original.len() - 1]).unwrap();
     assert_eq!(legacy_registry_path(&parent), None);
@@ -730,7 +745,9 @@ fn seeds_from_legacy_registries_once_and_atomically() {
     let parent = sessions.join("p1.jsonl");
     write_session_log(
         &parent,
-        &[json!({"type": "session", "id": "p1", "cwd": "/x"})],
+        &[
+            json!({"type": "session", "version": 3, "id": "p1", "cwd": "/x", "timestamp": "2026-10-31T00:00:00.000Z"}),
+        ],
     );
     let child = dir.join("child.jsonl");
     fs::write(&child, "{}").unwrap();
