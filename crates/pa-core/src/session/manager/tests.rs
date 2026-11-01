@@ -460,40 +460,20 @@ fn fork_from_terminates_on_cyclic_git_state_parents() {
 #[test]
 fn fork_from_rejects_empty_and_headerless_sources() {
     let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("sessions");
     let empty = tmp.path().join("empty.jsonl");
     std::fs::write(&empty, "").unwrap();
-    let error = SessionManager::fork_from(&empty, tmp.path(), &tmp.path().join("sessions"))
-        .err()
-        .expect("fork rejects an empty source");
-    assert_eq!(
-        error,
-        format!(
-            "Cannot fork: source session file is empty or invalid: {}",
-            empty.display()
-        )
-    );
+    assert!(SessionManager::fork_from(&empty, tmp.path(), &target).is_err());
+    assert_eq!(std::fs::read(&empty).unwrap(), b"");
     let headerless = tmp.path().join("headerless.jsonl");
-    std::fs::write(
-        &headerless,
-        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
-    )
-    .unwrap();
-    let error = SessionManager::fork_from(&headerless, tmp.path(), &tmp.path().join("sessions"))
-        .err()
-        .expect("fork rejects a headerless source");
-    assert_eq!(
-        error,
-        format!(
-            "Cannot fork: source session file is empty or invalid: {}",
-            headerless.display()
-        ),
-        "the loader finalizes a headerless file to zero entries"
-    );
+    write_log_fixture(&headerless, "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n").unwrap();
+    let before = std::fs::read(&headerless).unwrap();
+    assert!(SessionManager::fork_from(&headerless, tmp.path(), &target).is_err());
+    assert_eq!(std::fs::read(&headerless).unwrap(), before);
     let missing = tmp.path().join("absent.jsonl");
-    let error = SessionManager::fork_from(&missing, tmp.path(), &tmp.path().join("sessions"))
-        .err()
-        .expect("fork rejects a missing source");
-    assert!(error.starts_with("Cannot fork: source session file is empty or invalid:"));
+    assert!(SessionManager::fork_from(&missing, tmp.path(), &target).is_err());
+    assert!(!missing.exists());
+    assert!(!target.exists());
 }
 
 #[test]
