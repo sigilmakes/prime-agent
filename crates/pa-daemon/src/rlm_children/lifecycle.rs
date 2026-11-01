@@ -815,12 +815,12 @@ pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
 /// wins; a file with no assistant rows (the prompt arm's never-started
 /// turn) answers nothing.
 pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String> {
-    let content = std::fs::read_to_string(session_file).ok()?;
-    for line in content.lines().rev() {
-        let Ok(pa_types::session::FileEntry::Message {
+    let entries = pa_core::session::read_entries(std::path::Path::new(session_file)).ok()?;
+    for entry in entries.into_iter().rev() {
+        let pa_types::session::FileEntry::Message {
             message: pa_types::session::AgentMessage::Assistant(assistant),
             ..
-        }) = serde_json::from_str::<pa_types::session::FileEntry>(line.trim())
+        } = entry
         else {
             continue;
         };
@@ -842,6 +842,20 @@ pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String
 #[cfg(test)]
 mod exit_capture_tests {
     use super::*;
+    fn append_rows(path: &std::path::Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
 
     /// One serialized assistant row with the given text.
     fn assistant_row(text: &str) -> String {
@@ -882,32 +896,31 @@ mod exit_capture_tests {
     /// after the worker is gone: the newest non-empty assistant text wins.
     #[test]
     fn the_exit_capture_reader_takes_the_last_assistant_row() {
-        let file = std::env::temp_dir().join(format!(
-            "pa-rlm-exit-capture-{}.jsonl",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let user_row = r#"{"type":"message","role":"user","content":"the task"}"#;
-        std::fs::write(
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("child.jsonl");
+        append_rows(
             &file,
-            format!(
-                "{user_row}\n{}\n{}\n",
-                assistant_row("an earlier turn's say"),
-                assistant_row("the final say")
-            ),
-        )
-        .expect("write the session file");
-        let text = last_assistant_text_from_file(&file.to_string_lossy())
-            .expect("the last assistant row is readable");
-        assert_eq!(text, "the final say");
-        // A file with no assistant rows (the prompt arm's never-started
-        // turn) answers nothing.
-        let bare = std::env::temp_dir().join(format!(
-            "pa-rlm-exit-capture-bare-{}.jsonl",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::write(&bare, format!("{user_row}\n")).expect("write the bare file");
-        assert_eq!(last_assistant_text_from_file(&bare.to_string_lossy()), None);
-        let _ = std::fs::remove_file(&file);
-        let _ = std::fs::remove_file(&bare);
+            &[
+                json!({"type":"session","version":3,"id":"child","cwd":"/w","timestamp":"2026-09-24T00:00:00Z"}),
+            ],
+        );
+        assert_eq!(last_assistant_text_from_file(&file.to_string_lossy()), None);
+        append_rows(
+            &file,
+            &[
+                serde_json::from_str(&assistant_row("an earlier turn's say")).unwrap(),
+                serde_json::from_str(&assistant_row("the final say")).unwrap(),
+                serde_json::from_str(&assistant_row("")).unwrap(),
+            ],
+        );
+        assert_eq!(
+            last_assistant_text_from_file(&file.to_string_lossy()).as_deref(),
+            Some("the final say")
+        );
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.pop();
+        std::fs::write(&file, &bytes).unwrap();
+        assert_eq!(last_assistant_text_from_file(&file.to_string_lossy()), None);
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
     }
 }
