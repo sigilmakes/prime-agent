@@ -117,12 +117,15 @@ impl SessionLease {
     }
 
     /// Release execution ownership after the caller has stopped session work.
-    /// Closing the descriptor releases the OS lock, including on process death.
+    /// Explicit unlock also releases descriptors inherited by a child before exec.
+    /// Process exit releases the lock when the last inherited descriptor closes.
     pub fn release(&self) {
         let mut file = self.file.lock().expect("session execution lock");
         if file.is_some() {
             self.write_sidecars();
-            file.take();
+            if let Some(file) = file.take() {
+                let _ = file.unlock();
+            }
         }
     }
 
@@ -172,7 +175,10 @@ pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLea
         .open(lock_path(agent_dir, session_path))
         .ok()?;
     match file.try_lock() {
-        Ok(()) => None,
+        Ok(()) => {
+            let _ = file.unlock();
+            None
+        }
         Err(TryLockError::WouldBlock) => {
             let holder = read_holder(&mut file);
             Some(LiveLeaseOwner {
@@ -261,10 +267,21 @@ mod tests {
         let first = acquire_runtime_session_lease(&path, dir.path()).unwrap();
         let lock = lock_path(dir.path(), &path);
         let held_inode = File::open(&lock).unwrap();
+        // A fork before exec shares the lock's open file description. Retain a
+        // duplicate to prove release unlocks ownership, not just this descriptor.
+        let inherited = first
+            .file
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
         first.release();
         assert!(lock.is_file());
         assert!(first.ensure_held(&path).is_err());
         let second = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        drop(inherited);
         first.release();
         drop(first);
         assert!(matches!(
