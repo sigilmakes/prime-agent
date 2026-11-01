@@ -72,33 +72,29 @@ mod resume_settings_tests {
     #[tokio::test]
     async fn compacted_create_restores_settings_and_honors_explicit_overrides() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("resume.jsonl");
-        let mut file = SessionFile::create("/tmp", None, 0);
-        file.set_path(path.clone());
-        file.append_model_change("old", "superseded");
-        file.append_thinking_level_change("high");
-        file.append_entry("service_tier_change", json!({"serviceTier":null}));
-        file.append_message(&json!({"role":"assistant","provider":"saved","model":"inferred","api":"openai-responses","content":[],"stopReason":"stop","timestamp":0,"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}}}));
-        let kept = file.append_message(&json!({"role":"user","content":"kept","timestamp":1}));
-        file.append_entry(
-            "compaction",
-            json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":100}),
-        );
-        file.rewrite().unwrap();
         for mode in [0, 1, 2, 3, 4] {
-            // Each variant is a fresh immutable log, not a rewrite of history.
+            // Each variant constructs its own immutable log and write cursor.
             let path = dir.path().join(format!("resume-{mode}.jsonl"));
-            let mut fixture = file.clone();
-            fixture.set_path(path.clone());
+            let mut file = SessionFile::create("/tmp", None, 0);
+            file.set_path(path.clone());
+            file.append_model_change("old", "superseded");
+            file.append_thinking_level_change("high");
+            file.append_entry("service_tier_change", json!({"serviceTier":null}));
+            file.append_message(&json!({"role":"assistant","provider":"saved","model":"inferred","api":"openai-responses","content":[],"stopReason":"stop","timestamp":0,"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}}}));
+            let kept = file.append_message(&json!({"role":"user","content":"kept","timestamp":1}));
+            file.append_entry(
+                "compaction",
+                json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":100}),
+            );
             if mode == 4 {
-                for entry in &mut fixture.entries {
+                for entry in &mut file.entries {
                     if entry.type_ == "thinking_level_change" {
                         entry.type_ = "custom".into();
                         entry.fields = json!({"customType":"test"});
                     }
                 }
             }
-            fixture.rewrite().unwrap();
+            file.rewrite().unwrap();
             let capture = Arc::new(CaptureEngine::default());
             let mut worker = Worker::new(
                 WorkerConfig {
