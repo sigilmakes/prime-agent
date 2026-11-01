@@ -211,7 +211,7 @@ fn live_summary_usage_is_the_catalog_fold() {
         let row: Value = serde_json::from_str(line).unwrap();
         assert!(matches!(
             log.append(&row, std::time::Instant::now()),
-            pa_core::session_log::Outcome::Committed(_)
+            pa_core::session_log::Outcome::Committed { .. }
         ));
     }
     let store = crate::session_store::SessionFile::open_windowed(&path).unwrap();
