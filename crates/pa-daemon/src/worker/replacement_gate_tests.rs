@@ -96,6 +96,59 @@ fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<Stri
     worker
 }
 
+#[tokio::test]
+async fn create_owns_actual_custom_path_until_worker_close() {
+    for explicit_path in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("custom-sessions");
+        let path = custom.join("custom.jsonl");
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let owner = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+        let visitor = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+        let payload = if explicit_path {
+            json!({ "sessionPath": path, "cwd": "/tmp" })
+        } else {
+            json!({ "sessionDir": custom, "cwd": "/tmp" })
+        };
+        let created = owner.dispatch("create", &payload).await;
+        assert!(created.success, "{created:?}");
+        let path = {
+            let core = owner.core.lock().unwrap();
+            let store = core.store.as_ref().unwrap();
+            assert_eq!(store.path.parent(), Some(custom.as_path()));
+            store
+                .lease
+                .as_ref()
+                .unwrap()
+                .ensure_held(&store.path)
+                .unwrap();
+            store.path.clone()
+        };
+        assert!(path.is_file(), "create must publish at the selected path");
+        assert!(!dir.path().join("agent/session-logs").exists());
+        let before = std::fs::read(&path).unwrap();
+        let reopen = json!({ "sessionPath": path, "cwd": "/tmp" });
+        let refused = visitor.dispatch("create", &reopen).await;
+        assert!(
+            !refused.success,
+            "resident execution must exclude a rival: {refused:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let closed = owner.dispatch("shutdown", &json!({})).await;
+        assert!(closed.success, "{closed:?}");
+        let reopened = visitor.dispatch("create", &reopen).await;
+        assert!(
+            reopened.success,
+            "custom path must reopen after close: {reopened:?}"
+        );
+        let core = visitor.core.lock().unwrap();
+        let store = core.store.as_ref().unwrap();
+        assert_eq!(store.path, path);
+        store.lease.as_ref().unwrap().ensure_held(&path).unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
+    }
+}
+
 /// Two concurrent `switch_session` commands must not interleave their
 /// replacement critical sections — an overlap would leave the store, the
 /// branch context, and the model from different sessions.

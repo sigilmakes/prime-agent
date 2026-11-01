@@ -201,35 +201,22 @@ impl Worker {
         let mut fresh_prefix = FreshPrefixPlan::None;
         let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
         let mut store = match (&session_path, no_session) {
-            // A session whose log exists reopens through the log transport
-            // even without an old-format file: the log IS the session.
-            (Some(path), false)
-                if path.exists()
-                    || crate::session_transport::log_exists(&self.config.agent_dir, path) =>
-            {
-                // The reopen arm: a session's log is the source of truth (the
-                // log's flock is the writer's mutual exclusion, so the lease
-                // file is not taken); a pre-port old-format file is refused
-                // typed, never read and never migrated.
-                let loaded = match crate::session_transport::resolve(&self.config.agent_dir, path) {
-                    crate::session_transport::SessionTransport::SessionLog => {
-                        let path = path.clone();
-                        let agent_dir = self.config.agent_dir.clone();
-                        tokio::task::spawn_blocking(move || {
-                            SessionFile::open_log(&path, &agent_dir)
-                        })
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|result| result)
-                    }
-                    crate::session_transport::SessionTransport::LegacyUnsupported => {
-                        Err(anyhow::anyhow!(
-                            "legacy session unsupported: the old-format session file {} is \
-                                 not read and not migrated",
-                            path.display()
-                        ))
-                    }
-                };
+            (Some(path), false) if path.exists() => {
+                // Execution ownership is separate from the log's per-append lock.
+                // Hold it before owner repair and retain it with the serving fold.
+                let open_path = path.clone();
+                let agent_dir = self.config.agent_dir.clone();
+                let loaded = tokio::task::spawn_blocking(move || {
+                    let lease = std::sync::Arc::new(crate::lease::acquire_runtime_session_lease(
+                        &open_path, &agent_dir,
+                    )?);
+                    let mut opened = SessionFile::open_owned_log(&open_path)?;
+                    opened.lease = Some(lease);
+                    Ok::<_, anyhow::Error>(opened)
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result);
                 match loaded {
                     Ok(mut opened) => {
                         opened_existing_session = true;
@@ -309,14 +296,18 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
-                // The fresh path-backed arm: every fresh session rides the
-                // session log (the log's flock stands in for the lease
-                // file). The deferred wire's first flush (the rewrite below)
-                // creates the log and writes the header row, re-keyed to the
-                // path's id.
-                created.attach_log_wire(crate::session_transport::LogWire::deferred(
-                    &self.config.agent_dir,
-                ));
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        return response_failure(None, "create", &error.to_string(), None);
+                    }
+                }
+                let lease =
+                    match crate::lease::acquire_runtime_session_lease(path, &self.config.agent_dir)
+                    {
+                        Ok(lease) => std::sync::Arc::new(lease),
+                        Err(error) => return crate::hold_refusal::create_failure_response(&error),
+                    };
+                created.lease = Some(lease);
                 if let Err(error) = created.rekey_log_session_id(path) {
                     return response_failure(None, "create", &error.to_string(), None);
                 }
@@ -344,11 +335,19 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
-                // The fresh minted-id arm: the same deferred log wire; the
-                // minted id already names the file and the log, so no re-key.
-                created.attach_log_wire(crate::session_transport::LogWire::deferred(
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        return response_failure(None, "create", &error.to_string(), None);
+                    }
+                }
+                let lease = match crate::lease::acquire_runtime_session_lease(
+                    &path,
                     &self.config.agent_dir,
-                ));
+                ) {
+                    Ok(lease) => std::sync::Arc::new(lease),
+                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
+                };
+                created.lease = Some(lease);
                 // One durable write instead of three: the prefix, the `active` state,
                 // and the session name land in a single rewrite; the create stays
                 // pathless until it succeeds, so no reader reads the file mid-create.
