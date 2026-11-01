@@ -604,26 +604,6 @@ impl SessionPlugins {
             .with_current_contributions(&[strategy, compactor], commit)?
     }
 
-    pub(super) fn with_context_authority<T>(
-        &self,
-        strategy: &Contribution,
-        compactor: &Contribution,
-        commit: impl FnOnce() -> anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
-        let selection = self
-            .context_selection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if selection.as_ref() != Some(strategy) {
-            return Err(crate::plugins::PluginError::Retired.into());
-        }
-        if compactor.kind != ContributionKind::Compactor {
-            bail!("not a compactor contribution");
-        }
-        self.host
-            .with_current_contributions(&[strategy, compactor], commit)?
-    }
-
     pub(super) async fn invoke_context(
         &self,
         target: &Contribution,
@@ -1206,9 +1186,12 @@ mod context_selection_tests {
             .manager
             .context_compactor("standard_compaction/standard")
             .unwrap();
+        let registration = f.manager.capture_context_registration(&old).unwrap();
         assert_eq!(
             f.manager
-                .with_context_authority(&old, &compactor, || Ok("durable commit"))
+                .with_registered_context_authority(&registration, &old, &compactor, || Ok(
+                    "durable commit"
+                ))
                 .unwrap(),
             "durable commit"
         );
@@ -1216,7 +1199,7 @@ mod context_selection_tests {
         f.manager.reload().await.unwrap();
         assert!(f
             .manager
-            .with_context_authority(&old, &compactor, || Ok(()))
+            .with_registered_context_authority(&registration, &old, &compactor, || Ok(()))
             .is_err());
         assert!(f.manager.context_retirement(&compactor).is_err());
         let selected = f.manager.context_selection().unwrap();
