@@ -763,7 +763,11 @@ mod tests {
             .rewrite()
             .expect_err("header barrier lost, recovery busy");
         let bytes = std::fs::read(dir.join("unknown-first.jsonl")).unwrap();
-        assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let header =
+            session_log::Row::decode(bytes.strip_suffix(b"\n").expect("complete header row"), 0)
+                .expect("exactly one validated header envelope");
+        assert_eq!(header.seq, 1);
+        assert_eq!(header.body["type"], "session");
         fake.release_rival();
         store
             .rewrite()
@@ -1098,9 +1102,9 @@ mod tests {
                     None,
                 )
                 .expect("child usage row");
-            assert!(
-                store.entries().last().map(|e| e.type_.clone())
-                    == Some("child_usage_attributed".to_string())
+            assert_eq!(
+                store.entries().last().map(|entry| entry.type_.as_str()),
+                Some("child_usage_attributed")
             );
         }
 
@@ -1128,8 +1132,7 @@ mod tests {
                 .fields
                 .get("message")
                 .and_then(|message| message.get("usage"))
-                .map(|usage| usage.get("input").and_then(Value::as_u64))
-                .flatten(),
+                .and_then(|usage| usage.get("input").and_then(Value::as_u64)),
             Some(123),
             "the replayed assistant folds the attribution's aggregate (the scripted 120 plus the child's 3)"
         );
