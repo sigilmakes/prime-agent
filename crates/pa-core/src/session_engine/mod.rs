@@ -297,10 +297,10 @@ impl AgentSession {
                 })
             })
             .await;
-        Self::from_persisted_agent(agent, session, prompt_templates).await
+        Self::from_persisted_agent(agent, session, prompt_templates)
     }
 
-    async fn from_persisted_agent(
+    fn from_persisted_agent(
         agent: Arc<Agent>,
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         prompt_templates: Vec<PromptTemplate>,
@@ -345,13 +345,16 @@ impl AgentSession {
     /// # Errors
     /// Refuses queued/active work or unresolved canonical effects. A closed runtime
     /// remains closed if a later domain refuses retirement.
-    pub async fn retire_completed_runtime(&self) -> anyhow::Result<()> {
+    pub fn retire_completed_runtime(&self) -> anyhow::Result<()> {
         self.agent.retire_completed_runtime()?;
 
         Ok(())
     }
 
     /// Rebuild the current branch's model-facing context.
+    ///
+    /// # Errors
+    /// Returns context projection errors or refuses replacement while the agent is busy.
     pub async fn rebuild_current_branch_context(&self) -> anyhow::Result<()> {
         let messages = self.context_messages().await?;
         self.agent

@@ -56,7 +56,7 @@ pub struct SessionEngineConfig {
     /// Restrict initial strategy work to the verified pre-admission prefix.
     /// The complete canonical manager and durable strategy selection stay intact.
     pub context_startup_boundary: super::ContextStartupBoundary,
-    /// Exact ordered User or CustomMessage row IDs after a non-Current boundary.
+    /// Exact ordered User or `CustomMessage` row IDs after a non-Current boundary.
     /// These prove admission identity; content and timestamps are not deduplicated.
     pub context_startup_admitted_input_ids: Vec<String>,
     /// Acknowledge fresh or saved selection through the embedding's canonical
@@ -856,8 +856,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         agent.clone(),
         wiring.session.clone(),
         resources.prompts.clone(),
-    )
-    .await?;
+    )?;
     session.plugins = Some(Arc::clone(&plugins));
     session.plugin_command_barrier = plugin_command_barrier;
     session.plugin_jobs = Some(jobs);

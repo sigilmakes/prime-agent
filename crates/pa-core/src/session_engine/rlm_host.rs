@@ -323,6 +323,7 @@ pub fn rlm_child_session_dir(
 /// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a
 /// resumed session re-seeds its depth bound from. `None` when absent or
 /// unreadable.
+#[must_use]
 pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
     crate::session::read::read_entries(std::path::Path::new(path?))
         .ok()?
