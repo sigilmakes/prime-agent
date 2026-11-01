@@ -10,7 +10,8 @@ pub(super) struct StandaloneLog {
     seq: u64,
     initialized: usize,
     pending: Option<(u64, FileEntry)>,
-    creation_recover: Option<crate::session_log::Recover>,
+    initial_recover: Option<crate::session_log::Recover>,
+    initial_pending: Option<(u64, FileEntry)>,
 }
 
 impl SessionManager {
@@ -88,6 +89,13 @@ impl SessionManager {
         } else if self.persist {
             self.flush_now()?;
             let state = self.standalone_log.as_mut().expect("flush initialized log");
+            if let Some((seq, pending)) = &state.pending {
+                let outcome = state
+                    .log
+                    .append_at_checked(*seq, pending, &state.cursor, Instant::now())
+                    .map_err(io::Error::other)?;
+                committed(outcome)?;
+            }
             let rows = state
                 .log
                 .read_tail(&mut state.cursor, Instant::now())
@@ -186,7 +194,8 @@ impl SessionManager {
                     log,
                     cursor,
                     pending: None,
-                    creation_recover: None,
+                    initial_recover: None,
+                    initial_pending: None,
                 });
                 return Ok(());
             }
@@ -210,15 +219,20 @@ impl SessionManager {
                 log,
                 cursor,
                 pending: None,
-                creation_recover: None,
+                initial_recover: None,
+                initial_pending: None,
             }
         };
         let mut foreign_added = false;
         let result = (|| {
             while state.initialized < self.file_entries.len() {
-                let entry = self.file_entries[state.initialized].clone();
-                let seq = state.seq + 1;
-                let outcome = if let Some(recover) = &state.creation_recover {
+                let (seq, entry) = state
+                    .initial_pending
+                    .get_or_insert_with(|| {
+                        (state.seq + 1, self.file_entries[state.initialized].clone())
+                    })
+                    .clone();
+                let outcome = if let Some(recover) = &state.initial_recover {
                     recover.recover(Instant::now()).map_err(io::Error::other)?
                 } else if state.initialized == 0 && !self.flushed {
                     state.log.append_first(&entry, Instant::now())
@@ -229,10 +243,10 @@ impl SessionManager {
                         .map_err(io::Error::other)?
                 };
                 let outcome = match outcome {
-                    Outcome::Unknown { recover } if state.initialized == 0 && !self.flushed => {
-                        state.creation_recover = Some(recover);
+                    Outcome::Unknown { recover } => {
+                        state.initial_recover = Some(recover);
                         state
-                            .creation_recover
+                            .initial_recover
                             .as_ref()
                             .expect("recover retained")
                             .recover(Instant::now())
@@ -244,10 +258,11 @@ impl SessionManager {
                     &outcome,
                     Outcome::Committed { .. } | Outcome::NotWritten { .. }
                 ) {
-                    state.creation_recover = None;
+                    state.initial_recover = None;
                 }
                 committed(outcome)?;
-                state.seq = seq;
+                state.initial_pending = None;
+                state.seq = state.seq.max(seq);
                 state.initialized += 1;
                 let rows = state
                     .log
@@ -301,7 +316,6 @@ impl SessionManager {
                 .log
                 .read_tail(&mut state.cursor, Instant::now())
                 .map_err(io::Error::other)?;
-            let mut pending_found = false;
             let mut changed = false;
             for row in rows {
                 state.seq = row.seq;
@@ -317,7 +331,6 @@ impl SessionManager {
                             "pending session row was replaced",
                         ));
                     }
-                    pending_found = true;
                 } else {
                     let foreign: FileEntry = serde_json::from_value(row.body)?;
                     if let Some(window) = &mut self.window {
@@ -350,7 +363,7 @@ impl SessionManager {
             } else {
                 state.pending = Some((state.seq + 1, entry.clone()));
             }
-            if !pending_found {
+            {
                 let seq = state.pending.as_ref().expect("pending exists").0;
                 let outcome = state
                     .log
@@ -363,7 +376,7 @@ impl SessionManager {
                 // Leave the independent read cursor before this commit. The next
                 // refresh folds this row and every concurrent row, skipping our
                 // already-published identity rather than losing foreign writes.
-                state.seq = seq;
+                state.seq = state.seq.max(seq);
             }
             state.pending = None;
             Ok(())
@@ -399,3 +412,7 @@ fn committed(outcome: Outcome) -> io::Result<()> {
         ))),
     }
 }
+
+#[cfg(test)]
+#[path = "persist_tests.rs"]
+mod tests;
