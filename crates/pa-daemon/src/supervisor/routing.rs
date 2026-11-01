@@ -17,10 +17,6 @@ pub(super) enum WakeRoute {
 
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
 
-/// pending caller's ACK lands within milliseconds, and a hard stop must not fail
-/// on that handshake.
-pub(crate) const KILL_ADOPTION_RETRY: Duration = Duration::from_secs(2);
-pub(crate) const KILL_ADOPTION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) const SUMMARY_TIMEOUT_MS: u64 = 5_000;
 /// The route failure for a worker whose command channel is gone: the request did not
 /// leave the supervisor, so the route may retry it without risking a duplicate landing.
