@@ -100,6 +100,10 @@ fn legacy_registry_probe_rejects_uncommitted_or_corrupt_log_headers() {
             json!({"type": "session", "version": 3, "id": "p1", "cwd": "/fixture", "timestamp": "2026-10-31T00:00:00.000Z"}),
         ],
     );
+    assert!(
+        legacy_registry_path(&parent).is_some(),
+        "fixture starts with a valid typed header"
+    );
     let original = fs::read(&parent).unwrap();
     fs::write(&parent, &original[..original.len() - 1]).unwrap();
     assert_eq!(legacy_registry_path(&parent), None);
