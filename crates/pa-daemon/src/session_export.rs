@@ -158,6 +158,17 @@ impl ExportCommands {
                 pa_core::session::manager::format_iso_now().replace([':', '.'], "-")
             )),
         };
+        anyhow::ensure!(
+            crate::lease::canonical_session_path(&file_path)
+                != crate::lease::canonical_session_path(&store.path),
+            "Cannot export a session onto its source: {}",
+            file_path.display()
+        );
+        // The destination is a native session log even when its chosen name
+        // has no extension. Its existing execution lock excludes live owners
+        // and fresh-session creation throughout publication.
+        let _target_lease =
+            crate::lease::acquire_runtime_session_lease(&file_path, &self.agent_dir)?;
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -353,6 +364,42 @@ mod tests {
         let second = &lines[2];
         assert_eq!(second["id"], "e2");
         assert_eq!(second["parentId"], "e1");
+    }
+
+    #[test]
+    fn jsonl_export_refuses_the_source_and_a_live_destination() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let core = core_with_session(dir.path());
+        let source = core.store.as_ref().expect("session store").path.clone();
+        let source_before = std::fs::read(&source).expect("source bytes");
+        // The command's output is a session log regardless of its filename.
+        let target = dir.path().join("existing-export");
+        std::fs::copy(&source, &target).expect("existing native export");
+        let target_before = std::fs::read(&target).expect("target bytes");
+        let agent_dir = dir.path().join("agent");
+        let holder = crate::lease::acquire_runtime_session_lease(&target, &agent_dir)
+            .expect("live target owner");
+        let engine: Arc<dyn SessionEngine> = Arc::new(crate::engine::ScriptedEngine::default());
+        let exports = ExportCommands::new(engine, Arc::new(Mutex::new(core)), agent_dir);
+        let source_response = exports.export_jsonl(&json!({ "outputPath": source }));
+        assert!(!source_response.success, "source export must be refused");
+        let target_response = exports.export_jsonl(&json!({ "outputPath": target }));
+        assert!(!target_response.success, "live target must be refused");
+        assert_eq!(std::fs::read(&source).expect("source bytes"), source_before);
+        assert_eq!(std::fs::read(&target).expect("target bytes"), target_before);
+
+        holder.release();
+        std::fs::write(&target, b"not a session log").expect("idle non-log target");
+        let response = exports.export_jsonl(&json!({ "outputPath": target }));
+        assert!(
+            response.success,
+            "idle target overwrite: {:?}",
+            response.error
+        );
+        let exported = pa_core::session::read::read_entries(&target)
+            .expect("the replacement is a valid session log");
+        assert_eq!(exported.len(), 3);
+        assert_eq!(std::fs::read(&source).expect("source bytes"), source_before);
     }
 
     #[test]
