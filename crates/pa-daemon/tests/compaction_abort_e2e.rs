@@ -244,6 +244,21 @@ fn serve(
             break;
         }
     }
+    let mut request_line = head.lines().next().unwrap_or_default().split_whitespace();
+    let route = (
+        request_line.next().unwrap_or_default(),
+        request_line.next().unwrap_or_default(),
+    );
+    if route == ("GET", "/v1/models") {
+        return stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}",
+        );
+    }
+    if route != ("POST", "/v1/chat/completions") {
+        return stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    }
     let mut content_length = 0usize;
     for line in head.lines() {
         let lower = line.to_ascii_lowercase();
