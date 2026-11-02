@@ -59,7 +59,12 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
         .env_remove("PRIME_API_KEY")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // The supervisor's stderr carries worker-connection failures (a
+        // broken pipe names the exact child the settle watcher then saw
+        // idle); keep it with the other failure artifacts.
+        .stderr(Stdio::from(
+            std::fs::File::create(agent_dir.join("supervisor.err")).expect("supervisor stderr log"),
+        ))
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -95,6 +100,97 @@ fn kernel_python() -> Option<PathBuf> {
         candidates.join(" or ")
     );
     None
+}
+
+/// The spawned child's durable session file inside its session dir.
+fn spawned_child_session_file(spawned: &Value) -> PathBuf {
+    let dir = spawned["session_dir"].as_str().expect("child session dir");
+    std::fs::read_dir(dir)
+        .expect("child session dir")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                && pa_daemon::session_store::is_valid_session_file(path)
+        })
+        .expect("one child session file")
+}
+
+/// The artifacts a lost child leaves behind: every worker stderr log (a
+/// worker that panics or exits before running the kickoff writes here) and
+/// the supervisor's stderr (its worker links' broken pipes). Each file keeps
+/// only its tail: a wedged run may have written a lot.
+fn child_worker_diagnostics(agent_dir: &Path) -> String {
+    use std::fmt::Write as _;
+    const TAIL_BYTES: usize = 8192;
+    let tail = |path: &Path| {
+        let text =
+            std::fs::read_to_string(path).unwrap_or_else(|error| format!("<unreadable: {error}>"));
+        if text.len() <= TAIL_BYTES {
+            text
+        } else {
+            text[text.len() - TAIL_BYTES..].to_string()
+        }
+    };
+    let mut report = String::new();
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("logs"))
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    logs.sort();
+    for log in logs {
+        let _ = write!(report, "\nworker log {}:\n{}", log.display(), tail(&log));
+    }
+    let supervisor = agent_dir.join("supervisor.err");
+    let _ = write!(
+        report,
+        "\nsupervisor stderr {}:\n{}",
+        supervisor.display(),
+        tail(&supervisor)
+    );
+    // The child's own durable rows: a child that never ran the kickoff has
+    // only config rows here, which separates a lost prompt from a lost
+    // reply.
+    let mut sessions: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("session-artifacts"))
+        .map(|families| {
+            families
+                .filter_map(std::result::Result::ok)
+                .flat_map(|family| std::fs::read_dir(family.path()).into_iter().flatten())
+                .filter_map(std::result::Result::ok)
+                .flat_map(|child| std::fs::read_dir(child.path()).into_iter().flatten())
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    sessions.sort();
+    for session in sessions {
+        let _ = write!(
+            report,
+            "\nchild session {}:\n{}",
+            session.display(),
+            tail(&session)
+        );
+        // The sibling lock file records whoever held it: a child refused its
+        // own append names the process that must be holding a stale handle.
+        let lock = session.with_extension("lock");
+        if lock.exists() {
+            let _ = write!(
+                report,
+                "\nsession lock {}:\n{}",
+                lock.display(),
+                tail(&lock)
+            );
+        }
+    }
+    report
 }
 
 fn wait_socket_ready(socket: &Path) {
@@ -192,7 +288,7 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
 
 /// Poll for a kernel cell's receipt content (the cell writes its verdict;
 /// an empty read is the create-before-write window, not a verdict yet).
-fn await_receipt(receipt: &Path, context: &[&Path]) -> String {
+fn await_receipt(receipt: &Path, context: &[&Path], agent_dir: &Path) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
@@ -212,9 +308,10 @@ fn await_receipt(receipt: &Path, context: &[&Path]) -> String {
                 })
                 .collect();
             panic!(
-                "kernel cell receipt never appeared at {}; diagnostics:\n{}",
+                "kernel cell receipt never appeared at {}; diagnostics:\n{}{}",
                 receipt.display(),
-                diagnostics.join("\n")
+                diagnostics.join("\n"),
+                child_worker_diagnostics(agent_dir),
             );
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -410,26 +507,15 @@ fn child_usage_attributed_row_reaches_the_parent_transcript() {
     // Turn 1: the kernel cell spawns the child mid-turn through the
     // product `rlm.spawn` surface.
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
-    let spawned: Value = serde_json::from_str(&await_receipt(&spawn_receipt, &[&spawn_error]))
-        .expect("spawn receipt json");
+    let spawned: Value =
+        serde_json::from_str(&await_receipt(&spawn_receipt, &[&spawn_error], &agent_dir))
+            .expect("spawn receipt json");
     assert!(
         !spawn_error.exists(),
         "the spawn cell failed: {}",
         std::fs::read_to_string(&spawn_error).unwrap_or_default()
     );
-    let child_session_dir = spawned["session_dir"]
-        .as_str()
-        .expect("child session dir")
-        .to_string();
-    let child_session_file = std::fs::read_dir(&child_session_dir)
-        .expect("child session dir")
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
-                && pa_daemon::session_store::is_valid_session_file(path)
-        })
-        .expect("one child session file");
+    let child_session_file = spawned_child_session_file(&spawned);
 
     // Observable readiness: the attribution row lands in the parent's
     // durable transcript once the child settles and its usage is observed.
@@ -443,9 +529,10 @@ fn child_usage_attributed_row_reaches_the_parent_transcript() {
         }
         assert!(
             Instant::now() < deadline,
-            "the child_usage_attributed row never reached the parent transcript; parent rows: {:?}; child file: {}",
+            "the child_usage_attributed row never reached the parent transcript; parent rows: {:?}; child file: {}{}",
             transcript_rows(Path::new(&parent_session_file)),
             std::fs::read_to_string(&child_session_file).unwrap_or_default(),
+            child_worker_diagnostics(&agent_dir),
         );
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -662,6 +749,7 @@ fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
     let sent: Value = serde_json::from_str(&await_receipt(
         &send_receipt,
         &[&spawn_error, &supervisor_err, &spawn_receipt, parent_file],
+        &agent_dir,
     ))
     .expect("send receipt");
     assert!(
