@@ -33,6 +33,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Supervisor {
     child: Child,
     #[allow(dead_code)]
@@ -369,10 +377,7 @@ impl Harness {
             .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
             .collect();
         assert_eq!(files.len(), 1, "one session file, got {files:?}");
-        let text = std::fs::read_to_string(&files[0]).expect("read session file");
-        text.lines()
-            .map(|line| serde_json::from_str(line).expect("parse entry"))
-            .collect()
+        persisted_rows(&files[0])
     }
 
     fn persisted_thinking_level(&self) -> String {

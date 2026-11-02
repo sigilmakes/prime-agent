@@ -36,6 +36,14 @@ use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -288,12 +296,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     );
     // The child session header records the recursion identity (TS parity:
     // parentSession + rlmDepth).
-    let header: Value = {
-        let content =
-            std::fs::read_to_string(child_files[0].path()).expect("read child session file");
-        let first = content.lines().next().expect("header line");
-        serde_json::from_str(first).expect("parse header")
-    };
+    let header: Value = { persisted_rows(&child_files[0].path()).remove(0) };
     assert_eq!(
         header["parentSession"],
         agent_dir.join("parent.jsonl").to_string_lossy().to_string()
@@ -345,11 +348,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     // carrying the promised `[task from parent]` label, the raw prompt as
     // `details.message`, `details.id "spawn:<child id>"`, and the
     // delivery's parent/child endpoints.
-    let rows: Vec<Value> = std::fs::read_to_string(child_files[0].path())
-        .expect("read child session file")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect();
+    let rows: Vec<Value> = persisted_rows(&child_files[0].path());
     let Some(kickoff) = rows
         .iter()
         .find(|row| row.get("type").and_then(Value::as_str) == Some("custom_message"))

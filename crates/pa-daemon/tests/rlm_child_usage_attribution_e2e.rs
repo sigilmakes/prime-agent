@@ -17,6 +17,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Daemon {
     child: Child,
 }
@@ -252,11 +260,7 @@ fn create_parent(
 
 /// The transcript rows of one session file, in file order.
 fn transcript_rows(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("read session file {}", path.display()))
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect()
+    persisted_rows(path)
 }
 
 /// Every JSON number as a float, so a whole-value integer serializes equal

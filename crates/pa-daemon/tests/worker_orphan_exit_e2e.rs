@@ -10,6 +10,14 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct WorkerGuard {
     child: Child,
 }
@@ -308,10 +316,8 @@ fn an_orphaned_worker_waits_for_a_running_user_bash() {
         wait_exit(&mut worker.child, Duration::from_secs(40)),
         "the orphaned worker exited once the command settled"
     );
-    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&session_file)
-        .expect("session file")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    let rows: Vec<serde_json::Value> = persisted_rows(&session_file)
+        .into_iter()
         .map(|entry| entry["message"].clone())
         .filter(|message| message["role"] == "bashExecution")
         .map(|row| {
