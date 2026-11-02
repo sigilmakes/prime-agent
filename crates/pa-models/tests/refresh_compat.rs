@@ -687,8 +687,16 @@ async fn facade_refreshes_authorized_layers_and_gates_recent_attempts() {
     };
     let data: Vec<Value> = ids.iter().map(|id| entry(id)).collect();
     let pi_payload = json!({"data": data}).to_string();
+    let mut curated_payload: Value =
+        serde_json::from_str(&catalog_json(&["hourly-model"])).unwrap();
+    curated_payload["models"].as_array_mut().unwrap().extend(
+        pa_models::transports::compiled_models()
+            .iter()
+            .filter(|model| model.provider != "prime-inference")
+            .map(|model| serde_json::to_value(model).unwrap()),
+    );
     let server = common::MockServer::start(vec![
-        common::ok_json(catalog_json(&["hourly-model"]), None),
+        common::ok_json(curated_payload.to_string(), None),
         common::ok_json(pi_payload, None),
     ])
     .await;

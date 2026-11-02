@@ -209,7 +209,11 @@ impl ProviderCatalog {
                 self.dir
                     .as_ref()
                     .map(|dir| dir.join(format!("discovery-{identity}.v1.json"))),
-                Arc::new(CatalogFetcher::new()),
+                Arc::new(if source.format == CatalogFormat::PrimeInferencePrivate {
+                    CatalogFetcher::with_limits(std::time::Duration::from_secs(10), 2 * 1024 * 1024)
+                } else {
+                    CatalogFetcher::new()
+                }),
                 Arc::new(|payload, _| {
                     let rows: Vec<Metadata> = serde_json::from_value(payload.clone())
                         .map_err(|_| "Invalid normalized discovery metadata".to_string())?;
@@ -302,11 +306,22 @@ impl ProviderCatalog {
                 } else {
                     None
                 };
+                // Private authorization expires sooner than public metadata.
+                let force = policy == RefreshPolicy::Force
+                    || (format == CatalogFormat::PrimeInferencePrivate
+                        && cache.status(&source.scope()).checked_at.is_none_or(|at| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                                .saturating_sub(u128::from(at))
+                                >= 5 * 60 * 1000
+                        }));
                 let report = cache
                     .refresh_report(
                         &source.scope(),
                         RefreshOptions {
-                            force: policy == RefreshPolicy::Force,
+                            force,
                             headers: source.headers.clone(),
                             is_current: source.is_current.clone(),
                             fetch_payload,

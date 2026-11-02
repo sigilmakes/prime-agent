@@ -541,6 +541,7 @@ pub fn merge_prime_inference_models(bundled: &[Model], live: Option<&[Model]>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transports;
     use serde_json::{json, Value};
 
     fn wire_entry(id: &str, input: f64, output: f64) -> serde_json::Value {
