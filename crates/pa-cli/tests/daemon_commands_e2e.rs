@@ -121,6 +121,7 @@ fn spawn_daemon(binary: &Path, socket: &Path, agent_dir: &Path) -> Daemon {
         .arg("--agent-dir")
         .arg(agent_dir)
         .env("PRIME_AGENT_CODING_AGENT_DIR", agent_dir)
+        .env("PRIME_AGENT_SESSION_DIR", agent_dir.join("sessions"))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     for key in SCRUB_ENV {

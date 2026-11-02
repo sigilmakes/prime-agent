@@ -292,7 +292,18 @@ fn print_resume_refuses_a_foreign_lease_holder() {
         ),
     ];
     let session_path = sessions.join("foreign-held.jsonl");
-    std::fs::write(&session_path, "{}\n").expect("session file");
+    let mut log = pa_core::session_log::SessionLog::open(&sessions, "foreign-held", Instant::now())
+        .expect("open session log");
+    assert!(matches!(
+        log.append(
+            &json!({
+                "type": "session", "version": 3, "id": "foreign-held",
+                "timestamp": "2026-01-01T00:00:00.000Z", "cwd": dir.path(),
+            }),
+            Instant::now(),
+        ),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
 
     // The foreign holder: this test process takes the runtime lease, in
     // exactly the role the other product's daemon worker plays. The
@@ -305,11 +316,9 @@ fn print_resume_refuses_a_foreign_lease_holder() {
         .expect("the execution lock must be held");
     std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
 
-    // The refusal: this test process runs a build of this product, so the
-    // holder classification reads as another Rust build, never the TypeScript
-    // product and never an unnamed process. The refusal names what the kill
-    // would hit (here this test binary), and the session footer carries no
-    // paren (the `{}\n` fixture file has no name).
+    // The test holder is a separate process, not a hosted session. Its
+    // shared target-resume path does not identify a Prime Agent build.
+    // The refusal names the actual image, the recorded id, and the takeover.
     let holder_image = std::env::current_exe()
         .expect("own exe")
         .file_name()
@@ -317,14 +326,9 @@ fn print_resume_refuses_a_foreign_lease_holder() {
         .unwrap_or_default();
     let expected = format!(
         concat!(
-            "Error: This session is currently open in another Rust build of Prime Agent ",
-            "(active in foreign01ab3c) — another daemon or window of this product holds the file's ",
+            "Error: This session is currently open in another process ",
+            "(active in foreign01ab3c) — a live process this daemon does not host holds the file's ",
             "runtime lease.\n",
-            "\n",
-            "• Continue where you left off:\n",
-            "  prime-agent --daemon-socket <socket> --resume 'foreign01ab3c'\n",
-            "  (<socket> is that instance's daemon socket, from the shell where you started ",
-            "it — that daemon owns this session)\n",
             "\n",
             "• Take over on this daemon:\n",
             "  kill {} # the holder is {}\n",

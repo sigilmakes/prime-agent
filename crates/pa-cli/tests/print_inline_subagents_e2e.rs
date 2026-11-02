@@ -157,12 +157,11 @@ impl PrintLane {
 
     /// The session entries of one jsonl file.
     fn entries(path: &Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path)
-            .expect("the session file is readable")
-            .lines()
-            .map(serde_json::from_str)
-            .collect::<Result<_, _>>()
-            .expect("the session file is valid jsonl")
+        pa_core::session::read::read_entries(path)
+            .expect("the session log validates")
+            .into_iter()
+            .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+            .collect()
     }
 }
 
