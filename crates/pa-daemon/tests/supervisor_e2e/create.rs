@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn write_saved_header(path: &std::path::Path, header: serde_json::Value) {
+fn write_saved_header(path: &std::path::Path, header: &serde_json::Value) {
     let mut log = pa_core::session_log::SessionLog::open(
         path.parent().expect("session directory"),
         path.file_stem().unwrap().to_str().unwrap(),
@@ -12,7 +12,7 @@ fn write_saved_header(path: &std::path::Path, header: serde_json::Value) {
     )
     .expect("open saved session log");
     assert!(matches!(
-        log.append_first(&header, std::time::Instant::now()),
+        log.append_first(header, std::time::Instant::now()),
         pa_core::session_log::Outcome::Committed { .. }
     ));
 }
@@ -183,7 +183,7 @@ fn create_with_continue_recent_is_refused() {
     let saved = session_dir.join("saved00000000000000000000000001.jsonl");
     write_saved_header(
         &saved,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "session", "version": 3,
             "id": "saved00000000000000000000000001",
             "timestamp": "2024-01-01T00:00:00.000Z", "cwd": cwd,
@@ -280,7 +280,7 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
         let saved = file_dir.join(format!("saved-{index}.jsonl"));
         write_saved_header(
             &saved,
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "session", "version": 3,
                 "id": format!("cwd-regression-{index}"),
                 "timestamp": "2026-10-12T00:00:00.000Z", "cwd": recorded,
@@ -357,7 +357,7 @@ fn missing_saved_cwd_requires_an_explicit_fallback() {
     let saved = dir.path().join("missing.jsonl");
     write_saved_header(
         &saved,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "session", "version": 3, "id": "missing-cwd",
             "timestamp": "2026-10-12T00:00:00.000Z", "cwd": dir.path().join("gone"),
         }),
@@ -422,7 +422,7 @@ fn cold_reopen_python_kernel_uses_saved_cwd_and_explicit_override() {
         let saved = dir.path().join(format!("kernel-{index}.jsonl"));
         write_saved_header(
             &saved,
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "session", "version": 3, "id": format!("kernel-cwd-{index}"),
                 "timestamp": "2026-10-12T00:00:00.000Z", "cwd": project,
             }),
