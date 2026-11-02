@@ -693,7 +693,15 @@ async fn facade_refreshes_authorized_layers_and_gates_recent_attempts() {
         pa_models::transports::compiled_models()
             .iter()
             .filter(|model| model.provider != "prime-inference")
-            .map(|model| serde_json::to_value(model).unwrap()),
+            .map(|model| {
+                json!({
+                    "id": model.id, "name": model.name, "api": model.api,
+                    "provider": model.provider, "baseUrl": model.base_url,
+                    "reasoning": model.reasoning, "input": model.input,
+                    "cost": model.cost, "contextWindow": model.context_window,
+                    "maxTokens": model.max_tokens,
+                })
+            }),
     );
     let server = common::MockServer::start(vec![
         common::ok_json(curated_payload.to_string(), None),
@@ -711,9 +719,15 @@ async fn facade_refreshes_authorized_layers_and_gates_recent_attempts() {
         policy: pa_models::RefreshPolicy::Force,
         sources: Some(vec!["curated".into()]),
     };
-    catalog
+    let publication = catalog
         .refresh(&pa_models::CatalogInputs::default(), &curated)
         .await;
+    assert_eq!(
+        publication.sources[0].status,
+        pa_types::model_refresh::ModelRefreshStatus::Updated,
+        "{:?}",
+        publication.sources
+    );
     refresh_prime(&catalog, &credentials).await;
     let heads = server.recorded_requests();
     assert!(
