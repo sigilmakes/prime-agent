@@ -193,7 +193,7 @@ fn write_child_session(path: &Path, id: &str, name: &str, prompt: &str) {
 }
 
 fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize) {
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = pa_daemon::paths::sessions_dir(agent_dir).expect("sessions root");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     let root_id = "root-session-1";
     let root_path = sessions_dir.join(format!("{root_id}.jsonl"));

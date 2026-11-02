@@ -232,10 +232,14 @@ fn worker_stderr_lands_in_the_per_worker_log_and_prunes_retention() {
 
 #[test]
 fn never_ready_worker_failure_carries_the_captured_stderr_tail() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir = tempfile::Builder::new()
+        .prefix("ws-")
+        .tempdir_in("/tmp")
+        .expect("short temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    // A short path keeps this injection inside the Unix socket path limit.
     // TMPDIR pointing at a plain file makes the worker's socket dir
     // un-creatable (ENOTDIR, even for root), so the worker dies at its
     // socket-path preparation with the failure on stderr; the supervisor's

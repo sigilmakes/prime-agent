@@ -128,9 +128,18 @@ fn tool_result_entries_persisted_and_streamed() {
         .expect("toolResult entry on disk")
         .clone();
     assert_eq!(tool_result_entry["type"], "message");
-    assert!(tool_result_entry["id"]
-        .as_str()
-        .is_some_and(|id| id.len() == 8));
+    let result_id = tool_result_entry["id"].as_str().expect("result entry ID");
+    assert!(!result_id.is_empty());
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["id"] == result_id)
+            .count(),
+        1
+    );
+    assert!(entries
+        .iter()
+        .any(|entry| entry["id"] == tool_result_entry["parentId"]));
     assert!(tool_result_entry["parentId"].as_str().is_some());
     assert!(tool_result_entry["timestamp"].as_str().is_some());
     assert_eq!(tool_result_entry["message"]["toolCallId"], "call-1");

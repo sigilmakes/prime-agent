@@ -260,7 +260,19 @@ fn create_parent(
 
 /// The transcript rows of one session file, in file order.
 fn transcript_rows(path: &Path) -> Vec<Value> {
-    persisted_rows(path)
+    let bytes = std::fs::read(path).expect("read transcript snapshot");
+    pa_core::session::read::read_entries_from(std::io::Cursor::new(&bytes))
+        .expect("validate transcript snapshot");
+    let mut seq = 0;
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let row = pa_core::session_log::Row::decode(line, seq).expect("validated row");
+            seq = row.seq;
+            row.body
+        })
+        .collect()
 }
 
 /// Every JSON number as a float, so a whole-value integer serializes equal
