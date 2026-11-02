@@ -3,6 +3,7 @@
 //! stripping, the family pruning), the rewrite/diff-baseline snapshots, and
 //! the registration-mark + re-registration rules.
 use super::*;
+use crate::supervisor_roster_seed::tests::write_session_log;
 use crate::supervisor_roster_seed::tests::{
     append_family_edge, drain_pending_seeds_for_tests, live_child_summary, register_root_worker,
     roster_fixture, roster_row_for_child, write_display_file,
@@ -20,7 +21,7 @@ async fn subscribe_is_a_pure_in_memory_snapshot() {
     let agent_dir = dir.join("agent");
     append_family_edge(
         &agent_dir,
-        &agent_dir.join("sessions"),
+        &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
         "sub-9",
         &root_file,
         &child_file,
@@ -141,7 +142,7 @@ async fn stop_passivates_an_anchored_child_preserving_display_fields() {
     let agent_dir = dir.join("agent");
     append_family_edge(
         &agent_dir,
-        &agent_dir.join("sessions"),
+        &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
         "sub-9",
         &root_file,
         &child_file,
@@ -184,7 +185,7 @@ async fn passivation_normalizes_the_live_model_descriptor_to_the_durable_pair() 
     let (dir, supervisor, root_file, child_file) = roster_fixture().await;
     register_root_worker(&supervisor, "w-root", &root_file).await;
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     append_family_edge(&agent_dir, &sessions_dir, "sub-9", &root_file, &child_file);
     let mut live = live_child_summary(&root_file, &child_file);
     live["model"] = json!({
@@ -219,7 +220,7 @@ async fn passivation_normalizes_the_live_model_descriptor_to_the_durable_pair() 
 async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
     let (dir, supervisor, root_file, child_file) = roster_fixture().await;
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     register_root_worker(&supervisor, "w-root", &root_file).await;
     // The parent's top-level row: the bucket's target.
     let mut parent_summary = live_child_summary(&root_file, &child_file);
@@ -247,15 +248,7 @@ async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
     // ($0.30): the kill route was the flush barrier, so the
     // passivation fold reads this row.
     {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&child_artifact)
-            .expect("open the child transcript for its billed turn");
-        writeln!(
-            file,
-            "{}",
-            json!({
+        write_session_log(&child_artifact, json!({
                 "type": "message",
                 "id": "dm1a",
                 "parentId": null,
@@ -273,8 +266,7 @@ async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
                         "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
                     }
                 }
-            })
-        )
+            }).to_string())
         .expect("append the billed turn");
     }
     append_family_edge(
@@ -347,7 +339,7 @@ async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
 async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
     let (dir, supervisor, root_file, child_file) = roster_fixture().await;
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     register_root_worker(&supervisor, "w-root", &root_file).await;
     // The parent's top-level row: the ONLY roster row (the child has
     // none).
@@ -371,7 +363,7 @@ async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
         .join("sub-9")
         .join("sub-9.jsonl");
     std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
-    std::fs::write(
+    write_session_log(
         &child_artifact,
         format!(
             "{{\"type\":\"session\",\"version\":3,\"id\":\"sub-9\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/the/deleted/cwd\",\"parentSession\":\"{}\",\"rlmDepth\":1}}\n",
@@ -380,15 +372,7 @@ async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
     )
     .unwrap();
     {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&child_artifact)
-            .expect("open the child transcript for its billed turn");
-        writeln!(
-            file,
-            "{}",
-            json!({
+        write_session_log(&child_artifact, json!({
                 "type": "message",
                 "id": "dm1a",
                 "parentId": null,
@@ -406,8 +390,7 @@ async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
                         "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
                     }
                 }
-            })
-        )
+            }).to_string())
         .expect("append the billed turn");
     }
     append_family_edge(
@@ -475,7 +458,7 @@ async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
 async fn stop_removes_unanchored_children_and_passivates_the_top_level_row() {
     let (dir, supervisor, root_file, child_file) = roster_fixture().await;
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     let mut events = supervisor.events.subscribe();
 
     // A tombstoned child: the edge is deleted, so no live edge
@@ -651,7 +634,7 @@ async fn stop_removes_unanchored_children_and_passivates_the_top_level_row() {
 async fn stop_prunes_seeded_rows_of_a_family_that_lost_its_root() {
     let (dir, supervisor, root_file, child_file) = roster_fixture().await;
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     // The surviving root's family: its seeded child stays anchored
     // through the other root's stop.
     let survivor_file = sessions_dir.join("root-2.jsonl");
@@ -741,7 +724,7 @@ async fn stop_prunes_seeded_rows_of_a_family_that_lost_its_root() {
 async fn stop_leaves_the_first_roster_snapshot_clean_behind_hundreds_of_seeded_rows() {
     let (dir, supervisor, root_file, _child_file) = roster_fixture().await;
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     register_root_worker(&supervisor, "w-root", &root_file).await;
     for index in 0..300 {
         let seeded_child = sessions_dir.join(format!("sub-flash-{index}.jsonl"));
@@ -871,7 +854,7 @@ async fn a_reregistration_replaces_the_passive_row() {
     let agent_dir = dir.join("agent");
     append_family_edge(
         &agent_dir,
-        &agent_dir.join("sessions"),
+        &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
         "sub-9",
         &root_file,
         &child_file,

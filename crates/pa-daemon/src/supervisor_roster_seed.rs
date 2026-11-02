@@ -490,7 +490,10 @@ pub(crate) mod tests {
     use pa_types::daemon::agent_roster::AgentRosterStatus;
     use serde_json::Map;
 
-    fn write_session_log(path: impl AsRef<Path>, content: impl AsRef<str>) -> anyhow::Result<()> {
+    pub(crate) fn write_session_log(
+        path: impl AsRef<Path>,
+        content: impl AsRef<str>,
+    ) -> anyhow::Result<()> {
         let path = path.as_ref();
         let directory = path.parent().expect("fixture directory");
         let id = path
@@ -653,7 +656,7 @@ pub(crate) mod tests {
     pub(crate) async fn roster_fixture() -> (PathBuf, Arc<Supervisor>, PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("pa-roster-{}", uuid::Uuid::new_v4()));
         let agent_dir = dir.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
+        let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let root_file = sessions_dir.join("root-1.jsonl");
         let child_file = sessions_dir.join("sub-9.jsonl");
@@ -825,7 +828,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -866,7 +869,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -897,7 +900,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -950,7 +953,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -983,7 +986,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -1029,7 +1032,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -1052,7 +1055,13 @@ pub(crate) mod tests {
         );
         let _ = drain_roster_pushes(&mut events);
 
-        // The transcript becomes readable: the next walk re-finds the row.
+        // Replace the corrupt transcript with a new valid log at the same path.
+        std::fs::rename(&child_file, child_file.with_extension("corrupt"))
+            .expect("retain corrupt fixture");
+        assert_eq!(
+            std::fs::read(child_file.with_extension("corrupt")).unwrap(),
+            b"not a session transcript\n"
+        );
         write_display_file(&child_file, "/the/real/cwd");
         let retry = supervisor.seed_roster_family_edges(&root_file).await;
         assert_eq!(retry.len(), 1, "the marked row is the candidate");
@@ -1084,7 +1093,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::supervisor_roster_seed::tests::write_session_log;
 
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -930,12 +931,12 @@ async fn worker_probe_accepts_a_live_socket() {
 async fn adoption_settles_then_seeds_the_roster_once() {
     let dir = std::env::temp_dir().join(format!("pa-adopt-seed-{}", uuid::Uuid::new_v4()));
     let agent_dir = dir.join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let root_file = sessions_dir.join("root-1.jsonl");
     let child_file = sessions_dir.join("sub-9.jsonl");
     for path in [&root_file, &child_file] {
-        std::fs::write(
+        write_session_log(
             path,
             "{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"/the/real/cwd\"}\n{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}\n{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}\n",
         )
@@ -1083,10 +1084,10 @@ async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
 async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let session_file = sessions_dir.join("live-1.jsonl");
-    std::fs::write(
+    write_session_log(
         &session_file,
         "{\"type\":\"session\",\"version\":3,\"id\":\"live-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
     )
@@ -1167,7 +1168,7 @@ async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
 async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
@@ -1698,7 +1699,7 @@ async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
     let artifacts = agent_dir.join("session-artifacts").join("child-1");
     std::fs::create_dir_all(&artifacts).unwrap();
     let session_file = artifacts.join("child-1.jsonl");
-    std::fs::write(
+    write_session_log(
         &session_file,
         "{\"type\":\"session\",\"version\":3,\"id\":\"child-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
     )
@@ -1791,7 +1792,7 @@ async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch()
     let artifacts = agent_dir.join("session-artifacts").join("child-2");
     std::fs::create_dir_all(&artifacts).unwrap();
     let session_file = artifacts.join("child-2.jsonl");
-    std::fs::write(
+    write_session_log(
         &session_file,
         "{\"type\":\"session\",\"version\":3,\"id\":\"child-2\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
     )
@@ -1838,7 +1839,7 @@ async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch()
 async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
@@ -1850,7 +1851,7 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
     // A live ledger edge for a stopped child (the passivation's leftover:
     // the session file survives, the worker is gone).
     let child_file = sessions_dir.join("child-gone.jsonl");
-    std::fs::write(
+    write_session_log(
         &child_file,
         "{\"type\":\"session\",\"version\":3,\"id\":\"child-gone\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
     )
@@ -1861,7 +1862,7 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
     std::fs::create_dir_all(&artifacts).unwrap();
     std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
     let parent_file = sessions_dir.join("parent.jsonl");
-    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    write_session_log(&parent_file, "{\"type\":\"session\",\"version\":3,\"id\":\"p\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/c\"}\n").unwrap();
     let ledger = supervisor
         .rlm_spawn_ledger_for(None)
         .await
@@ -1937,7 +1938,7 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
 async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
@@ -1948,7 +1949,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
     );
     // The parent's roster row: the bucket's target.
     let parent_file = sessions_dir.join("parent.jsonl");
-    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    write_session_log(&parent_file, "{\"type\":\"session\",\"version\":3,\"id\":\"p\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/c\"}\n").unwrap();
     let parent_row = json!({
         "sessionId": "p",
         "activeSessionId": "p-live",
@@ -1970,26 +1971,17 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
         .join("sub-gone.jsonl");
     std::fs::create_dir_all(child_transcript.parent().expect("artifact dir")).unwrap();
     {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&child_transcript)
-            .expect("open the child transcript");
-        writeln!(
-            file,
-            "{}",
+        write_session_log(
+            &child_transcript,
             json!({
                 "type": "session", "version": 3, "id": "sub-gone",
                 "timestamp": "2026-09-29T00:00:00.000Z", "cwd": "/the/stopped/cwd",
                 "parentSession": parent_file.to_string_lossy(), "rlmDepth": 1
             })
+            .to_string(),
         )
         .expect("the child header");
-        writeln!(
-            file,
-            "{}",
-            json!({
+        write_session_log(&child_transcript, json!({
                 "type": "message", "id": "dm1a", "parentId": null,
                 "timestamp": "2026-09-29T00:00:02.100Z",
                 "message": {
@@ -2002,8 +1994,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
                         "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
                     }
                 }
-            })
-        )
+            }).to_string())
         .expect("the billed turn");
     }
     let child_row = json!({
@@ -2114,7 +2105,7 @@ async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
 async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
@@ -2125,7 +2116,7 @@ async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id
     );
     let seed = |stem: &str| {
         let file = sessions_dir.join(format!("{stem}.jsonl"));
-        std::fs::write(
+        write_session_log(
             &file,
             format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{stem}\",\"timestamp\":\"t\",\"cwd\":\"/c\"}}\n"),
         )
@@ -2178,15 +2169,15 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
     let artifacts = agent_dir.join("session-artifacts").join("kid-1");
     std::fs::create_dir_all(&artifacts).unwrap();
     let session_file = artifacts.join("kid-1.jsonl");
-    std::fs::write(
+    write_session_log(
         &session_file,
         "{\"type\":\"session\",\"version\":3,\"id\":\"kid-1\",\"timestamp\":\"t\",\"cwd\":\"/c\",\"rlmDepth\":1}\n",
     )
     .unwrap();
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let parent_file = sessions_dir.join("parent.jsonl");
-    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    write_session_log(&parent_file, "{\"type\":\"session\",\"version\":3,\"id\":\"p\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/c\"}\n").unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
             socket_path: dir.path().join("daemon.sock"),
@@ -2427,7 +2418,7 @@ proptest! {
         runtime.block_on(async {
             let dir = tempfile::TempDir::new().expect("case dir");
             let agent_dir = dir.path().join("agent");
-            let sessions_dir = agent_dir.join("sessions");
+            let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
             std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
             let parents = [sessions_dir.join("pa.jsonl"), sessions_dir.join("pb.jsonl")];
             let options = SupervisorOptions { socket_path: dir.path().join("d.sock"), agent_dir };
