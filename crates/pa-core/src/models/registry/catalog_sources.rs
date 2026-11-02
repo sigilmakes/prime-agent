@@ -163,22 +163,37 @@ impl ModelRegistry {
                 None
             };
             let mut configured_headers = BTreeMap::new();
+            let mut merge_headers = |values: &BTreeMap<String, String>| {
+                for (name, value) in values {
+                    configured_headers.insert(name.to_ascii_lowercase(), value.clone());
+                }
+            };
             if inherit {
                 if let Some(headers) = self.auth.get_provider_headers(&provider) {
-                    configured_headers.extend(headers);
+                    merge_headers(&headers.into_iter().collect());
                 }
                 if let Some(headers) = &config.headers {
-                    configured_headers.extend(headers.clone());
+                    merge_headers(headers);
                 }
             }
-            if let Some(headers) = discovery.and_then(|discovery| discovery.headers.as_ref()) {
-                configured_headers.extend(headers.clone());
+            let auth_header = match format {
+                CatalogFormat::Anthropic => "x-api-key",
+                CatalogFormat::Google => "x-goog-api-key",
+                _ => "authorization",
+            };
+            if key_config.is_some() {
+                configured_headers.remove(auth_header);
+            }
+            if let Some(values) = discovery.and_then(|discovery| discovery.headers.as_ref()) {
+                for (name, value) in values {
+                    configured_headers.insert(name.to_ascii_lowercase(), value.clone());
+                }
             }
             let mut headers = BTreeMap::new();
             let mut unresolved = false;
             for (name, value) in configured_headers {
                 if let Some(value) = resolve_value(&value, local_only) {
-                    headers.insert(name.to_ascii_lowercase(), value);
+                    headers.insert(name, value);
                 } else {
                     unresolved = true;
                 }
@@ -187,23 +202,13 @@ impl ModelRegistry {
                 continue;
             }
             if let Some(key) = &key {
-                match format {
-                    CatalogFormat::Anthropic => {
-                        headers
-                            .entry("x-api-key".into())
-                            .or_insert_with(|| key.clone());
-                    }
-                    CatalogFormat::Google => {
-                        headers
-                            .entry("x-goog-api-key".into())
-                            .or_insert_with(|| key.clone());
-                    }
-                    _ => {
-                        headers
-                            .entry("authorization".into())
-                            .or_insert_with(|| format!("Bearer {key}"));
-                    }
-                }
+                let value = if matches!(format, CatalogFormat::Anthropic | CatalogFormat::Google) {
+                    key.clone()
+                } else {
+                    format!("Bearer {key}")
+                };
+                // Explicit discovery headers have the final word over a generated API key.
+                headers.entry(auth_header.into()).or_insert(value);
             }
             if format == CatalogFormat::Anthropic {
                 headers
@@ -238,7 +243,12 @@ impl ModelRegistry {
                         .as_ref()
                         .map(|model| (model.api.clone(), model.base_url.clone())),
                 )
-            } else if builtin_format(&provider).is_some() {
+            } else if builtin_format(&provider).is_some()
+                && !matches!(
+                    format,
+                    CatalogFormat::OpenAi | CatalogFormat::Anthropic | CatalogFormat::Google
+                )
+            {
                 template
             } else {
                 None
@@ -326,10 +336,14 @@ impl ModelRegistry {
             .flatten()
             .collect();
         let previous: Vec<_> = paths.iter().map(|path| std::fs::read(path).ok()).collect();
-        let auth = self.auth.clone();
-        let expected = auth.get_api_key_local(provider);
-        let provider = provider.to_string();
+        let auth_guard = self.auth.local_catalog_guard(provider);
+        let inherited_headers = self.auth.get_provider_headers(provider);
         let mut values: Vec<String> = config.api_key.iter().cloned().collect();
+        values.extend(
+            inherited_headers
+                .iter()
+                .flat_map(|headers| headers.values().cloned()),
+        );
         values.extend(
             config
                 .headers
@@ -367,9 +381,7 @@ impl ModelRegistry {
             {
                 return false;
             }
-            let mut current = auth.clone();
-            current.reload();
-            current.get_api_key_local(&provider) == expected
+            auth_guard()
         }))
     }
 }

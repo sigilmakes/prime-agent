@@ -9,7 +9,7 @@ use pa_types::ai::{
 };
 
 use crate::auth::manager::AuthStorage;
-use crate::auth::types::{AuthCredential, PRIME_INFERENCE_PROVIDER_ID};
+use crate::auth::types::AuthCredential;
 
 mod catalog_refresh;
 mod catalog_sources;
@@ -17,7 +17,6 @@ mod catalog_sources;
 use super::catalog_chain;
 use super::custom::{apply_model_override, load_custom_models, merge_compat, CustomModelsResult};
 use super::prime_inference::is_private_prime_inference_model;
-use super::private_auth::is_offline_mode_enabled;
 
 /// Request-auth bits a provider can configure in models.json.
 #[derive(Debug, Clone, Default)]

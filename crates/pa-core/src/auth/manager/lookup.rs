@@ -8,6 +8,31 @@ use super::{
 };
 
 impl AuthStorage {
+    /// Validate the current local credential/team without deferred auth work.
+    pub(crate) fn local_catalog_guard(
+        &self,
+        provider: &str,
+    ) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync> {
+        let storage = std::sync::Arc::clone(&self.storage);
+        let env = std::sync::Arc::clone(&self.env_credentials);
+        let runtime = self.runtime_overrides.clone();
+        let stale = self.stale_auth_sources.clone();
+        let expected_key = self.get_api_key_local(provider);
+        let expected_headers = self.get_provider_headers(provider);
+        let provider = provider.to_string();
+        std::sync::Arc::new(move || {
+            let mut current = Self::from_storage(
+                std::sync::Arc::clone(&storage),
+                std::sync::Arc::new(super::NoOAuth),
+            );
+            current.env_credentials = std::sync::Arc::clone(&env);
+            current.runtime_overrides.clone_from(&runtime);
+            current.stale_auth_sources.clone_from(&stale);
+            current.get_api_key_local(&provider) == expected_key
+                && current.get_provider_headers(&provider) == expected_headers
+        })
+    }
+
     /// Resolve the winning local credential without commands, OAuth adapters or fallback resolvers.
     /// Only an unexpired Codex OAuth access token can be used without its adapter.
     pub fn get_api_key_local(&self, provider_id: &str) -> Option<String> {

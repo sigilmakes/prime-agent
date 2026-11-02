@@ -276,6 +276,20 @@ pub fn validate_config(
                 {
                     return Err(format!("Provider {provider_name}: discovery defaults require contextWindow, maxTokens, input, reasoning and cost"));
                 }
+                let valid_input = defaults.input.as_ref().is_some_and(|input| {
+                    input.iter().any(|mode| mode == "text")
+                        && input
+                            .iter()
+                            .all(|mode| matches!(mode.as_str(), "text" | "image"))
+                });
+                let valid_cost = defaults.cost.as_ref().is_some_and(|cost| {
+                    [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                        .iter()
+                        .all(|value| value.is_some_and(|value| value.is_finite() && value >= 0.0))
+                });
+                if !valid_input || !valid_cost {
+                    return Err(format!("Provider {provider_name}: discovery defaults require supported chat input and all four finite nonnegative cost fields"));
+                }
                 if defaults.api.is_some()
                     || defaults.base_url.is_some()
                     || defaults.headers.is_some()
@@ -544,6 +558,28 @@ pub fn load_custom_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_defaults_reject_invented_modalities_and_incomplete_pricing() {
+        let defaults = serde_json::json!({"contextWindow":32000,"maxTokens":4000,"reasoning":false,"input":["text"],
+            "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}});
+        for invalid in ["input", "missing-price", "negative-price"] {
+            let mut defaults = defaults.clone();
+            match invalid {
+                "input" => defaults["input"] = serde_json::json!(["typo"]),
+                "missing-price" => {
+                    defaults["cost"].as_object_mut().unwrap().remove("input");
+                }
+                _ => defaults["cost"]["input"] = serde_json::json!(-1),
+            }
+            let document = serde_json::json!({"providers":{"gateway":{"baseUrl":"https://gateway.test/v1","api":"openai-completions",
+                "discovery":{"format":"openai","defaults":defaults}}}});
+            let config = parse_models_config(&document.to_string()).unwrap();
+            assert!(
+                validate_config(&config, &|_| false).is_err(),
+                "invalid defaults: {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn strips_comments_and_trailing_commas() {
