@@ -156,14 +156,18 @@ impl Fixture {
                 if file.file_type().unwrap().is_dir() {
                     directories.push(file.path());
                 } else if file.path().extension().is_some_and(|ext| ext == "jsonl") {
-                    let journal: Vec<Value> = std::fs::read_to_string(file.path())
-                        .unwrap()
-                        .lines()
-                        .map(|line| serde_json::from_str(line).unwrap())
-                        .collect();
-                    // Only canonical session journals, not auxiliary artifact ledgers.
-                    if journal.first().is_some_and(|row| row["type"] == "session") {
-                        entries.extend(journal);
+                    // Auxiliary artifact ledgers are not session logs.
+                    let bytes = std::fs::read(file.path()).unwrap();
+                    let first = bytes.split(|byte| *byte == b'\n').next().unwrap();
+                    if pa_core::session_log::Row::decode(first, 0)
+                        .is_ok_and(|row| row.body["type"] == "session")
+                    {
+                        entries.extend(
+                            pa_core::session::read::read_entries(&file.path())
+                                .expect("valid persisted session log")
+                                .into_iter()
+                                .map(|entry| serde_json::to_value(entry).unwrap()),
+                        );
                     }
                 }
             }
