@@ -294,7 +294,10 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
             "type": "create", "sessionPath": if relative { saved.file_name().unwrap().to_str().unwrap() } else { saved.to_str().unwrap() }, "config": config,
         }));
         let response = client.read_response("resume");
-        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(
+            response["success"], true,
+            "reopen case {index}, explicit={explicit}, relative={relative}: {response}"
+        );
         let expected = if explicit { &override_dir } else { recorded };
         assert_eq!(
             response["data"]["cwd"],

@@ -114,6 +114,10 @@ impl SessionFile {
     }
 
     fn open_log_path(session_path: &Path, policy: OpenPolicy) -> Result<Self> {
+        // Bind relative selections before deriving the log directory or
+        // retaining a path that must survive later working-directory changes.
+        let absolute_path = std::path::absolute(session_path)?;
+        let session_path = absolute_path.as_path();
         anyhow::ensure!(
             session_path.is_file(),
             "session log is unavailable: {}",
