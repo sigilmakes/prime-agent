@@ -267,3 +267,67 @@ async fn independent_sources_start_together_and_reports_keep_input_order() {
     );
     server.await.unwrap();
 }
+
+#[test]
+fn discovery_routes_preserve_gateway_path_port_and_query() {
+    let url = CatalogFormat::OpenAi
+        .discovery_url("https://gateway.test:8443/prefix/v1?tenant=a")
+        .unwrap();
+    assert_eq!(url, "https://gateway.test:8443/prefix/v1/models?tenant=a");
+    let url = CatalogFormat::Google
+        .discovery_url("https://gateway.test/prefix/v1beta?tenant=a")
+        .unwrap();
+    assert_eq!(
+        url,
+        "https://gateway.test/prefix/v1beta/models?tenant=a&pageSize=1000"
+    );
+}
+
+#[test]
+fn codex_routes_and_reported_capabilities_are_not_template_guesses() {
+    let url = CatalogFormat::Codex
+        .discovery_url("https://gateway.test:8443/prefix/codex/responses?tenant=a")
+        .unwrap();
+    assert_eq!(
+        url,
+        "https://gateway.test:8443/prefix/codex/models?tenant=a&client_version=0.159.0"
+    );
+    let rows=normalize(CatalogFormat::Codex,&json!({"models":[{"slug":"actual","visibility":"list","input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"},{"effort":"xhigh"}]},{"slug":"hidden","visibility":"hide"}]}),None).unwrap();
+    let rows: Vec<Metadata> = serde_json::from_value(rows).unwrap();
+    let actual = rows.iter().find(|row| row.id == "actual").unwrap();
+    assert_eq!(
+        actual.input,
+        Some(vec![ModelInput::Text, ModelInput::Image])
+    );
+    assert_eq!(actual.reasoning, Some(true));
+    let map = actual.thinking.as_ref().unwrap();
+    assert_eq!(
+        map[&pa_types::ai::ModelThinkingLevel::Low],
+        Some("low".into())
+    );
+    assert_eq!(map[&pa_types::ai::ModelThinkingLevel::High], None);
+    assert!(rows.iter().find(|row| row.id == "hidden").unwrap().denied);
+}
+
+#[test]
+fn private_zero_prices_and_reasoning_controls_survive_durable_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = source(
+        CatalogFormat::PrimeInferencePrivate,
+        Some(template("custom", "family")),
+    );
+    let payload = json!({"data":[{"id":"internal/zero","pricing":{"input_usd_per_mtok":0,"output_usd_per_mtok":0},"supported_parameters":["tools","reasoning_effort"],"reasoning":{"supported_efforts":["low","high"]}}]});
+    let owner = ProviderCatalog::new(Some(dir.path().into()));
+    seed_cache(&owner, &source, &payload);
+    let (_, before) = owner.resolve(&[source.clone()], &[]);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].cost.input.as_f64(), 0.0);
+    assert_eq!(before[0].cost.output.as_f64(), 0.0);
+    assert!(before[0].thinking_level_map.is_some());
+    let fresh = ProviderCatalog::new(Some(dir.path().into()));
+    assert!(fresh
+        .adopt(&[source.clone()], None)
+        .applied
+        .contains(&source.id));
+    assert_eq!(fresh.resolve(&[source], &[]).1, before);
+}

@@ -31,24 +31,36 @@ impl CatalogFormat {
     /// No remote catalog metadata participates in endpoint selection.
     #[must_use]
     pub fn discovery_url(self, inference_base: &str) -> Option<String> {
-        let base = inference_base.trim_end_matches('/');
-        let endpoint = match self {
+        let mut url = reqwest::Url::parse(inference_base).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let base = url.path().trim_end_matches('/');
+        let path = match self {
             Self::Ollama => base.strip_suffix("/v1").unwrap_or(base).to_string(),
             Self::Anthropic if !base.ends_with("/v1") => format!("{base}/v1/models"),
             Self::Codex => {
                 let base = base.strip_suffix("/responses").unwrap_or(base);
-                let base = if base.ends_with("/codex") {
-                    base.to_string()
+                if base.ends_with("/codex") {
+                    format!("{base}/models")
                 } else {
-                    format!("{base}/codex")
-                };
-                format!("{base}/models?client_version=0.159.0")
+                    format!("{base}/codex/models")
+                }
             }
-            Self::Google => format!("{base}/models?pageSize=1000"),
             _ => format!("{base}/models"),
         };
-        let url = reqwest::Url::parse(&endpoint).ok()?;
-        matches!(url.scheme(), "http" | "https").then_some(endpoint)
+        url.set_path(&path);
+        match self {
+            Self::Codex => {
+                url.query_pairs_mut()
+                    .append_pair("client_version", "0.159.0");
+            }
+            Self::Google => {
+                url.query_pairs_mut().append_pair("pageSize", "1000");
+            }
+            _ => {}
+        }
+        Some(url.to_string())
     }
 }
 
@@ -553,6 +565,50 @@ fn normalize_rows(
             CatalogFormat::Codex => {
                 metadata.name = string(row.get("display_name"));
                 metadata.context = positive(row.get("context_window"));
+                metadata.denied = row
+                    .get("visibility")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|visibility| visibility != "list");
+                if let Some(modes) = row
+                    .get("input_modalities")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    if modes.iter().any(|mode| mode.as_str() == Some("text")) {
+                        let mut input = vec![ModelInput::Text];
+                        if modes.iter().any(|mode| mode.as_str() == Some("image")) {
+                            input.push(ModelInput::Image);
+                        }
+                        metadata.input = Some(input);
+                    }
+                }
+                if let Some(levels) = row
+                    .get("supported_reasoning_levels")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    let mut map = ThinkingLevelMap::new();
+                    for level in [
+                        pa_types::ai::ModelThinkingLevel::Off,
+                        pa_types::ai::ModelThinkingLevel::Minimal,
+                        pa_types::ai::ModelThinkingLevel::Low,
+                        pa_types::ai::ModelThinkingLevel::Medium,
+                        pa_types::ai::ModelThinkingLevel::High,
+                        pa_types::ai::ModelThinkingLevel::Xhigh,
+                        pa_types::ai::ModelThinkingLevel::Max,
+                    ] {
+                        let name = level.wire_name();
+                        let supported = levels.iter().any(|value| {
+                            value
+                                .as_str()
+                                .or_else(|| value.get("effort").and_then(serde_json::Value::as_str))
+                                == Some(name)
+                        });
+                        map.insert(level, supported.then(|| name.to_string()));
+                    }
+                    if map.values().any(Option::is_some) {
+                        metadata.reasoning = Some(true);
+                        metadata.thinking = Some(map);
+                    }
+                }
             }
             CatalogFormat::Google => {
                 metadata.denied = row
