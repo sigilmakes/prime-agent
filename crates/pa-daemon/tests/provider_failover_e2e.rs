@@ -88,6 +88,42 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     .to_string()
 }
 
+fn read_request_head(reader: &mut BufReader<TcpStream>) -> std::io::Result<String> {
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(head);
+        }
+        head.push_str(&line);
+        if line == "\r\n" {
+            return Ok(head);
+        }
+    }
+}
+
+/// Answer catalog discovery and unknown routes before the inference script runs.
+/// Returns `Some` when the request was answered here.
+fn answer_non_inference(stream: &mut TcpStream, head: &str) -> Option<std::io::Result<()>> {
+    let mut request = head.lines().next().unwrap_or_default().split_whitespace();
+    let method = request.next().unwrap_or_default();
+    let path = request.next().unwrap_or_default();
+    if method == "GET" && path == "/v1/models" {
+        let body = r#"{"data":[]}"#;
+        return Some(stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        ));
+    }
+    (method != "POST" || path != "/v1/chat/completions").then(|| {
+        stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    })
+}
+
 fn serve(
     mut stream: TcpStream,
     failures: usize,
@@ -95,34 +131,9 @@ fn serve(
     requests: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut head = String::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(());
-        }
-        head.push_str(&line);
-        if line == "\r\n" {
-            break;
-        }
-    }
-    let mut request = head.lines().next().unwrap_or_default().split_whitespace();
-    let method = request.next().unwrap_or_default();
-    let path = request.next().unwrap_or_default();
-    if method == "GET" && path == "/v1/models" {
-        let body = r#"{"data":[]}"#;
-        return stream.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        );
-    }
-    if method != "POST" || path != "/v1/chat/completions" {
-        return stream.write_all(
-            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
+    let head = read_request_head(&mut reader)?;
+    if let Some(response) = answer_non_inference(&mut stream, &head) {
+        return response;
     }
     let mut content_length = 0usize;
     for line in head.lines() {
