@@ -22,8 +22,9 @@ Port of the TS catalog client (branch `feat/catalog-client`:
 - Transport pinning: every remote model must match a compiled
   `(provider, api, baseUrl)` tuple; catalog data never carries request
   headers.
-- Prime Inference: live credentialed fetch, scope-keyed disk cache
-  (HMAC-SHA256 of key over team), 401/403 clears only that scope.
+- Prime Inference: live credentialed fetch, disk cache scoped by a digest of
+  endpoint, source policy, and effective credential/team headers. A 401/403
+  clears only that scope.
 - Refresh: hourly + startup + picker open + auth change; fire-and-forget;
   coalesced per source; a mid-session refresh never retargets the active
   model.
@@ -38,7 +39,8 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   supplies trusted seed models and explicit discovery descriptors. The catalog
   composes those seeds with the baseline before projecting optional metadata.
   Discovery cannot alter transport, endpoint, or headers. Unknown IDs require
-  explicit defaults; missing or malformed metadata preserves local definitions.
+  complete provider metadata or explicit full local defaults; missing or
+  malformed metadata preserves local definitions.
 - The catalog repo's sync/export tooling (lives with the data).
 
 ## Public API
@@ -50,7 +52,7 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   disk publications without network work.
 - `CatalogInputs` contains current trusted local seed models and authorized
   `ResolvedSource` descriptors. Each source names its format, exact endpoint,
-  complete request headers, optional explicit defaults, and publication guard.
+  complete request headers, unknown-model admission policy, and publication guard.
   These inputs come from pa-core; pa-models never opens auth or config files.
 - Discovery formats cover OpenAI, OpenRouter, Anthropic, Google, Codex, Ollama,
   and separate public/private Prime Inference sources. Private authorization
