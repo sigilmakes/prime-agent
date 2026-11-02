@@ -17,14 +17,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
-    pa_core::session::read::read_entries(path)
-        .expect("valid persisted session log")
-        .into_iter()
-        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
-        .collect()
-}
-
 struct Daemon {
     child: Child,
 }
