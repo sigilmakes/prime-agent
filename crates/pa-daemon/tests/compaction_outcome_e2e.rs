@@ -522,13 +522,12 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
                     .is_ok_and(|content| content.contains("compaction_outcome"))
         })
         .expect("the durable outcome row in the session file");
-    let persisted = std::fs::read_to_string(&session_file).expect("read session file");
-    let durable_row: Vec<&str> = persisted
-        .lines()
-        .filter(|line| line.contains("\"compaction_outcome\""))
+    let durable_row: Vec<Value> = session_rows(&session_file)
+        .into_iter()
+        .filter(|entry| entry["customType"] == "compaction_outcome")
         .collect();
     assert_eq!(durable_row.len(), 1, "exactly one durable outcome row");
-    let durable: Value = serde_json::from_str(durable_row[0]).expect("parse durable row");
+    let durable = &durable_row[0];
     assert_eq!(durable["type"], "custom_message");
     assert_eq!(durable["customType"], "compaction_outcome");
     assert_eq!(durable["content"], json!(failure_message));
@@ -560,4 +559,12 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         !serialized.contains("compaction_outcome") && !serialized.contains(failure_message),
         "the disclosure never reaches the provider request"
     );
+}
+
+fn session_rows(path: &std::path::Path) -> Vec<Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("validated native session rows")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }

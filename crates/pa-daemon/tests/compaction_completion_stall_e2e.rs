@@ -578,13 +578,10 @@ fn session_chain(session_dir: &Path) -> (bool, Vec<(String, String)>) {
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .expect("session file");
-    let content = std::fs::read_to_string(&session_file).expect("session file read");
     let mut has_compaction = false;
     let mut ids = std::collections::HashSet::new();
     let mut chain = Vec::new();
-    for line in content.lines() {
-        let entry: Value = serde_json::from_str(line)
-            .unwrap_or_else(|error| panic!("unparsable session line ({error}): {line}"));
+    for entry in session_rows(&session_file) {
         if entry["type"] == "compaction" {
             has_compaction = true;
         }
@@ -1061,4 +1058,12 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
 
     let (has_compaction, _) = session_chain(&session_dir);
     assert!(has_compaction, "the compaction entry persisted");
+}
+
+fn session_rows(path: &std::path::Path) -> Vec<Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("validated native session rows")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }

@@ -312,12 +312,13 @@ fn child_descriptor_pid(descriptor_dir: &Path, child_id: &str) -> Option<u32> {
 /// The `rlmDepth` of a session file's header line.
 #[cfg(target_os = "linux")]
 fn session_header_depth(session_file: &Path) -> u64 {
-    let file = std::fs::File::open(session_file).expect("session file open");
-    let mut first_line = String::new();
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first_line)
-        .expect("header line");
-    let header: Value = serde_json::from_str(first_line.trim()).expect("header json");
-    header["rlmDepth"].as_u64().unwrap_or(0)
+    let header = session_rows(session_file)
+        .into_iter()
+        .next()
+        .expect("session header");
+    header["rlmDepth"]
+        .as_u64()
+        .expect("explicit header rlmDepth")
 }
 
 /// The client launch env travels only to the session it created: A's
@@ -652,4 +653,13 @@ fn the_update_roster_never_carries_the_client_env() {
             "the roster row's launch env lost the internal identity: {worker}"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+fn session_rows(path: &std::path::Path) -> Vec<Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("validated native session rows")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }

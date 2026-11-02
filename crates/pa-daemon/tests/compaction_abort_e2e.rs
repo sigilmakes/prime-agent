@@ -665,12 +665,12 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
             && !persisted.contains("\"type\": \"compaction\""),
         "the aborted compaction never commits an entry"
     );
-    let durable_rows: Vec<&str> = persisted
-        .lines()
-        .filter(|line| line.contains("\"compaction_outcome\""))
+    let durable_rows: Vec<Value> = session_rows(&session_file)
+        .into_iter()
+        .filter(|entry| entry["customType"] == "compaction_outcome")
         .collect();
     assert_eq!(durable_rows.len(), 1, "exactly one durable outcome row");
-    let durable: Value = serde_json::from_str(durable_rows[0]).expect("parse durable row");
+    let durable = &durable_rows[0];
     assert_eq!(durable["type"], "custom_message");
     assert_eq!(durable["customType"], "compaction_outcome");
     assert_eq!(durable["content"], "Compaction cancelled");
@@ -936,14 +936,12 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
                     .is_some_and(|extension| extension == "jsonl")
             })
             .find_map(|path| {
-                let content = std::fs::read_to_string(&path).ok()?;
-                content
-                    .lines()
-                    .find(|line| line.contains("\"compaction_outcome\""))
-                    .map(str::to_string)
+                session_rows(&path)
+                    .into_iter()
+                    .find(|entry| entry["customType"] == "compaction_outcome")
             });
         if let Some(row) = row {
-            break serde_json::from_str::<Value>(&row).expect("parse durable row");
+            break row;
         }
         assert!(
             Instant::now() < deadline,
@@ -976,4 +974,12 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn session_rows(path: &std::path::Path) -> Vec<Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("validated native session rows")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }
