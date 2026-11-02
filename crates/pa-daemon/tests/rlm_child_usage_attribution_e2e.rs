@@ -17,13 +17,26 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+/// Both tests spawn a supervisor and boot kernels. The daemon discovers
+/// worker children through the process table, so overlapping tests in one
+/// test process can reap each other's children; serialize them.
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct Daemon {
     child: Child,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // The supervisor owns the worker and kernel tree; kill the whole
+        // group so a following test cannot race a lingering kernel.
+        let _ = pa_core::platform::kill_process_group_or_pid(self.child.id() as i32);
         let _ = self.child.wait();
     }
 }
@@ -32,7 +45,9 @@ impl Drop for Daemon {
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
-    let child = Command::new(binary)
+    let mut command = Command::new(binary);
+    pa_core::platform::set_new_process_group(&mut command);
+    let child = command
         .arg("supervisor")
         .arg("--socket")
         .arg(socket)
@@ -65,16 +80,19 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
-        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
-    ));
-    if candidate.exists() {
-        return Some(candidate);
+    // The fork's Rust runtime lives beside the TypeScript one; the latter
+    // speaks the TS kernel protocol and hangs a Rust daemon.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
+    let candidates = [
+        format!("{home}/.prime/agent/kernel-venv-rust/bin/python"),
+        format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ];
+    if let Some(candidate) = candidates.iter().find(|path| Path::new(path).exists()) {
+        return Some(PathBuf::from(candidate));
     }
     eprintln!(
-        "kernel python {} not found; skipping live RLM child-usage e2e",
-        candidate.display()
+        "kernel python not found in {}; skipping live RLM child-usage e2e",
+        candidates.join(" or ")
     );
     None
 }
@@ -174,7 +192,7 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
 
 /// Poll for a kernel cell's receipt content (the cell writes its verdict;
 /// an empty read is the create-before-write window, not a verdict yet).
-fn await_receipt(receipt: &Path) -> String {
+fn await_receipt(receipt: &Path, context: &[&Path]) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
@@ -182,11 +200,23 @@ fn await_receipt(receipt: &Path) -> String {
                 return content;
             }
         }
-        assert!(
-            Instant::now() < deadline,
-            "kernel cell receipt never appeared at {}",
-            receipt.display()
-        );
+        if Instant::now() >= deadline {
+            let diagnostics: Vec<String> = context
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{}:\n{}",
+                        path.display(),
+                        std::fs::read_to_string(path).unwrap_or_else(|_| "<absent>".into())
+                    )
+                })
+                .collect();
+            panic!(
+                "kernel cell receipt never appeared at {}; diagnostics:\n{}",
+                receipt.display(),
+                diagnostics.join("\n")
+            );
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -336,6 +366,7 @@ fn settled_child_usage(child_file: &Path) -> Value {
 /// resume semantics).
 #[test]
 fn child_usage_attributed_row_reaches_the_parent_transcript() {
+    let _guard = test_lock();
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -379,8 +410,8 @@ fn child_usage_attributed_row_reaches_the_parent_transcript() {
     // Turn 1: the kernel cell spawns the child mid-turn through the
     // product `rlm.spawn` surface.
     run_turn(&mut client, &parent_id, "spawn the kid", "t1");
-    let spawned: Value =
-        serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
+    let spawned: Value = serde_json::from_str(&await_receipt(&spawn_receipt, &[&spawn_error]))
+        .expect("spawn receipt json");
     assert!(
         !spawn_error.exists(),
         "the spawn cell failed: {}",
@@ -491,6 +522,7 @@ impl Drop for GitGate {
 /// deliveries must leave the parent's canonical source usable for the next turn.
 #[test]
 fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
+    let _guard = test_lock();
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -501,6 +533,7 @@ fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
     let spawn_receipt = dir.path().join("spawn.json");
     let spawn_error = dir.path().join("spawn.error");
     let send_receipt = dir.path().join("send.json");
+    let supervisor_err = dir.path().join("supervisor.err");
     let child_script = dir.path().join("child.json");
     let gate_ready = dir.path().join("git-ready");
     let gate_release = dir.path().join("git-release");
@@ -577,8 +610,10 @@ fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
         || PathBuf::from(env!("CARGO_BIN_EXE_pa-daemon")),
         PathBuf::from,
     );
+    let mut command = Command::new(binary);
+    pa_core::platform::set_new_process_group(&mut command);
     let _daemon = Daemon {
-        child: Command::new(binary)
+        child: command
             .args(["supervisor", "--socket"])
             .arg(&socket)
             .arg("--agent-dir")
@@ -592,7 +627,9 @@ fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
                 "15000",
             )
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&supervisor_err).expect("supervisor stderr log"),
+            ))
             .spawn()
             .expect("spawn supervisor"),
     };
@@ -622,7 +659,11 @@ fn child_message_then_usage_preserves_parent_read_and_next_prompt() {
     let spawned = client.read_response("spawn");
     assert_eq!(spawned["success"], true, "spawn prompt refused: {spawned}");
     assert!(!spawn_error.exists(), "spawn failed");
-    let sent: Value = serde_json::from_str(&await_receipt(&send_receipt)).expect("send receipt");
+    let sent: Value = serde_json::from_str(&await_receipt(
+        &send_receipt,
+        &[&spawn_error, &supervisor_err, &spawn_receipt, parent_file],
+    ))
+    .expect("send receipt");
     assert!(
         matches!(
             sent["deliveryStatus"].as_str(),
