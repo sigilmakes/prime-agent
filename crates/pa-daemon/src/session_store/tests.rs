@@ -2,6 +2,7 @@
 //! attribution folds, the wire shapes, and the resumable scan.
 
 use super::*;
+use crate::session_store::log_reader_tests::write_jsonl_fixture;
 use serde_json::json;
 
 fn temp_dir() -> PathBuf {
@@ -13,7 +14,7 @@ fn temp_dir() -> PathBuf {
 /// The captured-attribution fixture: real devbox session rows (content sanitized,
 /// cwd/repoUrl neutralized; ids, timestamps, and usage verbatim).
 fn captured_attribution_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attribution-fold-captured.jsonl")
+    super::log_reader_tests::captured_attribution_log()
 }
 
 #[test]
@@ -225,7 +226,7 @@ fn the_depth_two_chain_reports_the_folded_aggregate() {
             })
             .to_string(),
         ];
-    std::fs::write(&path, lines.join("\n")).unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let store = SessionFile::open(&path).unwrap();
     let folded = store.entry("a1").expect("the target row");
     assert_eq!(
@@ -335,9 +336,9 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
     // The marker hangs off u1 as a SIBLING of the live branch: the open
     // leaf (the last row, b1) walks u1 -> header and never meets it.
     let path = dir.join("off-branch-marker.jsonl");
-    std::fs::write(
+    write_jsonl_fixture(
         &path,
-        [
+        &[
             header("off-1"),
             row("u1", None, json!({"role": "user", "content": "hi"})),
             marker("m1", "u1"),
@@ -348,8 +349,7 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
             ),
         ]
         .join("\n"),
-    )
-    .unwrap();
+    );
     assert!(
         !SessionFile::open(&path).unwrap().anthropic_warning_shown(),
         "an off-branch marker never hydrates the full open's gate"
@@ -364,9 +364,9 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
     // The same marker ON the active branch answers open — the sibling
     // branch's rows stay irrelevant.
     let path_on = dir.join("on-branch-marker.jsonl");
-    std::fs::write(
+    write_jsonl_fixture(
         &path_on,
-        [
+        &[
             header("on-1"),
             row("u1", None, json!({"role": "user", "content": "hi"})),
             marker("m1", "u1"),
@@ -377,8 +377,7 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
             ),
         ]
         .join("\n"),
-    )
-    .unwrap();
+    );
     assert!(SessionFile::open(&path_on)
         .unwrap()
         .anthropic_warning_shown());
@@ -470,7 +469,7 @@ fn failed_persist_keeps_the_store_walkable() {
         .unwrap();
     let blocker = dir.join("blocked");
     fs::create_dir_all(&blocker).unwrap();
-    session.set_path(blocker);
+    session.set_path(blocker.join(session_file_name(session.session_id())));
     assert!(session
         .persist_entry(
             "message",
@@ -566,7 +565,7 @@ fn branch_bridged_bridges_ghost_parent_gaps() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&path, content).unwrap();
+    write_jsonl_fixture(&path, &content);
     let store = SessionFile::open(&path).unwrap();
     let strict: Vec<&str> = store
         .branch()
@@ -603,7 +602,7 @@ fn branch_bridged_skips_abandoned_chains_after_a_persisted_branch_move() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&path, content).unwrap();
+    write_jsonl_fixture(&path, &content);
     let store = SessionFile::open(&path).unwrap();
     let bridged: Vec<&str> = store
         .branch_bridged()
@@ -629,7 +628,7 @@ fn branch_bridged_matches_the_strict_walk_on_clean_files() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&path, content).unwrap();
+    write_jsonl_fixture(&path, &content);
     let store = SessionFile::open(&path).unwrap();
     let strict: Vec<&str> = store
         .branch()
@@ -1068,21 +1067,22 @@ fn append_cost_does_not_grow_with_the_store() {
 }
 
 #[test]
-fn skips_malformed_lines() {
+fn malformed_complete_rows_are_refused_without_repair() {
     let dir = temp_dir();
     let path = dir.join("s.jsonl");
-    fs::write(
-            &path,
-            format!(
-                "{}\nnot json\n{}\n",
-                json!({"type":"session","version":3,"id":"abc","timestamp":"t","cwd":"/x"}),
-                json!({"type":"message","id":"aaaa1111","parentId":null,"timestamp":"t","message":{"role":"user","content":"hi"}})
-            ),
-        )
-        .unwrap();
-    let loaded = SessionFile::open(&path).unwrap();
-    assert_eq!(loaded.message_count(), 1);
-    let _ = fs::remove_dir_all(&dir);
+    write_jsonl_fixture(
+        &path,
+        &json!({"type":"session","version":3,"id":"s","timestamp":"t","cwd":"/x"}).to_string(),
+    );
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"not json\n");
+    fs::write(&path, &bytes).unwrap();
+    assert!(SessionFile::open(&path).is_err());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        bytes,
+        "read-only open never repairs corruption"
+    );
 }
 
 /// Scalar settings restoration must not consume or clear an accepted context
@@ -1121,8 +1121,8 @@ fn windowed_settings_projection_preserves_the_accepted_context_archive() {
     let before_bytes = fs::read(&path).unwrap();
     let windowed = SessionFile::open_windowed(&path).unwrap();
     assert!(
-        windowed.window.is_some(),
-        "the settings projection must use its windowed arm"
+        windowed.window.is_none(),
+        "daemon replays the complete committed log"
     );
     let branch_before = windowed.branch_file_entries();
     let context_before =

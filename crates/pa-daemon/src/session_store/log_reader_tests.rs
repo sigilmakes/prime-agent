@@ -24,6 +24,32 @@ pub(crate) fn write_log_fixture(path: &Path, session: &SessionFile) {
     }
 }
 
+/// Materialize historical fixture payloads as committed native log rows.
+pub(crate) fn write_jsonl_fixture(path: &Path, content: &str) {
+    assert!(!path.exists(), "fixture must start with an absent log");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut log = SessionLog::open(
+        path.parent().unwrap(),
+        path.file_stem().unwrap().to_str().unwrap(),
+        crate::session_transport::deadline(),
+    )
+    .unwrap();
+    for line in content.lines() {
+        let row: Value = serde_json::from_str(line).expect("valid fixture payload");
+        append(&mut log, &row);
+    }
+}
+
+pub(crate) fn captured_attribution_log() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pa-captured-log-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("captured.jsonl");
+    write_jsonl_fixture(
+        &path,
+        include_str!("../../tests/fixtures/attribution-fold-captured.jsonl"),
+    );
+    path
+}
+
 fn fixture(dir: &Path, id: &str) -> (SessionLog, PathBuf) {
     fs::create_dir_all(dir).unwrap();
     let mut log = SessionLog::open(dir, id, crate::session_transport::deadline()).unwrap();
