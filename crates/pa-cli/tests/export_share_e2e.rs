@@ -376,8 +376,9 @@ async fn tui_export_and_share_surface() {
         "jsonl export row missing:\n{rendered}"
     );
     let jsonl = std::fs::read_to_string(&jsonl_out).expect("exported jsonl");
-    let first: serde_json::Value =
-        serde_json::from_str(jsonl.lines().next().expect("header line")).expect("header");
+    let entries = pa_core::session::read::read_entries(&jsonl_out)
+        .expect("JSONL export validates as a native session log");
+    let first = serde_json::to_value(entries.first().expect("header entry")).expect("header");
     assert_eq!(first["type"], "session");
     assert!(
         jsonl.contains("say hi"),
