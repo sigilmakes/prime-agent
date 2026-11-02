@@ -97,6 +97,36 @@ fn fixture_inputs(base: &str, configured: bool) -> CatalogInputs {
     }
 }
 
+fn catalog_entry(model: &pa_types::ai::Model) -> serde_json::Value {
+    json!({
+        "id": model.id, "name": model.name, "api": model.api,
+        "provider": model.provider, "baseUrl": model.base_url,
+        "reasoning": model.reasoning, "thinkingLevelMap": model.thinking_level_map,
+        "input": model.input, "cost": model.cost,
+        "contextWindow": model.context_window, "maxTokens": model.max_tokens,
+        "featured": model.featured, "compat": model.compat,
+    })
+}
+
+fn curated_payload(online: bool) -> serde_json::Value {
+    let compiled = pa_models::transports::compiled_models();
+    let mut models: Vec<_> = compiled
+        .iter()
+        .filter(|model| model.provider != "prime-inference")
+        .map(catalog_entry)
+        .collect();
+    if online {
+        let mut model = compiled
+            .iter()
+            .find(|model| model.provider == "anthropic")
+            .unwrap()
+            .clone();
+        model.id = "offline-fixture-model".into();
+        models.push(catalog_entry(&model));
+    }
+    json!({"schemaVersion": 1, "models": models})
+}
+
 fn prime_payload() -> serde_json::Value {
     json!({"data": pa_models::transports::prime_inference_offline_entries()
         .iter().map(|model| json!({
@@ -142,8 +172,12 @@ fn startup_child() {
                         )
                         .await;
                     assert_eq!(publication.sources.len(), 2);
-                    assert!(publication.sources.iter().all(|report| report.status
-                        == pa_types::model_refresh::ModelRefreshStatus::Updated));
+                    assert!(
+                        publication.sources.iter().all(|report| report.status
+                            == pa_types::model_refresh::ModelRefreshStatus::Updated),
+                        "fixture warm reports: {:?}",
+                        publication.sources
+                    );
                     return;
                 }
                 let before = files(&dir);
@@ -226,7 +260,7 @@ fn startup_child() {
                     before,
                     "offline never renews freshness or publishes auth snapshots"
                 );
-                let payload = json!({"schemaVersion": 1, "models": [model.clone()]});
+                let payload = curated_payload(false);
                 let bundled = tempfile::tempdir().unwrap();
                 std::fs::write(
                     bundled.path().join("models.bundled.json"),
@@ -272,7 +306,9 @@ fn startup_child() {
                     .await;
                 assert_eq!(
                     publication.sources[0].status,
-                    pa_types::model_refresh::ModelRefreshStatus::Updated
+                    pa_types::model_refresh::ModelRefreshStatus::Updated,
+                    "online control reports: {:?}",
+                    publication.sources
                 );
                 assert!(publication
                     .snapshot
@@ -390,17 +426,7 @@ async fn fenced_children(actions: &[&str]) {
             let path = request.split_whitespace().nth(1).unwrap();
             let payload = match path {
                 "/prime-inference" => prime_payload(),
-                "/catalog" | "/online" => {
-                    let mut model = pa_models::transports::compiled_models()
-                        .iter()
-                        .find(|model| model.provider == "anthropic")
-                        .unwrap()
-                        .clone();
-                    if path == "/online" {
-                        model.id = "offline-fixture-model".into();
-                    }
-                    json!({"schemaVersion": 1, "models": [model]})
-                }
+                "/catalog" | "/online" => curated_payload(path == "/online"),
                 _ => panic!("unexpected fixture request: {path}"),
             };
             let body = payload.to_string();
