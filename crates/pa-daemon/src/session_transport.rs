@@ -295,7 +295,9 @@ impl WireState {
                     log.append_at_checked(seq, row, cursor, deadline())
                         .map_err(|error| match error {
                             session_log::ReadError::Log(error) => open_error(error),
-                            other => LogWireError::Refused(anyhow::Error::from(other)),
+                            error @ session_log::ReadError::Replaced { .. } => {
+                                LogWireError::Refused(anyhow::Error::from(error))
+                            }
                         })
                 };
                 match result {
