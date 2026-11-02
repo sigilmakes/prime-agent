@@ -519,10 +519,24 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
+    fn append_session_rows(path: &Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .expect("fixture session log");
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
     use super::*;
     use crate::session_store::{session_file_name, SessionFile};
     use pa_core::cron::AgentCronJob;
-    use std::io::Write;
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-stop-cleanup-{}", uuid::Uuid::new_v4()));
@@ -690,13 +704,7 @@ mod tests {
                 }
             }
         });
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&child_file)
-                .unwrap();
-            writeln!(file, "{usage_row}").unwrap();
-        }
+        append_session_rows(&child_file, &[usage_row]);
         let captured =
             append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1");
         assert_eq!(captured, Some(1), "the one tombstoned edge is amended");
@@ -780,15 +788,7 @@ mod tests {
                 "childUsage": usage_block(0.10), "aggregateUsage": usage_block(0.50)
             }),
         ];
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&child_file)
-                .unwrap();
-            for row in rows {
-                writeln!(file, "{row}").unwrap();
-            }
-        }
+        append_session_rows(&child_file, &rows);
         let totals = crate::session_usage::read_session_usage(&child_file).unwrap();
         assert!(
             (totals.total.cost.total.as_f64() - 0.50).abs() < 1e-9,
