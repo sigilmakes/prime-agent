@@ -1263,6 +1263,26 @@ async fn empty_harness_scopes_keep_only_the_session_scope() {
 }
 
 #[tokio::test]
+async fn non_table_scope_config_keeps_the_global_default() {
+    for scopes in [Value::Null, json!("global")] {
+        let mut document = settings(true);
+        document["plugins"] = json!({"harness":{"config":{"scopes":scopes.clone()}}});
+        let f = Fixture::new(document, LEGACY).await;
+        f.call(
+            "create",
+            json!({"scope":"global","kind":"memory","id":"shared","content":"global evidence"}),
+        )
+        .await
+        .unwrap();
+        let prompt = instructions(&f, "global evidence").await;
+        assert!(
+            prompt.contains("scope=\"global\", kind=memory, id=\"shared\""),
+            "scopes={scopes} must fall back to the global default"
+        );
+    }
+}
+
+#[tokio::test]
 async fn configured_harness_scopes_replace_the_global_default() {
     let f = Fixture::new(scoped_settings(json!(["custom"])), LEGACY).await;
     for scope in ["global", "custom"] {

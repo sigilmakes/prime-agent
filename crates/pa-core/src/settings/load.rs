@@ -27,6 +27,7 @@ const KNOWN_FIELDS: &[&str] = &[
     "compaction",
     "autoRefine",
     "harnessRefinements",
+    "harnessScopes",
     "factory",
     "branchSummary",
     "retry",
@@ -171,5 +172,21 @@ mod tests {
         );
         let settings = from_value_lenient(&serde_json::json!({ "requestTiming": true }));
         assert_eq!(settings.request_timing, Some(true));
+    }
+
+    /// A wrong-typed `harnessScopes` behaves as unset (the known-field registry
+    /// entry), so the default scope list applies instead of a surviving raw value.
+    #[test]
+    fn wrong_typed_harness_scopes_loads_as_none() {
+        let value: Value = serde_json::json!({ "harnessScopes": "global" });
+        let settings = from_value_lenient(&value);
+        assert_eq!(settings.harness_scopes, None);
+        assert!(
+            settings.extra.get("harnessScopes").is_none(),
+            "the wrong-typed known field drops out entirely: {:?}",
+            settings.extra
+        );
+        let settings = from_value_lenient(&serde_json::json!({ "harnessScopes": ["global"] }));
+        assert_eq!(settings.harness_scopes, Some(vec!["global".to_string()]));
     }
 }

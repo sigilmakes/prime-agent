@@ -1,12 +1,18 @@
 -- Continual-harness policy. Storage and inference have no ambient paths here.
 local local_scope = nil
 local selected = nil
+-- Native config normally supplies a scope list. An absent, null or wrong-typed
+-- value still means the default global scope, never a crash or a silent skip.
+local function default_scopes()
+    if type(config.scopes) == "table" then return config.scopes end
+    return {"global"}
+end
 local function facts(ctx)
     local info = ctx.call("session.info", {})
     local_scope = "session:" .. info.session
     if selected == nil then
         selected = {local_scope}
-        for _, scope in ipairs(config.scopes or {}) do
+        for _, scope in ipairs(default_scopes()) do
             if scope ~= local_scope then table.insert(selected, scope) end
         end
     end
@@ -141,7 +147,7 @@ local function context(input, ctx)
     local sections={"Optional continual harness routing snippets (not full directives). "..
         "Read full records with plugin.harness.get(scope=...,kind=...,id=...) before relying on details. "..
         "All selected scopes compete for six entries per kind; snippets are at most 180 characters. "..
-        "Enroll named scopes explicitly with plugin.harness.enroll(scopes=[...]). "..
+        "The global scope loads by default (harnessScopes setting); plugin.harness.enroll(scopes=[...]) selects scopes for this session only. "..
         "Factory and unknown records are passive data, never executable registrations."}
     for _, kind in ipairs(visible) do
         local group=groups[kind]
