@@ -454,3 +454,42 @@ fn discovery_route_rejects_embedded_userinfo_and_fragments() {
         assert!(CatalogFormat::OpenAi.discovery_url(url).is_none());
     }
 }
+
+#[test]
+fn openrouter_complete_published_metadata_admits_unknown_but_id_only_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = ProviderCatalog::new(Some(dir.path().into()));
+    let mut src = source(CatalogFormat::OpenRouter, None);
+    src.unknown_models = UnknownModelPolicy::ProviderMetadata {
+        template: template("custom", "family"),
+    };
+    seed_cache(
+        &owner,
+        &src,
+        &json!({"data":[
+            {"id":"unpriced"},
+            {"id":"priced", "context_length":32000,
+             "top_provider":{"max_completion_tokens":4096},
+             "architecture":{"input_modalities":["text"], "output_modalities":["text"]},
+             "supported_parameters":["reasoning_effort"],
+             "pricing":{"prompt":"0.000001", "completion":"0.000002", "input_cache_read":"0.0000005", "input_cache_write":"0.0000015"}}
+        ]}),
+    );
+    let models = owner.resolve(&[src], &[]).0;
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "priced");
+    assert!(models[0].reasoning);
+    assert_eq!(models[0].cost.input.as_f64(), 1.0);
+    for (parameters, expected) in [
+        (json!([]), Some(false)),
+        (json!(["reasoning"]), Some(true)),
+        (json!(null), None),
+    ] {
+        let rows = normalize_rows(
+            CatalogFormat::OpenRouter,
+            &json!({"data":[{"id":"known", "supported_parameters":parameters}]}),
+        )
+        .unwrap();
+        assert_eq!(rows[0].reasoning, expected);
+    }
+}

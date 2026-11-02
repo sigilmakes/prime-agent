@@ -710,6 +710,14 @@ fn normalize_rows(
                 metadata.max_tokens = positive(row.get("outputTokenLimit"));
             }
             CatalogFormat::OpenRouter => {
+                metadata.reasoning = row
+                    .get("supported_parameters")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|parameters| {
+                        parameters.iter().any(|parameter| {
+                            matches!(parameter.as_str(), Some("reasoning" | "reasoning_effort"))
+                        })
+                    });
                 metadata.name = string(row.get("name"));
                 metadata.context = positive(row.get("context_length"));
                 metadata.max_tokens = positive(
