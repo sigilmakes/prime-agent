@@ -186,7 +186,30 @@ pub async fn fetch_catalog(base_url: &str, authorization: &str) -> Result<Value,
     if crate::offline::is_catalog_offline() {
         return Err(transport("Catalog is offline"));
     }
-    fetch_catalog_online(base_url, authorization).await
+    fetch_catalog_with_headers(base_url, &[("authorization".into(), authorization.into())]).await
+}
+
+/// Fetch the multi-endpoint catalog using the caller's complete authorized headers.
+///
+/// # Errors
+/// Returns credential-free transport or HTTP status failures.
+pub async fn fetch_catalog_with_headers(
+    base_url: &str,
+    headers: &[(String, String)],
+) -> Result<Value, FetchError> {
+    if crate::offline::is_catalog_offline() {
+        return Err(transport("Catalog is offline"));
+    }
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (name, value) in headers {
+        header_map.append(
+            reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| transport("Invalid discovery header"))?,
+            reqwest::header::HeaderValue::from_str(value)
+                .map_err(|_| transport("Invalid discovery header"))?,
+        );
+    }
+    fetch_catalog_online(base_url, header_map).await
 }
 
 enum Detail {
@@ -199,7 +222,7 @@ async fn detail_worker(
     queue: Arc<Mutex<VecDeque<String>>>,
     retained_bytes: Arc<std::sync::atomic::AtomicUsize>,
     base: String,
-    authorization: String,
+    headers: reqwest::header::HeaderMap,
 ) -> Vec<Detail> {
     let mut result = Vec::new();
     loop {
@@ -212,7 +235,7 @@ async fn detail_worker(
         };
         let response = client
             .post(format!("{base}/api/show"))
-            .header("authorization", &authorization)
+            .headers(headers.clone())
             .header("content-type", "application/json")
             .body(json!({"model":id}).to_string())
             .send()
@@ -253,7 +276,10 @@ async fn detail_worker(
     result
 }
 
-async fn fetch_catalog_online(base_url: &str, authorization: &str) -> Result<Value, FetchError> {
+async fn fetch_catalog_online(
+    base_url: &str,
+    headers: reqwest::header::HeaderMap,
+) -> Result<Value, FetchError> {
     let base = base_url.trim_end_matches('/');
     let client = pa_ai::utils::tls::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -262,7 +288,7 @@ async fn fetch_catalog_online(base_url: &str, authorization: &str) -> Result<Val
     tokio::time::timeout(FETCH_TIMEOUT, async {
         let response = client
             .get(format!("{base}/v1/models"))
-            .header("authorization", authorization)
+            .headers(headers.clone())
             .send()
             .await
             .map_err(|_| transport("Ollama Cloud model listing failed"))?;
@@ -294,7 +320,7 @@ async fn fetch_catalog_online(base_url: &str, authorization: &str) -> Result<Val
                 Arc::clone(&queue),
                 Arc::clone(&retained_bytes),
                 base.to_string(),
-                authorization.to_string(),
+                headers.clone(),
             ));
         }
         let mut models = Map::new();

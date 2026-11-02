@@ -415,6 +415,23 @@ impl ProviderCatalogs {
         report
     }
 
+    pub(crate) fn adopt_default(&self, since: Option<u64>) -> ModelRefreshApplyReport {
+        let mut report = ModelRefreshApplyReport::default();
+        if self.default.reload_from_disk(PUBLIC_SCOPE).is_some()
+            && since.is_none_or(|since| {
+                self.default
+                    .status(PUBLIC_SCOPE)
+                    .checked_at
+                    .is_some_and(|at| at >= since)
+            })
+        {
+            report.applied.push("default".into());
+        } else {
+            report.missing.push("default".into());
+        }
+        report
+    }
+
     pub(crate) fn preferred_default(&self) -> Option<String> {
         self.default.get(PUBLIC_SCOPE)
     }

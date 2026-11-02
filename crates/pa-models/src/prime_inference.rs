@@ -29,7 +29,7 @@ const MIN_CATALOG_COVERAGE: f64 = 0.5;
 const CACHE_FILE: &str = "prime-inference-models-cache.json";
 
 /// One entry of the Prime Inference `/models` response.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PrimeInferenceEntry {
     pub id: String,
     pub name: Option<String>,

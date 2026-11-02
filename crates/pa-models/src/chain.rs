@@ -76,6 +76,7 @@ pub struct ModelCatalog {
     #[allow(clippy::option_option)]
     pi_scope_seen: Mutex<Option<Option<String>>>,
     provider_owned: Option<crate::provider_catalogs::ProviderCatalogs>,
+    discovery: crate::discovery::ProviderCatalog,
 }
 
 impl ModelCatalog {
@@ -140,6 +141,7 @@ impl ModelCatalog {
             .as_ref()
             .map(|dir| dir.join(PROVIDER_CATALOG_CACHE_FILE));
         Self {
+            discovery: crate::discovery::ProviderCatalog::new(models_dir.clone()),
             provider_cache: CatalogCache::new(
                 model_catalog_url,
                 cache_path,
@@ -363,6 +365,114 @@ impl ModelCatalog {
         report
     }
 
+    /// Read a no-cold-start snapshot using current trusted seeds and scoped metadata.
+    pub fn snapshot(&self, inputs: &crate::CatalogInputs) -> crate::CatalogSnapshot {
+        let mut baseline = self.resolve(None);
+        for seed in &inputs.seeds {
+            if let Some(model) = baseline
+                .iter_mut()
+                .find(|model| model.provider == seed.provider && model.id == seed.id)
+            {
+                *model = seed.clone();
+            } else {
+                baseline.push(seed.clone());
+            }
+        }
+        let (models, authorized_private_prime_models) =
+            self.discovery.resolve(&inputs.sources, &baseline);
+        crate::CatalogSnapshot {
+            models,
+            preferred_default: self.preferred_default(),
+            authorized_private_prime_models,
+        }
+    }
+
+    /// Refresh selected sources and return their settled publication and current snapshot.
+    pub async fn refresh(
+        &self,
+        inputs: &crate::CatalogInputs,
+        request: &crate::RefreshRequest,
+    ) -> crate::RefreshPublication {
+        let selected = request.sources.as_deref();
+        let force = request.policy == crate::RefreshPolicy::Force;
+        let mut sources = self
+            .discovery
+            .refresh(&inputs.sources, request.policy, selected)
+            .await;
+        if crate::provider_catalogs::selected(selected, "curated") {
+            let templates = self.templates.clone();
+            let report = self
+                .provider_cache
+                .refresh_report(
+                    PUBLIC_SCOPE,
+                    RefreshOptions {
+                        force,
+                        merge_payload: Some(Arc::new(move |payload, _| {
+                            crate::pinning::parse_trusted_provider_model_catalog(
+                                payload, &templates,
+                            )?;
+                            Ok(payload.clone())
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            sources.push(crate::provider_catalogs::source_result(
+                "curated",
+                &report,
+                report.models.as_ref().map(Vec::len),
+            ));
+        }
+        if let Some(owned) = &self.provider_owned {
+            if crate::provider_catalogs::selected(selected, "default") {
+                sources.extend(
+                    owned
+                        .refresh(
+                            &crate::DiscoveryCredentials::new(),
+                            force,
+                            Some(&["default".to_string()]),
+                        )
+                        .await,
+                );
+            }
+        }
+        crate::RefreshPublication {
+            snapshot: self.snapshot(inputs),
+            sources,
+        }
+    }
+
+    /// Adopt validated local snapshots only; never fetch or resolve credentials.
+    pub fn adopt(
+        &self,
+        inputs: &crate::CatalogInputs,
+        requirement: crate::SnapshotRequirement,
+    ) -> crate::ApplyPublication {
+        let mut report = self.discovery.adopt(&inputs.sources, requirement.since);
+        let present = self.provider_cache.reload_from_disk(PUBLIC_SCOPE).is_some();
+        if present
+            && requirement.since.is_none_or(|since| {
+                self.provider_cache
+                    .status(PUBLIC_SCOPE)
+                    .checked_at
+                    .is_some_and(|at| at >= since)
+            })
+        {
+            report.applied.push("curated".into());
+        } else {
+            report.missing.push("curated".into());
+        }
+        if let Some(owned) = &self.provider_owned {
+            let default = owned.adopt_default(requirement.since);
+            report.applied.extend(default.applied);
+            report.missing.extend(default.missing);
+        }
+        crate::ApplyPublication {
+            snapshot: self.snapshot(inputs),
+            report,
+        }
+    }
+
     /// Fire-and-forget refresh for `trigger`; errors are caught and last-good
     /// retained, never surfaced into a session.
     pub fn trigger_refresh(self: &Arc<Self>, trigger: RefreshTrigger) {
@@ -456,7 +566,7 @@ impl ModelCatalog {
 
     /// Await a direct (non-spawned) refresh — `refreshModelCatalog` in the
     /// TS reference; used by tests and callers that need the result.
-    pub async fn refresh(&self, force: bool) -> Option<Vec<Model>> {
+    pub async fn refresh_curated(&self, force: bool) -> Option<Vec<Model>> {
         self.provider_cache
             .refresh(
                 PUBLIC_SCOPE,

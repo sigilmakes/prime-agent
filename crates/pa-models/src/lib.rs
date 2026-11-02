@@ -17,6 +17,11 @@ pub mod schema;
 pub mod transports;
 
 mod chain;
+mod discovery;
+pub use discovery::{
+    ApplyPublication, CatalogFormat, CatalogInputs, CatalogSnapshot, RefreshPolicy,
+    RefreshPublication, RefreshRequest, ResolvedSource, SnapshotRequirement,
+};
 
 pub use chain::{ModelCatalog, PrimeCredentials, RefreshTrigger};
 pub use pa_types::ai::Model;
