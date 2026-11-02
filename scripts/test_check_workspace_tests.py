@@ -24,6 +24,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
                 {"kind": ["lib"], "name": "sample", "test": True},
                 {"kind": ["bin"], "name": "app", "test": True},
                 {"kind": ["test"], "name": "ordinary", "test": True},
+                {"kind": ["test"], "name": "rlm_child_e2e", "test": True},
                 {"kind": ["test"], "name": "kernel_dispose_e2e", "test": True},
                 {"kind": ["example"], "name": "opted-in", "test": True},
                 {"kind": ["example"], "name": "default-example", "test": False},
@@ -33,6 +34,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
             ordinary, exclusive = gate.target_groups({"workspace_members": ["sample"],
                                                        "packages": [package, package]})
             self.assertEqual(ordinary, [("workspace-units", ["--lib", "--bins"]),
+                                        ("test-rlm_child_e2e", ["--test", "rlm_child_e2e"]),
                                         ("test-ordinary", ["--test", "ordinary"]),
                                         ("example-opted-in", ["--example", "opted-in"])])
             self.assertEqual(exclusive, [("test-kernel_dispose_e2e", ["--test", "kernel_dispose_e2e"]) ])
@@ -222,7 +224,8 @@ class WorkspaceTestScheduling(unittest.TestCase):
                     patch.object(gate, "run") as run:
                 run.return_value = json.dumps({})
                 self.assertEqual(gate.main(), 0)
-                self.assertEqual([call.kwargs["jobs"] for call in run_groups.call_args_list], [2, 1])
+                self.assertEqual([call.kwargs["jobs"] for call in run_groups.call_args_list],
+                                 [gate.PARALLEL_SLOTS, 1])
                 self.assertEqual([call.args[0] for call in run_groups.call_args_list],
                                  [[("ordinary", [])], [("exclusive", [])]])
                 self.assertEqual(run.call_args.args[0],

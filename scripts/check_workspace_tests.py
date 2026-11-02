@@ -81,6 +81,16 @@ def run(command, *, repo, env, deadline, capture=False):
 # Their in-process Mutex cannot exclude kernel producers in another binary.
 EXCLUSIVE = {"kernel_dispose_e2e", "replacement_kernel_e2e"}
 
+# Parallel test slots. The runner host has 32 cores; this cap keeps
+# kernel-booting binaries from starving each other, while the EXCLUSIVE list
+# still serializes the process-table-global fixtures.
+PARALLEL_SLOTS = 3
+
+# Groups whose area most changes touch run first: a regression there fails in
+# the first minute of the test phase instead of the last.
+SMOKE_PREFIXES = ("test-rlm_", "test-model_", "test-session_", "test-catalog",
+                  "test-private_")
+
 
 def target_groups(metadata):
     groups = {}
@@ -118,7 +128,16 @@ def target_groups(metadata):
     if not groups:
         raise ValueError("workspace has no default test targets")
     ordinary, exclusive = [], []
-    for name, selectors in sorted(groups.values(), key=lambda group: group[0] != "workspace-units"):
+    for name, selectors in sorted(
+        groups.values(),
+        # A stable two-part key: units first, then the smoke areas, then the
+        # inventory order the metadata produced (selector-qualified names keep
+        # their deterministic tie order).
+        key=lambda group: (
+            group[0] != "workspace-units",
+            not group[0].startswith(SMOKE_PREFIXES),
+        ),
+    ):
         (exclusive if selectors[-1] in EXCLUSIVE else ordinary).append((name, selectors))
     return ordinary, exclusive
 
@@ -143,6 +162,8 @@ def target_environment(repo, state, ambient):
 
 
 def run_groups(groups, *, repo, state, env, deadline, jobs):
+    """Run whole-binary groups and return their ``(name, seconds)`` costs."""
+    timings = []
     pending = deque(groups)
     active = {}
     private_dirs = []
@@ -181,7 +202,9 @@ def run_groups(groups, *, repo, state, env, deadline, jobs):
                     child, output, name, command, started = active.pop(future)
                     output.close()
                     print((state / f"{name}.log").read_text(), end="", flush=True)
-                    print(f"Test target elapsed: {name} {time.monotonic() - started:.2f}s "
+                    elapsed = time.monotonic() - started
+                    timings.append((name, elapsed))
+                    print(f"Test target elapsed: {name} {elapsed:.2f}s "
                           f"(exit {child.returncode})", flush=True)
                     if child.returncode:
                         active[future] = (child, output, name, command, started)
@@ -192,6 +215,7 @@ def run_groups(groups, *, repo, state, env, deadline, jobs):
                 output.close()
             for private in private_dirs:
                 shutil.rmtree(private, ignore_errors=True)
+    return timings
 
 
 def main():
@@ -213,13 +237,20 @@ def main():
                                "--format-version", "1"],
                               repo=repo, env=env, deadline=deadline, capture=True))
     ordinary, exclusive = target_groups(metadata)
-    print(f"Workspace tests: {len(ordinary)} parallel groups (2 slots), "
+    print(f"Workspace tests: {len(ordinary)} parallel groups ({PARALLEL_SLOTS} slots), "
           f"{len(exclusive)} globally exclusive groups, then all doctests", flush=True)
-    run_groups(ordinary, repo=repo, state=args.state_root, env=env, deadline=deadline, jobs=2)
-    run_groups(exclusive, repo=repo, state=args.state_root, env=env, deadline=deadline, jobs=1)
+    timings = run_groups(ordinary, repo=repo, state=args.state_root, env=env,
+                         deadline=deadline, jobs=PARALLEL_SLOTS)
+    timings += run_groups(exclusive, repo=repo, state=args.state_root, env=env,
+                          deadline=deadline, jobs=1)
     doc_env = target_environment(repo, args.state_root / "doctests", env)
     run(["cargo", "test", "--locked", "--offline", "--workspace", "--doc"],
         repo=repo, env=doc_env, deadline=deadline)
+    # Slowest first: a group creeping up this list is the next scheduling lever.
+    if timings:
+        print("Slowest test targets:", flush=True)
+        for name, elapsed in sorted(timings, key=lambda entry: entry[1], reverse=True)[:10]:
+            print(f"  {elapsed:8.2f}s  {name}", flush=True)
     print("All workspace test targets and doctests passed", flush=True)
     return 0
 
