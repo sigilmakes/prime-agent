@@ -21,7 +21,9 @@ fn source(format: CatalogFormat, defaults: Option<Model>) -> ResolvedSource {
         format,
         url: "https://trusted.test/models".into(),
         headers: vec![("Authorization".into(), "fixture-key".into())],
-        defaults,
+        unknown_models: defaults.map_or(UnknownModelPolicy::KnownOnly, |model| {
+            UnknownModelPolicy::ConfiguredDefaults { model }
+        }),
         is_current: None,
     }
 }
@@ -29,8 +31,7 @@ fn source(format: CatalogFormat, defaults: Option<Model>) -> ResolvedSource {
 fn seed_cache(owner: &ProviderCatalog, source: &ResolvedSource, payload: &serde_json::Value) {
     let normalized = normalize(source.format, payload, None).unwrap();
     let cache = owner.cache(source);
-    let snapshot =
-        json!({"url":source.url,"scope":source.scope(),"fetchedAt":1,"payload":normalized});
+    let snapshot = json!({"url":format!("discovery:{}", source.identity()),"scope":source.scope(),"fetchedAt":1,"payload":normalized});
     let path = owner
         .dir
         .as_ref()
@@ -78,7 +79,10 @@ fn explicit_defaults_admit_unknown_ids_and_scope_changes_hide_metadata() {
     changed.headers[0].1 = "new-account".into();
     assert!(owner.resolve(&[changed], &[]).0.is_empty());
     let mut changed = src;
-    changed.defaults.as_mut().unwrap().api = "new-policy".into();
+    let UnknownModelPolicy::ConfiguredDefaults { model } = &mut changed.unknown_models else {
+        panic!("configured policy");
+    };
+    model.api = "new-policy".into();
     assert!(owner.resolve(&[changed], &[]).0.is_empty());
 }
 
@@ -386,4 +390,67 @@ fn normalized_partial_metadata_drops_transport_fields_and_bad_fresh_envelopes_fa
     )
     .unwrap();
     assert_eq!(denied[0]["denied"], true);
+}
+
+#[test]
+fn automatic_unknown_models_require_complete_actual_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = ProviderCatalog::new(Some(dir.path().into()));
+    let mut src = source(CatalogFormat::OpenRouter, None);
+    src.unknown_models = UnknownModelPolicy::ProviderMetadata {
+        template: template("custom", "family"),
+    };
+    let complete = Metadata {
+        id: "new".into(),
+        context: Some(32000),
+        max_tokens: Some(4096),
+        input: Some(vec![ModelInput::Text]),
+        reasoning: Some(false),
+        input_price: Some(1.0),
+        output_price: Some(2.0),
+        cache_read: Some(0.5),
+        cache_write: Some(1.5),
+        ..Default::default()
+    };
+    for missing in 0..5 {
+        let mut row = complete.clone();
+        match missing {
+            0 => row.input_price = None,
+            1 => row.output_price = None,
+            2 => row.cache_read = None,
+            3 => row.cache_write = None,
+            _ => {}
+        }
+        let path = dir
+            .path()
+            .join(format!("discovery-{}.v1.json", src.identity()));
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "url":format!("discovery:{}", src.identity()), "scope":src.scope(),
+                "fetchedAt":missing+1, "payload":[row]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        owner.cache(&src).reload_from_disk(&src.scope());
+        let models = owner.resolve(&[src.clone()], &[]).0;
+        assert_eq!(models.len(), usize::from(missing == 4));
+        if let Some(model) = models.first() {
+            assert_eq!(model.cost.input.as_f64(), 1.0);
+            assert_eq!(model.cost.output.as_f64(), 2.0);
+            assert_eq!(model.cost.cache_read.as_f64(), 0.5);
+            assert_eq!(model.cost.cache_write.as_f64(), 1.5);
+        }
+    }
+}
+
+#[test]
+fn discovery_route_rejects_embedded_userinfo_and_fragments() {
+    for url in [
+        "https://user:secret@host.test/v1",
+        "https://host.test/v1#secret",
+    ] {
+        assert!(CatalogFormat::OpenAi.discovery_url(url).is_none());
+    }
 }

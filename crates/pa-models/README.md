@@ -80,3 +80,14 @@ Depends on `pa-ai` (compiled transport templates: `models_generated`) and
 `pa-ai` is touched. Consumers live at or above `pa-agent` (registry wiring
 in `pa-core`). The plugins lane must not place its catalog code in `pa-ai`
 (pa-models already depends on it).
+
+## Discovery admission and cache privacy
+
+Unknown IDs require either explicit configured full defaults or complete provider
+metadata, including input, output, cache-read, and cache-write prices. Missing
+rates do not mean zero. This conservative limit may exclude models whose API
+omits cache prices. Known IDs still accept partial metadata updates.
+
+Discovery snapshots and revocations store only an opaque endpoint identity.
+The actual endpoint, including its query, is used only by the fetch closure.
+Discovery therefore does not reuse ETags; the curated/default caches still do.

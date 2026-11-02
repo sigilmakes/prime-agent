@@ -26,7 +26,7 @@ fn prime_inputs(base: &str, key: &str, team: &str) -> pa_models::CatalogInputs {
                 ("authorization".into(), format!("Bearer {key}")),
                 ("x-prime-team-id".into(), team.into()),
             ],
-            defaults: None,
+            unknown_models: pa_models::UnknownModelPolicy::KnownOnly,
             is_current: None,
         }],
         seeds: Vec::new(),

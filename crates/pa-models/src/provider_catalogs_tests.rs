@@ -179,7 +179,9 @@ fn credentials(provider: &str, secret: &str) -> CatalogInputs {
                     format!("Bearer {secret}")
                 },
             )],
-            defaults,
+            unknown_models: defaults.map_or(crate::UnknownModelPolicy::KnownOnly, |model| {
+                crate::UnknownModelPolicy::ConfiguredDefaults { model }
+            }),
             is_current: None,
         }],
         seeds: Vec::new(),
@@ -198,7 +200,9 @@ fn inputs(catalog: &ModelCatalog, auth: &CatalogInputs) -> CatalogInputs {
                 .into()
         };
         if source.format == CatalogFormat::Ollama {
-            source.defaults = inputs.seeds.first().cloned();
+            source.unknown_models = crate::UnknownModelPolicy::ConfiguredDefaults {
+                model: inputs.seeds.first().unwrap().clone(),
+            };
         }
     }
     inputs
@@ -679,4 +683,54 @@ async fn provider_refresh_keeps_effective_bundled_models_beyond_compiled_templat
             "{provider} refresh removed trusted packaged model"
         );
     }
+}
+
+#[tokio::test]
+async fn endpoint_query_credentials_never_enter_snapshot_or_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(|request| {
+        assert!(request.path.contains("api_key=endpoint-secret"));
+        if request.path.starts_with("/revoke") {
+            Response::status(401)
+        } else {
+            Response::json(json!({"data":[{"id":"fixture"}]}))
+        }
+    })
+    .await;
+    let catalog = server.catalog(dir.path());
+    let mut auth = credentials("openrouter", "fixture-header");
+    auth.sources[0].url = format!("{}/models?api_key=endpoint-secret", server.base);
+    catalog
+        .refresh(
+            &auth,
+            &crate::RefreshRequest {
+                policy: crate::RefreshPolicy::Force,
+                sources: Some(vec!["openrouter".into()]),
+            },
+        )
+        .await;
+    auth.sources[0].url = format!("{}/revoke?api_key=endpoint-secret", server.base);
+    catalog
+        .refresh(
+            &auth,
+            &crate::RefreshRequest {
+                policy: crate::RefreshPolicy::Force,
+                sources: Some(vec!["openrouter".into()]),
+            },
+        )
+        .await;
+    let mut found = 0;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("endpoint-secret"),
+                "{}",
+                path.display()
+            );
+            found += 1;
+        }
+    }
+    assert!(found >= 2, "snapshot and revocation were persisted");
 }

@@ -32,7 +32,11 @@ impl CatalogFormat {
     #[must_use]
     pub fn discovery_url(self, inference_base: &str) -> Option<String> {
         let mut url = reqwest::Url::parse(inference_base).ok()?;
-        if !matches!(url.scheme(), "http" | "https") {
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
             return None;
         }
         let base = url.path().trim_end_matches('/');
@@ -70,6 +74,14 @@ pub enum RefreshPolicy {
     IfStale,
 }
 
+/// Authority for admitting IDs absent from the trusted baseline.
+#[derive(Clone, Serialize)]
+pub enum UnknownModelPolicy {
+    KnownOnly,
+    ProviderMetadata { template: Model },
+    ConfiguredDefaults { model: Model },
+}
+
 /// Fully authorized request description. Credentials never enter snapshots or diagnostics.
 #[derive(Clone)]
 pub struct ResolvedSource {
@@ -78,7 +90,7 @@ pub struct ResolvedSource {
     pub format: CatalogFormat,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub defaults: Option<Model>,
+    pub unknown_models: UnknownModelPolicy,
     pub is_current: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
@@ -168,7 +180,7 @@ impl ResolvedSource {
                 &self.provider,
                 self.format,
                 &self.url,
-                &self.defaults,
+                &self.unknown_models,
             ))
             .expect("source identity is serializable"),
         )
@@ -205,7 +217,7 @@ impl ProviderCatalog {
         let mut caches = self.caches.lock().expect("provider catalog lock");
         Arc::clone(caches.entry(identity.clone()).or_insert_with(|| {
             Arc::new(CatalogCache::new(
-                &source.url,
+                &format!("discovery:{identity}"),
                 self.dir
                     .as_ref()
                     .map(|dir| dir.join(format!("discovery-{identity}.v1.json"))),
@@ -247,13 +259,36 @@ impl ProviderCatalog {
                 let exact = models
                     .iter()
                     .position(|model| model.provider == source.provider && model.id == row.id);
-                let template = exact
-                    .map(|index| &models[index])
-                    .or(source.defaults.as_ref());
+                let template = exact.map(|index| &models[index]).or_else(|| {
+                    match &source.unknown_models {
+                        UnknownModelPolicy::KnownOnly => None,
+                        UnknownModelPolicy::ConfiguredDefaults { model } => Some(model),
+                        UnknownModelPolicy::ProviderMetadata { template } => {
+                            // Until unknown costs have a representation, require every rate.
+                            (row.context.is_some()
+                                && row.max_tokens.is_some()
+                                && row.input.is_some()
+                                && row.reasoning.is_some()
+                                && row.input_price.is_some()
+                                && row.output_price.is_some()
+                                && row.cache_read.is_some()
+                                && row.cache_write.is_some())
+                            .then_some(template)
+                        }
+                    }
+                });
                 let Some(template) = template else {
                     continue;
                 };
                 let mut model = project(source, &row, template);
+                if exact.is_none()
+                    && matches!(
+                        source.unknown_models,
+                        UnknownModelPolicy::ProviderMetadata { .. }
+                    )
+                {
+                    model.thinking_level_map.clone_from(&row.thinking);
+                }
                 model.provider.clone_from(&source.provider);
                 if source.format == CatalogFormat::PrimeInferencePrivate {
                     private.push(model.clone());
@@ -283,29 +318,52 @@ impl ProviderCatalog {
             let source = source.clone();
             tasks.push(tokio::spawn(async move {
                 let format = source.format;
-                let fetch_payload = if format == CatalogFormat::Ollama {
-                    let url = source.url.clone();
-                    let headers = source.headers.clone();
-                    Some(Arc::new(move || {
-                        let url = url.clone();
-                        let headers = headers.clone();
-                        Box::pin(async move {
-                            crate::ollama_cloud::fetch_catalog_with_headers(&url, &headers).await
-                        })
-                            as std::pin::Pin<
-                                Box<
-                                    dyn std::future::Future<
-                                            Output = Result<
-                                                serde_json::Value,
-                                                crate::fetch::FetchError,
-                                            >,
-                                        > + Send,
-                                >,
-                            >
-                    }) as crate::cache::CatalogFetchPayload)
-                } else {
-                    None
-                };
+                let url = source.url.clone();
+                let headers = source.headers.clone();
+                // The cache identity is opaque: endpoint queries may contain credentials.
+                // This explicit fetch path intentionally does not reuse discovery ETags.
+                let fetch_payload = Some(Arc::new(move || {
+                    let url = url.clone();
+                    let headers = headers.clone();
+                    Box::pin(async move {
+                        if format == CatalogFormat::Ollama {
+                            return crate::ollama_cloud::fetch_catalog_with_headers(&url, &headers)
+                                .await;
+                        }
+                        let fetcher = if format == CatalogFormat::PrimeInferencePrivate {
+                            CatalogFetcher::with_limits(
+                                std::time::Duration::from_secs(10),
+                                2 * 1024 * 1024,
+                            )
+                        } else {
+                            CatalogFetcher::new()
+                        };
+                        match fetcher.fetch_with(&url, None, &headers).await? {
+                            crate::fetch::FetchOutcome::Fresh { body, .. } => {
+                                serde_json::from_slice(&body).map_err(|_| {
+                                    crate::fetch::FetchError::Transport {
+                                        message: "Invalid discovery JSON".into(),
+                                    }
+                                })
+                            }
+                            crate::fetch::FetchOutcome::NotModified => {
+                                Err(crate::fetch::FetchError::Transport {
+                                    message: "Unexpected discovery response without body".into(),
+                                })
+                            }
+                        }
+                    })
+                        as std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = Result<
+                                            serde_json::Value,
+                                            crate::fetch::FetchError,
+                                        >,
+                                    > + Send,
+                            >,
+                        >
+                }) as crate::cache::CatalogFetchPayload);
                 // Private authorization expires sooner than public metadata.
                 let force = policy == RefreshPolicy::Force
                     || (format == CatalogFormat::PrimeInferencePrivate

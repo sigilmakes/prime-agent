@@ -21,7 +21,7 @@ mod chain;
 mod discovery;
 pub use discovery::{
     ApplyPublication, CatalogFormat, CatalogInputs, CatalogSnapshot, RefreshPolicy,
-    RefreshPublication, RefreshRequest, ResolvedSource, SnapshotRequirement,
+    RefreshPublication, RefreshRequest, ResolvedSource, SnapshotRequirement, UnknownModelPolicy,
 };
 
 pub use chain::ModelCatalog;
