@@ -1,11 +1,7 @@
 //! Model subsystem: resolver and Prime Inference private models.
 
 pub use allowlist::{model_allowed, ModelAllowlistRefusal};
-pub use private_auth::{
-    get_private_prime_inference_models, private_prime_authorization_fingerprint,
-    read_private_prime_authorization_cache, write_private_prime_authorization_cache,
-    PrivatePrimeAuthorizationCache, PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
-};
+pub use private_auth::get_private_prime_inference_models;
 pub use registry::{
     ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth, SetModelSelectionError,
 };
