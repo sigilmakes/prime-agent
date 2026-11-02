@@ -969,49 +969,29 @@ impl Supervisor {
         // woken resident (the prompt lands as the next turn on the replayed file).
     }
 
-    /// The roster-row wake: a passive (or live-but-unregistered) row carrying
-    /// this active session id names the session file to launch a worker over.
+    /// Wake the preserved file from an active-id row or an exact passivated durable-id row.
     async fn wake_roster_session(
         self: &Arc<Self>,
         selector: &str,
     ) -> Option<crate::messaging::WakeOutcome> {
-        let mut files: Vec<String> = {
+        let summary = {
             let roster = self.roster.lock().unwrap();
-            roster
-                .by_active_session_id(selector)
-                .map(|row| {
-                    row.summary
-                        .get("sessionFile")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .into_iter()
-                .flatten()
-                .collect()
+            match roster_wake_summary(&roster, selector) {
+                Ok(summary) => summary?,
+                Err(error) => {
+                    return Some(crate::messaging::WakeOutcome::Failed(error.to_string()))
+                }
+            }
         };
-        files.sort();
-        files.dedup();
-        let session_file = files.first()?.clone();
-        // The passive row's durable summary carries the child identity: the depth + agent id
-        // ride the create's rest (without `rest.rlmDepth` the revived child never re-passivates).
-        let (depth, child_id) = {
-            let roster = self.roster.lock().unwrap();
-            roster
-                .by_active_session_id(selector)
-                .map_or((0, String::new()), |row| {
-                    (
-                        row.summary
-                            .get("rlmDepth")
-                            .and_then(Value::as_u64)
-                            .unwrap_or_default(),
-                        row.summary
-                            .get("agentId")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    )
-                })
-        };
+        let session_file = summary.get("sessionFile")?.as_str()?.to_string();
+        let depth = summary
+            .get("rlmDepth")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let child_id = summary
+            .get("rlmChildId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
             .map_or_else(|| "/".to_string(), |info| info.cwd);
         // The identity rides `config.rlmDepth` + `runtime_metadata.rlmChildId` —
@@ -1024,7 +1004,7 @@ impl Supervisor {
             name: None,
             config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
             telemetry_disabled: None,
-            runtime_metadata: Some(json!({ "rlmChildId": child_id })),
+            runtime_metadata: child_id.map(|id| json!({ "rlmChildId": id })),
             lifecycle: None,
             env: None,
             launch_env: None,
@@ -1187,6 +1167,37 @@ impl Supervisor {
     }
 }
 
+/// An active-id match wins; a passivated row can also be addressed by its exact durable id.
+fn roster_wake_summary(
+    roster: &crate::agent_roster::AgentRoster,
+    selector: &str,
+) -> Result<Option<Value>> {
+    if let Some(entry) = roster.by_active_session_id(selector) {
+        return Ok(Some(entry.summary.clone()));
+    }
+    let mut found: Option<(std::path::PathBuf, Value)> = None;
+    for entry in roster.entries() {
+        if entry.worker_id.is_some()
+            || entry.status != pa_types::daemon::agent_roster::AgentRosterStatus::Inactive
+            || entry.summary.get("sessionId").and_then(Value::as_str) != Some(selector)
+        {
+            continue;
+        }
+        let Some(file) = entry.summary.get("sessionFile").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = crate::lease::canonical_session_path(std::path::Path::new(file));
+        if let Some((previous, _)) = &found {
+            if previous != &path {
+                bail!("Ambiguous session selector \"{selector}\"");
+            }
+        } else {
+            found = Some((path, entry.summary));
+        }
+    }
+    Ok(found.map(|(_, summary)| summary))
+}
+
 /// The ledger edge a delete addresses, as `(child_id, child_file)`. `rlmChildId` is the durable
 /// key; the selector is the child's LIVE id, NOT the file stem. Order: (1a) edge matching BOTH
 /// the stem and the id; (1b) the LAST edge carrying the id; (2) the stem-matching edge.
@@ -1225,4 +1236,51 @@ pub(crate) fn spliced_client_line(command_id: &str, worker_payload: &[u8]) -> Ve
     }
     line.push(b'\n');
     line
+}
+
+#[cfg(test)]
+mod roster_wake_tests {
+    use super::*;
+
+    fn summary(id: &str, path: &str) -> Value {
+        json!({"id":id,"sessionId":id,"sessionFile":path,"runtimeKind":"top-level","rlmDepth":0})
+    }
+
+    #[test]
+    fn exact_passive_durable_id_preserves_custom_path_and_active_id_preference() {
+        let mut roster = crate::agent_roster::AgentRoster::new();
+        roster.write_summary(summary("durable-root", "/custom/root.jsonl"), None, None);
+        let found = roster_wake_summary(&roster, "durable-root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found["sessionFile"], "/custom/root.jsonl");
+        assert!(roster_wake_summary(&roster, "durable").unwrap().is_none());
+        let mut live = summary("other-root", "/custom/live.jsonl");
+        live["activeSessionId"] = json!("durable-root");
+        roster.write_summary(live, Some("live-worker"), None);
+        assert_eq!(
+            roster_wake_summary(&roster, "durable-root")
+                .unwrap()
+                .unwrap()["sessionFile"],
+            "/custom/live.jsonl"
+        );
+        assert!(roster_wake_summary(&roster, "other-root")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn distinct_passive_files_with_same_durable_id_are_ambiguous() {
+        let mut roster = crate::agent_roster::AgentRoster::new();
+        for (child, file) in [("one", "/custom/one.jsonl"), ("two", "/custom/two.jsonl")] {
+            let mut row = summary("same-id", file);
+            row["runtimeKind"] = json!("subagent");
+            row["rlmChildId"] = json!(child);
+            roster.write_summary(row, None, None);
+        }
+        assert!(roster_wake_summary(&roster, "same-id")
+            .unwrap_err()
+            .to_string()
+            .contains("Ambiguous session selector"));
+    }
 }
