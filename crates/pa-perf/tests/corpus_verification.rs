@@ -302,7 +302,7 @@ fn the_warm_pass_writes_product_sidecars() {
         assert!(window.read_stats().cache_bytes > 0);
         if path == manifest.markers.huge.file.as_path() {
             assert!(
-                !window.is_full_history(),
+                !window.full_history(),
                 "huge session retains a compacted suffix"
             );
             assert!(window.read_stats().jsonl_bytes < std::fs::metadata(path).unwrap().len());
