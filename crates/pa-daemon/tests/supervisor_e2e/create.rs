@@ -5,14 +5,14 @@
 use super::*;
 
 fn write_saved_header(path: &std::path::Path, header: serde_json::Value) {
-    let log = pa_core::session_log::SessionLog::open(
+    let mut log = pa_core::session_log::SessionLog::open(
         path.parent().expect("session directory"),
         path.file_stem().unwrap().to_str().unwrap(),
         std::time::Instant::now(),
     )
     .expect("open saved session log");
     assert!(matches!(
-        log.append_first(header, std::time::Instant::now()).unwrap(),
+        log.append_first(&header, std::time::Instant::now()),
         pa_core::session_log::Outcome::Committed { .. }
     ));
 }
