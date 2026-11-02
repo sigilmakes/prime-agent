@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use pa_core::session::read::read_entries;
+use pa_core::session_log::Row;
 use pa_daemon::rlm_ledger::RlmSpawnLedger;
 use pa_daemon::session_store::SessionFile;
 use pa_perf::corpus::{generate, CacheMode, CorpusOptions, Profile};
@@ -139,9 +140,9 @@ fn the_ledger_replays_through_the_product_reader() {
     );
 }
 
-/// Same seed, same tree: every file the generator owns is byte-identical
-/// (the ledger's `at` stamps come from the product writer's wall clock; the
-/// edge content is compared field-by-field instead).
+/// Same seed, same tree: file bytes match after root normalization. Native
+/// logs compare every decoded value after strict checksum validation because
+/// absolute paths change their checksums. Ledger edges exclude wall-clock stamps.
 #[test]
 fn the_same_seed_rebuilds_the_identical_tree() {
     let first = tempfile::tempdir().expect("temp dir");
@@ -214,6 +215,28 @@ fn the_same_seed_rebuilds_the_identical_tree() {
         }
         let read = |path: &Path, root: &Path| -> Vec<u8> {
             let bytes = std::fs::read(path).expect("read");
+            let bytes = if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && path
+                    .file_name()
+                    .is_none_or(|name| name != "refinement_history.jsonl")
+            {
+                assert!(!bytes.is_empty(), "the native log is nonempty");
+                let mut decoded = Vec::with_capacity(bytes.len());
+                let mut seq = 0;
+                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                    let line = line.strip_suffix(b"\n").expect("a committed native row");
+                    let row = Row::decode(line, seq).expect("valid original native row");
+                    seq = row.seq;
+                    serde_json::to_writer(&mut decoded, &(row.seq, row.ts, row.body))
+                        .expect("serialize every decoded value");
+                    decoded.push(b'\n');
+                }
+                decoded
+            } else {
+                bytes
+            };
             let root = root.to_string_lossy().into_owned().into_bytes();
             let mut normalized = Vec::with_capacity(bytes.len());
             let mut index = 0;
