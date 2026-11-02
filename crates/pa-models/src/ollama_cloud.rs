@@ -515,9 +515,15 @@ mod tests {
                 result.unwrap();
             }
         });
-        let payload = fetch_catalog_online(&format!("http://{addr}"), "Bearer fixture-key")
-            .await
-            .unwrap();
+        let payload = fetch_catalog_online(
+            &format!("http://{addr}"),
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_static("Bearer fixture-key"),
+            )]),
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
         assert_eq!(payload["deniedIds"], json!(["denied"]));
         let previous = json!({"models":{"transient":{"capabilities":["tools"],"model_info":{}},"denied":{"capabilities":["tools"],"model_info":{}}}});
@@ -551,7 +557,14 @@ mod tests {
             assert_ne!(socket.read(&mut buffer).await.unwrap(), 0);
             socket.write_all(b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/leak\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
         });
-        let result = fetch_catalog_online(&format!("http://{addr}"), "Bearer fixture-key").await;
+        let result = fetch_catalog_online(
+            &format!("http://{addr}"),
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_static("Bearer fixture-key"),
+            )]),
+        )
+        .await;
         server.await.unwrap();
         assert!(matches!(result, Err(FetchError::Status { status: 302 })));
     }
@@ -574,7 +587,14 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let result = fetch_catalog_online(&format!("http://{addr}"), "Bearer fixture-key").await;
+        let result = fetch_catalog_online(
+            &format!("http://{addr}"),
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_static("Bearer fixture-key"),
+            )]),
+        )
+        .await;
         server.await.unwrap();
         assert!(
             matches!(result, Err(FetchError::Transport { message }) if message == "Ollama Cloud response is too large")
@@ -592,7 +612,14 @@ mod tests {
             // The reader may close immediately on the first over-limit chunk.
             let _ = socket.write_all(response.as_bytes()).await;
         });
-        let result = fetch_catalog_online(&format!("http://{addr}"), "Bearer fixture-key").await;
+        let result = fetch_catalog_online(
+            &format!("http://{addr}"),
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_static("Bearer fixture-key"),
+            )]),
+        )
+        .await;
         server.await.unwrap();
         assert!(
             matches!(result, Err(FetchError::Transport { message }) if message == "Ollama Cloud response is too large")

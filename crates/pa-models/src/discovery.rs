@@ -375,18 +375,7 @@ fn normalize(
         .collect();
     let next = match format {
         CatalogFormat::PrimeInference | CatalogFormat::PrimeInferencePrivate => {
-            crate::prime_inference::parse_prime_inference_model_catalog(payload, true)?
-                .into_iter()
-                .filter(|entry| {
-                    crate::prime_inference::is_private_prime_inference_model_id(&entry.id)
-                        == (format == CatalogFormat::PrimeInferencePrivate)
-                })
-                .map(|entry| Metadata {
-                    id: entry.id.clone(),
-                    prime: Some(entry),
-                    ..Default::default()
-                })
-                .collect()
+            normalize_prime(format, payload, &prior)?
         }
         CatalogFormat::Ollama => normalize_ollama(payload, &prior)?,
         _ => normalize_rows(format, payload)?,
@@ -407,6 +396,109 @@ fn normalize(
         result.push(value);
     }
     Ok(serde_json::Value::Array(result))
+}
+
+fn normalize_prime(
+    format: CatalogFormat,
+    payload: &serde_json::Value,
+    prior: &BTreeMap<String, Metadata>,
+) -> Result<Vec<Metadata>, String> {
+    let rows = payload
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Invalid Prime Inference model list")?;
+    let mut result = BTreeMap::new();
+    for raw in rows {
+        let Some(id) = raw
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| valid_id(id))
+        else {
+            continue;
+        };
+        if crate::prime_inference::is_private_prime_inference_model_id(id)
+            != (format == CatalogFormat::PrimeInferencePrivate)
+        {
+            continue;
+        }
+        let mut sanitized = raw.clone();
+        let Some(fields) = sanitized.as_object_mut() else {
+            continue;
+        };
+        let pricing = raw.get("pricing");
+        let number = |key: &str| {
+            pricing
+                .and_then(|pricing| pricing.get(key))
+                .and_then(serde_json::Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+        };
+        // The existing parser derives routing controls; absent prices are not assertions of zero.
+        fields.insert(
+            "pricing".into(),
+            serde_json::json!({
+                "input_usd_per_mtok":number("input_usd_per_mtok").unwrap_or(0.0),
+                "output_usd_per_mtok":number("output_usd_per_mtok").unwrap_or(0.0),
+            }),
+        );
+        fields.remove("specs");
+        let mut entries = crate::prime_inference::parse_prime_inference_model_catalog(
+            &serde_json::json!({"data":[sanitized]}),
+            true,
+        )?;
+        let Some(mut entry) = entries.pop() else {
+            continue;
+        };
+        if let Some(old) = prior.get(id).and_then(|old| old.prime.as_ref()) {
+            if entry.supported_parameters.is_none() {
+                entry
+                    .supported_parameters
+                    .clone_from(&old.supported_parameters);
+            }
+            if entry.reasoning_efforts.is_none() {
+                entry.reasoning_efforts.clone_from(&old.reasoning_efforts);
+            }
+            if entry.reasoning_mandatory.is_none() {
+                entry.reasoning_mandatory = old.reasoning_mandatory;
+            }
+        }
+        let specs = raw.get("specs");
+        let input = specs
+            .and_then(|specs| specs.get("modalities"))
+            .and_then(|modes| modes.get("input"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|modes| {
+                modes
+                    .iter()
+                    .any(|mode| mode.as_str() == Some("text"))
+                    .then(|| {
+                        let mut input = vec![ModelInput::Text];
+                        if modes.iter().any(|mode| mode.as_str() == Some("image")) {
+                            input.push(ModelInput::Image);
+                        }
+                        input
+                    })
+            });
+        let row = Metadata {
+            id: id.into(),
+            name: entry.name.clone(),
+            context: positive(specs.and_then(|specs| specs.get("context_window"))),
+            max_tokens: positive(specs.and_then(|specs| specs.get("max_output_tokens"))),
+            reasoning: specs
+                .and_then(|specs| specs.get("supports_reasoning"))
+                .and_then(serde_json::Value::as_bool),
+            input,
+            input_price: number("input_usd_per_mtok"),
+            output_price: number("output_usd_per_mtok"),
+            cache_read: number("cache_read_usd_per_mtok"),
+            cache_write: number("cache_write_usd_per_mtok"),
+            prime: Some(entry),
+            ..Default::default()
+        };
+        if result.insert(id.to_string(), row).is_some() {
+            return Err("Duplicate Prime Inference model identity".into());
+        }
+    }
+    Ok(result.into_values().collect())
 }
 
 fn normalize_rows(
@@ -581,6 +673,32 @@ fn project(source: &ResolvedSource, row: &Metadata, template: &Model) -> Model {
     if template.id != row.id {
         model.name.clone_from(&row.id);
     }
+    if let Some(entry) = &row.prime {
+        let mut entry = entry.clone();
+        entry.input = row
+            .input_price
+            .unwrap_or_else(|| template.cost.input.as_f64());
+        entry.output = row
+            .output_price
+            .unwrap_or_else(|| template.cost.output.as_f64());
+        let mut seed = template.clone();
+        seed.id.clone_from(&entry.id);
+        if let Some(mut prime) = crate::prime_inference::build_prime_inference_models(
+            &[seed],
+            std::slice::from_ref(&entry),
+            true,
+            Some(0),
+        )
+        .and_then(|models| models.into_iter().next())
+        {
+            prime.provider.clone_from(&source.provider);
+            prime.api.clone_from(&template.api);
+            prime.base_url.clone_from(&template.base_url);
+            prime.headers.clone_from(&template.headers);
+            prime.max_tokens_explicit = template.max_tokens_explicit;
+            model = prime;
+        }
+    }
     if let Some(name) = &row.name {
         model.name.clone_from(name);
     }
@@ -609,24 +727,6 @@ fn project(source: &ResolvedSource, row: &Metadata, template: &Model) -> Model {
             *target = JsNumber::from(value);
         }
     }
-    if let Some(entry) = &row.prime {
-        let mut seed = template.clone();
-        seed.id.clone_from(&entry.id);
-        if let Some(mut prime) = crate::prime_inference::build_prime_inference_models(
-            &[seed],
-            std::slice::from_ref(entry),
-            true,
-            Some(0),
-        )
-        .and_then(|models| models.into_iter().next())
-        {
-            prime.provider.clone_from(&source.provider);
-            prime.api.clone_from(&template.api);
-            prime.base_url.clone_from(&template.base_url);
-            prime.headers.clone_from(&template.headers);
-            prime.max_tokens_explicit = template.max_tokens_explicit;
-            model = prime;
-        }
-    }
+
     model
 }

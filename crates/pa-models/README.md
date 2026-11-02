@@ -34,15 +34,28 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   hands it the fetcher, the generic `CatalogCache`, and the bundled asset
   bytes).
 - The build-time asset generator + release packer (the build lane).
-- Session auth storage, `models.json` parsing, and registry merges
-  (`pa-core`): the user's local `models.json` takes precedence over this
-  catalog and is merged by its owner.
+- Session auth storage and `models.json` parsing (`pa-core`). The caller
+  supplies trusted seed models and explicit discovery descriptors. The catalog
+  composes those seeds with the baseline before projecting optional metadata.
+  Discovery cannot alter transport, endpoint, or headers. Unknown IDs require
+  explicit defaults; missing or malformed metadata preserves local definitions.
 - The catalog repo's sync/export tooling (lives with the data).
 
 ## Public API
 
-- `ModelCatalog` (chain resolution + refresh cadence),
-  `RefreshTrigger`, `PrimeCredentials`
+- `ModelCatalog::snapshot(&CatalogInputs)` reads a local no-cold-start snapshot.
+- `ModelCatalog::refresh(&CatalogInputs, &RefreshRequest)` publishes selected
+  sources and returns a snapshot plus source reports.
+- `ModelCatalog::adopt(&CatalogInputs, SnapshotRequirement)` adopts validated
+  disk publications without network work.
+- `CatalogInputs` contains current trusted local seed models and authorized
+  `ResolvedSource` descriptors. Each source names its format, exact endpoint,
+  complete request headers, optional explicit defaults, and publication guard.
+  These inputs come from pa-core; pa-models never opens auth or config files.
+- Discovery formats cover OpenAI, OpenRouter, Anthropic, Google, Codex, Ollama,
+  and separate public/private Prime Inference sources. Private authorization
+  appears separately in `CatalogSnapshot::authorized_private_prime_models`;
+  baseline definitions alone never grant access.
 - `cache::CatalogCache<T>` (generic last-good cache; the plugins lane
   instantiates it with its own fail-closed parser),
   `cache::{RefreshOptions, PUBLIC_SCOPE}`

@@ -194,3 +194,26 @@ async fn scoped_refresh_retains_metadata_on_transient_failure_and_revokes_on_den
     assert_eq!(owner.resolve(&[src], &[base.clone()]).0, vec![base]);
     server.await.unwrap();
 }
+
+#[test]
+fn prime_optional_metadata_updates_independently_without_erasing_prices() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = ProviderCatalog::new(Some(dir.path().into()));
+    let base = template("custom", "known");
+    let src = source(CatalogFormat::PrimeInference, None);
+    seed_cache(
+        &owner,
+        &src,
+        &json!({"data":[{"id":"known","specs":{"context_window":77777},"supported_parameters":["tools","reasoning_effort"],"reasoning":{"supported_efforts":["low","high"]}}]}),
+    );
+    let actual = owner.resolve(&[src.clone()], &[base.clone()]).0;
+    assert_eq!(actual[0].context_window, 77777);
+    assert_eq!(actual[0].cost.input, base.cost.input);
+    assert_eq!(actual[0].cost.output, base.cost.output);
+    assert_eq!(actual[0].base_url, base.base_url);
+    assert!(actual[0].thinking_level_map.is_some());
+    let first=normalize(src.format,&json!({"data":[{"id":"known","specs":{"context_window":88888},"pricing":{"input_usd_per_mtok":9}}]}),None).unwrap();
+    let next = normalize(src.format, &json!({"data":[{"id":"known"}]}), Some(&first)).unwrap();
+    assert_eq!(next[0]["context"], 88888);
+    assert_eq!(next[0]["input_price"], 9.0);
+}
