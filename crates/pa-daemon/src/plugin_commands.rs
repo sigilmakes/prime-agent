@@ -663,15 +663,20 @@ return {
             .store
             .as_mut()
             .unwrap()
-            .set_path(blocker.join("session.jsonl"));
+            .set_path(blocker.join(format!("{session}.jsonl")));
         crate::plugin_job_events::publish(
             &fixture.worker.core,
             &fixture.worker.events,
             &session,
             &job,
         );
-        let start: Value = serde_json::from_slice(&received.recv().await.unwrap().payload).unwrap();
-        let end: Value = serde_json::from_slice(&received.recv().await.unwrap().payload).unwrap();
+        let (start, end) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            (received.recv().await.unwrap(), received.recv().await.unwrap())
+        })
+        .await
+        .expect("persistence diagnostic reaches attached client");
+        let start: Value = serde_json::from_slice(&start.payload).unwrap();
+        let end: Value = serde_json::from_slice(&end.payload).unwrap();
         assert_eq!(start["event"]["type"], "message_start");
         assert_eq!(end["event"]["type"], "message_end");
         let row = &end["event"]["message"];
