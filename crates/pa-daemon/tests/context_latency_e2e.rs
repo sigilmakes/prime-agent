@@ -202,7 +202,7 @@ fn seed_child_session(dir: &std::path::Path, child_id: &str) {
         content.push('\n');
         parent_id = Some(entry_id);
     }
-    std::fs::write(&file, content).expect("write seeded child session");
+    write_session_rows(&file, &content);
 }
 
 #[test]
@@ -337,4 +337,22 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
         "the background refresh never filled the cache with the seeded children \
          (expected {SEEDED_CHILDREN} within {CACHE_FILL_DEADLINE:?})"
     );
+}
+
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("native fixture log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(matches!(
+            log.append(&row, deadline),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
 }
