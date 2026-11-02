@@ -5,6 +5,10 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Instant;
+
+use anyhow::Context;
+use pa_core::session_log::{Outcome, Row, SessionLog};
 
 use pa_daemon::session_store::{session_header_line, SessionEntry};
 use pa_types::ai::{
@@ -210,7 +214,7 @@ fn usage(rng: &mut Rng) -> Usage {
 /// The row writer: one `SessionEntry` line, exactly as the product's store
 /// serializes it (`type`, `id`, `parentId`, `timestamp`, then the payload).
 struct Rows {
-    writer: std::io::BufWriter<std::fs::File>,
+    log: SessionLog,
     counter: u64,
     millis: u64,
     parent: Option<String>,
@@ -237,9 +241,10 @@ impl Rows {
             timestamp: iso_from_millis(self.millis),
             fields,
         };
-        let mut line = serde_json::to_string(&entry).expect("the entry serializes");
-        line.push('\n');
-        self.writer.write_all(line.as_bytes())?;
+        match self.log.append(&entry, Instant::now()) {
+            Outcome::Committed { .. } => {}
+            outcome => anyhow::bail!("corpus entry was not committed: {outcome:?}"),
+        }
         self.parent = Some(entry.id);
         Ok(())
     }
@@ -271,17 +276,27 @@ pub(crate) fn write_session_file(
         git: None,
         rest: serde_json::Map::new(),
     };
-    let file = std::fs::File::create(path)?;
+    let directory = path.parent().context("corpus session has no directory")?;
+    let id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("corpus session has no file id")?;
+    // Corpus generation owns this file; start a fresh deterministic log.
+    std::fs::File::create(path)?;
+    let log = SessionLog::open(directory, id, Instant::now())?;
     let mut rows = Rows {
-        writer: std::io::BufWriter::new(file),
+        log,
         counter: 0,
         millis: spec.start_ms,
         parent: None,
     };
-    let mut header_line =
-        serde_json::to_string(&session_header_line(&header)).expect("the header serializes");
-    header_line.push('\n');
-    rows.writer.write_all(header_line.as_bytes())?;
+    match rows
+        .log
+        .append_first(&session_header_line(&header), Instant::now())
+    {
+        Outcome::Committed { .. } => {}
+        outcome => anyhow::bail!("corpus header was not committed: {outcome:?}"),
+    }
 
     rows.push(
         "model_change",
@@ -483,9 +498,29 @@ pub(crate) fn write_session_file(
         }
     }
 
-    rows.writer.flush()?;
+    let count = rows.counter as usize;
+    drop(rows);
+    // Only the envelope stamp is outside the checksum. Pin it to the seeded
+    // payload timestamp without reserializing the checksummed row bytes.
+    let text = std::fs::read_to_string(path)?;
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut seq = 0;
+    for line in text.lines() {
+        let row = Row::decode(line.as_bytes(), seq)?;
+        seq = row.seq;
+        let timestamp = row.body["timestamp"]
+            .as_str()
+            .context("corpus row has no timestamp")?;
+        let stamp = format!("\"ts\":\"{}\"", row.ts);
+        let seeded = format!("\"ts\":\"{timestamp}\"");
+        writeln!(writer, "{}", line.replacen(&stamp, &seeded, 1))?;
+    }
+    writer.flush()?;
+    // Keep the normal lock inode, but clear its nondeterministic courtesy
+    // note after the offline writer closes. No corpus reader is running yet.
+    std::fs::write(path.with_extension("lock"), b"")?;
     Ok(Written {
-        rows: rows.counter as usize,
+        rows: count,
         last_user_text,
     })
 }
@@ -511,7 +546,7 @@ mod tests {
         for seed in 0..16 {
             for target in 9..32 {
                 let written = super::write_session_file(
-                    &directory.path().join("session.jsonl"),
+                    &directory.path().join("corpus-regression.jsonl"),
                     &spec(target),
                     &mut crate::rng::Rng::new(seed),
                 )
@@ -527,24 +562,22 @@ mod tests {
     #[test]
     fn long_sessions_crossing_compaction_threshold_have_exactly_one_boundary() {
         let directory = tempfile::tempdir().expect("session directory");
-        let path = directory.path().join("session.jsonl");
+        let path = directory.path().join("corpus-regression.jsonl");
         for seed in 0..8 {
             super::write_session_file(&path, &spec(1500), &mut crate::rng::Rng::new(seed))
                 .expect("write long session");
-            let rows: Vec<serde_json::Value> = std::fs::read_to_string(&path)
-                .expect("read session")
-                .lines()
-                .map(|line| serde_json::from_str(line).expect("valid row"))
-                .collect();
+            let entries = pa_core::session::read::read_entries(&path)
+                .expect("read validated generated session");
             assert_eq!(
-                rows.iter()
-                    .filter(|row| row["type"] == "compaction")
+                entries
+                    .iter()
+                    .filter(|entry| matches!(
+                        entry,
+                        pa_types::session::FileEntry::Compaction { .. }
+                    ))
                     .count(),
                 1,
                 "seed={seed}"
-            );
-            let entries = pa_core::session::parse_session_entries(
-                &std::fs::read_to_string(&path).expect("read generated session"),
             );
             let context = pa_core::session::build_session_context(&entries, None);
             assert_eq!(
