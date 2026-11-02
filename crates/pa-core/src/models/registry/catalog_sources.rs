@@ -68,9 +68,11 @@ impl ModelRegistry {
         .map(str::to_string)
         .collect();
         providers.extend(custom.providers.keys().cloned());
+        let mut seeds = crate::models::private_auth::get_private_prime_inference_models();
+        seeds.extend(custom.models.clone());
         let mut inputs = CatalogInputs {
             sources: Vec::new(),
-            seeds: custom.models.clone(),
+            seeds,
         };
         let requested: Vec<_> = providers
             .iter()

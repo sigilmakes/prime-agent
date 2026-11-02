@@ -388,14 +388,6 @@ impl ModelRegistry {
             .collect();
         self.preferred_default = snapshot.preferred_default;
         let mut models = snapshot.models;
-        for private in super::private_auth::get_private_prime_inference_models() {
-            if !models
-                .iter()
-                .any(|model| model.provider == private.provider && model.id == private.id)
-            {
-                models.push(private);
-            }
-        }
         // Explicit local definitions and overrides are the final authority, never remote metadata.
         for model in &mut models {
             if let Some(over) = custom.provider_overrides.get(&model.provider) {
