@@ -74,6 +74,9 @@ impl AgentSessionEngine {
         {
             return Ok(());
         }
+        // Public model switches hold the construction gate before changing the
+        // SDK model. Adoption must share that fence, not only the target lock.
+        let _build = self.model_mutation_build_guard()?;
         let _reload_serialized = self
             .reload_lock
             .lock()
@@ -112,8 +115,7 @@ impl AgentSessionEngine {
                 ));
             core.update_model_facts(&refreshed);
         }
-        // Reload and model-switch credentials may have advanced while reading
-        // the catalog. Replace only model metadata, and only for the same id.
+        // Keep the serving credentials while replacing same-identity metadata.
         let mut target = self.provider_target.write().expect("provider target lock");
         if let Some(target) = target.as_mut().filter(|target| {
             target.model.provider == current.provider && target.model.id == current.id
@@ -738,6 +740,91 @@ mod refresh_tests {
         assert!(!engine
             .model_metadata_refresh_pending
             .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn refresh_metadata_serializes_with_the_public_model_switch_gate() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Arc::new(bare_engine(dir.path()));
+        write_models(&engine, &["selected", "replacement"], 128_000);
+        engine.configure_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("selected".into()),
+            ..Default::default()
+        });
+        let original = engine.resolve_model().unwrap();
+        engine.ensure_core_session(&original).unwrap();
+        let core = engine.session.blocking_lock().clone().unwrap();
+        write_models(&engine, &["selected", "replacement"], 256_000);
+
+        // The public set_model command owns this guard through its SDK mutation
+        // and target publication. Pending adoption must wait for both to finish.
+        let build = engine.model_mutation_build_guard().unwrap();
+        engine.schedule_model_metadata_refresh();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let refreshing = Arc::clone(&engine);
+        let adoption = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = refreshing.apply_scheduled_model_metadata_refresh();
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let early = done_rx.recv_timeout(Duration::from_millis(50));
+        let sdk_while_held = engine.runtime.block_on(core.session.agent().state()).model;
+        let target_while_held = engine.provider_target.read().unwrap().clone().unwrap();
+        let switched = engine.switch_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("replacement".into()),
+            api_key: Some("switch-live-key".into()),
+            ..Default::default()
+        });
+        let switched_target = engine.provider_target.read().unwrap().clone().unwrap();
+        write_models(&engine, &["selected", "replacement"], 512_000);
+        drop(build);
+
+        let waited_for_switch = matches!(&early, Err(mpsc::RecvTimeoutError::Timeout));
+        match early {
+            Ok(result) => result.unwrap(),
+            Err(mpsc::RecvTimeoutError::Timeout) => done_rx
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap(),
+            Err(error) => panic!("adoption disconnected: {error}"),
+        }
+        adoption.join().unwrap();
+        assert!(waited_for_switch, "adoption bypassed the model switch gate");
+        let original_wire: pa_agent::types::Model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&original).unwrap();
+        assert_eq!(sdk_while_held, original_wire);
+        assert_eq!(target_while_held.model, original);
+        assert!(switched);
+        let target = engine.provider_target.read().unwrap().clone().unwrap();
+        assert_eq!(target.model.id, "replacement");
+        assert_eq!(target.model.context_window, 512_000);
+        assert_eq!(target.api_key.as_deref(), Some("switch-live-key"));
+        assert_eq!(target.api_key, switched_target.api_key);
+        assert_eq!(target.headers, switched_target.headers);
+        assert_eq!(target.service_tier, switched_target.service_tier);
+        assert_eq!(
+            engine.current_selection().model.as_deref(),
+            Some("replacement")
+        );
+        assert_eq!(engine.model_metadata().unwrap()["id"], "replacement");
+        assert_eq!(engine.model_context_window(), Some(512_000));
+        let facts = core.turn_boundary.bound().unwrap();
+        assert_eq!(facts.model_info.id, "replacement");
+        assert_eq!(facts.model_info.provider, "refresh-test");
+        assert_eq!(facts.context_window, Some(512_000));
+        let expected_wire: pa_agent::types::Model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&target.model).unwrap();
+        assert_eq!(
+            engine.runtime.block_on(core.session.agent().state()).model,
+            expected_wire
+        );
     }
 
     #[test]
