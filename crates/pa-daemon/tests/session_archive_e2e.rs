@@ -294,7 +294,7 @@ fn log_mentions(agent_dir: &Path, needle: &str) -> bool {
 fn boot_sweep_archives_aged_sessions_and_the_catalog_excludes_them() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions = agent_dir.join("sessions");
+    let sessions = pa_daemon::paths::sessions_dir(&agent_dir).expect("default sessions dir");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
 
     let aged_one = write_fixture(&sessions, "aged-one");
@@ -318,7 +318,9 @@ fn boot_sweep_archives_aged_sessions_and_the_catalog_excludes_them() {
     let archive = agent_dir.join("sessions-archive");
     wait_until(Duration::from_secs(10), || {
         (archive.join(format!("{aged_one}.jsonl")).is_file()
-            && archive.join(format!("{aged_two}.jsonl")).is_file())
+            && archive.join(format!("{aged_two}.jsonl")).is_file()
+            && !sessions.join(format!("{aged_one}.jsonl")).is_file()
+            && !sessions.join(format!("{aged_two}.jsonl")).is_file())
         .then_some(())
     });
     assert!(!sessions.join(format!("{aged_one}.jsonl")).is_file());
@@ -350,7 +352,7 @@ fn boot_sweep_archives_aged_sessions_and_the_catalog_excludes_them() {
 fn an_archived_session_resumes_through_the_wake() {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions = agent_dir.join("sessions");
+    let sessions = pa_daemon::paths::sessions_dir(&agent_dir).expect("default sessions dir");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let url = spawn_mock("archive reply");
     std::fs::write(
@@ -440,10 +442,7 @@ fn an_archived_session_resumes_through_the_wake() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     wait_until(Duration::from_secs(10), || {
-        archive
-            .join(format!("{session_id}.jsonl"))
-            .is_file()
-            .then_some(())
+        (archive.join(format!("{session_id}.jsonl")).is_file() && !saved.is_file()).then_some(())
     });
     assert!(!saved.is_file(), "aged session left the sessions dir");
 

@@ -201,7 +201,7 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
     const SMALL_FILES: usize = 30;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("default sessions dir");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
     // The scan's tail: one grown file (its fold is the dominant cost),

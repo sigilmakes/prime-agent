@@ -244,7 +244,7 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
 fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions = agent_dir.join("sessions");
+    let sessions = pa_daemon::paths::sessions_dir(&agent_dir).expect("default sessions dir");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let url = spawn_mock("wake reply");
     std::fs::write(
