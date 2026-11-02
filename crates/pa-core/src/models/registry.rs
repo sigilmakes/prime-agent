@@ -240,7 +240,8 @@ impl ModelRegistry {
     }
 
     pub fn has_configured_auth(&self, model: &Model) -> bool {
-        self.auth.has_auth(&model.provider)
+        let status = self.auth.get_auth_status_local(&model.provider);
+        (status.source.is_some() && status.source != Some(crate::auth::types::AuthSource::Stale))
             || self.has_configured_provider_request_auth(&model.provider)
     }
 
@@ -558,7 +559,7 @@ impl ModelRegistry {
     /// gate, picker-open keeps it; private authorization keeps its own gating.
     pub async fn refresh_available_models_with_trigger(
         &mut self,
-        trigger: pa_models::RefreshTrigger,
+        trigger: crate::models::RefreshTrigger,
     ) -> Vec<Model> {
         self.refresh_available_models_forced(trigger.forced()).await
     }

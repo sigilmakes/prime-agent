@@ -7,10 +7,25 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use pa_models::{ModelCatalog, PrimeCredentials};
+use pa_models::ModelCatalog;
 
-use crate::auth::types::PRIME_INFERENCE_PROVIDER_ID;
 use crate::auth::AuthStorage;
+
+/// The core scheduler's refresh reasons; the catalog only receives freshness policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshTrigger {
+    Startup,
+    Hourly,
+    PickerOpen,
+    AuthChange,
+}
+
+impl RefreshTrigger {
+    #[must_use]
+    pub fn forced(self) -> bool {
+        matches!(self, Self::Startup | Self::AuthChange)
+    }
+}
 
 /// The models cache dir for a `models.json` path: `<agent-dir>/models` — both catalog caches live
 /// beside `models.json`.
@@ -55,20 +70,6 @@ pub fn install_catalog(models_json_path: &Path, catalog: Arc<ModelCatalog>) {
         .insert(Some(models_dir(models_json_path)), catalog);
 }
 
-/// The Prime Inference credentials from the auth stored under `agent_dir`.
-/// Callers re-read auth from disk before each use, so a login or logout is
-/// picked up by the next refresh (the scope-keyed caches discard the
-/// previous account's view).
-#[must_use]
-pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
-    let auth = AuthStorage::create(agent_dir);
-    let api_key = auth.get_api_key_local(PRIME_INFERENCE_PROVIDER_ID)?;
-    let team_id = auth
-        .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
-        .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
-    Some(PrimeCredentials { api_key, team_id })
-}
-
 /// The daemon's warm-up: the shared catalog for `agent_dir` with a forced
 /// [`RefreshTrigger::Startup`] refresh fired (fire-and-forget: every
 /// registry resolves the last-good chain immediately while the caches
@@ -83,7 +84,7 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
             dir.join("models.json"),
         );
         registry
-            .refresh_available_models_with_trigger(pa_models::RefreshTrigger::Startup)
+            .refresh_available_models_with_trigger(crate::models::RefreshTrigger::Startup)
             .await;
     });
     catalog
@@ -114,7 +115,7 @@ pub fn spawn_hourly_refresh(agent_dir: &Path) {
                 dir.join("models.json"),
             );
             registry
-                .refresh_available_models_with_trigger(pa_models::RefreshTrigger::Hourly)
+                .refresh_available_models_with_trigger(crate::models::RefreshTrigger::Hourly)
                 .await;
         }
     });

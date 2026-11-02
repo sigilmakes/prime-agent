@@ -143,7 +143,21 @@ impl ModelRegistry {
             }
             let inherit = !cross_origin || injected;
             let key_config = discovery.and_then(|discovery| discovery.api_key.as_deref());
-            let key = if let Some(key) = key_config {
+            let protocol_auth_header = match format {
+                CatalogFormat::Anthropic => "x-api-key",
+                CatalogFormat::Google => "x-goog-api-key",
+                _ => "authorization",
+            };
+            let explicit_auth_header = discovery
+                .and_then(|discovery| discovery.headers.as_ref())
+                .is_some_and(|headers| {
+                    headers
+                        .keys()
+                        .any(|name| name.eq_ignore_ascii_case(protocol_auth_header))
+                });
+            let key = if explicit_auth_header {
+                None
+            } else if let Some(key) = key_config {
                 resolve_value(key, local_only)
             } else if inherit {
                 let stored = if local_only {
@@ -198,7 +212,7 @@ impl ModelRegistry {
                     unresolved = true;
                 }
             }
-            if unresolved || (key_config.is_some() && key.is_none()) {
+            if unresolved || (key_config.is_some() && key.is_none() && !explicit_auth_header) {
                 continue;
             }
             if let Some(key) = &key {
@@ -243,10 +257,13 @@ impl ModelRegistry {
                         .as_ref()
                         .map(|model| (model.api.clone(), model.base_url.clone())),
                 )
-            } else if builtin_format(&provider).is_some()
+            } else if builtin_format(&provider) == Some(format)
                 && !matches!(
                     format,
-                    CatalogFormat::OpenAi | CatalogFormat::Anthropic | CatalogFormat::Google
+                    CatalogFormat::OpenAi
+                        | CatalogFormat::Anthropic
+                        | CatalogFormat::Google
+                        | CatalogFormat::Codex
                 )
             {
                 template

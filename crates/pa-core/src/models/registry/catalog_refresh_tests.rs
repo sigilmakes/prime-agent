@@ -574,7 +574,16 @@ async fn codex_refresh_adds_provider_models_and_local_apply_updates_the_picker_r
     )]))
     .await;
     install(&path, &server);
-    write_config(&path, json!({"openai-codex":{"baseUrl":server.base}}));
+    write_config(
+        &path,
+        json!({"openai-codex":{
+            "baseUrl":server.base,
+            "discovery":{"format":"codex","defaults":{
+                "contextWindow":32000,"maxTokens":8000,"reasoning":false,"input":["text"],
+                "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}
+            }}
+        }}),
+    );
     let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
         json!({"https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account"}}).to_string(),
     );
@@ -771,4 +780,44 @@ fn inherited_team_environment_change_supersedes_publication() {
         !guard(),
         "a header-resolved team change must fence the old request"
     );
+}
+
+#[test]
+fn picker_availability_never_executes_stored_commands_or_oauth_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("picker-auth-command-ran");
+    let command = format!("!printf ran > '{}'; printf fixture-key", marker.display());
+    let probe = Arc::new(OAuthProbe::default());
+    let data = AuthStorageData(
+        json!({
+            "openai":{"type":"api_key","key":command},
+            "anthropic":{"type":"oauth","access":"fixture","refresh":"fixture-refresh","expires":0}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let mut auth = AuthStorage::in_memory_without_env(&data, probe.clone());
+    auth.set_runtime_api_key("openai", "fixture-runtime".into());
+    let mut registry = ModelRegistry::create(auth, dir.path().join("models.json"));
+    assert!(registry.get_provider_auth_status("openai").source.is_some());
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "openai"));
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "anthropic"));
+    registry.auth.remove_runtime_api_key("openai");
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "openai"));
+    assert!(
+        !marker.exists(),
+        "painting availability must not execute stored or lower command candidates"
+    );
+    assert_eq!(probe.keys.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.refreshes.load(Ordering::SeqCst), 0);
 }
