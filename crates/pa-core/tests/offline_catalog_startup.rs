@@ -294,7 +294,14 @@ fn startup_child() {
             }
             "online" => {
                 let base = std::env::var("PA_OFFLINE_LOOPBACK_URL").unwrap();
-                let catalog = ModelCatalog::with_urls(None, None, &format!("{base}/online"), &base);
+                let dir = tempfile::tempdir().unwrap();
+                let catalog = ModelCatalog::with_urls(
+                    Some(dir.path().into()),
+                    None,
+                    &format!("{base}/online"),
+                    &base,
+                );
+
                 let publication = catalog
                     .refresh(
                         &CatalogInputs::default(),
