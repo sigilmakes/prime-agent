@@ -477,7 +477,7 @@ async fn ollama_anonymous_fallback_live_multiendpoint_persistence_and_revocation
     let mut expected = fallback.clone();
     expected.extend(crate::ollama_cloud::parse_catalog(&json!({"models":{"cloud/private":{"capabilities":["tools","vision","thinking"],"model_info":{"test.context_length":256_000}}}}),&server.base).unwrap());
     let live = |catalog: &ModelCatalog, auth: &CatalogInputs| {
-        snapshot(&catalog, auth)
+        snapshot(catalog, auth)
             .into_iter()
             .filter(|model| model.provider == "ollama-cloud")
             .collect::<Vec<_>>()

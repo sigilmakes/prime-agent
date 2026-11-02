@@ -158,6 +158,12 @@ impl ModelCatalog {
             authorized_private_prime_models,
         }
     }
+    /// Refresh selected sources and return the current catalog snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a spawned discovery, curated, or default refresh task panics or
+    /// is cancelled before completing.
     pub async fn refresh(
         &self,
         inputs: &crate::CatalogInputs,

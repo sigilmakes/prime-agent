@@ -48,7 +48,9 @@ fn optional_metadata_preserves_baseline_and_never_changes_transport() {
     let base = template("custom", "known");
     let src = source(CatalogFormat::OpenRouter, None);
     assert_eq!(
-        owner.resolve(&[src.clone()], &[base.clone()]).0,
+        owner
+            .resolve(std::slice::from_ref(&src), std::slice::from_ref(&base))
+            .0,
         vec![base.clone()]
     );
     seed_cache(
@@ -56,7 +58,7 @@ fn optional_metadata_preserves_baseline_and_never_changes_transport() {
         &src,
         &json!({"data":[{"id":"known","name":"Remote label","context_length":45678,"api":"bad","baseUrl":"https://untrusted.test","headers":{"authorization":"bad"}},{"id":"unknown"}]}),
     );
-    let (models, _) = owner.resolve(&[src], &[base.clone()]);
+    let (models, _) = owner.resolve(&[src], std::slice::from_ref(&base));
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].context_window, 45678);
     assert_eq!(models[0].api, base.api);
@@ -71,7 +73,7 @@ fn explicit_defaults_admit_unknown_ids_and_scope_changes_hide_metadata() {
     let base = template("custom", "family");
     let src = source(CatalogFormat::OpenAi, Some(base.clone()));
     seed_cache(&owner, &src, &json!({"data":[{"id":"new"}]}));
-    let models = owner.resolve(&[src.clone()], &[]).0;
+    let models = owner.resolve(std::slice::from_ref(&src), &[]).0;
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "new");
     assert_eq!(models[0].api, base.api);
@@ -116,7 +118,7 @@ fn private_grants_require_current_private_snapshot_not_baseline_or_public_metada
     );
     let payload = json!({"data":[{"id":private_id,"pricing":{"input_usd_per_mtok":1,"output_usd_per_mtok":2},"specs":{"context_window":32000,"max_output_tokens":4000}}]});
     seed_cache(&owner, &src, &payload);
-    assert_eq!(owner.resolve(&[src.clone()], &[]).1.len(), 1);
+    assert_eq!(owner.resolve(std::slice::from_ref(&src), &[]).1.len(), 1);
     src.is_current = Some(Arc::new(|| false));
     assert!(owner
         .resolve(&[src], &[template("custom", private_id)])
@@ -179,23 +181,32 @@ async fn scoped_refresh_retains_metadata_on_transient_failure_and_revokes_on_den
     let mut src = source(CatalogFormat::OpenRouter, None);
     src.url = endpoint;
     owner
-        .refresh(&[src.clone()], RefreshPolicy::Force, None)
+        .refresh(std::slice::from_ref(&src), RefreshPolicy::Force, None)
         .await;
     assert_eq!(
-        owner.resolve(&[src.clone()], &[base.clone()]).0[0].context_window,
+        owner
+            .resolve(std::slice::from_ref(&src), std::slice::from_ref(&base))
+            .0[0]
+            .context_window,
         65536
     );
     owner
-        .refresh(&[src.clone()], RefreshPolicy::Force, None)
+        .refresh(std::slice::from_ref(&src), RefreshPolicy::Force, None)
         .await;
     assert_eq!(
-        owner.resolve(&[src.clone()], &[base.clone()]).0[0].context_window,
+        owner
+            .resolve(std::slice::from_ref(&src), std::slice::from_ref(&base))
+            .0[0]
+            .context_window,
         65536
     );
     owner
-        .refresh(&[src.clone()], RefreshPolicy::Force, None)
+        .refresh(std::slice::from_ref(&src), RefreshPolicy::Force, None)
         .await;
-    assert_eq!(owner.resolve(&[src], &[base.clone()]).0, vec![base]);
+    assert_eq!(
+        owner.resolve(&[src], std::slice::from_ref(&base)).0,
+        vec![base]
+    );
     server.await.unwrap();
 }
 
@@ -210,7 +221,9 @@ fn prime_optional_metadata_updates_independently_without_erasing_prices() {
         &src,
         &json!({"data":[{"id":"known","specs":{"context_window":77777},"supported_parameters":["tools","reasoning_effort"],"reasoning":{"supported_efforts":["low","high"]}}]}),
     );
-    let actual = owner.resolve(&[src.clone()], &[base.clone()]).0;
+    let actual = owner
+        .resolve(std::slice::from_ref(&src), std::slice::from_ref(&base))
+        .0;
     assert_eq!(actual[0].context_window, 77777);
     assert_eq!(actual[0].cost.input, base.cost.input);
     assert_eq!(actual[0].cost.output, base.cost.output);
@@ -323,14 +336,14 @@ fn private_zero_prices_and_reasoning_controls_survive_durable_reload() {
     let payload = json!({"data":[{"id":"internal/zero","pricing":{"input_usd_per_mtok":0,"output_usd_per_mtok":0},"supported_parameters":["tools","reasoning_effort"],"reasoning":{"supported_efforts":["low","high"]}}]});
     let owner = ProviderCatalog::new(Some(dir.path().into()));
     seed_cache(&owner, &source, &payload);
-    let (_, before) = owner.resolve(&[source.clone()], &[]);
+    let (_, before) = owner.resolve(std::slice::from_ref(&source), &[]);
     assert_eq!(before.len(), 1);
-    assert_eq!(before[0].cost.input.as_f64(), 0.0);
-    assert_eq!(before[0].cost.output.as_f64(), 0.0);
+    assert_eq!(before[0].cost.input, JsNumber::from(0.0));
+    assert_eq!(before[0].cost.output, JsNumber::from(0.0));
     assert!(before[0].thinking_level_map.is_some());
     let fresh = ProviderCatalog::new(Some(dir.path().into()));
     assert!(fresh
-        .adopt(&[source.clone()], None)
+        .adopt(std::slice::from_ref(&source), None)
         .applied
         .contains(&source.id));
     assert_eq!(fresh.resolve(&[source], &[]).1, before);
@@ -345,7 +358,7 @@ fn all_id_only_adapters_need_trusted_models_and_reject_nonchat_metadata() {
     ] {
         let base = template("custom", "known");
         let payload = if format == CatalogFormat::Google {
-            json!({"models":[{"name":"models/known","supportedGenerationMethods":["generateContent"],"inputTokenLimit":500000.0},{"name":"models/unknown"},{"name":"models/embed","supportedGenerationMethods":["embedContent"]}]})
+            json!({"models":[{"name":"models/known","supportedGenerationMethods":["generateContent"],"inputTokenLimit":500_000.0},{"name":"models/unknown"},{"name":"models/embed","supportedGenerationMethods":["embedContent"]}]})
         } else {
             json!({"data":[{"id":"known","display_name":"Known"},{"id":"unknown"}]})
         };
@@ -353,12 +366,12 @@ fn all_id_only_adapters_need_trusted_models_and_reject_nonchat_metadata() {
         let owner = ProviderCatalog::new(Some(dir.path().into()));
         let src = source(format, None);
         seed_cache(&owner, &src, &payload);
-        let models = owner.resolve(&[src], &[base.clone()]).0;
+        let models = owner.resolve(&[src], std::slice::from_ref(&base)).0;
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "known");
         assert_eq!(models[0].api, base.api);
         if format == CatalogFormat::Google {
-            assert_eq!(models[0].context_window, 500000);
+            assert_eq!(models[0].context_window, 500_000);
         }
     }
 }
@@ -434,13 +447,13 @@ fn automatic_unknown_models_require_complete_actual_metadata() {
         )
         .unwrap();
         owner.cache(&src).reload_from_disk(&src.scope());
-        let models = owner.resolve(&[src.clone()], &[]).0;
+        let models = owner.resolve(std::slice::from_ref(&src), &[]).0;
         assert_eq!(models.len(), usize::from(missing == 4));
         if let Some(model) = models.first() {
-            assert_eq!(model.cost.input.as_f64(), 1.0);
-            assert_eq!(model.cost.output.as_f64(), 2.0);
-            assert_eq!(model.cost.cache_read.as_f64(), 0.5);
-            assert_eq!(model.cost.cache_write.as_f64(), 1.5);
+            assert_eq!(model.cost.input, JsNumber::from(1.0));
+            assert_eq!(model.cost.output, JsNumber::from(2.0));
+            assert_eq!(model.cost.cache_read, JsNumber::from(0.5));
+            assert_eq!(model.cost.cache_write, JsNumber::from(1.5));
         }
     }
 }
@@ -479,7 +492,7 @@ fn openrouter_complete_published_metadata_admits_unknown_but_id_only_does_not() 
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "priced");
     assert!(models[0].reasoning);
-    assert_eq!(models[0].cost.input.as_f64(), 1.0);
+    assert_eq!(models[0].cost.input, JsNumber::from(1.0));
     for (parameters, expected) in [
         (json!([]), Some(false)),
         (json!(["reasoning"]), Some(true)),

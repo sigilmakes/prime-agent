@@ -386,7 +386,6 @@ impl ProviderCatalog {
                             merge_payload: Some(Arc::new(move |payload, previous| {
                                 normalize(format, payload, previous)
                             })),
-                            ..Default::default()
                         },
                     )
                     .await;
@@ -648,108 +647,9 @@ fn normalize_rows(
         };
         match format {
             CatalogFormat::Anthropic => metadata.name = string(row.get("display_name")),
-            CatalogFormat::Codex => {
-                metadata.name = string(row.get("display_name"));
-                metadata.context = positive(row.get("context_window"));
-                metadata.denied = row
-                    .get("visibility")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|visibility| visibility != "list");
-                if let Some(modes) = row
-                    .get("input_modalities")
-                    .and_then(serde_json::Value::as_array)
-                {
-                    if modes.iter().any(|mode| mode.as_str() == Some("text")) {
-                        let mut input = vec![ModelInput::Text];
-                        if modes.iter().any(|mode| mode.as_str() == Some("image")) {
-                            input.push(ModelInput::Image);
-                        }
-                        metadata.input = Some(input);
-                    }
-                }
-                if let Some(levels) = row
-                    .get("supported_reasoning_levels")
-                    .and_then(serde_json::Value::as_array)
-                {
-                    let mut map = ThinkingLevelMap::new();
-                    for level in [
-                        pa_types::ai::ModelThinkingLevel::Off,
-                        pa_types::ai::ModelThinkingLevel::Minimal,
-                        pa_types::ai::ModelThinkingLevel::Low,
-                        pa_types::ai::ModelThinkingLevel::Medium,
-                        pa_types::ai::ModelThinkingLevel::High,
-                        pa_types::ai::ModelThinkingLevel::Xhigh,
-                        pa_types::ai::ModelThinkingLevel::Max,
-                    ] {
-                        let name = level.wire_name();
-                        let supported = levels.iter().any(|value| {
-                            value
-                                .as_str()
-                                .or_else(|| value.get("effort").and_then(serde_json::Value::as_str))
-                                == Some(name)
-                        });
-                        map.insert(level, supported.then(|| name.to_string()));
-                    }
-                    if map.values().any(Option::is_some) {
-                        metadata.reasoning = Some(true);
-                        metadata.thinking = Some(map);
-                    }
-                }
-            }
-            CatalogFormat::Google => {
-                metadata.denied = row
-                    .get("supportedGenerationMethods")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|methods| {
-                        !methods
-                            .iter()
-                            .any(|method| method.as_str() == Some("generateContent"))
-                    });
-                metadata.name = string(row.get("displayName"));
-                metadata.context = positive(row.get("inputTokenLimit"));
-                metadata.max_tokens = positive(row.get("outputTokenLimit"));
-            }
-            CatalogFormat::OpenRouter => {
-                metadata.reasoning = row
-                    .get("supported_parameters")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|parameters| {
-                        parameters.iter().any(|parameter| {
-                            matches!(parameter.as_str(), Some("reasoning" | "reasoning_effort"))
-                        })
-                    });
-                metadata.name = string(row.get("name"));
-                metadata.context = positive(row.get("context_length"));
-                metadata.max_tokens = positive(
-                    row.get("top_provider")
-                        .and_then(|value| value.get("max_completion_tokens")),
-                );
-                for direction in ["input_modalities", "output_modalities"] {
-                    if let Some(modes) = row
-                        .get("architecture")
-                        .and_then(|arch| arch.get(direction))
-                        .and_then(serde_json::Value::as_array)
-                    {
-                        if !modes.iter().any(|mode| mode.as_str() == Some("text")) {
-                            metadata.denied = true;
-                        }
-                        if direction == "input_modalities" && !metadata.denied {
-                            let mut input = vec![ModelInput::Text];
-                            if modes.iter().any(|mode| mode.as_str() == Some("image")) {
-                                input.push(ModelInput::Image);
-                            }
-                            metadata.input = Some(input);
-                        }
-                    }
-                }
-                let pricing = row.get("pricing");
-                metadata.input_price = price(pricing.and_then(|value| value.get("prompt")));
-                metadata.output_price = price(pricing.and_then(|value| value.get("completion")));
-                metadata.cache_read =
-                    price(pricing.and_then(|value| value.get("input_cache_read")));
-                metadata.cache_write =
-                    price(pricing.and_then(|value| value.get("input_cache_write")));
-            }
+            CatalogFormat::Codex => normalize_codex_row(row, &mut metadata),
+            CatalogFormat::Google => normalize_google_row(row, &mut metadata),
+            CatalogFormat::OpenRouter => normalize_openrouter_row(row, &mut metadata),
             _ => {}
         }
         result.insert(id.to_string(), metadata);
@@ -758,6 +658,109 @@ fn normalize_rows(
         return Err("Provider list has no valid metadata".into());
     }
     Ok(result.into_values().collect())
+}
+
+fn normalize_codex_row(row: &serde_json::Value, metadata: &mut Metadata) {
+    metadata.name = string(row.get("display_name"));
+    metadata.context = positive(row.get("context_window"));
+    metadata.denied = row
+        .get("visibility")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|visibility| visibility != "list");
+    if let Some(modes) = row
+        .get("input_modalities")
+        .and_then(serde_json::Value::as_array)
+    {
+        if modes.iter().any(|mode| mode.as_str() == Some("text")) {
+            let mut input = vec![ModelInput::Text];
+            if modes.iter().any(|mode| mode.as_str() == Some("image")) {
+                input.push(ModelInput::Image);
+            }
+            metadata.input = Some(input);
+        }
+    }
+    if let Some(levels) = row
+        .get("supported_reasoning_levels")
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut map = ThinkingLevelMap::new();
+        for level in [
+            pa_types::ai::ModelThinkingLevel::Off,
+            pa_types::ai::ModelThinkingLevel::Minimal,
+            pa_types::ai::ModelThinkingLevel::Low,
+            pa_types::ai::ModelThinkingLevel::Medium,
+            pa_types::ai::ModelThinkingLevel::High,
+            pa_types::ai::ModelThinkingLevel::Xhigh,
+            pa_types::ai::ModelThinkingLevel::Max,
+        ] {
+            let name = level.wire_name();
+            let supported = levels.iter().any(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("effort").and_then(serde_json::Value::as_str))
+                    == Some(name)
+            });
+            map.insert(level, supported.then(|| name.to_string()));
+        }
+        if map.values().any(Option::is_some) {
+            metadata.reasoning = Some(true);
+            metadata.thinking = Some(map);
+        }
+    }
+}
+
+fn normalize_google_row(row: &serde_json::Value, metadata: &mut Metadata) {
+    metadata.denied = row
+        .get("supportedGenerationMethods")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|methods| {
+            !methods
+                .iter()
+                .any(|method| method.as_str() == Some("generateContent"))
+        });
+    metadata.name = string(row.get("displayName"));
+    metadata.context = positive(row.get("inputTokenLimit"));
+    metadata.max_tokens = positive(row.get("outputTokenLimit"));
+}
+
+fn normalize_openrouter_row(row: &serde_json::Value, metadata: &mut Metadata) {
+    metadata.reasoning = row
+        .get("supported_parameters")
+        .and_then(serde_json::Value::as_array)
+        .map(|parameters| {
+            parameters.iter().any(|parameter| {
+                matches!(parameter.as_str(), Some("reasoning" | "reasoning_effort"))
+            })
+        });
+    metadata.name = string(row.get("name"));
+    metadata.context = positive(row.get("context_length"));
+    metadata.max_tokens = positive(
+        row.get("top_provider")
+            .and_then(|value| value.get("max_completion_tokens")),
+    );
+    for direction in ["input_modalities", "output_modalities"] {
+        if let Some(modes) = row
+            .get("architecture")
+            .and_then(|arch| arch.get(direction))
+            .and_then(serde_json::Value::as_array)
+        {
+            if !modes.iter().any(|mode| mode.as_str() == Some("text")) {
+                metadata.denied = true;
+            }
+            if direction == "input_modalities" && !metadata.denied {
+                let mut input = vec![ModelInput::Text];
+                if modes.iter().any(|mode| mode.as_str() == Some("image")) {
+                    input.push(ModelInput::Image);
+                }
+                metadata.input = Some(input);
+            }
+        }
+    }
+    let pricing = row.get("pricing");
+    metadata.input_price = price(pricing.and_then(|value| value.get("prompt")));
+    metadata.output_price = price(pricing.and_then(|value| value.get("completion")));
+    metadata.cache_read = price(pricing.and_then(|value| value.get("input_cache_read")));
+    metadata.cache_write = price(pricing.and_then(|value| value.get("input_cache_write")));
 }
 
 fn normalize_ollama(
