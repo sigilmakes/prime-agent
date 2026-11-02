@@ -292,10 +292,22 @@ fn session_rows(harness: &Harness, type_: &str) -> Vec<Value> {
                         pa_types::session::FileEntry::Header { header } if header.id == "grown-import"))
         })
         .expect("the imported session's copy in the session dir");
-    pa_core::session::read::read_entries(&file)
-        .expect("validated imported session rows")
-        .into_iter()
-        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+    let bytes = std::fs::read(&file).expect("imported session snapshot");
+    pa_core::session::read::read_entries_from(std::io::Cursor::new(&bytes))
+        .expect("validated imported session rows");
+    // Inspect stored values without normalizing accepted wire aliases through FileEntry.
+    let mut sequence = 0;
+    bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(|line| {
+            let row = pa_core::session_log::Row::decode(
+                line.strip_suffix(b"\n").expect("validated row terminator"),
+                sequence,
+            )
+            .expect("validated session envelope");
+            sequence = row.seq;
+            row.body
+        })
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some(type_))
         .collect()
 }
