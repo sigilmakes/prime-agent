@@ -281,14 +281,6 @@ impl ProviderCatalog {
                     continue;
                 };
                 let mut model = project(source, &row, template);
-                if exact.is_none()
-                    && matches!(
-                        source.unknown_models,
-                        UnknownModelPolicy::ProviderMetadata { .. }
-                    )
-                {
-                    model.thinking_level_map.clone_from(&row.thinking);
-                }
                 model.provider.clone_from(&source.provider);
                 if source.format == CatalogFormat::PrimeInferencePrivate {
                     private.push(model.clone());
