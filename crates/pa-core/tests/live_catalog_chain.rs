@@ -192,7 +192,10 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
     data.push(json!({
         "id": "anthropic/live-only-model",
         "display_name": "Live Only Model",
-        "pricing": { "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0 },
+        "pricing": {
+            "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+            "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+        },
         "specs": {
             "context_window": 64_000, "max_output_tokens": 8_192,
             "supports_reasoning": false,
@@ -202,7 +205,10 @@ fn pi_payload(repriced_id: &str, repriced_input: f64) -> String {
     data.push(json!({
         "id": "internal/glm-5.3-fast",
         "display_name": "GLM 5.3 Fast (internal)",
-        "pricing": { "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1 },
+        "pricing": {
+            "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
+            "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+        },
         "specs": {
             "context_window": 400_000, "max_output_tokens": 131_072,
             "supports_reasoning": true,
