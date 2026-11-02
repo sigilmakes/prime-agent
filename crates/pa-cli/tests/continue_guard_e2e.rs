@@ -269,10 +269,9 @@ fn print_continue_refuses_an_active_daemon_session() {
     );
 }
 
-/// A session file held by a live FOREIGN lease holder (this test process
-/// stands in for the other product's holder) refuses `--resume`. No daemon
-/// runs: the guard's lease probe must catch a holder no roster of this
-/// product's daemon can see; the guard runs before the file is opened.
+/// A session file held by a live process outside the daemon roster refuses
+/// `--resume`. This test process holds the execution lock; the print process
+/// must discover that ownership before opening the session file.
 #[test]
 fn print_resume_refuses_a_foreign_lease_holder() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -305,9 +304,8 @@ fn print_resume_refuses_a_foreign_lease_holder() {
         pa_core::session_log::Outcome::Committed { .. }
     ));
 
-    // The foreign holder: this test process takes the runtime lease, in
-    // exactly the role the other product's daemon worker plays. The
-    // execution lock is mandatory, like the worker's lock.
+    // Hold the same OS execution lock as a resident worker, without
+    // registering a worker in any daemon roster.
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
         "foreign01ab3c",
@@ -316,20 +314,16 @@ fn print_resume_refuses_a_foreign_lease_holder() {
         .expect("the execution lock must be held");
     std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
 
-    // The test holder is a separate process, not a hosted session. Its
-    // shared target-resume path does not identify a Prime Agent build.
-    // The refusal names the actual image, the recorded id, and the takeover.
+    // The actionable refusal is independent of build-directory provenance.
+    // The classifier's unit tests cover product flavor; this guard must name
+    // the actual holder, recorded session id, and precise takeover action.
     let holder_image = std::env::current_exe()
         .expect("own exe")
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let expected = format!(
+    let expected_takeover = format!(
         concat!(
-            "Error: This session is currently open in another process ",
-            "(active in foreign01ab3c) — a live process this daemon does not host holds the file's ",
-            "runtime lease.\n",
-            "\n",
             "• Take over on this daemon:\n",
             "  kill {} # the holder is {}\n",
             "  Then retry — the file unlocks when the holder exits.\n",
@@ -352,7 +346,15 @@ fn print_resume_refuses_a_foreign_lease_holder() {
     );
     assert_eq!(code, 1);
     assert!(stdout.is_empty(), "stdout: {stdout}");
-    assert_eq!(stderr, expected);
+    assert!(
+        stderr.starts_with("Error: This session is currently open in "),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("(active in foreign01ab3c)"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.ends_with(&expected_takeover), "stderr: {stderr}");
 
     holder.release();
 
