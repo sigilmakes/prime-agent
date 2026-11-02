@@ -311,6 +311,21 @@ impl ModelRegistry {
                     let mut private = source;
                     private.id = "prime-inference-private".into();
                     private.format = CatalogFormat::PrimeInferencePrivate;
+                    // Private routes are arbitrary internal deployments: the public
+                    // provider template's reasoning ladder and request shape do not
+                    // describe them. Their template is the bundled private route.
+                    if let UnknownModelPolicy::ProviderMetadata { template } =
+                        &mut private.unknown_models
+                    {
+                        if let Some(mut bundled) =
+                            crate::models::private_auth::get_private_prime_inference_models()
+                                .into_iter()
+                                .next()
+                        {
+                            bundled.base_url = self.catalog.prime_inference_base_url().to_string();
+                            *template = bundled;
+                        }
+                    }
                     inputs.sources.push(private);
                 }
             } else {
