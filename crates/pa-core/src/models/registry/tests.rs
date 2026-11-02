@@ -164,8 +164,28 @@ fn header_precedence_model_over_provider() {
     );
 }
 
-#[test]
-fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
+async fn serve_catalog_once(payload: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/models", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let mut chunk = [0; 1024];
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&chunk[..read]);
+        }
+        let body = payload.to_string();
+        socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    });
+    (url, task)
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
     let dir = tempfile::tempdir().unwrap();
     let models_path = dir.path().join("models.json");
     std::fs::write(
@@ -177,14 +197,14 @@ fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
         } } }"#,
     )
     .unwrap();
-    // A live-catalog snapshot scoped to these credentials: one compiled
-    // model repriced, one new entry, well past the coverage floor so
-    // the build accepts it. The scope-keyed cache serves this scope's
-    // snapshot only; another credential never sees it.
-    let auth = auth_without_env(&serde_json::json!({
-        "prime-inference": { "type": "api_key", "key": "live-key",
-            "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
-    }));
+    // Reprice one compiled model and admit one new entry through current
+    // scoped discovery. Another credential must not see this metadata.
+    let auth = || {
+        auth_without_env(&serde_json::json!({
+            "prime-inference": { "type": "api_key", "key": "live-key",
+                "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
+        }))
+    };
     let compiled = pa_models::transports::prime_inference_offline_entries();
     let repriced = &compiled[0];
     let mut entries = Vec::new();
@@ -214,20 +234,31 @@ fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
             "modalities": { "input": ["text"], "output": ["text"] },
         },
     }));
-    let scope = pa_models::prime_inference::scope_key("live-key", "team-1");
-    let snapshot = serde_json::json!({
-        "url": format!("{}/models", super::super::prime_inference::PRIME_INFERENCE_BASE_URL),
-        "scope": scope,
-        "fetchedAt": 1,
-        "payload": { "data": entries },
-    });
-    std::fs::create_dir_all(dir.path().join("models")).unwrap();
-    std::fs::write(
-        dir.path().join("models/prime-inference-models-cache.json"),
-        serde_json::to_vec(&snapshot).unwrap(),
-    )
-    .unwrap();
-    let mut registry = ModelRegistry::create(auth, &models_path);
+    let (url, response) = serve_catalog_once(serde_json::json!({ "data": entries })).await;
+    let catalog = || {
+        Arc::new(pa_models::ModelCatalog::with_discovery_urls(
+            Some(dir.path().join("models")),
+            None,
+            pa_models::fetch::MODEL_CATALOG_URL,
+            super::super::prime_inference::PRIME_INFERENCE_BASE_URL,
+            &std::collections::HashMap::from([("prime-inference".to_string(), url.clone())]),
+            pa_models::ollama_cloud::BASE_URL,
+        ))
+    };
+    super::super::catalog_chain::install_catalog(&models_path, catalog());
+    let mut writer = ModelRegistry::create(auth(), &models_path);
+    let report = writer
+        .refresh_catalog_sources(Some(&["prime-inference-public".to_string()]))
+        .await;
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(
+        report.sources[0].status,
+        pa_types::model_refresh::ModelRefreshStatus::Updated
+    );
+    response.await.unwrap();
+    // A new catalog must read the public facade's durable scoped metadata.
+    super::super::catalog_chain::install_catalog(&models_path, catalog());
+    let mut registry = ModelRegistry::create(auth(), &models_path);
     let all = registry.get_all().to_vec();
     // The live repriced model replaced its compiled template (other
     // providers may serve the same id; match the provider too).
@@ -272,15 +303,10 @@ fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
 }
 
 #[test]
-fn a_missing_or_corrupt_cache_falls_back_to_the_bundled_catalog() {
+fn invalid_models_config_keeps_the_bundled_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let models_path = dir.path().join("models.json");
     std::fs::write(&models_path, "{ not json").unwrap();
-    std::fs::write(
-        dir.path().join("prime-inference-models-cache.json"),
-        "{ not json",
-    )
-    .unwrap();
     let registry = ModelRegistry::create(auth_with(&serde_json::json!({})), &models_path);
     assert!(registry
         .get_all()
