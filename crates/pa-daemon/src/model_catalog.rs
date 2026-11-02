@@ -198,6 +198,21 @@ mod tests {
                             }
                         }
                         let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                        // Builtin discovery overrides point at `/blocked/*`: answer them
+                        // without recording, so scripted answers and request counts stay
+                        // exactly the inference/catalog traffic under test.
+                        let path = head
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or_default()
+                            .to_string();
+                        if path.starts_with("/blocked") {
+                            let _ = socket
+                                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                                .await;
+                            return;
+                        }
                         requests.lock().expect("request log").push(head);
                         let answer = answers.lock().expect("answer queue").pop_front();
                         let response = match answer {
@@ -319,7 +334,10 @@ mod tests {
         data.push(json!({
             "id": marker,
             "display_name": marker,
-            "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+            "pricing": {
+                "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+                "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+            },
             "specs": {
                 "context_window": 200_000,
                 "max_output_tokens": 32_768,
@@ -330,25 +348,31 @@ mod tests {
         serde_json::to_string(&json!({"data": data})).unwrap()
     }
 
-    /// The private-model entitlement payload: full-specs entries for
-    /// exactly the ids the account is authorized for.
-    fn private_payload(ids: &[&str]) -> String {
-        let data: Vec<Value> = ids
-            .iter()
-            .map(|id| {
-                json!({
-                    "id": id,
-                    "display_name": id,
-                    "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
-                    "specs": {
-                        "context_window": 200_000,
-                        "max_output_tokens": 32_768,
-                        "supports_reasoning": true,
-                        "modalities": {"input": ["text"], "output": ["text"]},
-                    },
-                })
-            })
-            .collect();
+    /// One private-model entitlement row: full specs for an authorized id.
+    fn private_row(id: &str) -> Value {
+        json!({
+            "id": id,
+            "display_name": id,
+            "pricing": {
+                "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+                "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+            },
+            "specs": {
+                "context_window": 200_000,
+                "max_output_tokens": 32_768,
+                "supports_reasoning": true,
+                "modalities": {"input": ["text"], "output": ["text"]},
+            },
+        })
+    }
+
+    /// A payload valid for both Prime Inference sources: each parser keeps
+    /// only the rows its format owns, so the fixture does not depend on which
+    /// of the two discovery requests the mock answers first.
+    fn pi_combined_payload(marker: &str, extra: &[Value]) -> String {
+        let snapshot: Value = serde_json::from_str(&pi_snapshot_payload(marker)).unwrap();
+        let mut data = snapshot["data"].as_array().cloned().unwrap_or_default();
+        data.extend(extra.iter().cloned());
         serde_json::to_string(&json!({"data": data})).unwrap()
     }
 
@@ -356,29 +380,29 @@ mod tests {
     /// parameters (`supported_parameters` with `reasoning`/`reasoning_effort`
     /// plus the supported efforts) — the shape the internal `DeepSeek` routes
     /// serve: reasoning arrives only when a request addresses it.
-    fn reasoning_private_payload(id: &str) -> String {
-        serde_json::to_string(&json!({
-            "data": [{
-                "id": id,
-                "display_name": id,
-                "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
-                "specs": {
-                    "context_window": 200_000,
-                    "max_output_tokens": 32_768,
-                    "supports_reasoning": true,
-                    "modalities": {"input": ["text"], "output": ["text"]},
-                },
-                "supported_parameters": [
-                    "max_tokens", "temperature", "tools", "tool_choice",
-                    "reasoning", "reasoning_effort",
-                ],
-                "reasoning": {
-                    "supported_efforts": ["none", "low", "high", "max"],
-                    "default_effort": "high",
-                },
-            }]
-        }))
-        .unwrap()
+    fn reasoning_private_row(id: &str) -> Value {
+        json!({
+            "id": id,
+            "display_name": id,
+            "pricing": {
+                "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+                "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+            },
+            "specs": {
+                "context_window": 200_000,
+                "max_output_tokens": 32_768,
+                "supports_reasoning": true,
+                "modalities": {"input": ["text"], "output": ["text"]},
+            },
+            "supported_parameters": [
+                "max_tokens", "temperature", "tools", "tool_choice",
+                "reasoning", "reasoning_effort",
+            ],
+            "reasoning": {
+                "supported_efforts": ["none", "low", "high", "max"],
+                "default_effort": "high",
+            },
+        })
     }
 
     fn write_auth_json(agent_dir: &Path, api_key: &str, team_id: &str) {
@@ -404,7 +428,6 @@ mod tests {
                 "providers": {
                     "prime-inference": {
                         "api": "openai-completions",
-                        "baseUrl": "http://127.0.0.1:9/v1",
                         "apiKey": "sk-catalog-worker",
                         "models": [
                             {"id": "mock-1", "name": "Mock 1", "api": "openai-completions",
@@ -417,6 +440,26 @@ mod tests {
             .to_string(),
         )
         .expect("write models.json");
+    }
+
+    /// Persisted provider discovery snapshots under the agent's models dir.
+    fn discovery_caches(agent_dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(agent_dir.join("models")) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("discovery-") && name.ends_with(".v1.json")
+                    })
+            })
+            .collect();
+        paths.sort();
+        paths
     }
 
     /// The hermetic fixture: a temp agent dir, both fetch layers aimed at
@@ -447,11 +490,26 @@ mod tests {
         let server = CatalogServer::start(create_answers).await;
         let bundled_dir = dir.join("bundled");
         std::fs::create_dir_all(&bundled_dir).expect("bundled dir");
-        let catalog = pa_models::ModelCatalog::with_urls(
+        let blocked = server.url("/blocked");
+        let discovery_urls: std::collections::HashMap<String, String> = [
+            "openai",
+            "openrouter",
+            "anthropic",
+            "google",
+            "openai-codex",
+            "ollama-cloud",
+            "default",
+        ]
+        .into_iter()
+        .map(|provider| (provider.to_string(), format!("{blocked}/{provider}")))
+        .collect();
+        let catalog = pa_models::ModelCatalog::with_discovery_urls(
             Some(agent_dir.join("models")),
             Some(bundled_dir),
             &server.url("/catalog"),
             &server.url("/api/v1"),
+            &discovery_urls,
+            &format!("{blocked}/ollama"),
         );
         pa_core::models::install_catalog(&agent_dir.join("models.json"), Arc::new(catalog));
         let config = WorkerConfig {
@@ -474,15 +532,20 @@ mod tests {
             )
             .await;
         assert!(created.success, "create failed: {created:?}");
-        // The create path's background refresh settles when its last
-        // write lands (the private-authorization cache).
-        let private_cache = agent_dir.join("prime-inference-private-models.json");
+        // The create path's background refresh settles when both Prime
+        // Inference discovery snapshots (public and private) have landed.
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !private_cache.exists() {
+        while discovery_caches(&agent_dir).len() < 2 {
             assert!(
                 Instant::now() < deadline,
-                "the create-path refresh never settled; requests so far: {:?}",
-                server.recorded_requests()
+                "the create-path refresh never settled; requests so far: {:?}; models dir: {:?}",
+                server.recorded_requests(),
+                std::fs::read_dir(agent_dir.join("models"))
+                    .map(|entries| entries
+                        .flatten()
+                        .map(|entry| entry.file_name())
+                        .collect::<Vec<_>>())
+                    .unwrap_or_default()
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -507,8 +570,14 @@ mod tests {
     fn create_phase_answers() -> Vec<Answer> {
         vec![
             Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
-            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
-            Answer::Raw(ok_json(&private_payload(&["internal/team-a-private"]))),
+            Answer::Raw(ok_json(&pi_combined_payload(
+                "live/team-a-marker",
+                &[private_row("internal/team-a-private")],
+            ))),
+            Answer::Raw(ok_json(&pi_combined_payload(
+                "live/team-a-marker",
+                &[private_row("internal/team-a-private")],
+            ))),
         ]
     }
 
@@ -590,16 +659,17 @@ mod tests {
         // A login switched the account between the create path's warm-up
         // and this picker open: the scope observation detects the change.
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
+        // Both Prime sources fetch on the scope change and either order is
+        // legitimate: the gate parks whichever request arrives first, and
+        // the combined payload answers both parsers.
         let (release, held) = gate();
         fixture.server.push(held);
         fixture
             .server
-            .push(Answer::Raw(ok_json(&pi_snapshot_payload(
+            .push(Answer::Raw(ok_json(&pi_combined_payload(
                 "live/team-b-marker",
+                &[],
             ))));
-        fixture
-            .server
-            .push(Answer::Raw(ok_json(&private_payload(&[]))));
         let requests_before = fixture.server.request_count();
 
         let started = Instant::now();
@@ -615,13 +685,12 @@ mod tests {
         assert!(!has_model(&served, "live/team-b-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));
 
-        let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
+        let _ = release.send(ok_json(&pi_combined_payload(
+            "live/team-b-marker",
+            &[],
+        )));
         await_catalog_changed(&mut fixture.events).await;
         let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(
-            has_model(&fresh, "probe-v2"),
-            "the refreshed provider catalog"
-        );
         assert_canonical_models_order(&fresh);
         assert_canonical_models_order(&served);
         assert!(has_model(&fresh, "live/team-b-marker"));
@@ -680,12 +749,10 @@ mod tests {
         fixture.server.push(held);
         fixture
             .server
-            .push(Answer::Raw(ok_json(&pi_snapshot_payload(
+            .push(Answer::Raw(ok_json(&pi_combined_payload(
                 "live/team-b-marker",
+                &[],
             ))));
-        fixture
-            .server
-            .push(Answer::Raw(ok_json(&private_payload(&[]))));
         let requests_before = fixture.server.request_count();
 
         let (first, second, third, fourth, fifth) = tokio::join!(
@@ -709,10 +776,10 @@ mod tests {
         // Exactly one refresh left the worker while the provider fetch was
         // held; the deadline is on the request log, never a fixed sleep.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while fixture.server.request_count() < requests_before + 1 {
+        while fixture.server.request_count() < requests_before + 2 {
             assert!(
                 Instant::now() < deadline,
-                "the forced refresh never started: {:?}",
+                "the coalesced refresh never started: {:?}",
                 fixture.server.recorded_requests()
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -723,28 +790,32 @@ mod tests {
                 .iter()
                 .filter(|head| head.starts_with("GET /catalog "))
                 .count(),
-            1,
-            "concurrent opens must coalesce to one curated fetch: {refresh_heads:?}"
+            0,
+            "the public catalog stays fresh across an auth change: {refresh_heads:?}"
         );
-        assert!(
-            refresh_heads.len() - requests_before <= 2,
-            "at most one curated and one concurrent Prime fetch may start: {refresh_heads:?}"
+        assert_eq!(
+            refresh_heads.len() - requests_before,
+            2,
+            "one cycle: the public and private Prime fetches: {refresh_heads:?}"
         );
 
-        // Release the held fetch: the one refresh cycle lands (provider +
-        // snapshot + entitlement = 3 requests total), the queued trailing
-        // re-arm finds every gate warm and fetches nothing.
-        let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
+        // Release the held fetch: the one refresh cycle lands (public and
+        // private Prime = 2 requests total), the queued trailing re-arm finds
+        // every gate warm and fetches nothing.
+        let _ = release.send(ok_json(&pi_combined_payload(
+            "live/team-b-marker",
+            &[],
+        )));
         await_catalog_changed(&mut fixture.events).await;
         assert_eq!(
             fixture.server.request_count() - requests_before,
-            3,
+            2,
             "the burst cost exactly one refresh cycle: {:?}",
             fixture.server.recorded_requests()
         );
         let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(has_model(&fresh, "probe-v2"));
         assert!(has_model(&fresh, "live/team-b-marker"));
+        assert!(!has_model(&fresh, "live/team-a-marker"));
         assert_canonical_models_order(&fresh);
     }
 
@@ -785,9 +856,13 @@ mod tests {
     async fn a_private_route_with_declared_reasoning_serves_addressable_levels() {
         let answers = vec![
             Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
-            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
-            Answer::Raw(ok_json(&reasoning_private_payload(
-                "internal/team-a-private",
+            Answer::Raw(ok_json(&pi_combined_payload(
+                "live/team-a-marker",
+                &[reasoning_private_row("internal/team-a-private")],
+            ))),
+            Answer::Raw(ok_json(&pi_combined_payload(
+                "live/team-a-marker",
+                &[reasoning_private_row("internal/team-a-private")],
             ))),
         ];
         let fixture = fixture(answers).await;
@@ -819,30 +894,18 @@ mod tests {
         let fixture = fixture(create_phase_answers()).await;
         // Age the on-disk authorization past its TTL so the next refresh
         // refetches the entitlements in the background.
-        let cache_path = fixture
-            .agent_dir
-            .join("prime-inference-private-models.json");
-        let document: Value =
+        let cache_path = discovery_caches(&fixture.agent_dir)
+            .into_iter()
+            .find(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|text| text.contains("internal/team-a-private"))
+            })
+            .expect("private discovery cache");
+        let mut document: Value =
             serde_json::from_str(&std::fs::read_to_string(&cache_path).expect("cache")).unwrap();
-        std::fs::write(
-            &cache_path,
-            serde_json::to_string(&json!({
-                "fingerprint": document["fingerprint"],
-                "data": document["data"],
-                "refreshedAt": 1u64,
-            }))
-            .unwrap(),
-        )
-        .expect("age the cache");
-        let revisioned_path = fixture
-            .agent_dir
-            .join("models/prime-inference-private-models.v2.json");
-        let mut revisioned: Value =
-            serde_json::from_slice(&std::fs::read(&revisioned_path).expect("revisioned cache"))
-                .unwrap();
-        revisioned["fetchedAt"] = json!(1u64);
-        revisioned["checkedAt"] = json!(1u64);
-        std::fs::write(&revisioned_path, revisioned.to_string()).expect("age authoritative cache");
+        document["fetchedAt"] = json!(1u64);
+        document["checkedAt"] = json!(1u64);
+        std::fs::write(&cache_path, document.to_string()).expect("age the private discovery cache");
         // The catalog chain stays hourly-gated from the create path; only the
         // private entitlement fetch runs. Its answer is a held gate: the
         // malformed body is released only after this test starts watching
@@ -897,7 +960,7 @@ mod tests {
     async fn refresh_failure_keeps_the_last_good_catalog_and_stays_silent() {
         let mut fixture = fixture(create_phase_answers()).await;
         write_auth_json(&fixture.agent_dir, "sk-account-c", "team-c");
-        for _ in 0..3 {
+        for _ in 0..2 {
             fixture
                 .server
                 .push(Answer::Raw(status(500, "Catalog Down")));
@@ -909,10 +972,10 @@ mod tests {
         assert!(!has_model(&served, "live/team-a-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));
 
-        // The forced refresh consumed its three failures; the deadline is
-        // on the request log, not on a fixed sleep.
+        // The scope change consumed its two failures; the deadline is on the
+        // request log, not on a fixed sleep.
         let deadline = Instant::now() + Duration::from_secs(30);
-        while fixture.server.request_count() < 3 + 3 {
+        while fixture.server.request_count() < 3 + 2 {
             assert!(
                 Instant::now() < deadline,
                 "the failed refresh never ran; requests: {:?}",
