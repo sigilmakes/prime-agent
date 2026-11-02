@@ -705,6 +705,11 @@ async fn persist_event(
 ) -> std::io::Result<AgentEvent> {
     match event.clone() {
         AgentEvent::MessageEnd { message, .. } => {
+            let admitted_custom_input = matches!(
+                &message,
+                AgentMessage::Custom(custom)
+                    if custom.delivery == pa_agent::types::CustomMessageDelivery::Input
+            );
             let Some(session_message) = loop_message_to_session(&message) else {
                 return Ok(event);
             };
@@ -712,7 +717,10 @@ async fn persist_event(
             let mut session = session.lock().await;
             let id = match session_message {
                 SessionAgentMessage::Custom(custom) => {
-                    match session.consume_admitted_custom_row() {
+                    let admitted_id = admitted_custom_input
+                        .then(|| session.consume_admitted_custom_row())
+                        .flatten();
+                    match admitted_id {
                         Some(id) => id,
                         None => session.append_metadata_intent(FileEntry::CustomMessage {
                             base: crate::session::metadata::draft_base(),

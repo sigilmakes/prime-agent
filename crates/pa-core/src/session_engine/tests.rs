@@ -820,3 +820,72 @@ async fn admitted_custom_event_uses_stored_timestamp_details_and_extra_fields() 
     );
     assert_eq!(manager.lock().await.retained_entries(), before);
 }
+
+#[tokio::test]
+async fn context_custom_prefix_cannot_consume_the_admitted_custom_input() {
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let id = manager
+        .append_metadata_intent(
+            serde_json::from_value(serde_json::json!({
+                "type":"custom_message", "customType":"accepted", "content":"durable input",
+                "display":true, "details":{"id":"accepted-input"}, "futureField":{"exact":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    manager
+        .replay_admitted_input_rows(vec![id.clone()])
+        .unwrap();
+    let accepted = manager.get_entry_by_id(&id).unwrap().clone();
+    let FileEntry::CustomMessage { payload, .. } = &accepted else {
+        panic!("custom row expected")
+    };
+    let canonical =
+        SessionAgentMessage::Custom(crate::session::create_custom_message(payload, &accepted));
+    let manager = Arc::new(tokio::sync::Mutex::new(manager));
+    let mut prefix: AgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"custom", "customType":"context-notice", "content":"context prefix", "display":true,
+        "timestamp":1
+    }))
+    .unwrap();
+    let AgentMessage::Custom(custom) = &mut prefix else {
+        panic!("custom prefix expected")
+    };
+    custom.delivery = pa_agent::types::CustomMessageDelivery::Context;
+    let prefix_event = super::persist_event(&manager, AgentEvent::MessageEnd { message: prefix })
+        .await
+        .unwrap();
+    let AgentEvent::MessageEnd { message: prefix } = prefix_event else {
+        panic!("message end expected")
+    };
+    assert_eq!(
+        serde_json::to_value(prefix).unwrap()["customType"],
+        "context-notice"
+    );
+    let input: AgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"custom", "customType":"accepted", "content":"transient input", "display":false,
+        "details":null, "timestamp":2
+    }))
+    .unwrap();
+    let input_event = super::persist_event(&manager, AgentEvent::MessageEnd { message: input })
+        .await
+        .unwrap();
+    let AgentEvent::MessageEnd { message: input } = input_event else {
+        panic!("message end expected")
+    };
+    assert_eq!(
+        serde_json::to_value(input).unwrap(),
+        serde_json::to_value(canonical).unwrap()
+    );
+    let manager = manager.lock().await;
+    assert_eq!(manager.get_entry_by_id(&id), Some(&accepted));
+    let custom_types: Vec<_> = manager
+        .retained_entries()
+        .iter()
+        .filter_map(|row| match row {
+            FileEntry::CustomMessage { payload, .. } => Some(payload.custom_type.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(custom_types, ["accepted", "context-notice"]);
+}
