@@ -222,11 +222,38 @@ impl pa_core::export_html::ToolHtmlRenderer for ExportToolRenderer<'_> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    fn write_session_log(path: impl AsRef<Path>, content: impl AsRef<str>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let directory = path.parent().expect("fixture directory");
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .expect("fixture id");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)?;
+        for line in content
+            .as_ref()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let row: serde_json::Value = serde_json::from_str(line)?;
+            anyhow::ensure!(
+                matches!(
+                    log.append(&row, deadline),
+                    pa_core::session_log::Outcome::Committed { .. }
+                ),
+                "fixture row must commit"
+            );
+        }
+        Ok(())
+    }
 
     fn core_with_session(dir: &Path) -> SessionCore {
         let file = dir.join("sess.jsonl");
-        std::fs::write(
+        write_session_log(
             &file,
             concat!(
                 r##"{"type":"session","id":"sess-1","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"##,
