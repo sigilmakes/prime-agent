@@ -1173,3 +1173,107 @@ async fn bounded_harness_context_large_corpus_crosses_actual_lua_vm() {
         format!("quantum {}", "界".repeat(16_000))
     );
 }
+
+fn scoped_settings(scopes: Value) -> Value {
+    let mut settings = settings(true);
+    settings["harnessScopes"] = scopes;
+    settings
+}
+
+async fn instructions(f: &Fixture, text: &str) -> String {
+    f.provider.push_text_turn("done");
+    f.engine
+        .prompt(text, crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    f.provider
+        .calls()
+        .last()
+        .unwrap()
+        .system_prompt
+        .clone()
+        .unwrap()
+}
+
+#[test]
+fn harness_scopes_resolve_defaults_and_sanitize_configured_values() {
+    let unset: crate::settings::Settings = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(super::default_scopes(&unset), ["global"]);
+    assert_eq!(super::source(&unset).config["scopes"], json!(["global"]));
+    let configured: crate::settings::Settings =
+        serde_json::from_value(json!({"harnessScopes":[" global ","other","global",""]})).unwrap();
+    assert_eq!(super::default_scopes(&configured), ["global", "other"]);
+    let empty: crate::settings::Settings =
+        serde_json::from_value(json!({"harnessScopes":[]})).unwrap();
+    assert!(super::default_scopes(&empty).is_empty());
+    assert_eq!(super::source(&empty).config["scopes"], json!([]));
+}
+
+#[tokio::test]
+async fn default_harness_scopes_load_global_without_enrollment() {
+    let f = Fixture::new(settings(true), LEGACY).await;
+    f.call(
+        "create",
+        json!({"scope":"global","kind":"memory","id":"shared","content":"global evidence"}),
+    )
+    .await
+    .unwrap();
+    let prompt = instructions(&f, "global evidence").await;
+    assert!(prompt.contains("scope=\"global\", kind=memory, id=\"shared\""));
+}
+
+#[tokio::test]
+async fn enrollment_overrides_default_harness_scopes() {
+    let f = Fixture::new(settings(true), LEGACY).await;
+    for scope in ["global", "other"] {
+        f.call(
+            "create",
+            json!({"scope":scope,"kind":"memory","id":"shared","content":"shared evidence"}),
+        )
+        .await
+        .unwrap();
+    }
+    let prompt = instructions(&f, "shared evidence").await;
+    assert!(prompt.contains("scope=\"global\", kind=memory, id=\"shared\""));
+    assert!(!prompt.contains("scope=\"other\""));
+    f.call("enroll", json!({"scopes":["other"]})).await.unwrap();
+    let prompt = instructions(&f, "shared evidence").await;
+    assert!(!prompt.contains("scope=\"global\""));
+    assert!(prompt.contains("scope=\"other\", kind=memory, id=\"shared\""));
+}
+
+#[tokio::test]
+async fn empty_harness_scopes_keep_only_the_session_scope() {
+    let f = Fixture::new(scoped_settings(json!([])), LEGACY).await;
+    f.call(
+        "create",
+        json!({"scope":"global","kind":"memory","id":"shared","content":"global evidence"}),
+    )
+    .await
+    .unwrap();
+    f.call(
+        "create",
+        json!({"kind":"memory","id":"local","content":"session evidence"}),
+    )
+    .await
+    .unwrap();
+    let prompt = instructions(&f, "evidence").await;
+    assert!(prompt.contains("session evidence"));
+    assert!(!prompt.contains("scope=\"global\""));
+}
+
+#[tokio::test]
+async fn configured_harness_scopes_replace_the_global_default() {
+    let f = Fixture::new(scoped_settings(json!(["custom"])), LEGACY).await;
+    for scope in ["global", "custom"] {
+        f.call(
+            "create",
+            json!({"scope":scope,"kind":"memory","id":"shared","content":"scoped evidence"}),
+        )
+        .await
+        .unwrap();
+    }
+    let prompt = instructions(&f, "scoped evidence").await;
+    assert!(prompt.contains("scope=\"custom\", kind=memory, id=\"shared\""));
+    assert!(!prompt.contains("scope=\"global\""));
+}

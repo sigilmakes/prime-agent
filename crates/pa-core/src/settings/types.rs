@@ -316,6 +316,12 @@ pub struct Settings {
     pub auto_refine: Option<AutoRefineSettings>,
     /// Master switch for harness creation and context loading; unset preserves enabled behavior.
     pub harness_refinements: Option<bool>,
+    /// Scopes loaded into every session's harness context in addition to the
+    /// session's own scope. Unset means `["global"]`: cross-session memory then
+    /// participates without an explicit `plugin.harness.enroll`. An empty array
+    /// loads only the session scope, and a session's saved enrollment still
+    /// overrides these defaults.
+    pub harness_scopes: Option<Vec<String>>,
     pub factory: Option<FactorySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,
