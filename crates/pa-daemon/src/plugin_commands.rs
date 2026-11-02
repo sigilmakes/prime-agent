@@ -671,7 +671,10 @@ return {
             &job,
         );
         let (start, end) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            (received.recv().await.unwrap(), received.recv().await.unwrap())
+            (
+                received.recv().await.unwrap(),
+                received.recv().await.unwrap(),
+            )
         })
         .await
         .expect("persistence diagnostic reaches attached client");
