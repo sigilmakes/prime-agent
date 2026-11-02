@@ -215,10 +215,14 @@ impl SessionManager {
                 ));
             }
         }
-        // Read-only: repairing would REWRITE the source (dropping a torn row
-        // mid-append); the copy skips a torn tail like TS `loadEntriesFromFile`.
-        let entries =
-            super::super::read::read_entries(source_path).map_err(|error| error.to_string())?;
+        // Read-only: a fork never repairs or changes its source. Keep the
+        // caller-facing fork context as well as the strict validation reason.
+        let entries = super::super::read::read_entries(source_path).map_err(|error| {
+            format!(
+                "Cannot fork: source session file is empty or invalid: {}: {error}",
+                source_path.display()
+            )
+        })?;
         if entries.is_empty() {
             return Err(format!(
                 "Cannot fork: source session file is empty or invalid: {}",

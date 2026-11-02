@@ -1115,6 +1115,11 @@ fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
         stderr.contains("Cannot fork: source session file is empty or invalid:"),
         "stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("session log has no header"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(std::fs::read(&empty).expect("source remains readable"), b"");
 
     // The flag conflicts still refuse (TS validateForkFlags).
     let (stdout, stderr, code) = run_in_home(
