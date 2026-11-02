@@ -12,7 +12,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{watch, Semaphore};
 
-use crate::{DiscoveryCredential, DiscoveryCredentials, ModelCatalog};
+use crate::{
+    CatalogFormat, CatalogInputs, ModelCatalog, RefreshPolicy, RefreshRequest, ResolvedSource,
+    SnapshotRequirement,
+};
 
 #[derive(Clone)]
 struct Request {
@@ -144,16 +147,111 @@ impl Server {
     }
 }
 
-fn credentials(provider: &str, secret: &str) -> DiscoveryCredentials {
-    [(
-        provider.into(),
-        DiscoveryCredential {
-            secret: secret.into(),
+fn credentials(provider: &str, secret: &str) -> CatalogInputs {
+    let format = match provider {
+        "openrouter" => CatalogFormat::OpenRouter,
+        "anthropic" => CatalogFormat::Anthropic,
+        "google" => CatalogFormat::Google,
+        "ollama-cloud" => CatalogFormat::Ollama,
+        _ => CatalogFormat::OpenAi,
+    };
+    let defaults = if provider == "ollama-cloud" {
+        crate::ollama_cloud::pinned_models(crate::ollama_cloud::BASE_URL)
+            .into_iter()
+            .next()
+    } else {
+        crate::transports::compiled_models()
+            .iter()
+            .find(|model| model.provider == provider)
+            .cloned()
+    };
+    CatalogInputs {
+        sources: vec![ResolvedSource {
+            id: provider.into(),
+            provider: provider.into(),
+            format,
+            url: String::new(),
+            headers: vec![(
+                "authorization".into(),
+                if secret.starts_with("Bearer ") {
+                    secret.into()
+                } else {
+                    format!("Bearer {secret}")
+                },
+            )],
+            unknown_models: defaults.map_or(crate::UnknownModelPolicy::KnownOnly, |model| {
+                crate::UnknownModelPolicy::ConfiguredDefaults { model }
+            }),
             is_current: None,
-        },
-    )]
-    .into_iter()
-    .collect()
+        }],
+        seeds: Vec::new(),
+    }
+}
+fn inputs(catalog: &ModelCatalog, auth: &CatalogInputs) -> CatalogInputs {
+    let mut inputs = auth.clone();
+    inputs.seeds = crate::ollama_cloud::pinned_models(catalog.ollama_base_url());
+    for source in &mut inputs.sources {
+        source.url = if source.format == CatalogFormat::Ollama {
+            catalog.ollama_base_url().into()
+        } else {
+            catalog
+                .discovery_url_override(&source.provider)
+                .unwrap()
+                .into()
+        };
+        if source.format == CatalogFormat::Ollama {
+            source.unknown_models = crate::UnknownModelPolicy::ConfiguredDefaults {
+                model: inputs.seeds.first().unwrap().clone(),
+            };
+        }
+    }
+    inputs
+}
+async fn refresh(
+    catalog: &ModelCatalog,
+    force: bool,
+    auth: &CatalogInputs,
+    sources: Option<&[String]>,
+) -> Vec<ModelRefreshSourceResult> {
+    catalog
+        .refresh(
+            &inputs(catalog, auth),
+            &RefreshRequest {
+                policy: if force {
+                    RefreshPolicy::Force
+                } else {
+                    RefreshPolicy::IfStale
+                },
+                sources: sources.map(<[String]>::to_vec),
+            },
+        )
+        .await
+        .sources
+}
+fn snapshot(catalog: &ModelCatalog, auth: &CatalogInputs) -> Vec<crate::Model> {
+    catalog.snapshot(&inputs(catalog, auth)).models
+}
+fn adopt(
+    catalog: &ModelCatalog,
+    auth: &CatalogInputs,
+    since: Option<u64>,
+) -> ModelRefreshApplyReport {
+    catalog
+        .adopt(&inputs(catalog, auth), SnapshotRequirement { since })
+        .report
+}
+fn stored_metadata(dir: &std::path::Path) -> String {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("discovery-")
+        })
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .collect()
 }
 
 fn only(source: &str) -> Vec<String> {
@@ -204,15 +302,9 @@ async fn scoped_provider_updates_discard_old_accounts_and_persist_partial_metada
     let a = credentials("openrouter", "secret-account-a");
     let b = credentials("openrouter", "secret-account-b");
     let sources = only("openrouter");
-    let expected_count = crate::transports::compiled_models()
-        .iter()
-        .filter(|model| model.provider == "openrouter")
-        .count()
-        + 1;
+    let expected_count = 1;
     assert_eq!(
-        catalog
-            .refresh_catalog_sources(true, None, &a, Some(&sources))
-            .await,
+        refresh(&catalog, true, &a, Some(&sources)).await,
         vec![result(
             "openrouter",
             Status::Updated,
@@ -220,18 +312,14 @@ async fn scoped_provider_updates_discard_old_accounts_and_persist_partial_metada
             Some(expected_count)
         )]
     );
-    assert!(catalog
-        .resolve_with_discovery(None, &a)
+    assert!(snapshot(&catalog, &a)
         .iter()
         .any(|model| model.id == "test/account-a"));
-    assert!(!catalog
-        .resolve_with_discovery(None, &b)
+    assert!(!snapshot(&catalog, &b)
         .iter()
         .any(|model| model.id == "test/account-a"));
     assert_eq!(
-        catalog
-            .refresh_catalog_sources(true, None, &b, Some(&sources))
-            .await,
+        refresh(&catalog, true, &b, Some(&sources)).await,
         vec![result(
             "openrouter",
             Status::Updated,
@@ -239,11 +327,9 @@ async fn scoped_provider_updates_discard_old_accounts_and_persist_partial_metada
             Some(expected_count)
         )]
     );
-    let before_partial = catalog.resolve_with_discovery(None, &b);
+    let before_partial = snapshot(&catalog, &b);
     assert_eq!(
-        catalog
-            .refresh_catalog_sources(true, None, &b, Some(&sources))
-            .await,
+        refresh(&catalog, true, &b, Some(&sources)).await,
         vec![result(
             "openrouter",
             Status::Updated,
@@ -251,7 +337,7 @@ async fn scoped_provider_updates_discard_old_accounts_and_persist_partial_metada
             Some(expected_count)
         )]
     );
-    let models = catalog.resolve_with_discovery(None, &b);
+    let models = snapshot(&catalog, &b);
     let mut expected = before_partial;
     expected
         .iter_mut()
@@ -262,13 +348,12 @@ async fn scoped_provider_updates_discard_old_accounts_and_persist_partial_metada
     assert!(models.iter().any(|model| model.id == "test/account-b"));
     assert!(!models.iter().any(|model| model.id == "test/account-a"));
     let fresh = server.catalog(dir.path());
-    assert!(fresh
-        .apply_catalog_snapshots(None, &b, None)
+    assert!(adopt(&fresh, &b, None)
         .applied
         .contains(&"openrouter".into()));
-    assert_eq!(fresh.resolve_with_discovery(None, &b), models);
+    assert_eq!(snapshot(&fresh, &b), models);
     assert_eq!(server.count(), 3);
-    let snapshot = std::fs::read_to_string(dir.path().join("openrouter-models.v1.json")).unwrap();
+    let snapshot = stored_metadata(dir.path());
     assert!(!snapshot.contains("attacker"));
     assert!(!snapshot.contains("Bearer"));
     assert!(!snapshot.contains("secret-account-b"));
@@ -297,17 +382,11 @@ async fn source_filtering_default_status_and_local_apply_are_credential_free_and
     let catalog = server.catalog(dir.path());
     let auth = credentials("anthropic", "never-persist-me");
     let sources = vec!["openai".into(), "anthropic".into(), "default".into()];
-    let count = crate::transports::compiled_models()
-        .iter()
-        .filter(|model| model.provider == "anthropic")
-        .count();
-    let reports = catalog
-        .refresh_catalog_sources(true, None, &auth, Some(&sources))
-        .await;
+    let count = 1;
+    let reports = refresh(&catalog, true, &auth, Some(&sources)).await;
     assert_eq!(
         reports,
         vec![
-            result("openai", Status::Skipped, Some(Reason::Unconfigured), None),
             result("anthropic", Status::Updated, None, Some(count)),
             result("default", Status::Updated, None, Some(1))
         ]
@@ -316,39 +395,36 @@ async fn source_filtering_default_status_and_local_apply_are_credential_free_and
         .unwrap()
         .contains("never-persist-me"));
     assert_eq!(
-        catalog.preferred_default(),
+        catalog
+            .snapshot(&CatalogInputs::default())
+            .preferred_default,
         Some(format!("anthropic/{known}"))
     );
-    let reports = catalog
-        .refresh_catalog_sources(false, None, &auth, Some(&sources))
-        .await;
+    let reports = refresh(&catalog, false, &auth, Some(&sources)).await;
     assert_eq!(
         reports,
         vec![
-            result("openai", Status::Skipped, Some(Reason::Unconfigured), None),
             result("anthropic", Status::Stale, None, Some(count)),
             result("default", Status::Stale, None, Some(1))
         ]
     );
     let fresh = server.catalog(dir.path());
-    let applied = fresh.apply_catalog_snapshots(None, &auth, None);
+    let applied = adopt(&fresh, &auth, None);
     assert_eq!(
         applied,
         ModelRefreshApplyReport {
             applied: vec!["anthropic".into(), "default".into()],
-            skipped: vec!["openai".into(), "google".into(), "ollama-cloud".into()],
-            missing: vec![
-                "openrouter".into(),
-                "curated".into(),
-                "prime-inference-public".into()
-            ]
+            skipped: vec![],
+            missing: vec!["curated".into()]
         }
     );
-    assert_eq!(fresh.preferred_default(), catalog.preferred_default());
-    assert!(fresh
-        .apply_catalog_snapshots(None, &auth, Some(u64::MAX))
-        .applied
-        .is_empty());
+    assert_eq!(
+        fresh.snapshot(&CatalogInputs::default()).preferred_default,
+        catalog
+            .snapshot(&CatalogInputs::default())
+            .preferred_default
+    );
+    assert!(adopt(&fresh, &auth, Some(u64::MAX)).applied.is_empty());
     assert_eq!(
         server
             .requests
@@ -380,48 +456,38 @@ async fn ollama_anonymous_fallback_live_multiendpoint_persistence_and_revocation
     }).await;
     let dir = tempfile::tempdir().unwrap();
     let catalog = server.catalog(dir.path());
-    let anonymous = DiscoveryCredentials::new();
+    let anonymous = CatalogInputs::default();
     let fallback = crate::ollama_cloud::pinned_models(&server.base);
-    let anonymous_models: Vec<_> = catalog
-        .resolve_with_discovery(None, &anonymous)
+    let anonymous_models: Vec<_> = snapshot(&catalog, &anonymous)
         .into_iter()
         .filter(|model| model.provider == "ollama-cloud")
         .collect();
     assert_eq!(anonymous_models, fallback);
     let sources = only("ollama-cloud");
     assert_eq!(
-        catalog
-            .refresh_catalog_sources(true, None, &anonymous, Some(&sources))
-            .await,
-        vec![result(
-            "ollama-cloud",
-            Status::Skipped,
-            Some(Reason::Unconfigured),
-            None
-        )]
+        refresh(&catalog, true, &anonymous, Some(&sources)).await,
+        Vec::<ModelRefreshSourceResult>::new()
     );
     assert_eq!(server.count(), 0);
     let auth = credentials("ollama-cloud", "Bearer ollama-test-key");
     assert_eq!(
-        catalog
-            .refresh_catalog_sources(true, None, &auth, Some(&sources))
-            .await,
+        refresh(&catalog, true, &auth, Some(&sources)).await,
         vec![result("ollama-cloud", Status::Updated, None, Some(1))]
     );
-    let expected=crate::ollama_cloud::parse_catalog(&json!({"models":{"cloud/private":{"capabilities":["tools","vision","thinking"],"model_info":{"test.context_length":256_000}}}}),&server.base).unwrap();
-    let live = |catalog: &ModelCatalog, auth: &DiscoveryCredentials| {
-        catalog
-            .resolve_with_discovery(None, auth)
+    let mut expected = fallback.clone();
+    expected.extend(crate::ollama_cloud::parse_catalog(&json!({"models":{"cloud/private":{"capabilities":["tools","vision","thinking"],"model_info":{"test.context_length":256_000}}}}),&server.base).unwrap());
+    let live = |catalog: &ModelCatalog, auth: &CatalogInputs| {
+        snapshot(&catalog, auth)
             .into_iter()
             .filter(|model| model.provider == "ollama-cloud")
             .collect::<Vec<_>>()
     };
     assert_eq!(live(&catalog, &auth), expected);
-    let stored = std::fs::read_to_string(dir.path().join("ollama-cloud-models.v1.json")).unwrap();
+    let stored = stored_metadata(dir.path());
     assert!(!stored.contains("ollama-test-key"));
     assert!(!stored.contains("attacker"));
     let fresh = server.catalog(dir.path());
-    fresh.apply_catalog_snapshots(None, &auth, None);
+    adopt(&fresh, &auth, None);
     assert_eq!(live(&fresh, &auth), expected);
     assert_eq!(server.count(), 2);
     assert_eq!(
@@ -433,9 +499,7 @@ async fn ollama_anonymous_fallback_live_multiendpoint_persistence_and_revocation
     );
     revoked.store(true, Ordering::SeqCst);
     assert_eq!(
-        catalog
-            .refresh_catalog_sources(true, None, &auth, Some(&sources))
-            .await,
+        refresh(&catalog, true, &auth, Some(&sources)).await,
         vec![result(
             "ollama-cloud",
             Status::Failed,
@@ -464,17 +528,20 @@ async fn held_refresh_never_blocks_synchronous_resolution_or_starts_more_network
     let refresh_catalog = Arc::clone(&catalog);
     let refresh_auth = auth.clone();
     let refresh = tokio::spawn(async move {
-        refresh_catalog
-            .refresh_catalog_sources(true, None, &refresh_auth, Some(&only("openrouter")))
-            .await
+        refresh(
+            &refresh_catalog,
+            true,
+            &refresh_auth,
+            Some(&only("openrouter")),
+        )
+        .await
     });
     server.received(1).await;
     let resolve_catalog = Arc::clone(&catalog);
     let resolve_auth = auth.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let resolve = std::thread::spawn(move || {
-        tx.send(resolve_catalog.resolve_with_discovery(None, &resolve_auth))
-            .unwrap();
+        tx.send(snapshot(&resolve_catalog, &resolve_auth)).unwrap();
     });
     let observed = rx.recv_timeout(Duration::from_millis(300));
     gate.add_permits(10);
@@ -488,8 +555,7 @@ async fn held_refresh_never_blocks_synchronous_resolution_or_starts_more_network
         .iter()
         .any(|model| model.id == "test/after-held-refresh"));
     assert_eq!(report[0].status, Status::Updated);
-    assert!(catalog
-        .resolve_with_discovery(None, &auth)
+    assert!(snapshot(&catalog, &auth)
         .iter()
         .any(|model| model.id == "test/after-held-refresh"));
     assert_eq!(server.count(), 1);
@@ -510,20 +576,22 @@ async fn changed_credentials_cancel_inflight_publication_without_cross_account_m
     let authorized = Arc::new(AtomicBool::new(true));
     let check = Arc::clone(&authorized);
     let mut a = credentials("openrouter", "secret-account-a");
-    a.get_mut("openrouter").unwrap().is_current =
-        Some(Arc::new(move || check.load(Ordering::SeqCst)));
+    a.sources[0].is_current = Some(Arc::new(move || check.load(Ordering::SeqCst)));
     let refresh_catalog = Arc::clone(&catalog);
     let refresh_auth = a.clone();
     let refresh = tokio::spawn(async move {
-        refresh_catalog
-            .refresh_catalog_sources(true, None, &refresh_auth, Some(&only("openrouter")))
-            .await
+        refresh(
+            &refresh_catalog,
+            true,
+            &refresh_auth,
+            Some(&only("openrouter")),
+        )
+        .await
     });
     server.received(1).await;
     authorized.store(false, Ordering::SeqCst);
     let b = credentials("openrouter", "secret-account-b");
-    assert!(!catalog
-        .resolve_with_discovery(None, &b)
+    assert!(!snapshot(&catalog, &b)
         .iter()
         .any(|model| model.id == "test/stale-account-a"));
     gate.add_permits(1);
@@ -536,11 +604,133 @@ async fn changed_credentials_cancel_inflight_publication_without_cross_account_m
             None
         )]
     );
-    assert!(!server
-        .catalog(dir.path())
-        .resolve_with_discovery(None, &a)
+    assert!(!snapshot(&server.catalog(dir.path()), &a)
         .iter()
         .any(|model| model.id == "test/stale-account-a"));
     assert!(!dir.path().join("openrouter-models.v1.json").exists());
     assert_eq!(server.count(), 1);
+}
+
+#[tokio::test]
+async fn dropped_readiness_wait_keeps_the_started_publication_alive() {
+    let gate = Arc::new(Semaphore::new(0));
+    let response_gate = Arc::clone(&gate);
+    let server = Server::start(move |_| Response {
+        status: 200,
+        body: json!({"data":[rich("test/late-publication")]}),
+        gate: Some(Arc::clone(&response_gate)),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(server.catalog(dir.path()));
+    let auth = credentials("openrouter", "fixture-key");
+    let first_catalog = Arc::clone(&catalog);
+    let first_auth = auth.clone();
+    let caller = tokio::spawn(async move {
+        refresh(&first_catalog, true, &first_auth, Some(&only("openrouter"))).await
+    });
+    server.received(1).await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    let reports = refresh(&catalog, false, &auth, Some(&only("openrouter"))).await;
+    assert!(matches!(reports[0].status, Status::Updated | Status::Stale));
+    assert!(snapshot(&catalog, &auth)
+        .iter()
+        .any(|model| model.id == "test/late-publication"));
+    assert_eq!(
+        server.count(),
+        1,
+        "the next waiter joins the surviving publication"
+    );
+}
+
+#[tokio::test]
+async fn provider_refresh_keeps_effective_bundled_models_beyond_compiled_templates() {
+    for provider in ["openai", "anthropic", "google", "openrouter"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut baseline = crate::transports::compiled_models()
+            .iter()
+            .find(|model| model.provider == provider)
+            .unwrap()
+            .clone();
+        baseline.id = format!("fixture-{provider}-bundled-only");
+        baseline.name = "Trusted packaged model".into();
+        std::fs::write(
+            dir.path().join(crate::bundled::PACKAGED_MODEL_CATALOG_FILE),
+            json!({"schemaVersion":1,"models":[baseline]}).to_string(),
+        )
+        .unwrap();
+        let known = crate::transports::compiled_models()
+            .iter()
+            .find(|model| model.provider == provider)
+            .unwrap()
+            .id
+            .clone();
+        let response = if provider == "google" {
+            json!({"models":[{"name":format!("models/{known}"),"supportedGenerationMethods":["generateContent"]}]})
+        } else {
+            json!({"data":[{"id":known}]})
+        };
+        let server = Server::start(move |_| Response::json(response.clone())).await;
+        let catalog = server.catalog(dir.path());
+        let auth = credentials(provider, "fixture-key");
+        assert!(snapshot(&catalog, &auth).contains(&baseline));
+        let reports = refresh(&catalog, true, &auth, Some(&only(provider))).await;
+        assert_eq!(reports[0].status, Status::Updated);
+        assert!(
+            snapshot(&catalog, &auth).contains(&baseline),
+            "{provider} refresh removed trusted packaged model"
+        );
+    }
+}
+
+#[tokio::test]
+async fn endpoint_query_credentials_never_enter_snapshot_or_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start(|request| {
+        assert!(request.path.contains("api_key=endpoint-secret"));
+        if request.path.starts_with("/revoke") {
+            Response::status(401)
+        } else {
+            Response::json(json!({"data":[{"id":"fixture"}]}))
+        }
+    })
+    .await;
+    let catalog = server.catalog(dir.path());
+    let mut auth = credentials("openrouter", "fixture-header");
+    auth.sources[0].url = format!("{}/models?api_key=endpoint-secret", server.base);
+    catalog
+        .refresh(
+            &auth,
+            &crate::RefreshRequest {
+                policy: crate::RefreshPolicy::Force,
+                sources: Some(vec!["openrouter".into()]),
+            },
+        )
+        .await;
+    auth.sources[0].url = format!("{}/revoke?api_key=endpoint-secret", server.base);
+    catalog
+        .refresh(
+            &auth,
+            &crate::RefreshRequest {
+                policy: crate::RefreshPolicy::Force,
+                sources: Some(vec!["openrouter".into()]),
+            },
+        )
+        .await;
+    let mut found = 0;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("endpoint-secret"),
+                "{}",
+                path.display()
+            );
+            found += 1;
+        }
+    }
+    assert!(found >= 2, "snapshot and revocation were persisted");
 }

@@ -34,15 +34,28 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   hands it the fetcher, the generic `CatalogCache`, and the bundled asset
   bytes).
 - The build-time asset generator + release packer (the build lane).
-- Session auth storage, `models.json` parsing, and registry merges
-  (`pa-core`): the user's local `models.json` takes precedence over this
-  catalog and is merged by its owner.
+- Session auth storage and `models.json` parsing (`pa-core`). The caller
+  supplies trusted seed models and explicit discovery descriptors. The catalog
+  composes those seeds with the baseline before projecting optional metadata.
+  Discovery cannot alter transport, endpoint, or headers. Unknown IDs require
+  explicit defaults; missing or malformed metadata preserves local definitions.
 - The catalog repo's sync/export tooling (lives with the data).
 
 ## Public API
 
-- `ModelCatalog` (chain resolution + refresh cadence),
-  `RefreshTrigger`, `PrimeCredentials`
+- `ModelCatalog::snapshot(&CatalogInputs)` reads a local no-cold-start snapshot.
+- `ModelCatalog::refresh(&CatalogInputs, &RefreshRequest)` publishes selected
+  sources and returns a snapshot plus source reports.
+- `ModelCatalog::adopt(&CatalogInputs, SnapshotRequirement)` adopts validated
+  disk publications without network work.
+- `CatalogInputs` contains current trusted local seed models and authorized
+  `ResolvedSource` descriptors. Each source names its format, exact endpoint,
+  complete request headers, optional explicit defaults, and publication guard.
+  These inputs come from pa-core; pa-models never opens auth or config files.
+- Discovery formats cover OpenAI, OpenRouter, Anthropic, Google, Codex, Ollama,
+  and separate public/private Prime Inference sources. Private authorization
+  appears separately in `CatalogSnapshot::authorized_private_prime_models`;
+  baseline definitions alone never grant access.
 - `cache::CatalogCache<T>` (generic last-good cache; the plugins lane
   instantiates it with its own fail-closed parser),
   `cache::{RefreshOptions, PUBLIC_SCOPE}`
@@ -55,8 +68,7 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   prime_inference_offline_entries}`
 - `bundled::{BundledAssets, load_bundled_models, PACKAGED_MODEL_CATALOG_FILE,
   PACKAGED_MCP_CATALOG_FILE}`
-- `prime_inference::{PrimeInferenceCatalog, PrimeInferenceCredentials,
-  build_prime_inference_models, merge_prime_inference_models,
+- `prime_inference::{build_prime_inference_models, merge_prime_inference_models,
   parse_prime_inference_model_catalog, is_private_prime_inference_model_id,
   scope_key, PRIME_INFERENCE_BASE_URL}`
 - `offline::is_catalog_offline`
@@ -68,3 +80,14 @@ Depends on `pa-ai` (compiled transport templates: `models_generated`) and
 `pa-ai` is touched. Consumers live at or above `pa-agent` (registry wiring
 in `pa-core`). The plugins lane must not place its catalog code in `pa-ai`
 (pa-models already depends on it).
+
+## Discovery admission and cache privacy
+
+Unknown IDs require either explicit configured full defaults or complete provider
+metadata, including input, output, cache-read, and cache-write prices. Missing
+rates do not mean zero. This conservative limit may exclude models whose API
+omits cache prices. Known IDs still accept partial metadata updates.
+
+Discovery snapshots and revocations store only an opaque endpoint identity.
+The actual endpoint, including its query, is used only by the fetch closure.
+Discovery therefore does not reuse ETags; the curated/default caches still do.

@@ -113,6 +113,118 @@ fn local_status_does_not_resolve_deferred_credentials() {
 }
 
 #[test]
+fn local_api_key_preserves_precedence_and_stale_sources() {
+    let mut auth = storage_with_env(
+        &serde_json::json!({
+            "anthropic": { "type": "api_key", "key": "stored-key" },
+            "prime-inference": { "type": "api_key", "key": "stored-prime" }
+        }),
+        ScriptedEnv(HashMap::from([
+            ("ANTHROPIC_API_KEY".to_string(), "env-key".to_string()),
+            ("PRIME_API_KEY".to_string(), "env-prime".to_string()),
+        ])),
+    );
+    assert_eq!(
+        auth.get_api_key_local("anthropic").as_deref(),
+        Some("stored-key")
+    );
+    assert_eq!(
+        auth.get_api_key_local("prime-inference").as_deref(),
+        Some("env-prime")
+    );
+    auth.set_runtime_api_key("anthropic", "runtime-key".to_string());
+    assert_eq!(
+        auth.get_api_key_local("anthropic").as_deref(),
+        Some("runtime-key")
+    );
+    assert!(auth.mark_auth_stale("anthropic"));
+    assert_eq!(
+        auth.get_api_key_local("anthropic").as_deref(),
+        Some("stored-key")
+    );
+    assert!(auth.mark_auth_stale("anthropic"));
+    assert_eq!(
+        auth.get_api_key_local("anthropic").as_deref(),
+        Some("env-key")
+    );
+    assert!(auth.mark_auth_stale("anthropic"));
+    assert_eq!(auth.get_api_key_local("anthropic"), None);
+    assert!(auth.mark_auth_stale("prime-inference"));
+    assert_eq!(
+        auth.get_api_key_local("prime-inference").as_deref(),
+        Some("stored-prime")
+    );
+}
+
+#[test]
+fn local_api_key_never_executes_commands_oauth_or_fallback() {
+    struct ForbiddenOAuth;
+    impl OAuthIntegration for ForbiddenOAuth {
+        fn api_key_for(&self, _: &str, _: &AuthCredential) -> Option<String> {
+            panic!("local key lookup must not invoke the OAuth adapter")
+        }
+        fn refresh(&self, _: &str, _: &AuthStorageData) -> Option<AuthCredential> {
+            panic!("local key lookup must not refresh OAuth")
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("command-ran");
+    let data = AuthStorageData(serde_json::json!({
+        "anthropic": { "type": "api_key", "key": format!("!touch '{}'; printf ignored", marker.display()) },
+        "openai-codex": { "type": "oauth", "access": "codex-access", "refresh": "dummy", "expires": now_epoch_ms() + 3_600_000 },
+        "other-oauth": { "type": "oauth", "access": "not-a-raw-key", "refresh": "dummy", "expires": now_epoch_ms() + 3_600_000 },
+        "expired-oauth": { "type": "oauth", "access": "expired", "refresh": "dummy", "expires": 0 }
+    }).as_object().unwrap().clone());
+    let mut auth = AuthStorage::in_memory_with_env(
+        &data,
+        Arc::new(ForbiddenOAuth),
+        Arc::new(ScriptedEnv(HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "lower-env-key".to_string(),
+        )]))),
+    );
+    auth.set_fallback_resolver(Arc::new(|_| {
+        panic!("local key lookup must not invoke fallback")
+    }));
+    assert_eq!(auth.get_api_key_local("anthropic"), None);
+    assert_eq!(
+        auth.get_api_key_local("openai-codex").as_deref(),
+        Some("codex-access")
+    );
+    assert_eq!(auth.get_api_key_local("other-oauth"), None);
+    assert_eq!(auth.get_api_key_local("expired-oauth"), None);
+    assert_eq!(auth.get_api_key_local("missing"), None);
+    auth.set_runtime_api_key("anthropic", "runtime-key".to_string());
+    assert_eq!(
+        auth.get_api_key_local("anthropic").as_deref(),
+        Some("runtime-key")
+    );
+    assert!(!marker.exists(), "local lookup executed a command key");
+    auth.set("openai-codex", oauth_credential("expired-codex", 0));
+    assert_eq!(auth.get_api_key_local("openai-codex"), None);
+}
+
+#[test]
+fn local_codex_key_respects_existing_stale_source_tokens() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+    });
+    let (mut auth, _) = storage_over_backend_with(
+        oauth,
+        "openai-codex",
+        &oauth_credential("codex-access", now_epoch_ms() + 3_600_000),
+    );
+    let token = auth
+        .get_api_key_with_source_token("openai-codex", false)
+        .source_token
+        .unwrap();
+    auth.mark_auth_source_stale(token);
+    assert_eq!(auth.get_api_key_local("openai-codex"), None);
+}
+
+#[test]
 fn runtime_override_wins() {
     // Non-prime provider: runtime beats stored; stored outranks env,
     // so ambient env cannot interfere.

@@ -1,108 +1,43 @@
-//! The no-cold-start chain and refresh cadence.
-//! Disk cache -> bundled snapshot -> compiled fallback: a user always has
-//! models, offline or not. Resolution returns fresh snapshots: a
-//! mid-session refresh never retargets the active model.
-
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
-
+//! Catalog facade: trusted baseline, current seeds, and scoped metadata publications.
 use crate::bundled::{load_bundled_models, BundledAssets};
 use crate::cache::{CatalogCache, RefreshOptions, PUBLIC_SCOPE};
 use crate::fetch::{CatalogFetcher, MODEL_CATALOG_URL};
 use crate::pinning::{parse_provider_model_catalog, PinnedTemplates};
-use crate::prime_inference::{
-    merge_prime_inference_models, PrimeInferenceCatalog, PrimeInferenceCredentials,
-    PRIME_INFERENCE_BASE_URL,
-};
-use crate::transports;
-use crate::Model;
+use crate::{transports, Model};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-/// The provider-model-catalog cache file, beside models.json.
 pub const PROVIDER_CATALOG_CACHE_FILE: &str = "provider-model-catalog.v1.json";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshTrigger {
-    /// Process startup (background, non-blocking, forced).
-    Startup,
-    /// The hourly timer (interval-gated).
-    Hourly,
-    /// The model/plugin picker opened (interval-gated).
-    PickerOpen,
-    /// Auth changed (forced — the account's view may be different).
-    AuthChange,
-}
-
-impl RefreshTrigger {
-    /// Forced triggers skip the hourly gating window.
-    #[must_use]
-    pub fn forced(self) -> bool {
-        matches!(self, RefreshTrigger::Startup | RefreshTrigger::AuthChange)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PrimeCredentials {
-    pub api_key: String,
-    pub team_id: Option<String>,
-}
-
-impl PrimeCredentials {
-    fn as_inference(&self) -> PrimeInferenceCredentials {
-        PrimeInferenceCredentials {
-            api_key: self.api_key.clone(),
-            team_id: self.team_id.clone(),
-        }
-    }
-}
-
-/// The catalog subsystem facade: no-cold-start resolution + refresh.
 pub struct ModelCatalog {
-    provider_cache: CatalogCache<Vec<Model>>,
-    prime_inference: PrimeInferenceCatalog,
+    provider_cache: Arc<CatalogCache<Vec<Model>>>,
+    default: Option<Arc<CatalogCache<String>>>,
     bundled: BundledAssets,
     templates: PinnedTemplates,
     compiled: Arc<Vec<Model>>,
-    /// The Prime Inference API base: the private-authorization fetch (the
-    /// entitlements lane in pa-core) targets the same endpoint as the
-    /// public catalog fetch and reads it from the shared catalog.
+    discovery: crate::discovery::ProviderCatalog,
+    discovery_urls: std::collections::HashMap<String, String>,
     pi_base_url: Arc<str>,
-    /// Guards [`ModelCatalog::spawn_hourly_refresh`]: one loop per instance.
-    hourly_loop: OnceLock<()>,
-    /// The Prime Inference credential scope the last catalog request in this process observed:
-    /// `None` until the first observation (the disk snapshot's stored scope seeds it, so a login or
-    /// logout that predates this process's first request is still detected), then the live scope
-    /// (`Some(None)` = no credentials). Both levels carry meaning (the documented three states), so
-    /// nesting is the contract, not an accidental Option<Option>.
-    #[allow(clippy::option_option)]
-    pi_scope_seen: Mutex<Option<Option<String>>>,
-    provider_owned: Option<crate::provider_catalogs::ProviderCatalogs>,
+    ollama_base_url: String,
 }
 
 impl ModelCatalog {
-    /// The production catalog: caches beside `models_dir` (None = in-memory
-    /// registry use), bundled assets at the package root.
     #[must_use]
     pub fn new(models_dir: Option<PathBuf>) -> Self {
         Self::with_bundled_dir(models_dir, None)
     }
-
-    /// [`ModelCatalog::new`] with an explicit bundled-asset directory
-    /// (tests, staged installs).
     #[must_use]
     pub fn with_bundled_dir(models_dir: Option<PathBuf>, bundled_dir: Option<PathBuf>) -> Self {
         Self::with_discovery_urls(
             models_dir,
             bundled_dir,
             MODEL_CATALOG_URL,
-            PRIME_INFERENCE_BASE_URL,
+            crate::prime_inference::PRIME_INFERENCE_BASE_URL,
             &std::collections::HashMap::new(),
             &std::env::var("OLLAMA_API_BASE")
-                .unwrap_or_else(|_| crate::ollama_cloud::BASE_URL.to_string()),
+                .unwrap_or_else(|_| crate::ollama_cloud::BASE_URL.into()),
         )
     }
-
-    /// [`ModelCatalog::new`] with both remote URLs overridden (hermetic
-    /// tests run the two fetch layers against a local server).
     #[must_use]
     pub fn with_urls(
         models_dir: Option<PathBuf>,
@@ -118,11 +53,10 @@ impl ModelCatalog {
             &std::collections::HashMap::new(),
             crate::ollama_cloud::BASE_URL,
         );
-        catalog.provider_owned = None;
+        catalog.default = None;
         catalog
     }
-
-    /// Hermetic provider-owned catalog endpoints; never taken from remote metadata.
+    #[must_use]
     pub fn with_discovery_urls(
         models_dir: Option<PathBuf>,
         bundled_dir: Option<PathBuf>,
@@ -132,64 +66,50 @@ impl ModelCatalog {
         ollama_base_url: &str,
     ) -> Self {
         let templates = PinnedTemplates::from_compiled();
-        let compiled = Arc::new(transports::compiled_models().to_vec());
         let pin_templates = templates.clone();
-        let parse: crate::cache::CatalogParse<Vec<Model>> =
-            Arc::new(move |payload, _scope| parse_provider_model_catalog(payload, &pin_templates));
-        let cache_path = models_dir
-            .as_ref()
-            .map(|dir| dir.join(PROVIDER_CATALOG_CACHE_FILE));
         Self {
-            provider_cache: CatalogCache::new(
+            provider_cache: Arc::new(CatalogCache::new(
                 model_catalog_url,
-                cache_path,
+                models_dir
+                    .as_ref()
+                    .map(|dir| dir.join(PROVIDER_CATALOG_CACHE_FILE)),
                 Arc::new(CatalogFetcher::new()),
-                parse,
-            ),
-            provider_owned: Some(crate::provider_catalogs::ProviderCatalogs::new(
-                models_dir.as_deref(),
-                discovery_urls,
-                ollama_base_url,
+                Arc::new(move |payload, _| parse_provider_model_catalog(payload, &pin_templates)),
             )),
-            prime_inference: PrimeInferenceCatalog::with_base_url(models_dir, pi_base_url),
+            default: Some(Arc::new(CatalogCache::new(
+                discovery_urls
+                    .get("default")
+                    .map_or(crate::DEFAULT_MODEL_CATALOG_URL, String::as_str),
+                models_dir
+                    .as_ref()
+                    .map(|dir| dir.join("default-model.v1.json")),
+                Arc::new(CatalogFetcher::new()),
+                Arc::new(|payload, _| crate::provider_catalogs::parse_default(payload)),
+            ))),
             bundled: bundled_dir
                 .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
+            compiled: Arc::new(transports::compiled_models().to_vec()),
             templates,
-            compiled,
+            discovery: crate::discovery::ProviderCatalog::new(models_dir),
+            discovery_urls: discovery_urls.clone(),
             pi_base_url: Arc::from(pi_base_url),
-            hourly_loop: OnceLock::new(),
-            pi_scope_seen: Mutex::new(None),
+            ollama_base_url: ollama_base_url.into(),
         }
     }
-
+    #[must_use]
+    pub fn discovery_url_override(&self, provider: &str) -> Option<&str> {
+        self.discovery_urls.get(provider).map(String::as_str)
+    }
+    #[must_use]
     pub fn prime_inference_base_url(&self) -> &str {
         &self.pi_base_url
     }
-
-    /// Whether the live Prime Inference credential scope changed since the last catalog request
-    /// this process served — the split-process port of TS `authStorage.onChange`: the stored disk
-    /// scope only seeds the first observation; afterwards only live credentials are trusted. Every
-    /// call records the current scope as the next comparison base.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the scope-observation mutex is poisoned.
-    pub fn credentials_changed(&self, credentials: Option<&PrimeCredentials>) -> bool {
-        let current = credentials
-            .map(|credentials| self.prime_inference.scope_for(&credentials.as_inference()));
-        let mut seen = self.pi_scope_seen.lock().expect("scope observation lock");
-        let last = seen
-            .clone()
-            .unwrap_or_else(|| self.prime_inference.stored_scope());
-        *seen = Some(current.clone());
-        last != current
+    #[must_use]
+    pub fn ollama_base_url(&self) -> &str {
+        &self.ollama_base_url
     }
-
-    /// Resolve the current catalog through the no-cold-start chain, merging
-    /// the live Prime Inference snapshot for `credentials` when given.
-    /// Never fails; never blocks on the network.
-    pub fn resolve(&self, credentials: Option<&PrimeCredentials>) -> Vec<Model> {
-        let base = match self.provider_cache.get(PUBLIC_SCOPE) {
+    fn baseline(&self) -> Vec<Model> {
+        match self.provider_cache.get(PUBLIC_SCOPE) {
             Some(remote) => {
                 // Step 1: validated last-good cache + the compiled offline
                 // Prime Inference entries (private/live entries come from
@@ -210,293 +130,135 @@ impl ModelCatalog {
                 // Step 3: compiled fallback.
                 None => self.compiled.as_ref().clone(),
             },
-        };
-        let live = match credentials {
-            Some(credentials) => self.prime_inference.get(&credentials.as_inference()),
-            None => self.prime_inference.get_public(),
-        };
-        match live {
-            Some(live) => merge_prime_inference_models(&base, Some(&live)),
-            None => base,
         }
     }
-
-    /// Resolve provider-owned views for exactly the caller's current credentials.
-    pub fn resolve_with_discovery(
-        &self,
-        prime: Option<&PrimeCredentials>,
-        credentials: &crate::DiscoveryCredentials,
-    ) -> Vec<Model> {
-        let models = self.resolve(prime);
-        match &self.provider_owned {
-            Some(owned) => owned.resolve(models, credentials),
-            None => models,
-        }
-    }
-
-    pub fn ollama_base_url(&self) -> &str {
-        self.provider_owned.as_ref().map_or(
-            crate::ollama_cloud::BASE_URL,
-            crate::provider_catalogs::ProviderCatalogs::ollama_base_url,
-        )
-    }
-
-    pub fn preferred_default(&self) -> Option<String> {
-        self.provider_owned
+    fn preferred_default(&self) -> Option<String> {
+        self.default
             .as_ref()
-            .and_then(crate::provider_catalogs::ProviderCatalogs::preferred_default)
+            .and_then(|cache| cache.get(PUBLIC_SCOPE))
     }
-
-    /// Explicit source refresh; every result is credential-free and publication has settled.
-    pub async fn refresh_catalog_sources(
-        &self,
-        force: bool,
-        prime: Option<&PrimeCredentials>,
-        credentials: &crate::DiscoveryCredentials,
-        sources: Option<&[String]>,
-    ) -> Vec<pa_types::model_refresh::ModelRefreshSourceResult> {
-        let (owned, curated, inference) = tokio::join!(
-            async {
-                match &self.provider_owned {
-                    Some(owned) => owned.refresh(credentials, force, sources).await,
-                    None => Vec::new(),
-                }
-            },
-            async {
-                if crate::provider_catalogs::selected(sources, "curated") {
-                    let templates = self.templates.clone();
-                    let report = self
-                        .provider_cache
-                        .refresh_report(
-                            PUBLIC_SCOPE,
-                            RefreshOptions {
-                                force,
-                                merge_payload: Some(Arc::new(move |payload, _previous| {
-                                    crate::pinning::parse_trusted_provider_model_catalog(
-                                        payload, &templates,
-                                    )?;
-                                    Ok(payload.clone())
-                                })),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    Some(crate::provider_catalogs::source_result(
-                        "curated",
-                        &report,
-                        report.models.as_ref().map(Vec::len),
-                    ))
-                } else {
-                    None
-                }
-            },
-            async {
-                if crate::provider_catalogs::selected(sources, "prime-inference-public") {
-                    if let Some(prime) = prime {
-                        let report = self
-                            .prime_inference
-                            .refresh_report(&prime.as_inference(), force)
-                            .await;
-                        Some(crate::provider_catalogs::source_result(
-                            "prime-inference-public",
-                            &report,
-                            report.models.as_ref().map(Vec::len),
-                        ))
-                    } else {
-                        let report = self.prime_inference.refresh_public_report(force).await;
-                        Some(crate::provider_catalogs::source_result(
-                            "prime-inference-public",
-                            &report,
-                            report.models.as_ref().map(Vec::len),
-                        ))
-                    }
-                } else {
-                    None
-                }
-            }
-        );
-        let mut results = owned;
-        results.extend(curated);
-        results.extend(inference);
-        results
-    }
-
-    /// Adopt local validated snapshots only, cancelling older publications.
-    pub fn apply_catalog_snapshots(
-        &self,
-        prime: Option<&PrimeCredentials>,
-        credentials: &crate::DiscoveryCredentials,
-        since: Option<u64>,
-    ) -> pa_types::model_refresh::ModelRefreshApplyReport {
-        let mut report = self.provider_owned.as_ref().map_or_else(
-            pa_types::model_refresh::ModelRefreshApplyReport::default,
-            |owned| owned.apply(credentials, since),
-        );
-        let present = self.provider_cache.reload_from_disk(PUBLIC_SCOPE).is_some();
-        let current = since.is_none_or(|since| {
-            self.provider_cache
-                .status(PUBLIC_SCOPE)
-                .checked_at
-                .is_some_and(|at| at >= since)
-        });
-        if present && current {
-            report.applied.push("curated".into());
-        } else {
-            report.missing.push("curated".into());
-        }
-        if let Some(prime) = prime {
-            let (present, checked_at) =
-                self.prime_inference.reload_from_disk(&prime.as_inference());
-            if present && since.is_none_or(|since| checked_at.is_some_and(|at| at >= since)) {
-                report.applied.push("prime-inference-public".into());
+    #[must_use]
+    pub fn snapshot(&self, inputs: &crate::CatalogInputs) -> crate::CatalogSnapshot {
+        let mut baseline = self.baseline();
+        for seed in &inputs.seeds {
+            if let Some(model) = baseline
+                .iter_mut()
+                .find(|model| model.provider == seed.provider && model.id == seed.id)
+            {
+                *model = seed.clone();
             } else {
-                report.missing.push("prime-inference-public".into());
-            }
-        } else {
-            let (present, checked_at) = self.prime_inference.reload_public_from_disk();
-            if present && since.is_none_or(|since| checked_at.is_some_and(|at| at >= since)) {
-                report.applied.push("prime-inference-public".into());
-            } else {
-                report.missing.push("prime-inference-public".into());
+                baseline.push(seed.clone());
             }
         }
-        report
+        let (models, authorized_private_prime_models) =
+            self.discovery.resolve(&inputs.sources, &baseline);
+        crate::CatalogSnapshot {
+            models,
+            preferred_default: self.preferred_default(),
+            authorized_private_prime_models,
+        }
     }
-
-    /// Fire-and-forget refresh for `trigger`; errors are caught and last-good
-    /// retained, never surfaced into a session.
-    pub fn trigger_refresh(self: &Arc<Self>, trigger: RefreshTrigger) {
-        self.trigger_refresh_with_credentials(trigger, None);
-    }
-
-    /// [`ModelCatalog::trigger_refresh`] plus a credentialed Prime Inference
-    /// refresh (auth change, picker open with entitlements).
-    pub fn trigger_refresh_with_credentials(
-        self: &Arc<Self>,
-        trigger: RefreshTrigger,
-        credentials: Option<PrimeCredentials>,
-    ) {
-        let catalog = Arc::clone(self);
-        // Fire-and-forget: the spawned task must never keep the runtime
-        // alive on its own and must never propagate errors.
-        tokio::spawn(async move {
-            let force = trigger.forced();
-            let refreshed = catalog
-                .provider_cache
-                .refresh(
+    pub async fn refresh(
+        &self,
+        inputs: &crate::CatalogInputs,
+        request: &crate::RefreshRequest,
+    ) -> crate::RefreshPublication {
+        let selected = request.sources.as_deref();
+        let force = request.policy == crate::RefreshPolicy::Force;
+        let discovery = self
+            .discovery
+            .refresh(&inputs.sources, request.policy, selected);
+        let curated_cache = Arc::clone(&self.provider_cache);
+        let templates = self.templates.clone();
+        let refresh_curated = crate::provider_catalogs::selected(selected, "curated");
+        let curated = tokio::spawn(async move {
+            if !refresh_curated {
+                return None;
+            }
+            let report = curated_cache
+                .refresh_report(
                     PUBLIC_SCOPE,
                     RefreshOptions {
                         force,
-                        headers: Vec::new(),
-                        is_current: None,
+                        merge_payload: Some(Arc::new(move |payload, _| {
+                            crate::pinning::parse_trusted_provider_model_catalog(
+                                payload, &templates,
+                            )?;
+                            Ok(payload.clone())
+                        })),
                         ..Default::default()
                     },
                 )
                 .await;
-            if let Some(credentials) = credentials {
-                let inference = credentials.as_inference();
-                catalog.prime_inference.refresh(&inference, force).await;
-            }
-            tracing::debug!(
-                trigger = ?trigger,
-                refreshed = refreshed.map(|models| models.len()),
-                "catalog refresh settled"
-            );
+            Some(crate::provider_catalogs::source_result(
+                "curated",
+                &report,
+                report.models.as_ref().map(Vec::len),
+            ))
         });
-    }
-
-    /// The hourly background refresh loop. One loop per catalog instance: the process-shared
-    /// catalog (pa-core's `catalog_chain`) serves the whole process, so the first caller arms it
-    /// and later calls are no-ops.
-    pub fn spawn_hourly_refresh(
-        self: &Arc<Self>,
-        credentials: impl Fn() -> Option<PrimeCredentials> + Send + Sync + 'static,
-    ) {
-        if self.hourly_loop.set(()).is_err() {
-            return;
+        let default_cache = self.default.clone();
+        let refresh_default = crate::provider_catalogs::selected(selected, "default");
+        let default = tokio::spawn(async move {
+            let cache = default_cache?;
+            if !refresh_default {
+                return None;
+            }
+            let report = cache
+                .refresh_report(
+                    PUBLIC_SCOPE,
+                    RefreshOptions {
+                        force,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            Some(crate::provider_catalogs::source_result(
+                "default",
+                &report,
+                report.models.as_ref().map(|_| 1),
+            ))
+        });
+        let (mut sources, curated, default) = tokio::join!(discovery, curated, default);
+        sources.extend(curated.expect("curated refresh task panicked"));
+        sources.extend(default.expect("default refresh task panicked"));
+        crate::RefreshPublication {
+            snapshot: self.snapshot(inputs),
+            sources,
         }
-        let catalog = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-                crate::CATALOG_REFRESH_INTERVAL_MS,
-            ));
-            loop {
-                interval.tick().await;
-                let credentials = credentials();
-                catalog.trigger_refresh_with_credentials(RefreshTrigger::Hourly, credentials);
-            }
-        });
     }
-
-    /// Hourly provider-owned discovery, sharing the same one-loop guard as the legacy chain.
-    pub fn spawn_hourly_refresh_with_discovery(
-        self: &Arc<Self>,
-        credentials: impl Fn() -> (Option<PrimeCredentials>, crate::DiscoveryCredentials)
-            + Send
-            + Sync
-            + 'static,
-    ) {
-        if self.hourly_loop.set(()).is_err() {
-            return;
-        }
-        let catalog = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-                crate::CATALOG_REFRESH_INTERVAL_MS,
-            ));
-            loop {
-                interval.tick().await;
-                let (prime, discovery) = credentials();
-                catalog
-                    .refresh_catalog_sources(false, prime.as_ref(), &discovery, None)
-                    .await;
-            }
-        });
-    }
-
-    /// Await a direct (non-spawned) refresh — `refreshModelCatalog` in the
-    /// TS reference; used by tests and callers that need the result.
-    pub async fn refresh(&self, force: bool) -> Option<Vec<Model>> {
-        self.provider_cache
-            .refresh(
-                PUBLIC_SCOPE,
-                RefreshOptions {
-                    force,
-                    headers: Vec::new(),
-                    is_current: None,
-                    ..Default::default()
-                },
-            )
-            .await
-    }
-
-    /// Awaited refresh of both catalog layers — the public provider catalog and, when `credentials`
-    /// are given, the credentialed Prime Inference snapshot. Unlike
-    /// [`ModelCatalog::trigger_refresh_with_credentials`] (fire-and-forget), `resolve` reflects the
-    /// refreshed state as soon as this future returns.
-    pub async fn refresh_with_credentials(
+    pub fn adopt(
         &self,
-        force: bool,
-        credentials: Option<&PrimeCredentials>,
-    ) {
-        self.provider_cache
-            .refresh(
-                PUBLIC_SCOPE,
-                RefreshOptions {
-                    force,
-                    headers: Vec::new(),
-                    is_current: None,
-                    ..Default::default()
-                },
-            )
-            .await;
-        if let Some(credentials) = credentials {
-            let inference = credentials.as_inference();
-            self.prime_inference.refresh(&inference, force).await;
+        inputs: &crate::CatalogInputs,
+        requirement: crate::SnapshotRequirement,
+    ) -> crate::ApplyPublication {
+        let mut report = self.discovery.adopt(&inputs.sources, requirement.since);
+        let fresh = |checked: Option<u64>| {
+            requirement
+                .since
+                .is_none_or(|since| checked.is_some_and(|at| at >= since))
+        };
+        if self.provider_cache.reload_from_disk(PUBLIC_SCOPE).is_some()
+            && fresh(self.provider_cache.status(PUBLIC_SCOPE).checked_at)
+        {
+            report.applied.push("curated".into());
+        } else {
+            report.missing.push("curated".into());
+        }
+        if let Some(cache) = &self.default {
+            if cache.reload_from_disk(PUBLIC_SCOPE).is_some()
+                && fresh(cache.status(PUBLIC_SCOPE).checked_at)
+            {
+                report.applied.push("default".into());
+            } else {
+                report.missing.push("default".into());
+            }
+        }
+        crate::ApplyPublication {
+            snapshot: self.snapshot(inputs),
+            report,
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,13 +299,13 @@ mod tests {
             "http://127.0.0.1:1/api/v1",
         );
         assert!(
-            catalog.provider_owned.is_none(),
+            catalog.default.is_none(),
             "no implicit provider/default endpoints"
         );
         assert!(catalog.preferred_default().is_none());
         let production = ModelCatalog::new(None);
         assert!(
-            production.provider_owned.is_some(),
+            production.default.is_some(),
             "production explicitly enables discovery"
         );
     }
@@ -553,7 +315,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let catalog =
             ModelCatalog::with_bundled_dir(Some(dir.path().into()), Some(dir.path().into()));
-        let models = catalog.resolve(None);
+        let models = catalog.snapshot(&crate::CatalogInputs::default()).models;
         assert_eq!(
             models.len(),
             transports::compiled_models().len(),
@@ -570,7 +332,7 @@ mod tests {
         )
         .unwrap();
         let catalog = ModelCatalog::with_bundled_dir(None, Some(dir.path().into()));
-        let models = catalog.resolve(None);
+        let models = catalog.snapshot(&crate::CatalogInputs::default()).models;
         assert_eq!(
             models.len(),
             111,
@@ -601,7 +363,7 @@ mod tests {
         .unwrap();
         let catalog =
             ModelCatalog::with_bundled_dir(Some(dir.path().into()), Some(dir.path().into()));
-        let models = catalog.resolve(None);
+        let models = catalog.snapshot(&crate::CatalogInputs::default()).models;
         assert!(models.iter().any(|m| m.id == "cached-a"));
         assert!(!models.iter().any(|m| m.id == "bundled-a"), "cache wins");
     }
@@ -617,7 +379,7 @@ mod tests {
         std::fs::write(dir.path().join(PROVIDER_CATALOG_CACHE_FILE), "{broken").unwrap();
         let catalog =
             ModelCatalog::with_bundled_dir(Some(dir.path().into()), Some(dir.path().into()));
-        let models = catalog.resolve(None);
+        let models = catalog.snapshot(&crate::CatalogInputs::default()).models;
         assert!(models.iter().any(|m| m.id == "bundled-a"));
     }
 
@@ -631,7 +393,7 @@ mod tests {
         .unwrap();
         let catalog =
             ModelCatalog::with_bundled_dir(Some(dir.path().into()), Some(dir.path().into()));
-        let before = catalog.resolve(None);
+        let before = catalog.snapshot(&crate::CatalogInputs::default()).models;
         let active = before
             .iter()
             .find(|m| m.id == "bundled-a")
@@ -657,101 +419,5 @@ mod tests {
                 .unwrap()
                 .base_url
         );
-    }
-
-    #[test]
-    fn triggers_force_per_trigger_kind() {
-        assert!(RefreshTrigger::Startup.forced());
-        assert!(RefreshTrigger::AuthChange.forced());
-        assert!(!RefreshTrigger::Hourly.forced());
-        assert!(!RefreshTrigger::PickerOpen.forced());
-    }
-
-    /// The compiled Prime Inference entries as a valid snapshot payload
-    /// (the parse gate needs the coverage; no marker).
-    fn pi_snapshot_payload() -> serde_json::Value {
-        let data: Vec<serde_json::Value> = transports::prime_inference_offline_entries()
-            .iter()
-            .map(|model| {
-                json!({
-                    "id": model.id,
-                    "display_name": model.name,
-                    "pricing": {
-                        "input_usd_per_mtok": model.cost.input.as_f64(),
-                        "output_usd_per_mtok": model.cost.output.as_f64(),
-                    },
-                    "specs": {
-                        "context_window": model.context_window,
-                        "max_output_tokens": model.max_tokens,
-                        "supports_reasoning": model.reasoning,
-                        "modalities": {"input": ["text"], "output": ["text"]},
-                    },
-                })
-            })
-            .collect();
-        json!({ "data": data })
-    }
-
-    /// Write the Prime Inference disk snapshot for `credentials`' scope
-    /// (the shape `CatalogCache` persists; a fresh process seeds its first
-    /// auth-scope observation from it).
-    fn write_pi_snapshot(dir: &std::path::Path, credentials: &PrimeCredentials) {
-        let scope = crate::prime_inference::scope_key(
-            &credentials.api_key,
-            credentials.team_id.as_deref().unwrap_or_default(),
-        );
-        let snapshot = json!({
-            "url": "http://catalog.test/api/v1/models",
-            "scope": scope,
-            "fetchedAt": 1,
-            "payload": pi_snapshot_payload(),
-        });
-        std::fs::write(
-            dir.join("prime-inference-models-cache.json"),
-            serde_json::to_string(&snapshot).unwrap(),
-        )
-        .unwrap();
-    }
-
-    fn account(api_key: &str, team_id: &str) -> PrimeCredentials {
-        PrimeCredentials {
-            api_key: api_key.to_string(),
-            team_id: Some(team_id.to_string()),
-        }
-    }
-
-    fn hermetic_catalog(dir: &std::path::Path) -> ModelCatalog {
-        ModelCatalog::with_urls(
-            Some(dir.to_path_buf()),
-            Some(dir.to_path_buf()),
-            "http://catalog.test/catalog",
-            "http://catalog.test/api/v1",
-        )
-    }
-
-    #[test]
-    fn first_observation_after_a_restart_compares_against_the_stored_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let account_a = account("sk-a", "team-a");
-        write_pi_snapshot(dir.path(), &account_a);
-
-        let catalog = hermetic_catalog(dir.path());
-        assert!(!catalog.credentials_changed(Some(&account_a)));
-        assert!(!catalog.credentials_changed(Some(&account_a)));
-        let account_b = account("sk-b", "team-b");
-        assert!(catalog.credentials_changed(Some(&account_b)));
-        assert!(!catalog.credentials_changed(Some(&account_b)));
-        assert!(catalog.credentials_changed(None));
-        assert!(!catalog.credentials_changed(None));
-    }
-
-    #[test]
-    fn first_observation_without_a_stored_snapshot_seeds_no_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = hermetic_catalog(dir.path());
-        assert!(!catalog.credentials_changed(None));
-        let account_a = account("sk-a", "team-a");
-        assert!(catalog.credentials_changed(Some(&account_a)));
-        assert!(!catalog.credentials_changed(Some(&account_a)));
     }
 }

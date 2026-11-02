@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pa_models::{DiscoveryCredential, DiscoveryCredentials, ModelCatalog, PrimeCredentials};
+use pa_models::{
+    CatalogFormat, CatalogInputs, ModelCatalog, RefreshPolicy, RefreshRequest, ResolvedSource,
+};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -26,6 +28,86 @@ fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+fn fixture_catalog(dir: &Path, base: &str) -> ModelCatalog {
+    let urls = [
+        "openrouter",
+        "openai",
+        "anthropic",
+        "google",
+        "openai-codex",
+        "prime-inference",
+    ]
+    .into_iter()
+    .map(|provider| (provider.to_string(), format!("{base}/{provider}")))
+    .collect();
+    ModelCatalog::with_discovery_urls(
+        Some(dir.into()),
+        None,
+        &format!("{base}/catalog"),
+        pa_models::prime_inference::PRIME_INFERENCE_BASE_URL,
+        &urls,
+        base,
+    )
+}
+
+fn fixture_inputs(base: &str, configured: bool) -> CatalogInputs {
+    let mut sources = vec![ResolvedSource {
+        id: "prime-inference-public".into(),
+        provider: "prime-inference".into(),
+        format: CatalogFormat::PrimeInference,
+        url: format!("{base}/prime-inference"),
+        headers: if configured {
+            vec![
+                ("authorization".into(), "Bearer fixture-key".into()),
+                ("x-prime-team-id".into(), "fixture-team".into()),
+            ]
+        } else {
+            Vec::new()
+        },
+        unknown_models: pa_models::UnknownModelPolicy::KnownOnly,
+        is_current: None,
+    }];
+    if configured {
+        for (provider, format) in [
+            ("openai", CatalogFormat::OpenAi),
+            ("openrouter", CatalogFormat::OpenRouter),
+            ("anthropic", CatalogFormat::Anthropic),
+            ("google", CatalogFormat::Google),
+            ("openai-codex", CatalogFormat::Codex),
+            ("ollama-cloud", CatalogFormat::Ollama),
+        ] {
+            sources.push(ResolvedSource {
+                id: provider.into(),
+                provider: provider.into(),
+                format,
+                url: format!("{base}/{provider}"),
+                headers: vec![("authorization".into(), "Bearer fixture-key".into())],
+                unknown_models: pa_models::UnknownModelPolicy::KnownOnly,
+                is_current: None,
+            });
+        }
+        let mut private = sources[0].clone();
+        private.id = "prime-inference-private".into();
+        private.format = CatalogFormat::PrimeInferencePrivate;
+        sources.push(private);
+    }
+    CatalogInputs {
+        sources,
+        seeds: Vec::new(),
+    }
+}
+
+fn prime_payload() -> serde_json::Value {
+    json!({"data": pa_models::transports::prime_inference_offline_entries()
+        .iter().map(|model| json!({
+            "id": model.id, "display_name": model.name,
+            "pricing": {"input_usd_per_mtok": 0, "output_usd_per_mtok": 0},
+            "specs": {"context_window": model.context_window, "max_output_tokens": model.max_tokens,
+                "supports_reasoning": model.reasoning,
+                "modalities": {"input": ["text"], "output": ["text"]}},
+        })).collect::<Vec<_>>()})
+}
+
 // Keep the isolated child actions together so the env-cleared entry point is explicit.
 #[allow(clippy::too_many_lines)]
 #[test]
@@ -39,90 +121,95 @@ fn startup_child() {
         .unwrap();
     runtime.block_on(async {
         match action.as_str() {
-            "models" => {
-                let dir = tempfile::tempdir().unwrap();
+            "models-warm" | "models" => {
+                let base = std::env::var("PA_OFFLINE_LOOPBACK_URL").unwrap();
+                let dir = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+                    .join("agent/models");
+                std::fs::create_dir_all(&dir).unwrap();
+                let catalog = Arc::new(fixture_catalog(&dir, &base));
+                let inputs = fixture_inputs(&base, true);
+                if action == "models-warm" {
+                    let publication = catalog
+                        .refresh(
+                            &inputs,
+                            &RefreshRequest {
+                                policy: RefreshPolicy::Force,
+                                sources: Some(vec![
+                                    "curated".into(),
+                                    "prime-inference-public".into(),
+                                ]),
+                            },
+                        )
+                        .await;
+                    assert_eq!(publication.sources.len(), 2);
+                    assert!(publication.sources.iter().all(|report| report.status
+                        == pa_types::model_refresh::ModelRefreshStatus::Updated));
+                    return;
+                }
+                let before = files(&dir);
+                let resolved = catalog.snapshot(&inputs).models;
                 let model = pa_models::transports::compiled_models()
                     .iter()
                     .find(|model| model.provider == "anthropic")
                     .unwrap()
                     .clone();
-                let payload = json!({"schemaVersion": 1, "models": [model]});
-                let cache = dir.path().join("provider-model-catalog.v1.json");
-                std::fs::write(
-                    &cache,
-                    serde_json::to_vec(&json!({
-                        "url": pa_models::fetch::MODEL_CATALOG_URL,
-                        "scope": "public", "fetchedAt": 1, "checkedAt": 2,
-                        "payload": payload,
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-                let prime_payload: Vec<_> = pa_models::transports::prime_inference_offline_entries()
-                    .iter()
-                    .map(|model| json!({
-                        "id": model.id, "display_name": model.name,
-                        "pricing": {"input_usd_per_mtok": 0, "output_usd_per_mtok": 0},
-                        "specs": {"context_window": model.context_window,
-                            "max_output_tokens": model.max_tokens,
-                            "supports_reasoning": model.reasoning,
-                            "modalities": {"input": ["text"], "output": ["text"]}},
-                    }))
-                    .collect();
-                std::fs::write(dir.path().join("prime-inference-models-cache.json"),
-                    serde_json::to_vec(&json!({
-                        "url": format!("{}/models", pa_models::prime_inference::PRIME_INFERENCE_BASE_URL),
-                        "scope": pa_models::prime_inference::scope_key("fixture-key", "fixture-team"),
-                        "fetchedAt": 1, "checkedAt": 2, "payload": {"data": prime_payload},
-                    })).unwrap()).unwrap();
-                let before = files(dir.path());
-                let catalog = Arc::new(ModelCatalog::new(Some(dir.path().into())));
-                let resolved = catalog.resolve(None);
                 assert!(resolved.iter().any(|item| item.id == model.id));
-                let prime = PrimeCredentials {
-                    api_key: "fixture-key".into(),
-                    team_id: Some("fixture-team".into()),
-                };
-                let credentials: DiscoveryCredentials =
-                    ["openai", "anthropic", "google", "ollama-cloud"]
-                        .into_iter()
-                        .map(|id| {
-                            (
-                                id.into(),
-                                DiscoveryCredential {
-                                    secret: "fixture-key".into(),
-                                    is_current: None,
-                                },
-                            )
-                        })
+                for inputs in [fixture_inputs(&base, false), inputs] {
+                    let expected: std::collections::BTreeSet<_> = inputs
+                        .sources
+                        .iter()
+                        .map(|source| source.id.clone())
+                        .chain(["curated".into(), "default".into()])
                         .collect();
-                // Both public/no-auth startup and configured discovery are covered.
-                for credentials in [&DiscoveryCredentials::new(), &credentials] {
-                    let reports = catalog
-                        .refresh_catalog_sources(true, Some(&prime), credentials, None)
+                    let publication = catalog
+                        .refresh(
+                            &inputs,
+                            &RefreshRequest {
+                                policy: RefreshPolicy::Force,
+                                sources: None,
+                            },
+                        )
                         .await;
-                    assert_eq!(reports.len(), 8, "production defaults include every source");
                     assert_eq!(
-                        reports.iter().find(|report| report.source == "prime-inference-public")
-                            .unwrap().model_count,
-                        Some(prime_payload.len()),
-                        "credential-scoped cache remains usable without renewing freshness"
+                        publication
+                            .sources
+                            .iter()
+                            .map(|report| report.source.clone())
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        expected
                     );
+                    let prime = publication
+                        .sources
+                        .iter()
+                        .find(|report| report.source == "prime-inference-public")
+                        .unwrap();
+                    if inputs.sources[0].headers.is_empty() {
+                        assert_eq!(
+                            prime.model_count, None,
+                            "public startup cannot use credential-scoped metadata"
+                        );
+                    } else {
+                        assert_eq!(
+                            prime.model_count,
+                            Some(prime_payload()["data"].as_array().unwrap().len()),
+                            "credential-scoped cache remains usable without renewing freshness"
+                        );
+                    }
                     assert!(
-                        reports.iter().all(|report| matches!(
+                        publication.sources.iter().all(|report| matches!(
                             report.reason,
                             Some(
                                 pa_types::model_refresh::ModelRefreshReason::Offline
                                     | pa_types::model_refresh::ModelRefreshReason::Unconfigured
                             )
                         )),
-                        "{reports:?}"
+                        "{:?}",
+                        publication.sources
                     );
                 }
-                catalog.trigger_refresh_with_credentials(
-                    pa_models::RefreshTrigger::Startup,
-                    Some(prime),
-                );
+                let path = dir.parent().unwrap().join("models.json");
+                pa_core::models::install_catalog(&path, Arc::clone(&catalog));
+                let _ = pa_core::models::startup_refresh(dir.parent().unwrap());
                 tokio::time::timeout(Duration::from_secs(5), async {
                     while runtime.metrics().num_alive_tasks() != 0 {
                         tokio::task::yield_now().await;
@@ -130,13 +217,16 @@ fn startup_child() {
                 })
                 .await
                 .expect("background refresh settled");
-                assert_eq!(catalog.resolve(None), resolved);
                 assert_eq!(
-                    files(dir.path()),
+                    catalog.snapshot(&fixture_inputs(&base, true)).models,
+                    resolved
+                );
+                assert_eq!(
+                    files(&dir),
                     before,
                     "offline never renews freshness or publishes auth snapshots"
                 );
-                // The same offline chain still serves bundled and compiled data.
+                let payload = json!({"schemaVersion": 1, "models": [model.clone()]});
                 let bundled = tempfile::tempdir().unwrap();
                 std::fs::write(
                     bundled.path().join("models.bundled.json"),
@@ -144,11 +234,15 @@ fn startup_child() {
                 )
                 .unwrap();
                 let bundled = ModelCatalog::with_bundled_dir(None, Some(bundled.path().into()));
-                assert!(bundled.resolve(None).iter().any(|item| item.id == model.id));
+                assert!(bundled
+                    .snapshot(&CatalogInputs::default())
+                    .models
+                    .iter()
+                    .any(|item| item.id == model.id));
                 let missing = tempfile::tempdir().unwrap();
                 let fallback = ModelCatalog::with_bundled_dir(None, Some(missing.path().into()));
                 assert_eq!(
-                    fallback.resolve(None),
+                    fallback.snapshot(&CatalogInputs::default()).models,
                     pa_models::transports::compiled_models()
                 );
             }
@@ -166,12 +260,23 @@ fn startup_child() {
             }
             "online" => {
                 let base = std::env::var("PA_OFFLINE_LOOPBACK_URL").unwrap();
-                let catalog = ModelCatalog::with_urls(None, None, &base, &base);
-                let models = catalog
-                    .refresh(true)
-                    .await
-                    .expect("explicit online loopback response");
-                assert!(models
+                let catalog = ModelCatalog::with_urls(None, None, &format!("{base}/online"), &base);
+                let publication = catalog
+                    .refresh(
+                        &CatalogInputs::default(),
+                        &RefreshRequest {
+                            policy: RefreshPolicy::Force,
+                            sources: Some(vec!["curated".into()]),
+                        },
+                    )
+                    .await;
+                assert_eq!(
+                    publication.sources[0].status,
+                    pa_types::model_refresh::ModelRefreshStatus::Updated
+                );
+                assert!(publication
+                    .snapshot
+                    .models
                     .iter()
                     .any(|model| model.id == "offline-fixture-model"));
             }
@@ -185,6 +290,62 @@ fn startup_child() {
             _ => panic!("unknown child action"),
         }
     });
+}
+
+async fn run_child(action: &str, root: &Path, url: &str, endpoint: &str) -> std::process::Output {
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .env_clear()
+        .kill_on_drop(true)
+        .args(["--exact", "startup_child", "--nocapture"])
+        .env(CHILD, action)
+        .env("HOME", root)
+        .env("PI_PACKAGE_DIR", root)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", root.join("agent"))
+        .env("PRIME_AGENT_KERNEL_VENV", root.join("kernel"))
+        .env("RLM_SESSION_DIR", root.join("sessions"))
+        .env("RLM_HARNESS_STATE_DIR", root.join("harness"))
+        .env("RLM_GLOBAL_HARNESS_STATE_DIR", root.join("global-harness"))
+        .env(
+            "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET",
+            root.join("supervisor.sock"),
+        )
+        .env("TMPDIR", root)
+        .env(
+            "PI_OFFLINE",
+            if matches!(action, "online" | "fence" | "models-warm") {
+                "0"
+            } else {
+                "1"
+            },
+        )
+        .env("PA_OFFLINE_LOOPBACK_URL", url);
+    for name in [
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
+        child.env(name, root.join(name));
+    }
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        child.env(name, endpoint);
+    }
+    for name in ["NO_PROXY", "no_proxy"] {
+        child.env(name, "127.0.0.1,localhost,::1");
+    }
+    tokio::time::timeout(Duration::from_secs(15), child.output())
+        .await
+        .expect("finite child")
+        .unwrap()
 }
 
 // The fixture owns both listeners and all child lifetimes in one place.
@@ -212,87 +373,57 @@ async fn fenced_children(actions: &[&str]) {
         }
     });
     let local = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/catalog", local.local_addr().unwrap());
+    let url = format!("http://{}", local.local_addr().unwrap());
     let counter = Arc::clone(&served);
     let local_task = tokio::spawn(async move {
-        let (mut socket, _) = local.accept().await.unwrap();
-        let mut buffer = [0; 4096];
-        tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buffer))
-            .await
-            .unwrap()
-            .unwrap();
-        counter.fetch_add(1, Ordering::SeqCst);
-        let mut model = pa_models::transports::compiled_models()
-            .iter()
-            .find(|model| model.provider == "anthropic")
-            .unwrap()
-            .clone();
-        model.id = "offline-fixture-model".into();
-        let body = json!({"schemaVersion": 1, "models": [model]}).to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        socket.write_all(response.as_bytes()).await.unwrap();
+        loop {
+            let (mut socket, _) = local.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+            let request = String::from_utf8(request).unwrap();
+            let path = request.split_whitespace().nth(1).unwrap();
+            let payload = match path {
+                "/prime-inference" => prime_payload(),
+                "/catalog" | "/online" => {
+                    let mut model = pa_models::transports::compiled_models()
+                        .iter()
+                        .find(|model| model.provider == "anthropic")
+                        .unwrap()
+                        .clone();
+                    if path == "/online" {
+                        model.id = "offline-fixture-model".into();
+                    }
+                    json!({"schemaVersion": 1, "models": [model]})
+                }
+                _ => panic!("unexpected fixture request: {path}"),
+            };
+            let body = payload.to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
     });
     for &action in actions {
         let root = tempfile::tempdir().unwrap();
-        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
-        child
-            .env_clear()
-            .kill_on_drop(true)
-            .args(["--exact", "startup_child", "--nocapture"])
-            .env(CHILD, action)
-            .env("HOME", root.path())
-            .env("PI_PACKAGE_DIR", root.path())
-            .env("PRIME_AGENT_CODING_AGENT_DIR", root.path().join("agent"))
-            .env("PRIME_AGENT_KERNEL_VENV", root.path().join("kernel"))
-            .env("RLM_SESSION_DIR", root.path().join("sessions"))
-            .env("RLM_HARNESS_STATE_DIR", root.path().join("harness"))
-            .env(
-                "RLM_GLOBAL_HARNESS_STATE_DIR",
-                root.path().join("global-harness"),
-            )
-            .env(
-                "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET",
-                root.path().join("supervisor.sock"),
-            )
-            .env("TMPDIR", root.path())
-            .env(
-                "PI_OFFLINE",
-                if action == "online" || action == "fence" {
-                    "0"
-                } else {
-                    "1"
-                },
-            )
-            .env("PA_OFFLINE_LOOPBACK_URL", &url);
-        for name in [
-            "XDG_CACHE_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-            "XDG_RUNTIME_DIR",
-        ] {
-            child.env(name, root.path().join(name));
+        if action == "models" {
+            let warm = run_child("models-warm", root.path(), &url, &endpoint).await;
+            assert!(
+                warm.status.success(),
+                "online fixture warm: {}{}",
+                String::from_utf8_lossy(&warm.stdout),
+                String::from_utf8_lossy(&warm.stderr)
+            );
+            assert_eq!(
+                denied.load(Ordering::SeqCst),
+                0,
+                "fixture warm stayed on loopback"
+            );
         }
-        for name in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
-            child.env(name, &endpoint);
-        }
-        for name in ["NO_PROXY", "no_proxy"] {
-            child.env(name, "127.0.0.1,localhost,::1");
-        }
-        let output = tokio::time::timeout(Duration::from_secs(15), child.output())
-            .await
-            .expect("finite child")
-            .unwrap();
+        let output = run_child(action, root.path(), &url, &endpoint).await;
         assert_eq!(
             denied.load(Ordering::SeqCst),
             usize::from(action == "fence"),
@@ -309,14 +440,10 @@ async fn fenced_children(actions: &[&str]) {
     }
     assert_eq!(
         served.load(Ordering::SeqCst),
-        usize::from(actions.contains(&"online")),
-        "online opt-in bypasses the proxy only for loopback"
+        usize::from(actions.contains(&"online")) + 2 * usize::from(actions.contains(&"models")),
+        "only explicit online fixture warms and online control reach loopback"
     );
-    if actions.contains(&"online") {
-        local_task.await.unwrap();
-    } else {
-        local_task.abort();
-    }
+    local_task.abort();
     proxy_task.abort();
 }
 

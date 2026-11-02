@@ -41,15 +41,9 @@ impl Worker {
             .cloned()
             .collect::<Vec<_>>();
         let served = catalog_payload(&registry, &available);
-        // An observed credential-scope change forces the refresh; the
-        // observation consumes the scope, so one change forces exactly once.
-        let credentials = pa_core::models::prime_credentials_for_dir(&agent_dir);
-        let catalog = pa_core::models::catalog_for(Some(&models_json));
-        let trigger = if catalog.credentials_changed(credentials.as_ref()) {
-            pa_core::models::RefreshTrigger::AuthChange
-        } else {
-            pa_core::models::RefreshTrigger::PickerOpen
-        };
+        // Provider caches are scoped by the complete current authorized source. A changed
+        // account/endpoint naturally selects a fresh scope without resolving auth on paint.
+        let trigger = pa_core::models::RefreshTrigger::PickerOpen;
         self.spawn_catalog_refresh(trigger, served.clone());
         response_success(None, "get_model_catalog", Some(served))
     }
