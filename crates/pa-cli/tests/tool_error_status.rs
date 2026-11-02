@@ -272,10 +272,10 @@ async fn assert_persisted_status(is_error: bool) {
         ["user", "assistant", "toolResult", "assistant"]
     );
     assert_eq!(normalized_message(messages[2].clone()), expected);
-    let rows = std::fs::read_to_string(&path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+    let rows = pa_core::session::read::read_entries(&path)
+        .expect("valid persisted session log")
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(rows[0]["type"], "session");
     assert_eq!(rows[0]["id"], session_id);
