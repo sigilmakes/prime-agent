@@ -685,10 +685,7 @@ mod tests {
         assert!(!has_model(&served, "live/team-b-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));
 
-        let _ = release.send(ok_json(&pi_combined_payload(
-            "live/team-b-marker",
-            &[],
-        )));
+        let _ = release.send(ok_json(&pi_combined_payload("live/team-b-marker", &[])));
         await_catalog_changed(&mut fixture.events).await;
         let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
         assert_canonical_models_order(&fresh);
@@ -802,10 +799,7 @@ mod tests {
         // Release the held fetch: the one refresh cycle lands (public and
         // private Prime = 2 requests total), the queued trailing re-arm finds
         // every gate warm and fetches nothing.
-        let _ = release.send(ok_json(&pi_combined_payload(
-            "live/team-b-marker",
-            &[],
-        )));
+        let _ = release.send(ok_json(&pi_combined_payload("live/team-b-marker", &[])));
         await_catalog_changed(&mut fixture.events).await;
         assert_eq!(
             fixture.server.request_count() - requests_before,
