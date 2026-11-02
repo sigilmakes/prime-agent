@@ -235,6 +235,29 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
+    fn write_session_rows(path: &std::path::Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .expect("create fixture session log");
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
+    fn write_session_text(path: &std::path::Path, text: &str) {
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("fixture row JSON"))
+            .collect();
+        write_session_rows(path, &rows);
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-roster-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -245,7 +268,7 @@ mod tests {
         let content = format!(
             "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"t\",\"cwd\":\"/x\"}}\n             {{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":null,\"timestamp\":\"t\",\"thinkingLevel\":\"{level}\"}}\n"
         );
-        fs::write(path, content).unwrap();
+        write_session_text(path, &content);
     }
 
     #[test]
@@ -299,7 +322,7 @@ mod tests {
     fn passive_child_summary_carries_the_saved_usage_summary() {
         let dir = temp_dir("usage");
         let child = dir.join("sub-usage.jsonl");
-        fs::write(
+        write_session_text(
             &child,
             concat!(
                 r#"{"type":"session","version":3,"id":"sub-usage","timestamp":"t","cwd":"/x"}"#,
@@ -307,8 +330,7 @@ mod tests {
                 r#"{"type":"message","id":"m1","timestamp":"t","message":{"role":"assistant","content":"ok","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,"cost":{"input":0.0,"output":0.2,"cacheRead":0.0,"cacheWrite":0.0,"total":0.2}}}}"#,
                 "\n",
             ),
-        )
-        .unwrap();
+        );
         let info = read_session_info(&child).expect("child info");
         let child_row = PassiveRlmChild {
             edge: RlmLedgerEdge {
@@ -341,7 +363,7 @@ mod tests {
                 "{{\"type\":\"message\",\"id\":\"m{i}\",\"timestamp\":\"t\",\"message\":{{\"role\":\"user\",\"content\":\"msg {i}\",\"timestamp\":{i}}}}}"
             ).expect("write to String");
         }
-        fs::write(path, content).unwrap();
+        write_session_text(path, &content);
     }
 
     #[test]

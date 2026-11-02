@@ -257,6 +257,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn write_session_rows(path: &std::path::Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .expect("create fixture session log");
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
     fn dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-ctc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -307,12 +322,7 @@ mod tests {
                 },
             }),
         ];
-        let content = lines
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(child_dir.join(format!("{session_id}.jsonl")), content).unwrap();
+        write_session_rows(&child_dir.join(format!("{session_id}.jsonl")), &lines);
         child_dir
     }
 
@@ -421,12 +431,7 @@ mod tests {
                 "aggregateUsage": aggregate_usage,
             }),
         ];
-        let content = lines
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(child_dir.join("01a0child-opus.jsonl"), content).unwrap();
+        write_session_rows(&child_dir.join("01a0child-opus.jsonl"), &lines);
         let node = load_context_tree_child(
             &artifacts,
             &child_dir,
@@ -481,12 +486,7 @@ mod tests {
                             "stopReason": "stop", "usage": own_usage},
             }),
         ];
-        let content = bare
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(modelless.join("01a0child-bare.jsonl"), content).unwrap();
+        write_session_rows(&modelless.join("01a0child-bare.jsonl"), &bare);
         let node = load_context_tree_child(
             &artifacts,
             &modelless,
@@ -616,12 +616,7 @@ mod tests {
             json!({"type": "message", "id": "g1", "parentId": "m0", "timestamp": "2026-09-22T00:00:01.000Z", "message": {"role": "assistant", "content": [{ "type": "text", "text": "hi" }], "provider": "prime-inference", "model": "internal/glm-5.3-fast", "usage": {"input": 7, "output": 2, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 9, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}}}),
             json!({"type": "message", "id": "g2", "parentId": "8b5f0d21", "timestamp": "2026-09-22T00:00:02.000Z", "message": {"role": "user", "content": "after the gap"}}),
         ];
-        let content = lines
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(child_dir.join("01a0child-0000.jsonl"), content).unwrap();
+        write_session_rows(&child_dir.join("01a0child-0000.jsonl"), &lines);
         let node = load_context_tree_child(
             &artifacts,
             &child_dir,
