@@ -5,17 +5,47 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use pa_models::cache::{CatalogCache, RefreshOptions, PUBLIC_SCOPE};
 use pa_models::fetch::CatalogFetcher;
 use pa_models::pinning::{parse_provider_model_catalog, PinnedTemplates};
 use pa_models::prime_inference::{
-    build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceCatalog,
-    PrimeInferenceCredentials,
+    build_prime_inference_models, parse_prime_inference_model_catalog,
 };
 use serde_json::{json, Value};
+
+fn prime_inputs(base: &str, key: &str, team: &str) -> pa_models::CatalogInputs {
+    pa_models::CatalogInputs {
+        sources: vec![pa_models::ResolvedSource {
+            id: "prime-inference-public".into(),
+            provider: "prime-inference".into(),
+            format: pa_models::CatalogFormat::PrimeInference,
+            url: format!("{base}/models"),
+            headers: vec![
+                ("authorization".into(), format!("Bearer {key}")),
+                ("x-prime-team-id".into(), team.into()),
+            ],
+            defaults: None,
+            is_current: None,
+        }],
+        seeds: Vec::new(),
+    }
+}
+async fn refresh_prime(
+    catalog: &pa_models::ModelCatalog,
+    inputs: &pa_models::CatalogInputs,
+) -> pa_models::RefreshPublication {
+    catalog
+        .refresh(
+            inputs,
+            &pa_models::RefreshRequest {
+                policy: pa_models::RefreshPolicy::Force,
+                sources: Some(vec!["prime-inference-public".into()]),
+            },
+        )
+        .await
+}
 
 /// A cache over the models catalog parse pipeline (the same closure
 /// `ModelCatalog` installs in production), aimed at the mock server.
@@ -378,22 +408,20 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
         let url = server.url("/api/v1");
         url.trim_end_matches("/models").to_string()
     };
-    let catalog = PrimeInferenceCatalog::with_base_url(Some(PathBuf::from(dir.path())), &base);
+    let catalog = pa_models::ModelCatalog::with_urls(
+        Some(dir.path().into()),
+        Some(dir.path().into()),
+        "http://127.0.0.1:1/unused",
+        &base,
+    );
 
-    let team_a = PrimeInferenceCredentials {
-        api_key: "key-a".into(),
-        team_id: Some("team-a".into()),
-    };
-    let team_b = PrimeInferenceCredentials {
-        api_key: "key-b".into(),
-        team_id: Some("team-b".into()),
-    };
+    let team_a = prime_inputs(&base, "key-a", "team-a");
+    let team_b = prime_inputs(&base, "key-b", "team-b");
 
-    let a = catalog
-        .refresh(&team_a, true)
-        .await
-        .expect("team-a live models");
-    assert_eq!(a.len(), 60, "public live entries only");
+    let publication = refresh_prime(&catalog, &team_a).await;
+    assert_eq!(publication.sources[0].model_count, Some(60));
+    let a = publication.snapshot.models;
+
     // The public models cache never includes private ids (the private
     // entitlement flow is the registry's, over its own authorization).
     assert!(
@@ -405,25 +433,50 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
     assert!(request.contains("x-prime-team-id: team-a"), "{request}");
 
     assert!(
-        catalog.get(&team_b).is_none(),
+        catalog
+            .adopt(&team_b, pa_models::SnapshotRequirement::default())
+            .report
+            .applied
+            .is_empty(),
         "account B sees nothing from account A's scope"
     );
 
-    let fresh = PrimeInferenceCatalog::with_base_url(Some(PathBuf::from(dir.path())), &base);
+    let fresh = pa_models::ModelCatalog::with_urls(
+        Some(dir.path().into()),
+        Some(dir.path().into()),
+        "http://127.0.0.1:1/unused",
+        &base,
+    );
     assert!(
-        fresh.get(&team_a).is_some(),
+        fresh
+            .adopt(&team_a, pa_models::SnapshotRequirement::default())
+            .report
+            .applied
+            .contains(&"prime-inference-public".into()),
         "A's scope reloads its own disk snapshot"
     );
     assert!(
-        fresh.get(&team_b).is_none(),
+        fresh
+            .adopt(&team_b, pa_models::SnapshotRequirement::default())
+            .report
+            .applied
+            .is_empty(),
         "B's scope stays empty across processes"
     );
-    let stored: Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("prime-inference-models-cache.json")).unwrap(),
-    )
-    .unwrap();
-    let expected_scope = pa_models::prime_inference::scope_key("key-a", "team-a");
-    assert_eq!(stored["scope"], expected_scope, "scope fingerprint on disk");
+    let stored_path = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_name().to_string_lossy().ends_with(".v1.json")
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("discovery-")
+        })
+        .unwrap()
+        .path();
+    let stored = std::fs::read_to_string(stored_path).unwrap();
+    assert!(!stored.contains("key-a"));
 }
 
 #[tokio::test]
@@ -456,28 +509,41 @@ async fn unauthorized_prime_inference_clears_only_that_scope() {
         let url = server.url("/api/v1");
         url.trim_end_matches("/models").to_string()
     };
-    let catalog = PrimeInferenceCatalog::with_base_url(Some(PathBuf::from(dir.path())), &base);
-
-    let creds = PrimeInferenceCredentials {
-        api_key: "key-a".into(),
-        team_id: Some("team-a".into()),
-    };
-    let other = PrimeInferenceCredentials {
-        api_key: "key-z".into(),
-        team_id: Some("team-z".into()),
-    };
-    assert!(catalog.refresh(&creds, true).await.is_some(), "good fetch");
-    assert!(catalog.get(&creds).is_some());
-
-    assert!(catalog.refresh(&creds, true).await.is_none(), "401");
-    assert!(catalog.get(&creds).is_none(), "scope cleared");
-    assert!(
-        !dir.path()
-            .join("prime-inference-models-cache.json")
-            .exists(),
-        "cache file removed"
+    let catalog = pa_models::ModelCatalog::with_urls(
+        Some(dir.path().into()),
+        Some(dir.path().into()),
+        "http://127.0.0.1:1/unused",
+        &base,
     );
-    assert!(catalog.get(&other).is_none());
+
+    let creds = prime_inputs(&base, "key-a", "team-a");
+    let other = prime_inputs(&base, "key-z", "team-z");
+    assert_eq!(
+        refresh_prime(&catalog, &creds).await.sources[0].status,
+        pa_types::model_refresh::ModelRefreshStatus::Updated
+    );
+    assert!(catalog
+        .adopt(&creds, pa_models::SnapshotRequirement::default())
+        .report
+        .applied
+        .contains(&"prime-inference-public".into()));
+    assert_eq!(
+        refresh_prime(&catalog, &creds).await.sources[0].reason,
+        Some(pa_types::model_refresh::ModelRefreshReason::AuthRejected)
+    );
+    assert!(
+        catalog
+            .adopt(&creds, pa_models::SnapshotRequirement::default())
+            .report
+            .applied
+            .is_empty(),
+        "scope cleared"
+    );
+    assert!(catalog
+        .adopt(&other, pa_models::SnapshotRequirement::default())
+        .report
+        .applied
+        .is_empty());
 }
 
 #[test]
@@ -603,7 +669,7 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
 /// caches without waiting an hour) and the tick's fetch arms the hourly
 /// gate, so an immediate second attempt stays inside the window.
 #[tokio::test]
-async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
+async fn facade_refreshes_authorized_layers_and_gates_recent_attempts() {
     let dir = tempfile::tempdir().unwrap();
     let compiled = pa_models::transports::prime_inference_offline_entries();
     let ids: Vec<String> = compiled.iter().map(|m| m.id.clone()).take(60).collect();
@@ -632,20 +698,15 @@ async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
         &server.url("/catalog"),
         &server.url("/api/v1"),
     ));
-    let credentials = pa_models::PrimeCredentials {
-        api_key: "sk-hourly".into(),
-        team_id: Some("team-hourly".into()),
+    let credentials = prime_inputs(&server.url("/api/v1"), "sk-hourly", "team-hourly");
+    let curated = pa_models::RefreshRequest {
+        policy: pa_models::RefreshPolicy::Force,
+        sources: Some(vec!["curated".into()]),
     };
-    let hourly = Arc::clone(&catalog);
-    hourly.spawn_hourly_refresh(move || Some(credentials.clone()));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while server.request_count() < 2 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the hourly loop's first tick never fetched"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    catalog
+        .refresh(&pa_models::CatalogInputs::default(), &curated)
+        .await;
+    refresh_prime(&catalog, &credentials).await;
     let heads = server.recorded_requests();
     assert!(
         heads.iter().any(|head| head.contains("/catalog")),
@@ -666,7 +727,15 @@ async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
     // The hourly gate: an immediate second attempt serves the cached
     // snapshot with no fetch (the awaited call is the gate's own path, so
     // the count is settled at the assert, not raced).
-    let gated = catalog.refresh_curated(false).await;
-    assert!(gated.is_some_and(|models| { models.iter().any(|model| model.id == "hourly-model") }));
+    let request = pa_models::RefreshRequest {
+        policy: pa_models::RefreshPolicy::IfStale,
+        sources: Some(vec!["curated".into(), "prime-inference-public".into()]),
+    };
+    let gated = catalog.refresh(&credentials, &request).await;
+    assert!(gated
+        .snapshot
+        .models
+        .iter()
+        .any(|model| model.id == "hourly-model"));
     assert_eq!(server.request_count(), 2, "one fetch per layer per window");
 }

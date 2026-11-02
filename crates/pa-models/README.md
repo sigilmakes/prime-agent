@@ -68,8 +68,7 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   prime_inference_offline_entries}`
 - `bundled::{BundledAssets, load_bundled_models, PACKAGED_MODEL_CATALOG_FILE,
   PACKAGED_MCP_CATALOG_FILE}`
-- `prime_inference::{PrimeInferenceCatalog, PrimeInferenceCredentials,
-  build_prime_inference_models, merge_prime_inference_models,
+- `prime_inference::{build_prime_inference_models, merge_prime_inference_models,
   parse_prime_inference_model_catalog, is_private_prime_inference_model_id,
   scope_key, PRIME_INFERENCE_BASE_URL}`
 - `offline::is_catalog_offline`

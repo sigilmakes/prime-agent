@@ -3,9 +3,6 @@
 //! `X-Prime-Team-ID` (when a team is configured) is what makes
 //! private/internal models appear for entitled users.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use hmac::{Hmac, Mac};
 use pa_types::ai::{
     CompatKind, Model, ModelCompat, ModelCost, ModelInput, ModelThinkingLevel,
@@ -15,18 +12,10 @@ use pa_types::JsNumber;
 use serde::Deserialize;
 use sha2::Sha256;
 
-use crate::cache::{CatalogCache, RefreshOptions};
-use crate::fetch::CatalogFetcher;
-use crate::transports;
-
 pub const PRIME_INFERENCE_BASE_URL: &str = "https://api.pinference.ai/api/v1";
-
-const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Minimum share of compiled entries a live fetch must cover.
 const MIN_CATALOG_COVERAGE: f64 = 0.5;
-
-const CACHE_FILE: &str = "prime-inference-models-cache.json";
 
 /// One entry of the Prime Inference `/models` response.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -138,12 +127,6 @@ pub fn prime_inference_reasoning_controls(
         thinking_format,
         thinking_level_map,
     })
-}
-
-#[derive(Debug, Clone)]
-pub struct PrimeInferenceCredentials {
-    pub api_key: String,
-    pub team_id: Option<String>,
 }
 
 #[must_use]
@@ -552,164 +535,6 @@ pub fn merge_prime_inference_models(bundled: &[Model], live: Option<&[Model]>) -
             merged.extend(live.iter().cloned());
             merged
         }
-    }
-}
-
-/// The scope-keyed Prime Inference catalog: one last-good snapshot per
-/// credential+team scope, fetched live with credentials.
-pub struct PrimeInferenceCatalog {
-    cache: CatalogCache<Vec<Model>>,
-}
-
-impl PrimeInferenceCatalog {
-    /// A catalog persisted beside `models_dir`, using the compiled entries
-    /// as templates.
-    #[must_use]
-    pub fn new(models_dir: Option<PathBuf>) -> Self {
-        let templates = Arc::new(transports::prime_inference_offline_entries());
-        let cache_path = models_dir.map(|dir| dir.join(CACHE_FILE));
-        let parse_templates = Arc::clone(&templates);
-        let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
-            let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
-                .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
-        });
-        Self {
-            cache: CatalogCache::new(
-                &format!("{PRIME_INFERENCE_BASE_URL}/models"),
-                cache_path,
-                Arc::new(CatalogFetcher::with_limits(
-                    crate::fetch::FETCH_TIMEOUT,
-                    MAX_RESPONSE_BYTES,
-                )),
-                parse,
-            ),
-        }
-    }
-
-    /// [`PrimeInferenceCatalog::new`] with an explicit API base URL (test
-    /// seam for running the credentialed flow against a local server).
-    #[must_use]
-    pub fn with_base_url(models_dir: Option<PathBuf>, base_url: &str) -> Self {
-        let templates = Arc::new(transports::prime_inference_offline_entries());
-        let cache_path = models_dir.map(|dir| dir.join(CACHE_FILE));
-        let parse_templates = Arc::clone(&templates);
-        let parse: crate::cache::CatalogParse<Vec<Model>> = Arc::new(move |payload, _scope| {
-            let entries = parse_prime_inference_model_catalog(payload, false)?;
-            build_prime_inference_models(&parse_templates, &entries, false, None)
-                .ok_or_else(|| "Prime Inference catalog coverage gate failed".to_string())
-        });
-        Self {
-            cache: CatalogCache::new(
-                &format!("{base_url}/models"),
-                cache_path,
-                Arc::new(CatalogFetcher::with_limits(
-                    crate::fetch::FETCH_TIMEOUT,
-                    MAX_RESPONSE_BYTES,
-                )),
-                parse,
-            ),
-        }
-    }
-
-    pub fn scope_for(&self, credentials: &PrimeInferenceCredentials) -> String {
-        scope_key(
-            &credentials.api_key,
-            credentials.team_id.as_deref().unwrap_or_default(),
-        )
-    }
-
-    /// The scope recorded in the stored disk snapshot, when one exists (the
-    /// auth-scope observation's first-request seed; a login or logout that
-    /// predates the process is still detected).
-    pub fn stored_scope(&self) -> Option<String> {
-        self.cache.stored_scope()
-    }
-
-    /// The last-good snapshot for a scope, or None (callers fall back to the
-    /// compiled offline entries).
-    pub fn get(&self, credentials: &PrimeInferenceCredentials) -> Option<Vec<Model>> {
-        self.cache.get(&self.scope_for(credentials))
-    }
-
-    /// Unauthenticated public catalog; protected views never fall back across credential scopes.
-    pub fn get_public(&self) -> Option<Vec<Model>> {
-        self.cache.get(crate::cache::PUBLIC_SCOPE)
-    }
-
-    /// Explicit refresh may refresh the public endpoint even without a configured credential.
-    pub async fn refresh_public_report(
-        &self,
-        force: bool,
-    ) -> crate::cache::CatalogRefreshReport<Vec<Model>> {
-        self.cache
-            .refresh_report(
-                crate::cache::PUBLIC_SCOPE,
-                RefreshOptions {
-                    force,
-                    ..Default::default()
-                },
-            )
-            .await
-    }
-
-    pub fn reload_public_from_disk(&self) -> (bool, Option<u64>) {
-        (
-            self.cache
-                .reload_from_disk(crate::cache::PUBLIC_SCOPE)
-                .is_some(),
-            self.cache.status(crate::cache::PUBLIC_SCOPE).checked_at,
-        )
-    }
-
-    /// Clear one scope's cache (revocation, logout).
-    pub fn clear(&self, credentials: &PrimeInferenceCredentials) {
-        self.cache.clear(&self.scope_for(credentials));
-    }
-
-    /// Reload a sibling process's validated snapshot without network work.
-    pub fn reload_from_disk(&self, credentials: &PrimeInferenceCredentials) -> (bool, Option<u64>) {
-        let scope = self.scope_for(credentials);
-        (
-            self.cache.reload_from_disk(&scope).is_some(),
-            self.cache.status(&scope).checked_at,
-        )
-    }
-
-    /// Live credentialed refresh: coalesced, hourly gated, scope-isolated;
-    /// 401/403 clears only this scope. Never blocks on errors.
-    pub async fn refresh(
-        &self,
-        credentials: &PrimeInferenceCredentials,
-        force: bool,
-    ) -> Option<Vec<Model>> {
-        self.refresh_report(credentials, force).await.models
-    }
-
-    /// Refresh with a credential-free outcome for explicit refresh reports.
-    pub async fn refresh_report(
-        &self,
-        credentials: &PrimeInferenceCredentials,
-        force: bool,
-    ) -> crate::cache::CatalogRefreshReport<Vec<Model>> {
-        let mut headers = vec![(
-            "Authorization".to_string(),
-            format!("Bearer {}", credentials.api_key),
-        )];
-        if let Some(team_id) = &credentials.team_id {
-            headers.push(("X-Prime-Team-ID".to_string(), team_id.clone()));
-        }
-        self.cache
-            .refresh_report(
-                &self.scope_for(credentials),
-                RefreshOptions {
-                    force,
-                    headers,
-                    is_current: None,
-                    ..Default::default()
-                },
-            )
-            .await
     }
 }
 

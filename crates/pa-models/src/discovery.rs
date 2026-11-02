@@ -716,6 +716,13 @@ fn normalize_ollama(
             ..Default::default()
         };
         if !row.denied {
+            row.thinking = crate::ollama_cloud::parse_catalog(
+                &serde_json::json!({"models":{id:raw}}),
+                crate::ollama_cloud::BASE_URL,
+            )
+            .ok()
+            .and_then(|models| models.into_iter().next())
+            .and_then(|model| model.thinking_level_map);
             row.input = Some(if has("vision") {
                 vec![ModelInput::Text, ModelInput::Image]
             } else {

@@ -12,6 +12,8 @@ pub mod ollama_cloud;
 pub mod pinning;
 pub mod prime_inference;
 mod provider_catalogs;
+#[cfg(test)]
+mod provider_catalogs_tests;
 pub mod provider_discovery;
 pub mod schema;
 pub mod transports;
@@ -23,8 +25,8 @@ pub use discovery::{
     RefreshPublication, RefreshRequest, ResolvedSource, SnapshotRequirement,
 };
 
-pub use chain::{ModelCatalog, PrimeCredentials, RefreshTrigger};
+pub use chain::ModelCatalog;
 pub use pa_types::ai::Model;
-pub use provider_catalogs::{DiscoveryCredential, DiscoveryCredentials, DEFAULT_MODEL_CATALOG_URL};
+pub use provider_catalogs::DEFAULT_MODEL_CATALOG_URL;
 
 pub const CATALOG_REFRESH_INTERVAL_MS: u64 = 60 * 60_000;
