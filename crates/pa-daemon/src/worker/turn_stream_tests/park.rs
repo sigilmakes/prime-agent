@@ -15,7 +15,7 @@ impl SessionEngine for ReleaseCountingEngine {
         _prompt_index: usize,
         _request: PromptRequest,
         _aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         emit(EngineEvent::Done(Ok(())));
     }
@@ -146,7 +146,7 @@ impl SessionEngine for AdmitProbeEngine {
         _prompt_index: usize,
         request: PromptRequest,
         _aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         self.prompts.lock().unwrap().push(request.message);
         emit(EngineEvent::Done(Ok(())));

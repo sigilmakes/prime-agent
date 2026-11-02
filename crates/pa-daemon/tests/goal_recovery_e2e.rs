@@ -274,11 +274,8 @@ impl Harness {
 
     /// The session file's `thread_goal_state` custom rows, in file order.
     fn goal_state_rows(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.session_file())
-            .expect("session file readable")
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        session_rows(&self.session_file())
+            .into_iter()
             .filter(|entry| {
                 entry.get("type").and_then(Value::as_str) == Some("custom")
                     && entry.get("customType").and_then(Value::as_str)
@@ -584,11 +581,9 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     assert_eq!(idle["success"], true, "never went idle: {idle}");
     harness.client.drain_events(Duration::from_secs(1));
 
-    let compaction_rows = std::fs::read_to_string(harness.session_file())
-        .expect("session file readable")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter(|line| line.contains("\"type\":\"compaction\""))
+    let compaction_rows = session_rows(&harness.session_file())
+        .into_iter()
+        .filter(|entry| entry["type"] == "compaction")
         .count();
     assert!(
         compaction_rows >= 2,
@@ -631,4 +626,12 @@ fn repeat_last_script_stays_answerable_once_the_goal_churn_empties_it() {
     // A quiet teardown: the pause withdraws the minted continuation before the harness drops.
     harness.prompt_racing_the_loop("x2", "/goal pause");
     harness.client.drain_events(Duration::from_secs(1));
+}
+
+fn session_rows(path: &std::path::Path) -> Vec<Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("validated native session rows")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }

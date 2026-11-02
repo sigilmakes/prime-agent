@@ -23,7 +23,7 @@ impl AgentSessionEngine {
         &self,
         first: TurnPrompt,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         // The engine's turn scope spans this loop, not one model attempt: the
         // overflow arm compacts and re-issues the turn inside it, so the engine

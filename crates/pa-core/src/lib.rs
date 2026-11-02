@@ -71,6 +71,7 @@ pub mod refinement;
 pub mod resources;
 pub mod session;
 pub mod session_engine;
+pub mod session_log;
 pub mod settings;
 pub mod skills;
 pub mod slash_command_args;

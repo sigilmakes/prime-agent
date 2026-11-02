@@ -269,7 +269,7 @@ impl SessionEngine for ScriptedEngine {
         prompt_index: usize,
         request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         let cancelled = || EngineEvent::Done(Err("prompt cancelled".to_string()));
         let scripted = self.responses.get(prompt_index).cloned();
@@ -300,7 +300,7 @@ impl SessionEngine for ScriptedEngine {
             Some(_) => EngineEvent::CustomMessage(accepted_row.clone()),
             None => EngineEvent::UserMessage(accepted_row.clone()),
         };
-        if !emit(accepted) {
+        if !emit(accepted).continues() {
             emit(cancelled());
             return;
         }
@@ -325,7 +325,7 @@ impl SessionEngine for ScriptedEngine {
                 "timestamp": crate::util::now_ms(),
             });
             batch_rows.push(accepted_row.clone());
-            if !emit(EngineEvent::UserMessage(accepted_row)) {
+            if !emit(EngineEvent::UserMessage(accepted_row)).continues() {
                 emit(cancelled());
                 return;
             }
@@ -335,7 +335,9 @@ impl SessionEngine for ScriptedEngine {
         if let Some(goal) = self.goal.as_ref().filter(|goal| goal.emit_update_on_prompt) {
             if !emit(EngineEvent::GoalUpdate {
                 goal: goal.state.clone(),
-            }) {
+            })
+            .continues()
+            {
                 emit(cancelled());
                 return;
             }
@@ -346,7 +348,7 @@ impl SessionEngine for ScriptedEngine {
                 json!({"role": "assistant", "content": [], "api": "scripted", "provider": "scripted", "model": "faux-1", "usage": usage, "stopReason": "stop", "timestamp": crate::util::now_ms()}),
             ),
             stream_event: None,
-        }) {
+        }).continues() {
             emit(cancelled());
             return;
         }
@@ -374,7 +376,7 @@ impl SessionEngine for ScriptedEngine {
             }
             json!({"role": "assistant", "content": content, "api": "scripted", "provider": "scripted", "model": "faux-1", "usage": usage, "stopReason": "toolUse", "timestamp": crate::util::now_ms()})
         };
-        if !emit(EngineEvent::AssistantMessage(final_message.clone())) {
+        if !emit(EngineEvent::AssistantMessage(final_message.clone())).continues() {
             emit(cancelled());
             return;
         }
@@ -399,7 +401,9 @@ impl SessionEngine for ScriptedEngine {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),
                 args: call.get("args").cloned().unwrap_or(Value::Null),
-            }) {
+            })
+            .continues()
+            {
                 emit(cancelled());
                 return;
             }
@@ -419,7 +423,9 @@ impl SessionEngine for ScriptedEngine {
                     "isError": is_error,
                 }),
                 is_error,
-            }) {
+            })
+            .continues()
+            {
                 emit(cancelled());
                 return;
             }
@@ -431,7 +437,7 @@ impl SessionEngine for ScriptedEngine {
                 "isError": is_error,
                 "timestamp": crate::util::now_ms(),
             });
-            if !emit(EngineEvent::ToolResultMessage(result_message.clone())) {
+            if !emit(EngineEvent::ToolResultMessage(result_message.clone())).continues() {
                 emit(cancelled());
                 return;
             }
@@ -441,7 +447,9 @@ impl SessionEngine for ScriptedEngine {
         if !emit(EngineEvent::TurnEnd {
             message: final_message.clone(),
             tool_results: tool_results.clone(),
-        }) {
+        })
+        .continues()
+        {
             emit(cancelled());
             return;
         }
@@ -452,7 +460,9 @@ impl SessionEngine for ScriptedEngine {
         run_messages.extend(tool_results);
         if !emit(EngineEvent::AgentEnd {
             messages: run_messages,
-        }) {
+        })
+        .continues()
+        {
             emit(cancelled());
             return;
         }
@@ -549,7 +559,7 @@ impl SessionEngine for ScriptedEngine {
             let index = self
                 .compaction
                 .next
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |current| {
@@ -628,7 +638,7 @@ impl SessionEngine for ScriptedEngine {
             let index = self
                 .branch_summary
                 .next
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |current| {

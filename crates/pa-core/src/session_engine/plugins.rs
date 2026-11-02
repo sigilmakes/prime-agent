@@ -575,8 +575,7 @@ impl SessionPlugins {
     }
 
     // A successful prewrite closure admits exactly one already-built mutation.
-    // Retirement after admission may not cancel its receipt adoption/ACK, but
-    // publication must pass this same registration guard again after ACK.
+    // Publication must pass the same registration guard as the durable append.
     pub(super) fn with_registered_context_authority<T>(
         &self,
         registration: &ContextRegistration,
@@ -596,26 +595,6 @@ impl SessionPlugins {
                 .unwrap_or_else(PoisonError::into_inner),
         );
         if !current || selection.as_ref() != Some(strategy) {
-            return Err(crate::plugins::PluginError::Retired.into());
-        }
-        if compactor.kind != ContributionKind::Compactor {
-            bail!("not a compactor contribution");
-        }
-        self.host
-            .with_current_contributions(&[strategy, compactor], commit)?
-    }
-
-    pub(super) fn with_context_authority<T>(
-        &self,
-        strategy: &Contribution,
-        compactor: &Contribution,
-        commit: impl FnOnce() -> anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
-        let selection = self
-            .context_selection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if selection.as_ref() != Some(strategy) {
             return Err(crate::plugins::PluginError::Retired.into());
         }
         if compactor.kind != ContributionKind::Compactor {
@@ -1207,9 +1186,12 @@ mod context_selection_tests {
             .manager
             .context_compactor("standard_compaction/standard")
             .unwrap();
+        let registration = f.manager.capture_context_registration(&old).unwrap();
         assert_eq!(
             f.manager
-                .with_context_authority(&old, &compactor, || Ok("durable commit"))
+                .with_registered_context_authority(&registration, &old, &compactor, || Ok(
+                    "durable commit"
+                ))
                 .unwrap(),
             "durable commit"
         );
@@ -1217,7 +1199,7 @@ mod context_selection_tests {
         f.manager.reload().await.unwrap();
         assert!(f
             .manager
-            .with_context_authority(&old, &compactor, || Ok(()))
+            .with_registered_context_authority(&registration, &old, &compactor, || Ok(()))
             .is_err());
         assert!(f.manager.context_retirement(&compactor).is_err());
         let selected = f.manager.context_selection().unwrap();
@@ -1381,62 +1363,5 @@ mod context_selection_tests {
             })
             .is_err());
         assert!(!published);
-    }
-    #[tokio::test]
-    async fn concrete_context_admission_checks_actual_registration_exact_draft_and_once() {
-        let f = Fixture::new();
-        let strategy = f.manager.context_selection().unwrap();
-        let compactor = f
-            .manager
-            .context_compactor("standard_compaction/standard")
-            .unwrap();
-        let registration = f.manager.capture_context_registration(&strategy).unwrap();
-        let draft = crate::session::canonical::CanonicalEntryDraft::new(crate::session::canonical::CanonicalMutationKind::ContextPolicy,
-            serde_json::from_value(json!({"type":"compaction","summary":"actual policy","firstKeptEntryId":"kept","tokensBefore":1})).unwrap()).unwrap();
-        let cap = super::super::canonical_live::CanonicalLiveContextAdmission::new(
-            f.manager.clone(),
-            registration,
-            strategy.clone(),
-            compactor.clone(),
-            draft.clone(),
-        );
-        let changed = crate::session::canonical::CanonicalEntryDraft::new(crate::session::canonical::CanonicalMutationKind::ContextPolicy,
-            serde_json::from_value(json!({"type":"compaction","summary":"different policy","firstKeptEntryId":"kept","tokensBefore":1})).unwrap()).unwrap();
-        let mut entered = 0;
-        assert!(cap
-            .with_admission(&changed, || {
-                entered += 1;
-                Ok(())
-            })
-            .is_err());
-        cap.with_admission(&draft, || {
-            entered += 1;
-            Ok(())
-        })
-        .unwrap();
-        assert!(cap
-            .with_admission(&draft, || {
-                entered += 1;
-                Ok(())
-            })
-            .is_err());
-        assert_eq!(entered, 1);
-        let registration = f.manager.capture_context_registration(&strategy).unwrap();
-        let cap = super::super::canonical_live::CanonicalLiveContextAdmission::new(
-            f.manager.clone(),
-            registration,
-            strategy,
-            compactor,
-            draft.clone(),
-        );
-        f.configure(&json!({"plugins":{"standard_compaction":{"enabled":false},"default_context":{"config":{"compactors":[]}}}}));
-        f.manager.reload().await.unwrap();
-        assert!(cap
-            .with_admission(&draft, || {
-                entered += 1;
-                Ok(())
-            })
-            .is_err());
-        assert_eq!(entered, 1);
     }
 }

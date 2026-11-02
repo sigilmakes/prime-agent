@@ -44,8 +44,8 @@ DIR/
 ```
 
 Row payloads are serialized from the product's own types (pa-types message
-shapes inside pa-daemon's `SessionEntry` envelope and `session_header_line`
-header) — no hand-copied JSON. Entry ids are counter-based unique 8-hex: the
+shapes inside pa-daemon's `SessionEntry` and `session_header_line` header)
+through `pa_core::session_log::SessionLog` — no hand-copied envelopes or checksums. Entry ids are counter-based unique 8-hex: the
 product's own ids are uuid4 prefixes with a 100-try collision check, which
 collide around ~22K rows and silently break branch reconstruction.
 
@@ -75,21 +75,23 @@ Total rows: small ~3.5K, medium ~250K, large ~10.1M, xl ~1.2M (medium is
 ### Determinism
 
 Same seed + same canonical path => a byte-identical tree, file mtimes
-included (roster order is mtime-desc). Two stamps are the product writer's
-own wall clock and are excluded from that contract: the ledger records'
-`at` fields, and the corpus-root path embedded in child headers/ledger
-records (`parentSession`/`child` are canonical paths).
+included (roster order is mtime-desc). After the native writer closes, the
+fixture pins each envelope's unchecksummed `ts` to the seeded row timestamp,
+without changing the exact row bytes or checksum. Normal lock files remain
+in the baseline with their diagnostic holder notes cleared before readers run. The ledger records' `at` fields come from the
+product writer's wall clock and are excluded from the byte contract. Paths
+embedded in headers/ledger records are normalized when comparing roots.
 
 ### Caches (cold vs warm)
 
-- `--cache warm` runs the product's own `pa_core::session::window::WindowedSessionStore::open`
-  over every openable session file, writing real `<id>.window-cache.json`
-  sidecars. On a real store warm window-cache sidecars are the common state
-  (the operator's live store: 71 of 111 sessions carry one).
-- The `<id>.info-cache.json` sidecar is written only at worker lease
-  release (pa-daemon, no public writer), so generated corpora carry none —
-  matching real stores (9 of 111). The `agents-view-warm` scenario measures
-  the warm scan via the daemon's in-process cache instead.
+- `--cache warm` runs the SDK's
+  `pa_core::session::window::WindowedSessionStore::open` over top-level and
+  archived session logs and flushes real `<id>.window-cache.json` sidecars.
+  Verification reopens these windows and proves cache hits and sparse reads
+  on the compacted huge session.
+- These sidecars belong to the SDK, not the daemon. The daemon serving reader
+  replays the canonical SessionLog; warm corpus generation does not restore
+  a removed daemon scan cache or change its read policy.
 - `pa-perf run` generates BOTH corpora (cold for the cold scenarios, warm
   for warm-start/warm-ready) — every scenario runs on the state it needs.
 - The corpus settings disable BOTH archive rules (`sessionArchiveMaxAgeDays`
@@ -121,7 +123,7 @@ the liveness deadline only fails broken runs):
 | `warm-start` | warm | exec -> first paint, daemon pre-started |
 | `warm-ready` | warm | the same launch, exec -> the attach pill |
 | `agents-view` | cold | left-arrow -> the completed `Inactive (N)` roster heading in the screen model |
-| `agents-view-warm` | cold | the same daemon's second populate (its in-process scan cache warm) |
+| `agents-view-warm` | cold | the same daemon's second populate (repeated roster discovery) |
 | `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker |
 | `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker |
 | `at-completion` | cold | the `@` keystroke -> the first completion menu row |

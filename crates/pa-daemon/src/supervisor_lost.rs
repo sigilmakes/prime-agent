@@ -122,7 +122,7 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
     }
     // Retain the lease through process exit: kernel disposal has a bounded
     // host-request drain, so writers may survive until the process dies.
-    // The dead-owner sweep or the next acquire reclaims its directory.
+    // The OS releases the execution flock when the process exits.
     // The listener closes FIRST and the cleanup probes the path with the
     // owner's bind provably released (the TS graceful-shutdown sequence,
     // shared with `exit_after_close`), so both a REPLACED file and a

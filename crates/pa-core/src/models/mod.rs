@@ -1,22 +1,14 @@
 //! Model subsystem: resolver and Prime Inference private models.
 
 pub use allowlist::{model_allowed, ModelAllowlistRefusal};
-pub use private_auth::{
-    get_private_prime_inference_models, private_prime_authorization_fingerprint,
-    read_private_prime_authorization_cache, write_private_prime_authorization_cache,
-    PrivatePrimeAuthorizationCache, PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
-};
+pub use private_auth::get_private_prime_inference_models;
 pub use registry::{
     ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth, SetModelSelectionError,
 };
 
-pub use catalog_chain::{
-    catalog_for, install_catalog, prime_credentials_for_dir, spawn_hourly_refresh, startup_refresh,
-};
-/// The refresh triggers (`pa-models`' own enum — the daemon's picker-open
-/// and auth-change wiring selects it; pa-daemon's runtime surface goes
-/// through pa-core, so the trigger rides this re-export).
-pub use pa_models::RefreshTrigger;
+/// Scheduler policy belongs to core, not the metadata/cache owner.
+pub use catalog_chain::RefreshTrigger;
+pub use catalog_chain::{catalog_for, install_catalog, spawn_hourly_refresh, startup_refresh};
 
 pub mod allowlist;
 pub(crate) mod catalog_chain;

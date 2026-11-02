@@ -12,6 +12,27 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    use pa_core::session_log::{Outcome, SessionLog};
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    assert!(!path.exists(), "fixture log must not exist");
+    let mut log = SessionLog::open(
+        path.parent().expect("session directory"),
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .expect("session ID"),
+        deadline(),
+    )
+    .expect("open fixture log");
+    for line in content.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture payload");
+        assert!(matches!(
+            log.append(&row, deadline()),
+            Outcome::Committed { .. }
+        ));
+    }
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -660,15 +681,16 @@ fn wave_b9_session_navigation_wire_shapes() {
         "File not found: /tmp/no-such-import.jsonl"
     );
 
-    let imported = dir.path().join("imported.jsonl");
-    std::fs::write(
+    let imported = dir.path().join("imported-1.jsonl");
+    write_session_rows(
         &imported,
         concat!(
-            r#"{"type":"session","id":"imported-1","timestamp":"2026-01-01T00:00:00Z","cwd":"","version":1}"#, "\n",
-            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"imported question"}]}}"#, "\n",
+            r#"{"type":"session","id":"imported-1","timestamp":"2026-01-01T00:00:00Z","cwd":"","version":3}"#,
+            "\n",
+            r#"{"type":"message","id":"m1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"imported question"}],"timestamp":1767225601000}}"#,
+            "\n",
         ),
-    )
-    .expect("write import");
+    );
     client.send_command(
         "i-1",
         &json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": imported.to_string_lossy() }),

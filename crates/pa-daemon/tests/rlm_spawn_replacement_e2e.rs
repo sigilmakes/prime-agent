@@ -34,6 +34,14 @@ use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -351,9 +359,13 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         let deadline = Instant::now() + Duration::from_secs(150);
         let content = loop {
             let content = std::fs::read_to_string(&session_file).unwrap_or_default();
-            let kickoff_rows = content
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            let rows = if session_file.exists() {
+                persisted_rows(&session_file)
+            } else {
+                Vec::new()
+            };
+            let kickoff_rows = rows
+                .into_iter()
                 .filter(|entry| {
                     entry.get("type").and_then(Value::as_str) == Some("custom_message")
                         && entry

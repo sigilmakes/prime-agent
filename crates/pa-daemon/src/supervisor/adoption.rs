@@ -268,6 +268,16 @@ impl Supervisor {
             if self.recorded_worker_is_gone(&resident).await {
                 self.reap_dead_worker_orphans(&resident).await;
             }
+            let session_file = resident.descriptor.lock().await.session_file.clone();
+            if let Some(owner) = session_file.as_deref().and_then(|file| {
+                crate::lease::live_lease_owner(&self.options.agent_dir, Path::new(file))
+            }) {
+                self.log_line(&format!(
+                    "session worker {worker_id} is unreachable but its execution lock is held (pid {}); not revived",
+                    owner.pid
+                ));
+                return AdoptionOutcome::Failed;
+            }
             let interrupted =
                 crate::journal::WorkerRecoveryJournal::read_interrupted(&journal_path);
             let kept = match &boot {

@@ -236,10 +236,10 @@ impl RlmSubagentHost for NoRlmChildren {
             if session_id.is_some() {
                 anyhow::bail!("rlm.rename with session_id requires a daemon-backed session");
             }
-            crate::session::canonical::persist_metadata_entry(
+            crate::session::metadata::persist_metadata_entry(
                 &session,
                 pa_types::session::FileEntry::SessionInfo {
-                    base: super::canonical_live::draft_base(),
+                    base: crate::session::metadata::draft_base(),
                     payload: pa_types::session::SessionInfoEntry {
                         name: Some(name.trim().to_string()),
                     },
@@ -323,40 +323,20 @@ pub fn rlm_child_session_dir(
 /// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a
 /// resumed session re-seeds its depth bound from. `None` when absent or
 /// unreadable.
+#[must_use]
 pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    let path = std::path::Path::new(path?);
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
-        &mut bytes,
-    )
-    .ok()?;
-    let content = std::str::from_utf8(&bytes).ok()?;
-    content
-        .lines()
+    crate::session::read::read_entries(std::path::Path::new(path?))
+        .ok()?
+        .iter()
         .rev()
-        // The exact union gate: a matching row's raw text carries either the
-        // `customType` literal or a `\u`-escape (serde never letter-escapes),
-        // so the union admits every line the reference could match;
-        // `rlm_max_depth_row` judges the candidates by the decoded fields.
-        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
-        .find_map(rlm_max_depth_row)
-}
-
-/// One candidate line's depth bound: `Some(depth)` for a matching custom
-/// row with a parseable `data.maxDepth`, `None` otherwise.
-fn rlm_max_depth_row(line: &str) -> Option<u64> {
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("custom") {
-        return None;
-    }
-    if value.get("customType").and_then(serde_json::Value::as_str) != Some("rlm_max_depth_state") {
-        return None;
-    }
-    value
-        .get("data")
-        .and_then(|data| data.get("maxDepth"))
-        .and_then(serde_json::Value::as_u64)
+        .find_map(|entry| match entry {
+            pa_types::session::FileEntry::Custom { payload, .. }
+                if payload.custom_type == "rlm_max_depth_state" =>
+            {
+                payload.data.as_ref()?.get("maxDepth")?.as_u64()
+            }
+            _ => None,
+        })
 }
 
 /// The depth-bound resolution and its precedence: chat override >
@@ -1028,7 +1008,7 @@ mod tests {
         let session_dir = dir.join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
         let mut session = SessionManager::in_memory(dir);
-        session.materialize_session_file(Some(session_dir));
+        session.materialize_session_file(Some(session_dir)).unwrap();
         session
     }
 
@@ -1635,84 +1615,6 @@ mod tests {
             error.to_string(),
             "rlm.rename session_id must be a non-empty string"
         );
-    }
-
-    struct RejectRenameWriter {
-        session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>,
-        expected_entries: Vec<pa_types::session::FileEntry>,
-    }
-
-    impl crate::session::canonical::CanonicalMetadataWriter for RejectRenameWriter {
-        fn observe_metadata_source(
-            self: std::sync::Arc<Self>,
-        ) -> crate::session::canonical::CanonicalFuture<()> {
-            panic!("rename must not enter goal source observation")
-        }
-
-        fn append_metadata_from(
-            self: std::sync::Arc<Self>,
-            _entry: pa_types::session::FileEntry,
-            _expected: crate::session::canonical::CanonicalCursor,
-        ) -> crate::session::canonical::CanonicalFuture<
-            crate::session::canonical::CanonicalMetadataReceipt,
-        > {
-            panic!("this standalone test writer has no certified canonical source")
-        }
-
-        fn append_metadata(
-            self: Arc<Self>,
-            entry: pa_types::session::FileEntry,
-        ) -> crate::session::canonical::CanonicalFuture<String> {
-            Box::pin(async move {
-                let session = self.session.try_lock().expect("rename released SDK guard");
-                assert_eq!(session.retained_entries(), self.expected_entries);
-                assert_eq!(
-                    entry,
-                    pa_types::session::FileEntry::SessionInfo {
-                        base: super::super::canonical_live::draft_base(),
-                        payload: pa_types::session::SessionInfoEntry {
-                            name: Some("owner-name".to_owned())
-                        },
-                    }
-                );
-                Err(crate::session::canonical::CanonicalStoreError {
-                    kind: crate::session::canonical::CanonicalFailureKind::Io,
-                    requested: crate::session::canonical::CanonicalRequestedWrite::Unknown,
-                    source: crate::session::canonical::CanonicalSourceDisposition::NeedsReconcile,
-                    detail: "injected rename receipt failure".to_owned(),
-                })
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn no_children_bound_rename_uses_owner_without_local_identity() {
-        let tmp = tempfile::tempdir().unwrap();
-        let session = Arc::new(tokio::sync::Mutex::new(
-            crate::session::manager::SessionManager::in_memory(tmp.path()),
-        ));
-        let expected_entries = session.lock().await.retained_entries().to_vec();
-        assert!(matches!(
-            expected_entries.as_slice(),
-            [pa_types::session::FileEntry::Header { .. }]
-        ));
-        let writer: Arc<dyn crate::session::canonical::CanonicalMetadataWriter> =
-            Arc::new(RejectRenameWriter {
-                session: session.clone(),
-                expected_entries: expected_entries.clone(),
-            });
-        session
-            .lock()
-            .await
-            .bind_canonical_metadata_writer(Arc::downgrade(&writer));
-        let result = NoRlmChildren::new(session.clone())
-            .rename("owner-name".to_owned(), None)
-            .await;
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("injected rename receipt failure"));
-        assert_eq!(session.lock().await.retained_entries(), expected_entries);
     }
 
     #[tokio::test]

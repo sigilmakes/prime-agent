@@ -6,10 +6,12 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use pa_core::session::parse_session_entries;
+use pa_core::session::read::read_entries;
+use pa_core::session_log::Row;
 use pa_daemon::rlm_ledger::RlmSpawnLedger;
 use pa_daemon::session_store::SessionFile;
 use pa_perf::corpus::{generate, CacheMode, CorpusOptions, Profile};
+use pa_types::session::{AgentMessage, FileEntry};
 
 fn tiny(profile: Profile, out: &Path) -> CorpusOptions {
     CorpusOptions {
@@ -25,17 +27,35 @@ fn sessions_load_through_the_product_store() {
     let options = tiny(Profile::Small, dir.path());
     let manifest = generate(&options).expect("generate");
     let mut checked = 0;
+    let mut rows = 0;
     for file in &manifest.files {
         let path = std::path::PathBuf::from(file);
-        if path.parent() != Some(&manifest.paths.sessions_dir) {
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+            || path.starts_with(manifest.paths.agent_dir.join("rlm-ledger"))
+            || path
+                .file_name()
+                .is_some_and(|name| name == "refinement_history.jsonl")
+        {
             continue;
         }
         let store = SessionFile::open(&path).expect("the product store opens the file");
+        let entries = read_entries(&path).expect("the SDK validates the same log");
         assert_eq!(store.header.id, path.file_stem().unwrap().to_string_lossy());
         assert!(!store.entries().is_empty(), "the session carried its rows");
+        assert_eq!(entries.len(), store.entries().len() + 1);
+        rows += store.entries().len();
         checked += 1;
     }
-    assert_eq!(checked, options.sessions, "every sessions-dir file checked");
+    assert_eq!(
+        checked,
+        options.sessions + options.archive + manifest.counts.child_sessions
+    );
+    assert_eq!(
+        rows, manifest.counts.total_rows,
+        "all native session rows counted"
+    );
 }
 
 /// No row may degrade to an Unknown entry: the corpus speaks the wire format.
@@ -45,8 +65,11 @@ fn rows_never_degrade_to_unknown_entries() {
     let options = tiny(Profile::Small, dir.path());
     let manifest = generate(&options).expect("generate");
     let huge = &manifest.markers.huge;
-    let text = std::fs::read_to_string(&huge.file).expect("read the huge session");
-    let entries = parse_session_entries(&text);
+    let entries = read_entries(&huge.file).expect("validate the huge session log");
+    assert!(
+        entries.len() > options.huge_rows,
+        "header plus generated rows"
+    );
     assert!(
         entries
             .iter()
@@ -66,20 +89,28 @@ fn markers_land_on_the_final_user_message() {
         &manifest.markers.switch_a,
         &manifest.markers.switch_b,
     ] {
-        let text = std::fs::read_to_string(&marker.file).expect("read session");
-        let last_user = text
-            .lines()
+        let entries = read_entries(&marker.file).expect("validate marker session log");
+        let last_user = entries
+            .iter()
             .rev()
-            .find_map(|line| {
-                let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                (value.get("type") == Some(&serde_json::json!("message"))
-                    && value["message"]["role"] == serde_json::json!("user"))
-                .then(|| value["message"]["content"].to_string())
+            .find_map(|entry| {
+                if let FileEntry::Message {
+                    message: AgentMessage::User(user),
+                    ..
+                } = entry
+                {
+                    Some(&user.content)
+                } else {
+                    None
+                }
             })
             .expect("a final user message");
-        assert!(
-            last_user.contains(&marker.needle),
-            "the needle is the final user message: {last_user}"
+        let content = serde_json::to_value(last_user).expect("serialize user content");
+        let text = content.as_str().or_else(|| content[0]["text"].as_str());
+        assert_eq!(
+            text,
+            Some(marker.needle.as_str()),
+            "the final user message is the needle"
         );
     }
 }
@@ -109,9 +140,9 @@ fn the_ledger_replays_through_the_product_reader() {
     );
 }
 
-/// Same seed, same tree: every file the generator owns is byte-identical
-/// (the ledger's `at` stamps come from the product writer's wall clock; the
-/// edge content is compared field-by-field instead).
+/// Same seed, same tree: file bytes match after root normalization. Native
+/// logs compare every decoded value after strict checksum validation because
+/// absolute paths change their checksums. Ledger edges exclude wall-clock stamps.
 #[test]
 fn the_same_seed_rebuilds_the_identical_tree() {
     let first = tempfile::tempdir().expect("temp dir");
@@ -184,6 +215,28 @@ fn the_same_seed_rebuilds_the_identical_tree() {
         }
         let read = |path: &Path, root: &Path| -> Vec<u8> {
             let bytes = std::fs::read(path).expect("read");
+            let bytes = if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && path
+                    .file_name()
+                    .is_none_or(|name| name != "refinement_history.jsonl")
+            {
+                assert!(!bytes.is_empty(), "the native log is nonempty");
+                let mut decoded = Vec::with_capacity(bytes.len());
+                let mut seq = 0;
+                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                    let line = line.strip_suffix(b"\n").expect("a committed native row");
+                    let row = Row::decode(line, seq).expect("valid original native row");
+                    seq = row.seq;
+                    serde_json::to_writer(&mut decoded, &(row.seq, row.ts, row.body))
+                        .expect("serialize every decoded value");
+                    decoded.push(b'\n');
+                }
+                decoded
+            } else {
+                bytes
+            };
             let root = root.to_string_lossy().into_owned().into_bytes();
             let mut normalized = Vec::with_capacity(bytes.len());
             let mut index = 0;
@@ -228,15 +281,11 @@ fn entry_ids_stay_unique_past_the_uuid_prefix_collision_cliff() {
         .paths
         .sessions_dir
         .join(format!("{}.jsonl", manifest.markers.huge.id));
-    let text = std::fs::read_to_string(&file).expect("read session");
+    let entries = read_entries(&file).expect("validate session log");
     let mut ids = HashSet::new();
     let mut rows = 0;
-    for line in text.lines() {
-        let value: serde_json::Value = serde_json::from_str(line).expect("a parseable row");
-        if value["type"] == serde_json::json!("session") {
-            continue;
-        }
-        let id = value["id"].as_str().expect("an id").to_string();
+    for entry in entries.iter().skip(1) {
+        let id = entry.id().expect("an id").to_string();
         assert_eq!(id.len(), 8, "the id is 8-hex");
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "hex id: {id}");
         ids.insert(id);
@@ -245,7 +294,7 @@ fn entry_ids_stay_unique_past_the_uuid_prefix_collision_cliff() {
     assert_eq!(ids.len(), rows, "no id collides across {rows} rows");
 }
 
-/// The warm pass writes the product's own window-cache sidecars.
+/// The warm pass writes SDK sparse caches, not removed daemon scan caches.
 #[test]
 fn the_warm_pass_writes_product_sidecars() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -257,11 +306,32 @@ fn the_warm_pass_writes_product_sidecars() {
         .iter()
         .filter(|file| file.ends_with("window-cache.json"))
         .count();
-    assert_eq!(
-        sidecars,
-        options.sessions + options.archive,
-        "every openable session gained a window-cache sidecar"
-    );
+    assert_eq!(sidecars, options.sessions + options.archive);
+    for file in &manifest.files {
+        let path = Path::new(file);
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+            || !(path.parent() == Some(&manifest.paths.sessions_dir)
+                || path.parent() == Some(&manifest.paths.archive_dir))
+        {
+            continue;
+        }
+        let window = pa_core::session::window::WindowedSessionStore::open(path)
+            .expect("open validated SDK window")
+            .expect("corpus is sparse-cache eligible");
+        assert!(path.with_extension("window-cache.json").is_file());
+        assert!(window.read_stats().cache_hit, "{}", path.display());
+        assert!(window.read_stats().cache_bytes > 0);
+        if path == manifest.markers.huge.file.as_path() {
+            assert!(
+                !window.full_history(),
+                "huge session retains a compacted suffix"
+            );
+            assert!(window.read_stats().jsonl_bytes < std::fs::metadata(path).unwrap().len());
+            assert_eq!(window.compaction_count(), 1);
+        }
+    }
 }
 
 /// The switch-b row is the ONLY session the switch query can match. The
@@ -281,17 +351,17 @@ fn the_switch_query_can_only_match_switch_b() {
     let mut scanned = 0;
     for file in &manifest.files {
         let path = std::path::PathBuf::from(file);
-        if path.parent() == Some(&manifest.paths.sessions_dir) {
+        if path.parent() == Some(&manifest.paths.sessions_dir)
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        {
             // The search corpus folds MESSAGE text and names (not header
             // timestamps, whose ISO `Z` suffix is the one allowed z).
-            for line in std::fs::read_to_string(&path)
-                .expect("read session")
-                .lines()
-            {
-                if line.contains('z')
-                    && !line.contains(r#""type":"session""#)
-                    && !line.contains(&manifest.markers.switch_row)
-                {
+            let entries = read_entries(&path).expect("validate session log");
+            for entry in entries.iter().skip(1) {
+                let line = serde_json::to_string(entry).expect("serialize session row");
+                if line.contains('z') && !line.contains(&manifest.markers.switch_row) {
                     panic!("a non-header row carries z: {line}");
                 }
             }
@@ -338,7 +408,7 @@ fn the_manifest_is_the_file_set_baseline() {
     );
     let archived = on_disk
         .iter()
-        .filter(|file| file.starts_with("agent/sessions-archive/"))
+        .filter(|file| file.starts_with("agent/sessions-archive/") && file.ends_with(".jsonl"))
         .count();
     assert_eq!(archived, options.archive);
 }

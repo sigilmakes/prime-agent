@@ -8,6 +8,111 @@ use super::{
 };
 
 impl AuthStorage {
+    /// Validate the current local credential/team without deferred auth work.
+    pub(crate) fn local_catalog_guard(
+        &self,
+        provider: &str,
+    ) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync> {
+        let storage = std::sync::Arc::clone(&self.storage);
+        let env = std::sync::Arc::clone(&self.env_credentials);
+        let runtime = self.runtime_overrides.clone();
+        let stale = self.stale_auth_sources.clone();
+        let expected_key = self.get_api_key_local(provider);
+        let expected_headers = self.get_provider_headers(provider);
+        let provider = provider.to_string();
+        std::sync::Arc::new(move || {
+            let mut current = Self::from_storage(
+                std::sync::Arc::clone(&storage),
+                std::sync::Arc::new(super::NoOAuth),
+            );
+            current.env_credentials = std::sync::Arc::clone(&env);
+            current.runtime_overrides.clone_from(&runtime);
+            current.stale_auth_sources.clone_from(&stale);
+            current.get_api_key_local(&provider) == expected_key
+                && current.get_provider_headers(&provider) == expected_headers
+        })
+    }
+
+    /// Resolve the winning local credential without commands, OAuth adapters or fallback resolvers.
+    /// Only an unexpired Codex OAuth access token can be used without its adapter.
+    pub fn get_api_key_local(&self, provider_id: &str) -> Option<String> {
+        if let Some(candidate) = self.runtime_candidate(provider_id) {
+            if !self.is_stale(provider_id, &candidate) {
+                return self.runtime_overrides.get(provider_id).cloned();
+            }
+        }
+        let env_candidate = self.environment_candidate(provider_id);
+        if provider_id == PRIME_INFERENCE_PROVIDER_ID {
+            if let Some(candidate) = &env_candidate {
+                if !self.is_stale(provider_id, candidate) {
+                    return self.env_credentials.api_key(provider_id);
+                }
+            }
+        }
+        if let Some(credential) = self.data.credential(provider_id) {
+            // Even fingerprinting a command-backed candidate executes it. A local
+            // lookup cannot establish a different value or skip it for a lower source.
+            if matches!(&credential, AuthCredential::ApiKey { key, .. } if key.starts_with('!')) {
+                return None;
+            }
+            let candidate = match &credential {
+                AuthCredential::Oauth {
+                    access,
+                    refresh,
+                    expires,
+                    ..
+                } => {
+                    let value_fingerprint = (provider_id == "openai-codex").then(|| {
+                        super::fingerprint(
+                            super::AuthSource::Stored,
+                            &format!(
+                                "value:auth.json\0oauth:{access}\0{}\0{expires}",
+                                refresh.as_deref().unwrap_or_default()
+                            ),
+                        )
+                    });
+                    super::AuthSourceCandidate {
+                        source: super::AuthSource::Stored,
+                        configured: true,
+                        label: None,
+                        identity_fingerprint: super::fingerprint(
+                            super::AuthSource::Stored,
+                            "identity:auth.json",
+                        ),
+                        value_fingerprint,
+                        resolve_value_fingerprint: None,
+                    }
+                }
+                AuthCredential::ApiKey { .. } | AuthCredential::McpStaticToken { .. } => {
+                    self.stored_candidate(provider_id)?
+                }
+            };
+            let stale = if candidate.value_fingerprint.is_some() {
+                self.is_stale(provider_id, &candidate)
+            } else {
+                !self.matching_stale(provider_id, &candidate).is_empty()
+            };
+            if !stale {
+                return match credential {
+                    AuthCredential::ApiKey { key, .. } => resolve_config_value(&key),
+                    AuthCredential::Oauth {
+                        access, expires, ..
+                    } => (provider_id == "openai-codex" && now_epoch_ms() < expires)
+                        .then_some(access),
+                    AuthCredential::McpStaticToken { bearer, .. } => Some(bearer),
+                };
+            }
+        }
+        if provider_id != PRIME_INFERENCE_PROVIDER_ID {
+            if let Some(candidate) = env_candidate {
+                if !self.is_stale(provider_id, &candidate) {
+                    return self.env_credentials.api_key(provider_id);
+                }
+            }
+        }
+        None
+    }
+
     pub fn get_api_key_with_source_token(
         &mut self,
         provider_id: &str,

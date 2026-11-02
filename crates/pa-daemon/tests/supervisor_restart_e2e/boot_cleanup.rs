@@ -103,25 +103,19 @@ fn boot_cleanup_preserves_unverifiable_journals_and_waiting_callers_status() {
     std::fs::write(&live_session, "{}\n").expect("live session");
     let live_lease = pa_daemon::lease::acquire_runtime_session_lease(&live_session, &agent_dir)
         .expect("live lease");
-    let dead_lease = agent_dir.join("session-leases/dead.lock");
-    std::fs::create_dir_all(&dead_lease).expect("dead lease");
-    std::fs::write(
-        dead_lease.join("owner.json"),
-        json!({
-            "version": 1,
-            "token": "dead-fixture",
-            "pid": 0,
-            "sessionPath": dir.path().join("dead-session.jsonl"),
-            "createdAt": "2026-10-07T00:00:00Z",
-        })
-        .to_string(),
-    )
-    .expect("dead owner");
-    let corrupt_lease = agent_dir.join("session-leases/corrupt.lock");
-    std::fs::create_dir_all(&corrupt_lease).expect("corrupt lease");
-    let corrupt_owner = corrupt_lease.join("owner.json");
-    std::fs::write(&corrupt_owner, "not json").expect("corrupt owner");
-    preserved.push((corrupt_owner, b"not json".to_vec()));
+    let unlocked_file = agent_dir.join("session-leases/unlocked.lock");
+    std::fs::write(&unlocked_file, b"stale courtesy header").expect("unlocked execution file");
+    preserved.push((unlocked_file, b"stale courtesy header".to_vec()));
+    // Give the boot cleanup real obsolete socket logs to prune. Execution lock
+    // files are never cleanup targets, whether their courtesy headers parse or not.
+    let logs_dir = pa_daemon::paths::logs_dir(&agent_dir);
+    std::fs::create_dir_all(&logs_dir).expect("logs directory");
+    for index in 0..65 {
+        let path = logs_dir.join(format!("old.{index:08x}.log"));
+        std::fs::write(&path, b"old socket log").expect("old socket log");
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1, 0))
+            .expect("backdate socket log");
+    }
     let obsolete_cache = agent_dir.join("prime-inference-models-cache.json");
     std::fs::write(&obsolete_cache, "{}").expect("obsolete cache");
 
@@ -154,10 +148,6 @@ fn boot_cleanup_preserves_unverifiable_journals_and_waiting_callers_status() {
             path.display()
         );
     }
-    assert!(
-        !dead_lease.exists(),
-        "the provably dead lease was reclaimed"
-    );
     assert_eq!(
         std::fs::read(&obsolete_cache).expect("the legacy root cache remains"),
         b"{}",

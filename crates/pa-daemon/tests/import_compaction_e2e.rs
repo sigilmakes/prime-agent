@@ -268,7 +268,7 @@ fn grown_fixture(dir: &Path, turns: usize) -> PathBuf {
             lines.push(entry.to_string());
         }
     }
-    std::fs::write(&fixture, lines.join("\n") + "\n").expect("write fixture");
+    write_session_rows(&fixture, &(lines.join("\n") + "\n"));
     fixture
 }
 
@@ -285,24 +285,29 @@ fn session_rows(harness: &Harness, type_: &str) -> Vec<Value> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.starts_with("grown-import"))
-                && std::fs::read_to_string(path)
-                    .ok()
-                    .and_then(|text| {
-                        text.lines()
-                            .find(|line| !line.trim().is_empty())
-                            .and_then(|line| serde_json::from_str::<Value>(line.trim()).ok())
-                    })
-                    .is_some_and(|header| {
-                        header.get("type").and_then(Value::as_str) == Some("session")
-                            && header.get("id").and_then(Value::as_str) == Some("grown-import")
-                    })
+                && pa_core::session::read::read_entries(path)
+                    .expect("validated imported session")
+                    .first()
+                    .is_some_and(|entry| matches!(entry,
+                        pa_types::session::FileEntry::Header { header } if header.id == "grown-import"))
         })
         .expect("the imported session's copy in the session dir");
-    std::fs::read_to_string(file)
-        .expect("session file readable")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+    let bytes = std::fs::read(&file).expect("imported session snapshot");
+    pa_core::session::read::read_entries_from(std::io::Cursor::new(&bytes))
+        .expect("validated imported session rows");
+    // Inspect stored values without normalizing accepted wire aliases through FileEntry.
+    let mut sequence = 0;
+    bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(|line| {
+            let row = pa_core::session_log::Row::decode(
+                line.strip_suffix(b"\n").expect("validated row terminator"),
+                sequence,
+            )
+            .expect("validated session envelope");
+            sequence = row.seq;
+            row.body
+        })
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some(type_))
         .collect()
 }
@@ -392,4 +397,22 @@ fn imported_session_compacts() {
         Some(first_kept),
         "the durable row records the same cut: {compactions:?}"
     );
+}
+
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("native fixture log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: Value = serde_json::from_str(line).expect("fixture row");
+        assert!(matches!(
+            log.append(&row, deadline),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
 }

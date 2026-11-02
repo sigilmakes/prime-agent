@@ -141,11 +141,10 @@ fn session_files(home: &Path) -> Vec<PathBuf> {
 }
 
 fn read_entries(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).unwrap())
+    pa_core::session::read::read_entries(path)
+        .expect("validated session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
         .collect()
 }
 

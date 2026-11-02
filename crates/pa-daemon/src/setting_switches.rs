@@ -180,9 +180,9 @@ impl Worker {
                 if let Some(store) = core
                     .store
                     .as_mut()
-                    .filter(|store| !store.is_canonical_bound())
+                    .filter(|_| !engine.persists_session_entries())
                 {
-                    // A bound live Core switch has already committed this intent.
+                    // The SDK sink already committed a built session's row.
                     let _ = store.persist_entry(
                         "model_change",
                         json!({ "provider": provider, "modelId": model_id }),
@@ -391,10 +391,9 @@ impl Worker {
             let preference_changed = core.service_tier != Some(tier);
             if preference_changed {
                 if let Some(store) = core.store.as_mut() {
-                    if let Err(error) = store.persist_owner_metadata(
-                        "service_tier_change",
-                        json!({ "serviceTier": tier }),
-                    ) {
+                    if let Err(error) =
+                        store.persist_entry("service_tier_change", json!({ "serviceTier": tier }))
+                    {
                         return response_failure(
                             None,
                             "set_service_tier",

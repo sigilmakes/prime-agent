@@ -118,7 +118,7 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
     }
@@ -240,7 +240,7 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     // The engine holds no autonomous logic of its own: the injected text

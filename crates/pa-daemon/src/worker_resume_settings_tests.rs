@@ -35,7 +35,7 @@ mod resume_settings_tests {
             _: usize,
             _: PromptRequest,
             _: &dyn Fn() -> bool,
-            _: &mut dyn FnMut(EngineEvent) -> bool,
+            _: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
         ) {
         }
         fn run_side_question(
@@ -72,30 +72,29 @@ mod resume_settings_tests {
     #[tokio::test]
     async fn compacted_create_restores_settings_and_honors_explicit_overrides() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("resume.jsonl");
-        let mut file = SessionFile::create("/tmp", None, 0);
-        file.set_path(path.clone());
-        file.append_model_change("old", "superseded");
-        file.append_thinking_level_change("high");
-        file.append_entry("service_tier_change", json!({"serviceTier":null}));
-        file.append_message(&json!({"role":"assistant","provider":"saved","model":"inferred","api":"openai-responses","content":[],"stopReason":"stop","timestamp":0,"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}}}));
-        let kept = file.append_message(&json!({"role":"user","content":"kept","timestamp":1}));
-        file.append_entry(
-            "compaction",
-            json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":100}),
-        );
-        file.rewrite().unwrap();
         for mode in [0, 1, 2, 3, 4] {
-            let mut fixture = file.clone();
+            // Each variant constructs its own immutable log and write cursor.
+            let path = dir.path().join(format!("resume-{mode}.jsonl"));
+            let mut file = SessionFile::create("/tmp", None, 0);
+            file.set_path(path.clone());
+            file.append_model_change("old", "superseded");
+            file.append_thinking_level_change("high");
+            file.append_entry("service_tier_change", json!({"serviceTier":null}));
+            file.append_message(&json!({"role":"assistant","provider":"saved","model":"inferred","api":"openai-responses","content":[],"stopReason":"stop","timestamp":0,"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}}}));
+            let kept = file.append_message(&json!({"role":"user","content":"kept","timestamp":1}));
+            file.append_entry(
+                "compaction",
+                json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":100}),
+            );
             if mode == 4 {
-                for entry in &mut fixture.entries {
+                for entry in &mut file.entries {
                     if entry.type_ == "thinking_level_change" {
                         entry.type_ = "custom".into();
                         entry.fields = json!({"customType":"test"});
                     }
                 }
             }
-            fixture.rewrite().unwrap();
+            file.rewrite().unwrap();
             let capture = Arc::new(CaptureEngine::default());
             let mut worker = Worker::new(
                 WorkerConfig {
@@ -162,14 +161,10 @@ mod resume_settings_tests {
                     }
                 );
                 assert_eq!(*capture.tier.lock().unwrap(), None);
-                assert!(worker
-                    .core
-                    .lock()
+                // The daemon owns a full serving fold; SDK context still uses
+                // the sparse compaction window over these same durable rows.
+                assert!(pa_core::session::window::WindowedSessionStore::open(&path)
                     .unwrap()
-                    .store
-                    .as_ref()
-                    .unwrap()
-                    .window
                     .is_some());
             }
             // The worker's core is Arc-shared with its handler seams, so an
@@ -218,7 +213,9 @@ mod resume_settings_tests {
         assert!(response.success, "{response:?}");
         {
             let core = worker.core.lock().unwrap();
-            assert!(core.store.as_ref().unwrap().window.is_some());
+            assert!(pa_core::session::window::WindowedSessionStore::open(&path)
+                .unwrap()
+                .is_some());
             assert_eq!(core.service_tier, Some(pa_types::ai::ServiceTier::Default));
         }
         assert_eq!(

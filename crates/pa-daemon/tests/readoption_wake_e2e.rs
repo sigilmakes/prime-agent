@@ -141,6 +141,13 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
 
 fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(());
+    }
+    let mut request = request_line.split_whitespace();
+    let method = request.next().unwrap_or_default();
+    let path = request.next().unwrap_or_default();
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -158,6 +165,21 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body)?;
+    }
+    if method == "GET" && path == "/v1/models" {
+        let body = r#"{"data":[]}"#;
+        return stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    }
+    if method != "POST" || path != "/v1/chat/completions" {
+        return stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
     }
     // The scripted sequence: request 1 answers the ipython tool call that starts the
     // detached watcher, request 2 ends the turn, every later request the woken reply.

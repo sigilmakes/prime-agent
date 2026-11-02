@@ -127,6 +127,7 @@ pub async fn run_side_question(
     for (index, turn) in previous_turns.iter().enumerate() {
         messages.push(pa_agent::types::AgentMessage::Standard(Message::User(
             UserMessage {
+                rest: serde_json::Map::default(),
                 content: UserContent::Parts(vec![UserPart::Text(TextContent {
                     text: side_question_prompt(&turn.question, index == 0),
                     text_signature: None,

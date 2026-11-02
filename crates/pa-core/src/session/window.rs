@@ -6,7 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::window_cache::{self, Generation, Snapshot};
-pub use super::window_cache::{append_cached, flush as flush_cache, AppendOwnership};
+pub use super::window_cache::{flush as flush_cache, AppendOwnership};
 use pa_types::session::{FileEntry, SessionHeader};
 use serde::{Deserialize, Serialize};
 
@@ -170,40 +170,6 @@ impl OlderPathUsage {
     }
 }
 
-/// Owner-captured physical row facts. These are implementation inputs, not authority.
-/// Bodies omitted from the window must not be loaded to populate this index.
-#[derive(Clone, Debug)]
-pub struct CanonicalWindowRow {
-    pub byte_offset: u64,
-    pub byte_len: u64,
-    pub physical_row: u64,
-    pub id: Option<String>,
-    pub parent_id: Option<String>,
-    pub kind: String,
-    pub assistant_model: Option<(String, String)>,
-}
-
-/// In-memory projection inputs supplied by the bound canonical raw owner.
-/// The owner certifies the index, ancestry, metadata and older statistics against
-/// its capture. The cache snapshot created here is NEVER a raw-source proof.
-pub struct CanonicalWindowParts {
-    pub cursor: super::canonical::CanonicalCursor,
-    pub header: super::canonical::CanonicalJournalRow,
-    pub retained: Vec<super::canonical::CanonicalJournalRow>,
-    /// ALL physical non-message rows, including all branches and retained rows.
-    pub metadata: Vec<super::canonical::CanonicalJournalRow>,
-    /// Every non-header physical row, in physical order.
-    pub rows: Vec<CanonicalWindowRow>,
-    /// Selected ancestry, oldest first; zero-based indices into `rows`.
-    pub ancestry: Vec<usize>,
-    /// Actual metadata already captured by the owner; never stat the path here.
-    pub physical_metadata: std::fs::Metadata,
-    /// Selected ancestry messages absent from retained bodies, with the LAST
-    /// physical attribution already folded by the owner. Raw rows stay unchanged.
-    pub older_path_stats: WindowStats,
-    pub first_user_message: Option<serde_json::Value>,
-}
-
 /// What this store holds for the retained rows. `full` and `detached` are one
 /// lifecycle, not two flags: construction picks the window or whole-file arm,
 /// [`WindowedSessionStore::take_retained`] moves to the detached arm at the same
@@ -245,11 +211,6 @@ impl BodyState {
 
 /// An active compacted window plus verified settings from its older ancestry.
 /// The underlying JSONL is never rewritten by this reader.
-// One state value, not four flags: `bodies` is the body lifecycle above, the
-// walk's `retained_whole_file` fact lives in the snapshot it was certified
-// with, and `canonical_derived` is the immutable construction kind (a derived
-// projection over an owner-certified capture), which no transition changes and
-// no other field implies.
 pub struct WindowedSessionStore {
     path: PathBuf,
     entries: Vec<FileEntry>,
@@ -266,8 +227,6 @@ pub struct WindowedSessionStore {
     bodies: BodyState,
     snapshot: Snapshot,
     reads: WindowReadStats,
-    /// Canonical-derived stores must never reopen a source or publish a cache.
-    canonical_derived: bool,
 }
 
 impl WindowedSessionStore {
@@ -278,279 +237,6 @@ impl WindowedSessionStore {
     /// # Errors
     /// Reject inconsistent physical facts, header, index, retained rows or ancestry.
     #[allow(clippy::too_many_lines)]
-    pub fn from_canonical_parts(parts: CanonicalWindowParts) -> anyhow::Result<Self> {
-        use sha2::{Digest, Sha256};
-        let CanonicalWindowParts {
-            cursor,
-            header,
-            retained,
-            metadata,
-            rows,
-            ancestry,
-            physical_metadata,
-            older_path_stats,
-            first_user_message,
-        } = parts;
-        let FileEntry::Header {
-            header: parsed_header,
-        } = header.entry()
-        else {
-            anyhow::bail!("canonical window header is not a header");
-        };
-        anyhow::ensure!(
-            header.byte_offset() == 0 && header.physical_row() == 0,
-            "canonical header position mismatch"
-        );
-        anyhow::ensure!(
-            parsed_header.id == cursor.session_id
-                && parsed_header.version == Some(3)
-                && <[u8; 32]>::from(Sha256::digest(header.raw())) == cursor.header_certificate,
-            "canonical header/cursor mismatch"
-        );
-        anyhow::ensure!(
-            cursor.source_path.is_absolute()
-                && physical_metadata.is_file()
-                && physical_metadata.len() == cursor.frontier.bytes,
-            "canonical physical metadata/frontier mismatch"
-        );
-        anyhow::ensure!(
-            u64::try_from(rows.len())?.checked_add(1) == Some(cursor.frontier.rows),
-            "canonical physical row count mismatch"
-        );
-        let mut offset = u64::try_from(header.raw().len())?;
-        let mut ids = HashMap::new();
-        for (index, row) in rows.iter().enumerate() {
-            anyhow::ensure!(
-                row.physical_row == u64::try_from(index)? + 1
-                    && row.byte_offset == offset
-                    && row.byte_len > 1
-                    && !row.kind.is_empty()
-                    && row.kind != "session",
-                "invalid canonical physical row position/type"
-            );
-            offset = offset
-                .checked_add(row.byte_len)
-                .ok_or_else(|| anyhow::anyhow!("canonical offset overflow"))?;
-            if let Some(parent) = &row.parent_id {
-                anyhow::ensure!(ids.contains_key(parent), "canonical parent is not prior");
-            }
-            if let Some(id) = &row.id {
-                anyhow::ensure!(
-                    !id.is_empty()
-                        && id != &cursor.session_id
-                        && ids.insert(id.clone(), index).is_none(),
-                    "duplicate canonical ID"
-                );
-            } else {
-                anyhow::ensure!(row.parent_id.is_none(), "IDless canonical tree row");
-            }
-            anyhow::ensure!(
-                row.assistant_model.is_none() || row.kind == "message",
-                "assistant facts on non-message"
-            );
-        }
-        anyhow::ensure!(
-            offset == cursor.frontier.bytes,
-            "canonical physical byte frontier mismatch"
-        );
-        let leaf_id = cursor.selected_leaf.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("a derived window requires an explicit selected leaf")
-        })?;
-        let mut expected_ancestry = Vec::new();
-        let mut next = Some(leaf_id.as_str());
-        while let Some(id) = next {
-            let index = *ids
-                .get(id)
-                .ok_or_else(|| anyhow::anyhow!("selected ancestry ID absent"))?;
-            expected_ancestry.push(index);
-            next = rows[index].parent_id.as_deref();
-        }
-        expected_ancestry.reverse();
-        anyhow::ensure!(
-            expected_ancestry == ancestry,
-            "canonical selected ancestry mismatch"
-        );
-        let validate = |row: &super::canonical::CanonicalJournalRow| -> anyhow::Result<usize> {
-            let index = usize::try_from(row.physical_row())?
-                .checked_sub(1)
-                .ok_or_else(|| anyhow::anyhow!("duplicate canonical header"))?;
-            let fact = rows
-                .get(index)
-                .ok_or_else(|| anyhow::anyhow!("raw row outside frontier"))?;
-            let value: serde_json::Value = serde_json::from_slice(row.raw())?;
-            anyhow::ensure!(
-                row.byte_offset() == fact.byte_offset
-                    && u64::try_from(row.raw().len())? == fact.byte_len
-                    && value.get("type").and_then(serde_json::Value::as_str)
-                        == Some(fact.kind.as_str())
-                    && value.get("id").and_then(serde_json::Value::as_str) == fact.id.as_deref()
-                    && value.get("parentId").and_then(serde_json::Value::as_str)
-                        == fact.parent_id.as_deref(),
-                "canonical row/index mismatch"
-            );
-            let model = match row.entry() {
-                FileEntry::Message {
-                    message: pa_types::session::AgentMessage::Assistant(message),
-                    ..
-                } => Some((message.provider.clone(), message.model.clone())),
-                _ => None,
-            };
-            anyhow::ensure!(
-                model == fact.assistant_model,
-                "canonical assistant facts mismatch"
-            );
-            Ok(index)
-        };
-        let mut retained_indices = HashSet::new();
-        let mut previous = None;
-        for row in &retained {
-            let index = validate(row)?;
-            anyhow::ensure!(
-                previous.is_none_or(|previous| index > previous),
-                "canonical retained rows not strictly ordered"
-            );
-            previous = Some(index);
-            retained_indices.insert(index);
-        }
-        let expected_metadata: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, row)| (row.kind != "message").then_some(i))
-            .collect();
-        let mut metadata_indices = Vec::new();
-        for row in &metadata {
-            metadata_indices.push(validate(row)?);
-        }
-        anyhow::ensure!(
-            metadata_indices == expected_metadata,
-            "incomplete/unordered physical metadata"
-        );
-        let metadata_by_index: HashMap<usize, _> =
-            metadata_indices.into_iter().zip(&metadata).collect();
-        for row in &retained {
-            let index = usize::try_from(row.physical_row())? - 1;
-            if let Some(meta) = metadata_by_index.get(&index) {
-                anyhow::ensure!(meta.raw() == row.raw(), "retained metadata bytes disagree");
-            }
-        }
-        let older_messages = ancestry
-            .iter()
-            .filter(|i| !retained_indices.contains(i) && rows[**i].kind == "message")
-            .count();
-        anyhow::ensure!(
-            older_path_stats.total_messages == u64::try_from(older_messages)?
-                && older_path_stats
-                    .user_messages
-                    .checked_add(older_path_stats.assistant_messages)
-                    .and_then(|n| n.checked_add(older_path_stats.tool_results))
-                    == Some(older_path_stats.total_messages)
-                && older_path_stats.cost.is_finite(),
-            "older selected statistics mismatch"
-        );
-        let raw_text = |row: &super::canonical::CanonicalJournalRow| -> anyhow::Result<String> {
-            Ok(std::str::from_utf8(row.raw())?.to_owned())
-        };
-        let metadata_entries: Vec<String> = metadata
-            .iter()
-            .map(raw_text)
-            .collect::<anyhow::Result<_>>()?;
-        let raw_entries = retained
-            .iter()
-            .map(raw_text)
-            .collect::<anyhow::Result<_>>()?;
-        let mut entries = vec![header.entry().clone()];
-        entries.extend(retained.iter().map(|row| row.entry().clone()));
-        // Apply ALL physical attributions once, oldest first, to DERIVED clones.
-        // Do not re-fold a retained attribution afterward: an older retained row
-        // must not overwrite the final aggregate from the complete metadata list.
-        apply_attributions(&mut entries, &metadata_entries);
-        let retained_whole_file = retained_indices.len() == rows.len();
-        let message_count = rows.iter().filter(|row| row.kind == "message").count();
-        let compaction_count = rows.iter().filter(|row| row.kind == "compaction").count();
-        let mut snapshot = Snapshot {
-            version: window_cache::SNAPSHOT_VERSION,
-            generation: Generation::of(&physical_metadata),
-            header: raw_text(&header)?,
-            start: retained.first().map_or(
-                cursor.frontier.bytes,
-                super::canonical::CanonicalJournalRow::byte_offset,
-            ),
-            leaf: leaf_id.clone(),
-            thinking: "off".to_owned(),
-            thinking_present: false,
-            tier: None,
-            tier_present: false,
-            model: None,
-            boundary_model: None,
-            metadata: metadata_entries.clone(),
-            message_count,
-            compaction_count,
-            stats: older_path_stats.clone(),
-            first_user: first_user_message.clone(),
-            goal: None,
-            anthropic_warning_shown: false,
-            non_bootstrap: false,
-            retained_whole_file,
-        };
-        // Metadata for other branches remains raw, but cannot select settings.
-        for index in &ancestry {
-            if let Some(row) = metadata_by_index.get(index) {
-                update_snapshot(&mut snapshot, row.entry());
-                if !retained_indices.contains(index) {
-                    if let FileEntry::ModelChange { payload, .. } = row.entry() {
-                        snapshot.boundary_model =
-                            Some((payload.provider.clone(), payload.model_id.clone()));
-                    }
-                }
-            }
-            if let Some(model) = &rows[*index].assistant_model {
-                snapshot.model = Some(model.clone());
-            }
-        }
-        // Counts are physical, not counts of the selected metadata fold.
-        snapshot.message_count = message_count;
-        snapshot.compaction_count = compaction_count;
-        snapshot.non_bootstrap = rows.iter().any(|row| {
-            !matches!(
-                row.kind.as_str(),
-                "model_change" | "thinking_level_change" | "service_tier_change"
-            ) && metadata_by_index
-                .get(
-                    &(usize::try_from(row.physical_row)
-                        .unwrap_or(0)
-                        .saturating_sub(1)),
-                )
-                .is_none_or(|meta| !super::is_bootstrap_entry(meta.entry()))
-        });
-        let settings = SessionContext {
-            archive: None,
-            messages: Vec::new(),
-            thinking_level: snapshot.thinking.clone(),
-            service_tier: snapshot.tier,
-            model: snapshot.model.clone(),
-        };
-        Ok(Self {
-            path: cursor.source_path,
-            entries,
-            raw_entries,
-            metadata_entries,
-            message_count,
-            older_path_stats,
-            first_user_message,
-            leaf_id: leaf_id.clone(),
-            settings,
-            boundary_model: snapshot.boundary_model.clone(),
-            bodies: if retained_whole_file {
-                BodyState::WholeFile
-            } else {
-                BodyState::Window
-            },
-            snapshot,
-            reads: WindowReadStats::default(),
-            canonical_derived: true,
-        })
-    }
-
     /// Return `None` for old schemas, torn rows, or ambiguous ancestry so callers
     /// can use their ordinary full reader. No size or message-count admission cap.
     ///
@@ -624,7 +310,18 @@ impl WindowedSessionStore {
         // not `model` (the leaf's).
         let mut boundary_model = None;
         let mut header = None;
-        while let Some(line) = reader.next()? {
+        let mut newer_seq = None;
+        while let Some(envelope) = reader.next()? {
+            let row = crate::session_log::Row::decode(&envelope, 0)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if newer_seq.is_some_and(|newer| row.seq >= newer) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session log sequence is not increasing",
+                ));
+            }
+            newer_seq = Some(row.seq);
+            let line = serde_json::to_vec(&row.body)?;
             let Ok(text) = std::str::from_utf8(&line) else {
                 return Ok(None);
             };
@@ -952,7 +649,6 @@ impl WindowedSessionStore {
             bodies: BodyState::Window,
             snapshot,
             reads: reader.reads,
-            canonical_derived: false,
         }))
     }
 
@@ -973,11 +669,18 @@ impl WindowedSessionStore {
         }
         reads.jsonl_bytes += header.len() as u64;
         reads.jsonl_ranges.push((0, header.len() as u64));
-        let Ok(canonical) = serde_json::from_slice::<FileEntry>(&header) else {
-            return Ok(None);
-        };
+        if header.pop() != Some(b'\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session header is unterminated",
+            ));
+        }
+        let header_row = crate::session_log::Row::decode(&header, 0)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let canonical: FileEntry = serde_json::from_value(header_row.body)?;
+        let mut seq = header_row.seq;
         if serde_json::to_string(&canonical)? != snapshot.header
-            || snapshot.start < header.len() as u64
+            || snapshot.start < header.len() as u64 + 1
             || snapshot.start > file.metadata()?.len()
         {
             return Ok(None);
@@ -989,17 +692,20 @@ impl WindowedSessionStore {
         reads
             .jsonl_ranges
             .push((snapshot.start, suffix.len() as u64));
-        let raw_entries: Vec<String> = suffix
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect();
+        if !suffix.is_empty() && !suffix.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session suffix is unterminated",
+            ));
+        }
+        let mut raw_entries = Vec::new();
         let mut entries = vec![canonical];
-        for line in &raw_entries {
-            let Ok(entry) = serde_json::from_str::<FileEntry>(line) else {
-                return Ok(None);
-            };
-            entries.push(entry);
+        for line in suffix.lines() {
+            let row = crate::session_log::Row::decode(line.as_bytes(), seq)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            seq = row.seq;
+            raw_entries.push(serde_json::to_string(&row.body)?);
+            entries.push(serde_json::from_value(row.body)?);
         }
         if entries.last().and_then(FileEntry::id) != Some(snapshot.leaf.as_str())
             || !snapshot.generation.valid(file, path)?
@@ -1029,7 +735,6 @@ impl WindowedSessionStore {
             bodies: BodyState::Window,
             snapshot,
             reads,
-            canonical_derived: false,
         }))
     }
     /// Move the retained raw JSONL rows out; holding both the raw lines and
@@ -1233,18 +938,12 @@ impl WindowedSessionStore {
     ///
     /// Error when reading the session file fails or the blocking read task fails to join.
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.canonical_derived,
-            "canonical-derived history requires the bound raw store and cursor"
-        );
         if self.bodies.is_full() {
             return Ok(());
         }
         let path = self.path.clone();
-        let entries = tokio::task::spawn_blocking(move || {
-            std::fs::read_to_string(path).map(|text| super::parse_session_entries(&text))
-        })
-        .await??;
+        let entries =
+            tokio::task::spawn_blocking(move || super::read::read_entries(&path)).await??;
         self.entries = entries;
         // Re-hydrated bodies re-arm the retained copies (and with them
         // `context()`), like a fresh walk: one transition, not two flags.

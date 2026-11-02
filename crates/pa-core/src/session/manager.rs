@@ -1,8 +1,7 @@
 //! `SessionManager`: the stateful session writer (create/new/append/persist,
-//! crash repair, index).
+//! durable log persistence and index).
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use pa_types::session::{
@@ -11,7 +10,7 @@ use pa_types::session::{
 };
 
 use super::tree::SessionTree;
-use super::{migrate_to_current_version, parse_session_entries, CURRENT_SESSION_VERSION};
+use super::CURRENT_SESSION_VERSION;
 
 #[cfg(test)]
 mod tests;
@@ -26,9 +25,7 @@ use super::{build_session_context, SessionContext};
 mod lifecycle;
 use super::window;
 
-mod canonical;
-pub(crate) use canonical::CanonicalLivePublication;
-pub use canonical::{CanonicalLocalAdoption, CanonicalRawCoverage};
+mod metadata;
 
 // `get_session_file_path` has zero external callers; the re-export keeps
 // the pub path stable and avoids dead-code churn.
@@ -38,14 +35,29 @@ pub use ids::{format_iso, format_iso_now, get_session_file_path};
 
 mod header;
 pub use header::read_session_header;
-use header::{is_valid_rlm_depth, resolve_session_rlm_depth, root_rlm_depth_from_env};
+use header::{resolve_session_rlm_depth, root_rlm_depth_from_env};
 
 mod git;
 pub use git::capture_git_context;
 
-mod repair;
-use repair::serialize_entry;
-pub use repair::{load_entries_from_file, repair_jsonl_damage};
+/// Durable append target supplied by an embedding host.
+/// Implementations preserve the complete entry envelope and return only after
+/// the row is durable. They must not call back into the session manager.
+pub trait SessionEntryWriter: Send + Sync {
+    /// Commit the entry and update its envelope to the stored identity.
+    ///
+    /// # Errors
+    /// Returns append contention, validation, or durability errors.
+    fn append(&self, entry: &mut FileEntry) -> std::io::Result<()>;
+    /// Read committed rows through this manager's independent bounded cursor.
+    ///
+    /// # Errors
+    /// Returns history replacement, validation, contention, or I/O errors.
+    fn read_tail(
+        &self,
+        cursor: &mut crate::session_log::ReadCursor,
+    ) -> std::io::Result<Vec<FileEntry>>;
+}
 
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
@@ -71,13 +83,8 @@ pub struct SessionManager {
     /// session-owned artifacts (local harness state) resolve under it.
     session_dir_backed: bool,
     flushed: bool,
-    has_assistant_entry: bool,
     append_ownership: super::window::AppendOwnership,
     file_entries: Vec<FileEntry>,
-    canonical_raw: Option<canonical::RawCanonicalState>,
-    canonical_local_revision: u64,
-    canonical_metadata_writer:
-        Option<std::sync::Weak<dyn super::canonical::CanonicalMetadataWriter>>,
     window: Option<super::window::WindowedSessionStore>,
     by_id: HashMap<String, usize>,
     labels_by_id: HashMap<String, String>,
@@ -85,7 +92,11 @@ pub struct SessionManager {
     leaf_id: Option<String>,
     /// Exact worker-owned rows replayed by the current prompt admission.
     admitted_user_rows: std::collections::VecDeque<String>,
+    admitted_custom_rows: std::collections::VecDeque<String>,
     persist_listeners: Vec<SessionPersistListener>,
+    entry_writer: Option<std::sync::Arc<dyn SessionEntryWriter>>,
+    standalone_log: Option<persist::StandaloneLog>,
+    read_cursor: crate::session_log::ReadCursor,
 }
 
 /// The refine transcript's consumed artifacts: the conversation message

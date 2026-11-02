@@ -120,6 +120,24 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<usize>>) -> std::io::Result
     if content_length > 0 {
         reader.read_exact(&mut body_bytes)?;
     }
+    let mut request = head.lines().next().unwrap_or_default().split_whitespace();
+    let method = request.next().unwrap_or_default();
+    let path = request.next().unwrap_or_default();
+    if method == "GET" && path == "/v1/models" {
+        let body = r#"{"data":[]}"#;
+        return stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    }
+    if method != "POST" || path != "/v1/chat/completions" {
+        return stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    }
     {
         let mut requests = requests.lock().expect("mock lock");
         *requests += 1;

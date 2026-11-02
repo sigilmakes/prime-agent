@@ -194,7 +194,7 @@ impl CompactionManager {
         let Some(store) = core.store.as_mut() else {
             return;
         };
-        if store.is_canonical_bound() {
+        if self.engine.persists_session_entries() {
             // The engine committed the exact archive row and ACKed its raw receipt.
             return;
         }
@@ -257,11 +257,7 @@ impl CompactionManager {
     fn persist_and_emit_ipython_state(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
-            if let Some(store) = core
-                .store
-                .as_mut()
-                .filter(|store| !store.is_canonical_bound())
-            {
+            if let Some(store) = core.store.as_mut() {
                 let _ = store.persist_entry(
                     "custom_message",
                     json!({

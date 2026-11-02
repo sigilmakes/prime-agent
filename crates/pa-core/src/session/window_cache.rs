@@ -53,7 +53,7 @@ impl Generation {
 /// version (any other version is rebuilt by the full walk). A served
 /// snapshot's `WindowStats` already folds the child usage attributions,
 /// and unread keys are ignored on load (no `deny_unknown_fields`).
-pub(super) const SNAPSHOT_VERSION: u32 = 7;
+pub(super) const SNAPSHOT_VERSION: u32 = 8;
 // `retained_whole_file` is `#[serde(default)]` false: older sidecars
 // deserialize it as false and skip the full-history fast paths until the
 // next walk rewrites the sidecar (a version bump would force a re-walk).
@@ -180,81 +180,44 @@ pub enum AppendOwnership {
     /// No runtime lease: append without publishing an incremental snapshot.
     Unleased,
 }
-/// Whether the file's last byte is a newline: the append boundary probe.
-fn file_tail_is_newline(path: &Path) -> io::Result<bool> {
-    use std::io::{Read, Seek};
-    let mut probe = std::fs::File::open(path)?;
-    let mut tail = [0u8; 1];
-    probe.seek(std::io::SeekFrom::End(-1))?;
-    probe.read_exact(&mut tail)?;
-    Ok(tail[0] == b'\n')
-}
 
-/// Append authoritative JSONL bytes. Only a caller holding the existing session
-/// lease may incrementally certify the cache. Rows must have fresh writer IDs.
-/// Cache failures never fail a successful durable append.
-///
-/// # Errors
-///
-/// The durable append's I/O error; a failed incremental certification is dropped.
-pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> io::Result<()> {
-    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-    // The torn-tail boundary (the append-only reopen's belt): an
-    // unterminated final row - a crashed append the repair failed to
-    // re-terminate, its errors swallowed - must not merge with the first
-    // appended row: both would be lost to the index. One newline before
-    // the payload keeps the torn row alone (the loaders skip it) and the
-    // appended rows parseable. A no-op on a healthy file.
-    if file.metadata()?.len() > 0 && !file_tail_is_newline(path)? {
-        file.write_all(b"\n")?;
-    }
-    file.write_all(bytes)?;
-    file.flush()?;
-    crate::platform::fsync(&file)?;
-    if ownership != AppendOwnership::SessionLeaseHeld || !bytes.ends_with(b"\n") {
-        if let Ok(mut snapshots) = live_snapshots().lock() {
-            snapshots.remove(path);
-        }
-        return Ok(());
-    }
-    let generation = Generation::of(&file.metadata()?);
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return Ok(());
-    };
+/// Update only a derived cache after the authoritative log has committed.
+pub(super) fn committed(
+    path: &Path,
+    entry: &pa_types::session::FileEntry,
+    ownership: AppendOwnership,
+) {
     let Ok(mut snapshots) = live_snapshots().lock() else {
-        return Ok(());
+        return;
     };
-    let Some(snapshot) = snapshots.get_mut(path) else {
-        return Ok(());
-    };
-    for line in text.lines() {
-        let Ok(entry) = serde_json::from_str::<pa_types::session::FileEntry>(line) else {
-            snapshots.remove(path);
-            return Ok(());
-        };
-        if entry.parent_id() != Some(snapshot.leaf.as_str())
-            || matches!(
-                entry,
-                pa_types::session::FileEntry::Compaction { .. }
-                    | pa_types::session::FileEntry::ChildUsageAttributed { .. }
-            )
-        {
-            snapshots.remove(path);
-            return Ok(());
-        }
-        let Some(id) = entry.id() else {
-            snapshots.remove(path);
-            return Ok(());
-        };
-        if id == snapshot.leaf {
-            snapshots.remove(path);
-            return Ok(());
-        }
-        id.clone_into(&mut snapshot.leaf);
-        super::window::update_snapshot(snapshot, &entry);
+    if ownership != AppendOwnership::SessionLeaseHeld {
+        snapshots.remove(path);
+        return;
     }
-    snapshot.generation = generation;
-    Ok(())
+    let Some(snapshot) = snapshots.get_mut(path) else {
+        return;
+    };
+    if entry.parent_id() != Some(snapshot.leaf.as_str())
+        || matches!(
+            entry,
+            pa_types::session::FileEntry::Compaction { .. }
+                | pa_types::session::FileEntry::ChildUsageAttributed { .. }
+        )
+    {
+        snapshots.remove(path);
+        return;
+    }
+    let Some(id) = entry.id() else {
+        snapshots.remove(path);
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        snapshots.remove(path);
+        return;
+    };
+    id.clone_into(&mut snapshot.leaf);
+    super::window::update_snapshot(snapshot, entry);
+    snapshot.generation = Generation::of(&metadata);
 }
 
 // JSON decimal parsing need not round-trip every IEEE value. The subtotal must

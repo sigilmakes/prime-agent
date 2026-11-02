@@ -6,6 +6,12 @@ use super::{
     TurnAdmission, TurnOnce, TurnPrompt, TurnResult,
 };
 
+type SessionRestore = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 impl AgentSessionEngine {
     /// Drive one admitted prompt through the retry-driver model loop and
     /// emit the turn outcome (provider-failure retries + final-row
@@ -16,7 +22,7 @@ impl AgentSessionEngine {
         prompt: &TurnPrompt,
         boundary_passed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> TurnResult {
         #[derive(Clone)]
         struct FailoverPrimary {
@@ -180,10 +186,7 @@ impl AgentSessionEngine {
         // A bound owner receipt must never wait under Agent::event_delivery.
         // Its existing restore callback runs after run_turn_once has settled,
         // before the retry driver publishes restoration or starts another attempt.
-        let canonical_bound = core
-            .as_ref()
-            .is_some_and(|core| core.session.has_canonical_live_owner());
-        let restore_session: pa_core::session_engine::canonical_live::CanonicalAfterAssistantCommitFn = {
+        let restore_session: SessionRestore = {
             let primary_state = primary_state.clone();
             let pending_model_changes = pending_model_changes.clone();
             let agent_weak = std::sync::Arc::downgrade(&agent);
@@ -213,14 +216,14 @@ impl AgentSessionEngine {
                     let agent = agent_weak
                         .upgrade()
                         .ok_or_else(|| anyhow::anyhow!("restoration episode Agent retired"))?;
-                    let core = match core_weak {
-                        Some(core) => Some(core.upgrade().ok_or_else(|| {
-                            anyhow::anyhow!("restoration episode Core retired")
-                        })?),
-                        None => None,
-                    };
-                    primary.model =
-                        ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
+                    let core =
+                        match core_weak {
+                            Some(core) => Some(core.upgrade().ok_or_else(|| {
+                                anyhow::anyhow!("restoration episode Core retired")
+                            })?),
+                            None => None,
+                        };
+                    primary.model = ollama_cloud.configure_model(&cwd, &agent_dir, &primary.model);
                     let model = json_round_trip(&primary.model)
                         .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                     if let Some(persistence) = persistence {
@@ -257,22 +260,7 @@ impl AgentSessionEngine {
                 })
             })
         };
-        let restore_commit_guard = match core
-            .as_ref()
-            .and_then(|core| core.session.canonical_live_session())
-        {
-            Some(live) => match live.register_after_assistant_commit(restore_session.clone()) {
-                Ok(guard) => Some(guard),
-                Err(error) => {
-                    return TurnResult::Error {
-                        error: error.to_string(),
-                        assistant: None,
-                    };
-                }
-            },
-            None => None,
-        };
-        let restore_subscription = (!canonical_bound).then(|| {
+        let restore_subscription = Some({
             self.runtime.block_on(async {
                 let restore_session = restore_session.clone();
                 agent
@@ -376,6 +364,7 @@ impl AgentSessionEngine {
                             model_id: primary_model.id.clone(),
                         },
                     ))
+                    .continues()
                 {
                     anyhow::bail!("Model restoration persistence was cancelled");
                 }
@@ -514,7 +503,7 @@ impl AgentSessionEngine {
                             }
                         }
                         let engine_event = retry_event_to_engine_event(event);
-                        if !emit(engine_event) {
+                        if !emit(engine_event).continues() {
                             anyhow::bail!("emit cancelled");
                         }
                         Ok(())
@@ -637,7 +626,9 @@ impl AgentSessionEngine {
                                 provider: next.provider.clone(),
                                 model_id: next.id.clone(),
                             },
-                        )) {
+                        ))
+                        .continues()
+                        {
                             anyhow::bail!("Model switch persistence was cancelled");
                         }
                         Ok(())
@@ -650,7 +641,6 @@ impl AgentSessionEngine {
         // Also restore the previous override when an attempt/listener failed
         // before the retry driver's normal restoration path.
         agent.set_model_override(episode_model_override.clone());
-        drop(restore_commit_guard);
         if let Some(subscription) = restore_subscription {
             self.runtime.block_on(subscription.unsubscribe());
         }
@@ -697,7 +687,7 @@ async fn persist_model_change(
     provider: &str,
     model_id: &str,
 ) -> anyhow::Result<()> {
-    pa_core::session::canonical::persist_metadata_entry(
+    pa_core::session::metadata::persist_metadata_entry(
         session,
         pa_types::session::FileEntry::ModelChange {
             base: pa_types::session::EntryBase {

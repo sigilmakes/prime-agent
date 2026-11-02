@@ -709,9 +709,8 @@ pub(crate) async fn build_headless_engine_with(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message: None,
             context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
-            context_startup_admitted_user_ids: Vec::new(),
+            context_startup_admitted_input_ids: Vec::new(),
             on_initial_context_selection: None,
-            canonical_live_owner: None,
             cron_store: None,
             semantic_edges,
             steering_mode,
@@ -1344,11 +1343,8 @@ fn open_session_file(
     explicit_cwd_override: Option<&std::path::Path>,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
     let session_cwd = stored_session_cwd(path, fallback_cwd, explicit_cwd_override)?;
-    Ok(pa_core::session::manager::SessionManager::open(
-        &session_cwd,
-        session_dir,
-        path,
-    ))
+    pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path)
+        .map_err(|error| error.to_string())
 }
 
 /// The cwd an opened session runs in: the explicit override (main.ts

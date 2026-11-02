@@ -44,7 +44,7 @@ fn bare_engine(dir: &std::path::Path) -> AgentSessionEngine {
 
 /// A standalone engine fixture still needs the real canonical owner. Transfer
 /// its existing store into one `SessionCore`; no second SDK writer is enabled.
-fn own_canonical_store(
+fn own_log_store(
     engine: &AgentSessionEngine,
     mut store: crate::session_store::SessionFile,
 ) -> std::sync::Arc<std::sync::Mutex<crate::worker::SessionCore>> {
@@ -67,6 +67,22 @@ fn own_canonical_store(
         std::sync::Arc::clone(&core),
     ));
     core
+}
+
+fn persist_accepted_user(
+    _engine: &AgentSessionEngine,
+    owner: &std::sync::Arc<std::sync::Mutex<crate::worker::SessionCore>>,
+    message: &serde_json::Value,
+) -> String {
+    let id = owner
+        .lock()
+        .unwrap()
+        .store
+        .as_mut()
+        .unwrap()
+        .persist_entry("message", serde_json::json!({"message":message}))
+        .unwrap();
+    id
 }
 
 /// A settings.json with an explicit compaction reserve (the f14 battery shape).
@@ -152,7 +168,7 @@ pub(crate) fn admit(engine: &AgentSessionEngine, message: String, events: &mut V
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
 }
@@ -234,7 +250,7 @@ pub(crate) fn admit_parked(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(event);
-                true
+                true.into()
             },
         );
     })
@@ -349,7 +365,7 @@ fn run_prompts(
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
     }

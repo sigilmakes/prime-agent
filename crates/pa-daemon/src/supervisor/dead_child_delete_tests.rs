@@ -3,6 +3,7 @@
 //! ledger boundary already stands succeeds only once the worker is gone.
 
 use super::*;
+use crate::supervisor_roster_seed::tests::write_session_log;
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -14,7 +15,7 @@ struct Fixture {
 async fn fixture() -> Fixture {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
@@ -24,13 +25,13 @@ async fn fixture() -> Fixture {
         .expect("supervisor"),
     );
     let child_file = sessions_dir.join("child-dead.jsonl");
-    std::fs::write(
+    write_session_log(
         &child_file,
         "{\"type\":\"session\",\"version\":3,\"id\":\"child-dead\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
     )
     .unwrap();
     let parent_file = sessions_dir.join("parent.jsonl");
-    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    write_session_log(&parent_file, "{\"type\":\"session\",\"version\":3,\"id\":\"p\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/c\"}\n").unwrap();
     let ledger = supervisor
         .rlm_spawn_ledger_for(None)
         .await

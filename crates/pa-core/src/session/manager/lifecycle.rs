@@ -1,13 +1,10 @@
 //! The lifecycle concern: the constructors, the open/fork/new/materialize/
 //! adopt arm, and the fork's branch-copy helpers.
 
-#[cfg(test)]
-use super::repair::repair_jsonl_damage;
 use super::{
     capture_git_context, create_session_id, format_iso_now, get_session_file_path,
-    is_valid_rlm_depth, load_entries_from_file, migrate_to_current_version,
-    resolve_session_rlm_depth, root_rlm_depth_from_env, AgentMessage, FileEntry, HashMap,
-    NewSessionOptions, Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
+    resolve_session_rlm_depth, root_rlm_depth_from_env, FileEntry, HashMap, NewSessionOptions,
+    Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
 };
 
 /// The fork's branch copy: drop the source header and its `git_state` rows,
@@ -110,56 +107,43 @@ impl SessionManager {
             persist,
             session_dir_backed: persist,
             flushed: false,
-            has_assistant_entry: false,
             append_ownership: super::window::AppendOwnership::Unleased,
             file_entries: Vec::new(),
-            canonical_raw: None,
-            canonical_local_revision: 0,
-            canonical_metadata_writer: None,
             window: None,
             by_id: HashMap::new(),
             labels_by_id: HashMap::new(),
             label_timestamps_by_id: HashMap::new(),
             leaf_id: None,
             admitted_user_rows: std::collections::VecDeque::new(),
+            admitted_custom_rows: std::collections::VecDeque::new(),
             persist_listeners: Vec::new(),
+            entry_writer: None,
+            standalone_log: None,
+            read_cursor: crate::session_log::ReadCursor::default(),
         }
     }
 
-    fn new_with(
-        cwd: PathBuf,
-        session_dir: PathBuf,
-        session_file: Option<PathBuf>,
-        persist: bool,
-    ) -> Self {
-        if persist && !session_dir.exists() {
-            let _ = std::fs::create_dir_all(&session_dir);
-        }
+    fn new_with(cwd: PathBuf, session_dir: PathBuf, persist: bool) -> Self {
         let mut manager = Self::uninitialized(cwd, session_dir, persist);
-        match session_file {
-            Some(file) => manager.set_session_file(file, None),
-            None => {
-                manager.new_session(&NewSessionOptions::default());
-            }
-        }
+        manager.new_session(&NewSessionOptions::default());
         manager
     }
 
     #[must_use]
     pub fn persisted(cwd: &Path, session_dir: &Path) -> Self {
-        Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, true)
+        Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), true)
     }
 
     #[must_use]
     pub fn in_memory(cwd: &Path) -> Self {
-        Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), None, false)
+        Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), false)
     }
 
     /// Create an in-memory manager pinned to a session's own directory: the
     /// session's identity (its directory, the local harness state's home) stays its own.
     #[must_use]
     pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
-        let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false);
+        let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), false);
         manager.session_dir_backed = true;
         manager
     }
@@ -197,15 +181,14 @@ impl SessionManager {
         self.session_dir_backed
     }
 
-    /// Open an existing session file (repair + migrate), or a fresh one.
-    #[must_use]
-    pub fn open(cwd: &Path, session_dir: &Path, session_file: &Path) -> Self {
-        Self::new_with(
-            cwd.to_path_buf(),
-            session_dir.to_path_buf(),
-            Some(session_file.to_path_buf()),
-            true,
-        )
+    /// Open an existing CRC session log. Unsupported files are never repaired.
+    ///
+    /// # Errors
+    /// Returns validation, lock or filesystem errors without recreating history.
+    pub fn open(cwd: &Path, session_dir: &Path, session_file: &Path) -> std::io::Result<Self> {
+        let mut manager = Self::uninitialized(cwd.to_owned(), session_dir.to_owned(), true);
+        manager.set_session_file(session_file.to_owned(), None)?;
+        Ok(manager)
     }
 
     /// Copy a source session file into a fresh session under `target_cwd`,
@@ -232,9 +215,14 @@ impl SessionManager {
                 ));
             }
         }
-        // Read-only: repairing would REWRITE the source (dropping a torn row
-        // mid-append); the copy skips a torn tail like TS `loadEntriesFromFile`.
-        let mut entries = load_entries_from_file(source_path, false);
+        // Read-only: a fork never repairs or changes its source. Keep the
+        // caller-facing fork context as well as the strict validation reason.
+        let entries = super::super::read::read_entries(source_path).map_err(|error| {
+            format!(
+                "Cannot fork: source session file is empty or invalid: {}: {error}",
+                source_path.display()
+            )
+        })?;
         if entries.is_empty() {
             return Err(format!(
                 "Cannot fork: source session file is empty or invalid: {}",
@@ -253,7 +241,6 @@ impl SessionManager {
                     source_path.display()
                 )
             })?;
-        migrate_to_current_version(&mut entries);
         let rlm_depth = resolve_session_rlm_depth(&source_header, source_path);
 
         let mut forked = Self::persisted(target_cwd, session_dir);
@@ -267,7 +254,6 @@ impl SessionManager {
         let branch = forked_branch_entries(entries);
         // The copied rows' assistant entries keep the append path durable
         // from the first new entry: one predicate for the durable-append rule.
-        forked.refresh_has_assistant_entry(&branch);
         forked.adopt_entries(branch);
         forked.flush_now().map_err(|error| error.to_string())?;
         Ok(forked)
@@ -289,9 +275,8 @@ impl SessionManager {
         let session_dir = session_dir.to_owned();
         let path = session_file.to_owned();
         tokio::task::spawn_blocking(move || {
-            repair_jsonl_damage(&path);
             let Some(window) = super::window::WindowedSessionStore::open(&path)? else {
-                return Ok(Self::open(&cwd, &session_dir, &path));
+                return Self::open(&cwd, &session_dir, &path).map_err(Into::into);
             };
             let mut manager = Self::in_memory(&cwd);
             manager.session_id = match window.entries().first() {
@@ -313,17 +298,9 @@ impl SessionManager {
     /// manager: rows go straight to disk, never deferred behind the
     /// bootstrap rule.
     ///
-    /// # Panics
-    /// Panics if this manager is bound to a canonical live owner. That path
-    /// requires an owner-certified checkpoint instead of local window adoption.
     pub fn adopt_window(&mut self, mut window: super::window::WindowedSessionStore) {
-        assert!(
-            self.canonical_binding().is_none(),
-            "canonical live mirror requires an owner-certified checkpoint for navigation"
-        );
-        self.invalidate_canonical_local_revision()
-            .expect("canonical local revision exhausted");
         self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
         // One-copy adoption: the parsed trees move in (no `to_vec` clone); the
         // window stays attached for its snapshot/settings/metadata state, and
         // `active_context` walks `file_entries` with the window's settings overlay.
@@ -331,7 +308,6 @@ impl SessionManager {
         self.file_entries = entries;
         self.build_index();
         self.leaf_id = Some(window.leaf_id().to_owned());
-        self.has_assistant_entry = true;
         self.flushed = true;
         self.window = Some(window);
     }
@@ -343,95 +319,55 @@ impl SessionManager {
     pub fn set_append_ownership(&mut self, ownership: super::window::AppendOwnership) {
         self.append_ownership = ownership;
     }
-    /// Switch to a different session file (resume/branch).
+    /// Switch to a validated existing session log.
     ///
-    /// # Panics
-    ///
-    /// The `unwrap` on the session file path is guarded by the existence check above.
+    /// # Errors
+    /// Rejects missing or unsupported files; never repairs or rewrites them.
     pub fn set_session_file(
         &mut self,
-        session_file: PathBuf,
+        path: PathBuf,
         preloaded_entries: Option<Vec<FileEntry>>,
-    ) {
-        self.window = None;
-        self.session_file = Some(session_file);
-        if self.session_file.as_ref().is_some_and(|path| path.exists()) {
-            let path = self.session_file.clone().unwrap();
-            let mut entries =
-                preloaded_entries.unwrap_or_else(|| load_entries_from_file(&path, self.persist));
-            self.refresh_has_assistant_entry(&entries);
-
-            if entries.is_empty() {
-                let explicit_path = path;
-                self.new_session(&NewSessionOptions::default());
-                self.session_file = Some(explicit_path);
-                self.rewrite_file();
-                self.flushed = true;
-                return;
+    ) -> std::io::Result<()> {
+        // A caller's cached rows cannot establish disk authority.
+        let entries = super::super::read::read_entries(&path)?;
+        if let Some(preloaded) = preloaded_entries {
+            if serde_json::to_value(&preloaded)? != serde_json::to_value(&entries)? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "preloaded session entries differ from durable log",
+                ));
             }
-            let header_id = entries.iter().find_map(|entry| match entry {
-                FileEntry::Header { header } => Some(header.id.clone()),
-                _ => None,
-            });
-            self.session_id = header_id.unwrap_or_else(create_session_id);
-
-            let mut should_rewrite = migrate_to_current_version(&mut entries);
-            if let Some(FileEntry::Header { header }) = entries.first_mut() {
-                if header.parent_session.is_some() && !is_valid_rlm_depth(header.rlm_depth) {
-                    let depth = resolve_session_rlm_depth(header, &path);
-                    header.rlm_depth = Some(depth);
-                    should_rewrite = true;
-                }
-            }
-            self.file_entries = entries;
-            if should_rewrite {
-                self.rewrite_file();
-            }
-            self.build_index();
-            self.flushed = true;
-        } else {
-            let explicit_path = self.session_file.clone();
-            self.new_session(&NewSessionOptions::default());
-            self.session_file = explicit_path;
         }
+        let Some(FileEntry::Header { header }) = entries.first() else {
+            unreachable!("reader validates header")
+        };
+        self.session_id.clone_from(&header.id);
+        self.session_file = Some(path);
+        self.window = None;
+        self.standalone_log = None;
+        self.read_cursor = crate::session_log::ReadCursor::default();
+        self.file_entries = entries;
+        self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
+        self.build_index();
+        self.flushed = true;
+        Ok(())
     }
 
     /// Create a new session; returns the session file path when persisting.
     ///
-    /// # Panics
-    ///
-    /// Panics when an explicit session id is requested while persisting and that id's file exists.
     pub fn new_session(&mut self, options: &NewSessionOptions) -> Option<PathBuf> {
-        let mut session_id = options.id.clone().unwrap_or_else(create_session_id);
+        let session_id = options.id.clone().unwrap_or_else(create_session_id);
         let mut session_file: Option<PathBuf> = None;
         if self.persist {
-            if let Some(id) = &options.id {
-                let candidate = get_session_file_path(&self.session_dir, id);
-                assert!(
-                    !candidate.exists(),
-                    "Session file already exists for id \"{id}\": {}",
-                    candidate.display()
-                );
-                session_file = Some(candidate);
-            } else {
-                session_id = create_session_id();
-                let mut candidate = get_session_file_path(&self.session_dir, &session_id);
-                let mut attempts = 0;
-                while candidate.exists() && attempts < 100 {
-                    session_id = create_session_id();
-                    candidate = get_session_file_path(&self.session_dir, &session_id);
-                    attempts += 1;
-                }
-                session_file = Some(candidate);
-            }
+            session_file = Some(get_session_file_path(&self.session_dir, &session_id));
         }
 
+        self.standalone_log = None;
+        self.read_cursor = crate::session_log::ReadCursor::default();
         self.session_id = session_id;
         let timestamp = format_iso_now();
-        let git = self
-            .persist
-            .then(|| capture_git_context(&self.cwd))
-            .flatten();
+        let git = None;
         let rlm_depth = match options.rlm_depth {
             Some(depth) => Some(depth),
             None => options
@@ -454,8 +390,8 @@ impl SessionManager {
         };
         self.file_entries = vec![header];
         self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
         self.window = None;
-        self.has_assistant_entry = false;
         self.by_id.clear();
         self.labels_by_id.clear();
         self.label_timestamps_by_id.clear();
@@ -468,23 +404,30 @@ impl SessionManager {
     }
     /// Materialize an in-memory session into a persisted file.
     ///
+    /// # Errors
+    /// Returns session-path, log validation, contention, or durability errors.
+    ///
     /// # Panics
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full session history first.
-    pub fn materialize_session_file(&mut self, session_dir: Option<PathBuf>) -> PathBuf {
+    pub fn materialize_session_file(
+        &mut self,
+        session_dir: Option<PathBuf>,
+    ) -> std::io::Result<PathBuf> {
         assert!(
             self.window.is_none(),
             "hydrate full session history before this operation"
         );
         if let Some(session_file) = self.session_file.clone() {
-            return session_file;
+            self.flush_now()?;
+            return Ok(session_file);
         }
         let dir = session_dir
             .or_else(|| {
                 (!self.session_dir.as_os_str().is_empty()).then(|| self.session_dir.clone())
             })
             .unwrap_or_else(|| self.cwd.join("sessions"));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
         let previous_header = self.get_header().cloned();
         let session_id = create_session_id();
         let target = get_session_file_path(&dir, &session_id);
@@ -515,37 +458,23 @@ impl SessionManager {
             },
         };
         let rest = std::mem::take(&mut self.file_entries);
-        let has_assistant = rest.iter().any(|entry| {
-            matches!(
-                entry,
-                FileEntry::Message {
-                    message: AgentMessage::Assistant(_),
-                    ..
-                }
-            )
-        });
         self.file_entries = vec![header];
-        self.file_entries.extend(rest);
-        self.has_assistant_entry = has_assistant;
-        self.rewrite_file();
-        self.flushed = true;
-        target
+        self.file_entries.extend(
+            rest.into_iter()
+                .filter(|entry| !matches!(entry, FileEntry::Header { .. })),
+        );
+        self.standalone_log = None;
+        self.read_cursor = crate::session_log::ReadCursor::default();
+        self.flush_now()?;
+        Ok(target)
     }
     /// Adopt a durable branch as this session's entries: keeps the header,
     /// replaces every entry with the given chain, and re-indexes so the leaf
     /// is the last adopted entry. In-memory only — the caller owns persistence.
     ///
-    /// # Panics
-    /// Panics if this manager is bound to a canonical live owner. That path
-    /// requires an owner-certified checkpoint instead of local entry adoption.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
-        assert!(
-            self.canonical_binding().is_none(),
-            "canonical live mirror requires an owner-certified checkpoint for navigation"
-        );
-        self.invalidate_canonical_local_revision()
-            .expect("canonical local revision exhausted");
         self.admitted_user_rows.clear();
+        self.admitted_custom_rows.clear();
         // The caller supplies the complete selected branch after explicit navigation.
         self.window = None;
         let header = self

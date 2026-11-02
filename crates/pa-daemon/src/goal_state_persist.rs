@@ -72,10 +72,37 @@ fn goal_state_from_value(data: &Value) -> Option<GoalState> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use pa_core::goals::{empty_goal_state, GoalStatus};
     use pa_types::session::SessionHeader;
     use serde_json::json;
+
+    fn write_session_log(path: impl AsRef<Path>, content: impl AsRef<str>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let directory = path.parent().expect("fixture directory");
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .expect("fixture id");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)?;
+        for line in content
+            .as_ref()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let row: serde_json::Value = serde_json::from_str(line)?;
+            anyhow::ensure!(
+                matches!(
+                    log.append(&row, deadline),
+                    pa_core::session_log::Outcome::Committed { .. }
+                ),
+                "fixture row must commit"
+            );
+        }
+        Ok(())
+    }
 
     fn custom_goal_entry(data: Value) -> FileEntry {
         FileEntry::Custom {
@@ -141,7 +168,7 @@ mod tests {
                 "continuationsUsed": 2,
             },
         });
-        std::fs::write(
+        write_session_log(
             &path,
             [header, user_row, first_goal, second_goal]
                 .iter()
@@ -180,10 +207,10 @@ mod tests {
         assert_eq!(persisted_goal_state(Some(&junk)), None);
         // An empty-but-valid session carries no goal entry.
         let empty = dir.path().join("empty.jsonl");
-        std::fs::write(
+        write_session_log(
             &empty,
             format!(
-                "{}\\n",
+                "{}\n",
                 json!({
                     "type": "session",
                     "version": 3,
@@ -201,7 +228,7 @@ mod tests {
     fn invalid_entry_data_is_skipped() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
-        std::fs::write(
+        write_session_log(
             &path,
             [
                 json!({

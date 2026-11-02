@@ -123,6 +123,28 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// One saved-session fixture: a session header whose `parentSession` and
 /// `rlmDepth` give the catalog the subagent linkage, a display name, and
 /// a user/assistant exchange.
@@ -156,7 +178,7 @@ fn write_fixture(
             index * 1000 + 1
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
+    append_session_rows(&path, &content);
     path
 }
 
@@ -246,7 +268,7 @@ async fn run_scoped_view(
 async fn scope_exit_keeps_the_subagents_item(exit_key: &'static str) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -461,7 +483,8 @@ fn assert_scoped_frame(frame: &str) {
 #[tokio::test]
 async fn a_session_without_subagents_opens_its_empty_scoped_view() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let session_dir = dir.path().join("agent").join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&dir.path().join("agent"))
+        .expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
     let (scope, session_file) = open_fresh_session_scope(&supervisor.socket, &session_dir).await;
@@ -502,7 +525,8 @@ async fn a_session_without_subagents_opens_its_empty_scoped_view() {
 #[tokio::test]
 async fn a_child_created_under_the_open_empty_scope_appears_live() {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let session_dir = dir.path().join("agent").join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&dir.path().join("agent"))
+        .expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
     let (scope, session_file) = open_fresh_session_scope(&supervisor.socket, &session_dir).await;

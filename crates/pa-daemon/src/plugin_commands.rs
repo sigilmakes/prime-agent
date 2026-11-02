@@ -218,7 +218,7 @@ impl Worker {
                         .as_mut()
                         .context("Session is still initializing")
                         .and_then(|store| {
-                            if store.is_canonical_bound() {
+                            if self.engine.persists_session_entries() {
                                 return Ok(());
                             }
                             store.persist_entry("custom_message", json!({
@@ -627,6 +627,196 @@ return {
             fixture.provider.calls().is_empty(),
             "neither wire route may fall back to inference"
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_job_publication_fences_sessions_and_surfaces_persistence_errors() {
+        let fixture = Fixture::new().await;
+        let session = fixture
+            .worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .session_id()
+            .to_owned();
+        let mut received = fixture.worker.events.subscribe();
+        let job = json!({"id":"fixture-job","plugin":"counter","generation":"fixture-generation",
+            "state":{"status":"completed","result":{"summary":"already committed"}}});
+        crate::plugin_job_events::publish(
+            &fixture.worker.core,
+            &fixture.worker.events,
+            "replaced-session",
+            &job,
+        );
+        assert!(received.try_recv().is_err(), "stale session cannot publish");
+        assert!(fixture.rows().is_empty());
+        let blocker = fixture.cwd.join("not-a-directory");
+        std::fs::write(&blocker, "fixture blocker").unwrap();
+        fixture
+            .worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .unwrap()
+            .set_path(blocker.join(format!("{session}.jsonl")));
+        crate::plugin_job_events::publish(
+            &fixture.worker.core,
+            &fixture.worker.events,
+            &session,
+            &job,
+        );
+        let (start, end) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            (
+                received.recv().await.unwrap(),
+                received.recv().await.unwrap(),
+            )
+        })
+        .await
+        .expect("persistence diagnostic reaches attached client");
+        let start: Value = serde_json::from_slice(&start.payload).unwrap();
+        let end: Value = serde_json::from_slice(&end.payload).unwrap();
+        assert_eq!(start["event"]["type"], "message_start");
+        assert_eq!(end["event"]["type"], "message_end");
+        let row = &end["event"]["message"];
+        assert_eq!(
+            row["details"]["state"], job["state"],
+            "publication failure never rewrites committed state"
+        );
+        assert!(row["details"]["persistenceError"].is_string());
+        assert!(row["content"]
+            .as_str()
+            .unwrap()
+            .contains("Could not save job outcome"));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn deferred_job_success_and_failure_reach_custom_message_transport_once() {
+        for mode in ["generic", "failed", "projected", "malformed"] {
+            let fixture = Fixture::new().await;
+            std::fs::write(
+                fixture.cwd.join("counter.lua"),
+                r"
+return {commands={{name='later',run=function(input,ctx)
+ return ctx.call('jobs.enqueue',{hook='later',input={mode=input.args}})
+end}},hooks={{name='later',run=function(input)
+ if input.mode=='failed' then error('fixture deferred failure') end
+ local result={summary='fixture deferred success'}
+ if input.mode=='projected' then
+  result.message={customType='fixture_outcome',content='plugin-owned presentation',display=true,details={source='fixture'}}
+ elseif input.mode=='malformed' then result.message={customType=42} end
+ return result
+end}}}
+",
+            )
+            .unwrap();
+            let reload = fixture.command("/reload", None).await;
+            assert!(reload.success, "{reload:?}");
+            let session = fixture.core.session.session_id().await;
+            fixture
+                .worker
+                .core
+                .lock()
+                .unwrap()
+                .store
+                .as_mut()
+                .unwrap()
+                .header
+                .id = session;
+            let core = Arc::clone(&fixture.worker.core);
+            let events = Arc::clone(&fixture.worker.events);
+            fixture
+                .worker
+                .agent_engine
+                .as_ref()
+                .unwrap()
+                .set_plugin_job_sink(Arc::new(move |session, job| {
+                    crate::plugin_job_events::publish(&core, &events, session, &job);
+                }));
+            let mut received = fixture.worker.events.subscribe();
+            let command = fixture.command(&format!("/later {mode}"), None).await;
+            assert!(command.success, "{command:?}");
+            let row = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let frame = received.recv().await.unwrap();
+                    let frame: Value = serde_json::from_slice(&frame.payload).unwrap();
+                    if frame["event"]["type"] == "message_end"
+                        && frame["event"]["message"]["customType"]
+                            == if mode == "projected" {
+                                "fixture_outcome"
+                            } else {
+                                "plugin_job_outcome"
+                            }
+                    {
+                        break frame["event"]["message"].clone();
+                    }
+                }
+            })
+            .await
+            .expect("terminal outcome reaches attached client");
+            let terminal = fixture.core.drain_plugin_jobs().await;
+            assert_eq!(terminal.len(), 1, "{terminal:?}");
+            if mode == "projected" {
+                assert_eq!(
+                    row,
+                    json!({"role":"custom","customType":"fixture_outcome",
+                    "content":"plugin-owned presentation","display":true,"details":{"source":"fixture"}})
+                );
+            } else if mode == "malformed" {
+                assert!(row["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("invalid custom-message projection"));
+                let mut expected = terminal[0].clone();
+                expected["projectionError"] =
+                    json!("Plugin job returned an invalid custom-message projection");
+                assert_eq!(row["details"], expected);
+            } else {
+                assert_eq!(row["details"], terminal[0]);
+            }
+            assert_eq!(row["display"], true);
+            assert_eq!(
+                terminal[0]["state"]["status"],
+                if mode == "failed" {
+                    "failed"
+                } else {
+                    "completed"
+                }
+            );
+            assert!(row["content"].as_str().unwrap().contains(match mode {
+                "failed" => "fixture deferred failure",
+                "projected" => "plugin-owned presentation",
+                _ => "fixture deferred success",
+            }));
+            assert_eq!(
+                fixture.core.drain_plugin_jobs().await,
+                terminal,
+                "observing never consumes results"
+            );
+            assert_eq!(
+                fixture
+                    .rows()
+                    .iter()
+                    .filter(|row| row["customType"]
+                        == if mode == "projected" {
+                            "fixture_outcome"
+                        } else {
+                            "plugin_job_outcome"
+                        })
+                    .count(),
+                1
+            );
+            assert!(
+                received.try_recv().is_err(),
+                "draining must not rebroadcast outcomes"
+            );
+            assert!(fixture.provider.calls().is_empty());
+        }
     }
 
     #[tokio::test]

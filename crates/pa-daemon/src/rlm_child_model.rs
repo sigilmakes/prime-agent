@@ -413,8 +413,10 @@ mod tests {
 
     /// The child-propagation regression: a spawned child resolves an
     /// entitled private `internal/*` model through the worker's same disk caches.
-    #[test]
-    fn a_spawned_child_resolves_an_entitled_private_model() {
+    #[tokio::test]
+    async fn a_spawned_child_resolves_an_entitled_private_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         // The worker-path auth (auth.json): one Prime Inference key+team.
@@ -430,42 +432,55 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        // The authorized private model: the compiled fallback lacks it, the
-        // fingerprint-scoped disk cache carries it.
-        let mut auth = pa_core::auth::AuthStorage::create(dir.path());
-        let api_key = auth.get_api_key("prime-inference").expect("api key");
-        // The stored team selection survives ambient env credentials (a
-        // dogfood box's ambient `PRIME_API_KEY` changes the pair); the
-        // cache below is written for whatever pair resolves.
-        let team_id = auth
-            .get_provider_headers("prime-inference")
-            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
-            .expect("stored team selection");
-        let fingerprint =
-            pa_core::models::private_prime_authorization_fingerprint(&api_key, &team_id);
-        pa_core::models::write_private_prime_authorization_cache(
-            &dir.path().join("models.json"),
-            &pa_core::models::PrivatePrimeAuthorizationCache {
-                fingerprint,
-                // The durable wire items (an `/models` payload shape): the
-                // read path parses and builds the model from them.
-                items: vec![json!({
-                    "id": "internal/glm-5.3-fast",
-                    "display_name": "GLM 5.3 Fast",
-                    "pricing": {
-                        "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
-                        "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
-                    },
-                    "specs": {
-                        "context_window": 400_000, "max_output_tokens": 131_072,
-                        "supports_reasoning": true,
-                        "modalities": { "input": ["text"], "output": ["text"] },
-                    },
-                })],
-                models: Vec::new(),
-                refreshed_at: 1,
-            },
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/models", listener.local_addr().unwrap());
+        let response = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = json!({"data": [{
+                "id": "internal/glm-5.3-fast", "display_name": "GLM 5.3 Fast",
+                "pricing": { "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
+                    "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0 },
+                "specs": { "context_window": 400_000, "max_output_tokens": 131_072,
+                    "supports_reasoning": true,
+                    "modalities": { "input": ["text"], "output": ["text"] } }
+            }]})
+            .to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let catalog = || {
+            std::sync::Arc::new(pa_models::ModelCatalog::with_discovery_urls(
+                Some(dir.path().join("models")),
+                None,
+                pa_models::fetch::MODEL_CATALOG_URL,
+                pa_models::prime_inference::PRIME_INFERENCE_BASE_URL,
+                &std::collections::HashMap::from([("prime-inference".to_string(), url.clone())]),
+                pa_models::ollama_cloud::BASE_URL,
+            ))
+        };
+        let path = dir.path().join("models.json");
+        pa_core::models::install_catalog(&path, catalog());
+        let mut writer = pa_core::models::ModelRegistry::create(
+            pa_core::auth::AuthStorage::create(dir.path()),
+            &path,
         );
+        let report = writer
+            .refresh_catalog_sources(Some(&["prime-inference-private".to_string()]))
+            .await;
+        assert_eq!(report.sources.len(), 1);
+        assert_eq!(
+            report.sources[0].status,
+            pa_types::model_refresh::ModelRefreshStatus::Updated
+        );
+        response.await.unwrap();
+        // Fresh child registries must adopt durable metadata, not the writer's memory.
+        pa_core::models::install_catalog(&path, catalog());
 
         assert!(catalog_models(dir.path())
             .iter()

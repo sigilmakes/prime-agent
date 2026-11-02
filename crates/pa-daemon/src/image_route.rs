@@ -498,7 +498,7 @@ mod tests {
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
         let turn_end = events
@@ -566,7 +566,7 @@ mod tests {
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
         let refusal = events

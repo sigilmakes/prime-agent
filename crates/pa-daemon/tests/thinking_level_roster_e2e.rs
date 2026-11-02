@@ -31,6 +31,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Supervisor {
     child: Child,
     #[allow(dead_code)]
@@ -497,11 +505,7 @@ fn thinking_level_changes_reach_the_roster_push() {
         "the switched parent stays idle in the roster push: {update}"
     );
 
-    let entries: Vec<Value> = std::fs::read_to_string(&session_file)
-        .expect("read session file")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("parse entry"))
-        .collect();
+    let entries: Vec<Value> = persisted_rows(&session_file);
     assert!(
         entries
             .iter()

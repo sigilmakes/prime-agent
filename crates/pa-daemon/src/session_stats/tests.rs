@@ -2,13 +2,13 @@
 //! and the cost.
 
 use super::*;
+use crate::session_store::log_reader_tests::write_jsonl_fixture;
 
 /// The captured-attribution fixture end to end: the folded totals — cost
 /// $0 → $0.0089957, input 2690 → 52898 — `totalTokens` stays 23032.
 #[test]
 fn captured_attribution_fixture_stats_count_the_fold() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/attribution-fold-captured.jsonl");
+    let path = crate::session_store::log_reader_tests::captured_attribution_log();
     let store = SessionFile::open(&path).unwrap();
     let stats = session_stats(&store, None);
     assert_eq!(stats["userMessages"], json!(2));
@@ -62,7 +62,7 @@ fn store_with(entries: &[(&str, Value)]) -> SessionFile {
         lines.push(entry.to_string());
     }
     let content = lines.join("\n");
-    std::fs::write(&path, content).expect("write session");
+    write_jsonl_fixture(&path, &content);
     SessionFile::open(&path).expect("open session file")
 }
 
@@ -114,7 +114,7 @@ fn ghost_gap_does_not_zero_the_token_totals() {
         json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-22T00:00:02.000Z", "message": serde_json::from_str::<serde_json::Value>(&assistant).unwrap()}).to_string(),
         json!({"type": "message", "id": "e3", "parentId": "8b5f0d21", "timestamp": "2026-09-22T00:00:03.000Z", "message": {"role": "user", "content": "after the gap"}}).to_string(),
     ];
-    std::fs::write(&path, lines.join("\n")).unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let store = SessionFile::open(&path).unwrap();
     assert_eq!(
         store.branch().len(),
@@ -316,16 +316,16 @@ fn compaction_boundary_serves_the_windowed_reader() {
         user("u5", Some("a4")),
         assistant("a5", Some("u5"), usage(500, 100, 2500, 3100, 0.5)),
     ];
-    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let full = SessionFile::open(&path).unwrap();
     let windowed = SessionFile::open_windowed(&path).unwrap();
     assert!(
-        windowed.window.is_some(),
-        "the intact ancestry must serve a real window"
+        windowed.window.is_none(),
+        "daemon replays the complete committed log"
     );
     assert!(
-        windowed.by_id.contains_key("u3") && !windowed.by_id.contains_key("a2"),
-        "the window loads the kept region only, without the pre-cut ancestry"
+        windowed.by_id.contains_key("u3") && windowed.by_id.contains_key("a2"),
+        "the daemon retains ancestry while active stats respect compaction"
     );
     let expected = json!({
         "sessionFile": path.display().to_string(),
@@ -363,8 +363,8 @@ fn captured_compaction_boundary_matches_ts_active_stats() {
     let full = SessionFile::open(&path).expect("fixture opens");
     let windowed = SessionFile::open_windowed(&path).expect("windowed open");
     assert!(
-        windowed.window.is_some(),
-        "fixture must exercise the windowed reader"
+        windowed.window.is_none(),
+        "daemon replays the complete committed log"
     );
     let expected = json!({
         "sessionFile": path.display().to_string(),
@@ -454,11 +454,11 @@ fn compaction_boundary_drops_the_pre_cut_ancestry() {
         user("u5", Some("a5")),
         assistant("a6", Some("ghost01"), 0.5),
     ];
-    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let full = SessionFile::open(&path).unwrap();
     let windowed = SessionFile::open_windowed(&path).unwrap();
-    // The ghost parent dangles the windowed reader's chain-following, so it falls back
-    // to the full reader: both stores still serve the same kept-region numbers.
+    // Both daemon entry points replay the complete log and serve the same
+    // kept-region numbers even when an older parent is absent.
     assert!(windowed.window.is_none());
     let expected = json!({
         "sessionFile": path.display().to_string(),
@@ -529,18 +529,7 @@ fn an_abandoned_branchs_compaction_never_bounds_the_active_list() {
         user("u3", Some("a2")),
         assistant("a3", Some("u3"), 0.25),
     ];
-    std::fs::write(
-        &path,
-        format!(
-            "{}
-",
-            lines.join(
-                "
-"
-            )
-        ),
-    )
-    .unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let store = SessionFile::open(&path).unwrap();
     let stats = session_stats(&store, None);
     // The active branch keeps its own full history — the abandoned fork's compaction does

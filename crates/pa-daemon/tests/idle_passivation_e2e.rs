@@ -737,13 +737,10 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
     // `session_info` row (only a woken worker writes it), and the
     // parent's registry row follows the applied name.
     let entries = std::fs::read_to_string(&child_file).unwrap_or_default();
-    let named = entries
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("session_info")
-                && entry.get("name").and_then(Value::as_str) == Some("renamed-lane")
-        });
+    let named = session_rows(&child_file).into_iter().any(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("session_info")
+            && entry.get("name").and_then(Value::as_str) == Some("renamed-lane")
+    });
     assert!(
         named,
         "the woken child must carry the renamed session_info row (tail: {:?})",
@@ -880,4 +877,12 @@ async fn an_idle_root_passivates_and_resumes_by_its_durable_id_with_its_transcri
         messages.contains("root turn done"),
         "the snapshot must carry the first turn's reply: {messages}"
     );
+}
+
+fn session_rows(path: &std::path::Path) -> Vec<Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("validated native session rows")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }

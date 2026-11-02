@@ -2,6 +2,7 @@
 //! attribution folds, the wire shapes, and the resumable scan.
 
 use super::*;
+use crate::session_store::log_reader_tests::write_jsonl_fixture;
 use serde_json::json;
 
 fn temp_dir() -> PathBuf {
@@ -13,7 +14,7 @@ fn temp_dir() -> PathBuf {
 /// The captured-attribution fixture: real devbox session rows (content sanitized,
 /// cwd/repoUrl neutralized; ids, timestamps, and usage verbatim).
 fn captured_attribution_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attribution-fold-captured.jsonl")
+    super::log_reader_tests::captured_attribution_log()
 }
 
 #[test]
@@ -23,7 +24,7 @@ fn bounded_header_matches_the_line_read() {
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     assert_eq!(
         read_session_header_bounded(&path),
         read_session_header(&path)
@@ -48,24 +49,22 @@ fn bounded_header_refuses_an_over_long_first_line() {
     let mut session = SessionFile::create(&format!("/repo/{}", "x".repeat(600)), None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     assert_eq!(read_session_header_bounded(&path), None);
     assert!(read_session_header(&path).is_some());
 }
 
 #[test]
-fn bounded_header_reads_an_unterminated_first_line() {
+fn bounded_header_refuses_an_unterminated_first_line() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/repo", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     let header_line = fs::read_to_string(&path).unwrap();
     fs::write(&path, header_line.trim_end()).unwrap();
-    assert_eq!(
-        read_session_header_bounded(&path),
-        read_session_header(&path)
-    );
+    assert!(read_session_header_bounded(&path).is_none());
+    assert!(read_session_header(&path).is_none());
 }
 
 #[test]
@@ -74,7 +73,7 @@ fn bounded_header_strips_a_crlf_line_return() {
     let mut session = SessionFile::create("/repo", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.rewrite().unwrap();
+    super::log_reader_tests::write_log_fixture(&path, &session);
     let header_line = fs::read_to_string(&path).unwrap();
     fs::write(&path, format!("{}\r\n", header_line.trim_end())).unwrap();
     assert_eq!(
@@ -227,7 +226,7 @@ fn the_depth_two_chain_reports_the_folded_aggregate() {
             })
             .to_string(),
         ];
-    std::fs::write(&path, lines.join("\n")).unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let store = SessionFile::open(&path).unwrap();
     let folded = store.entry("a1").expect("the target row");
     assert_eq!(
@@ -337,9 +336,9 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
     // The marker hangs off u1 as a SIBLING of the live branch: the open
     // leaf (the last row, b1) walks u1 -> header and never meets it.
     let path = dir.join("off-branch-marker.jsonl");
-    std::fs::write(
+    write_jsonl_fixture(
         &path,
-        [
+        &[
             header("off-1"),
             row("u1", None, json!({"role": "user", "content": "hi"})),
             marker("m1", "u1"),
@@ -350,8 +349,7 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
             ),
         ]
         .join("\n"),
-    )
-    .unwrap();
+    );
     assert!(
         !SessionFile::open(&path).unwrap().anthropic_warning_shown(),
         "an off-branch marker never hydrates the full open's gate"
@@ -366,9 +364,9 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
     // The same marker ON the active branch answers open — the sibling
     // branch's rows stay irrelevant.
     let path_on = dir.join("on-branch-marker.jsonl");
-    std::fs::write(
+    write_jsonl_fixture(
         &path_on,
-        [
+        &[
             header("on-1"),
             row("u1", None, json!({"role": "user", "content": "hi"})),
             marker("m1", "u1"),
@@ -379,8 +377,7 @@ fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
             ),
         ]
         .join("\n"),
-    )
-    .unwrap();
+    );
     assert!(SessionFile::open(&path_on)
         .unwrap()
         .anthropic_warning_shown());
@@ -470,9 +467,10 @@ fn failed_persist_keeps_the_store_walkable() {
             json!({ "message": { "role": "user", "content": "hi" } }),
         )
         .unwrap();
+    let before = fs::read(&file).unwrap();
     let blocker = dir.join("blocked");
-    fs::create_dir_all(&blocker).unwrap();
-    session.set_path(blocker);
+    fs::write(&blocker, "not a directory").unwrap();
+    session.set_path(blocker.join(session_file_name(session.session_id())));
     assert!(session
         .persist_entry(
             "message",
@@ -485,7 +483,9 @@ fn failed_persist_keeps_the_store_walkable() {
         "only the persisted entry stays indexed"
     );
     assert_eq!(session.leaf_id(), Some(first.as_str()));
-    session.set_path(file.clone());
+    assert_eq!(fs::read(&file).unwrap(), before);
+    // set_path denotes fresh publication; resuming existing history requires open.
+    session = SessionFile::open(&file).unwrap();
     let third = session
         .persist_entry(
             "message",
@@ -568,7 +568,7 @@ fn branch_bridged_bridges_ghost_parent_gaps() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&path, content).unwrap();
+    write_jsonl_fixture(&path, &content);
     let store = SessionFile::open(&path).unwrap();
     let strict: Vec<&str> = store
         .branch()
@@ -605,7 +605,7 @@ fn branch_bridged_skips_abandoned_chains_after_a_persisted_branch_move() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&path, content).unwrap();
+    write_jsonl_fixture(&path, &content);
     let store = SessionFile::open(&path).unwrap();
     let bridged: Vec<&str> = store
         .branch_bridged()
@@ -631,7 +631,7 @@ fn branch_bridged_matches_the_strict_walk_on_clean_files() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&path, content).unwrap();
+    write_jsonl_fixture(&path, &content);
     let store = SessionFile::open(&path).unwrap();
     let strict: Vec<&str> = store
         .branch()
@@ -937,51 +937,26 @@ fn search_text_counter_lockstep_names_every_corpus_mutation_path() {
         SESSION_LIST_SEARCH_TEXT_MAX_CHARS
     );
 
-    // (3) the torn-tail snapshot: build_info folds the torn line into a CLONE,
-    // so the durable accumulator's counter stays untouched.
+    // (3) snapshots derive only from the committed prefix.
     let durable_before = state.acc.clone();
     let capped_info = state
-            .build_info(
-                Path::new("/repo/s1.jsonl"),
-                || None,
-                Some(r#"{"type":"message","id":"m4","timestamp":"4","message":{"role":"user","content":"torn tail"}}"#),
-            )
-            .unwrap();
+        .build_info(Path::new("/repo/s1.jsonl"), || None)
+        .unwrap();
     assert_eq!(
-        capped_info.all_messages_text, durable_before.all_messages_text,
-        "the cap bounds the snapshot fold too - a torn tail past it changes no corpus byte"
+        capped_info.all_messages_text,
+        durable_before.all_messages_text
     );
     assert_eq!(
         state.acc.search_text_chars,
         durable_before.search_text_chars
     );
-    assert_eq!(
-        state.acc.search_text_chars,
-        state.acc.all_messages_text.chars().count()
-    );
     let mut uncapped = SessionScanState::fresh(generation);
     fold_scan_entry(&mut uncapped.acc, &header_line).unwrap();
     fold_scan_entry(&mut uncapped.acc, &message("user turn one", 1)).unwrap();
-    let uncapped_durable = uncapped.acc.clone();
     let uncapped_info = uncapped
-            .build_info(
-                Path::new("/repo/s1.jsonl"),
-                || None,
-                Some(r#"{"type":"message","id":"m5","timestamp":"2","message":{"role":"user","content":"user turn two"}}"#),
-            )
-            .unwrap();
-    assert_eq!(
-        uncapped_info.all_messages_text,
-        "user turn one user turn two"
-    );
-    assert_eq!(
-        uncapped.acc.all_messages_text,
-        uncapped_durable.all_messages_text
-    );
-    assert_eq!(
-        uncapped.acc.search_text_chars,
-        uncapped_durable.search_text_chars
-    );
+        .build_info(Path::new("/repo/s1.jsonl"), || None)
+        .unwrap();
+    assert_eq!(uncapped_info.all_messages_text, "user turn one");
 
     // (4) a rewritten file re-folds from a fresh accumulator: corpus and counter restart together.
     let mut rewritten = SessionScanState::fresh(generation);
@@ -1095,21 +1070,22 @@ fn append_cost_does_not_grow_with_the_store() {
 }
 
 #[test]
-fn skips_malformed_lines() {
+fn malformed_complete_rows_are_refused_without_repair() {
     let dir = temp_dir();
     let path = dir.join("s.jsonl");
-    fs::write(
-            &path,
-            format!(
-                "{}\nnot json\n{}\n",
-                json!({"type":"session","version":3,"id":"abc","timestamp":"t","cwd":"/x"}),
-                json!({"type":"message","id":"aaaa1111","parentId":null,"timestamp":"t","message":{"role":"user","content":"hi"}})
-            ),
-        )
-        .unwrap();
-    let loaded = SessionFile::open(&path).unwrap();
-    assert_eq!(loaded.message_count(), 1);
-    let _ = fs::remove_dir_all(&dir);
+    write_jsonl_fixture(
+        &path,
+        &json!({"type":"session","version":3,"id":"s","timestamp":"t","cwd":"/x"}).to_string(),
+    );
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"not json\n");
+    fs::write(&path, &bytes).unwrap();
+    assert!(SessionFile::open(&path).is_err());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        bytes,
+        "read-only open never repairs corruption"
+    );
 }
 
 /// Scalar settings restoration must not consume or clear an accepted context
@@ -1148,8 +1124,8 @@ fn windowed_settings_projection_preserves_the_accepted_context_archive() {
     let before_bytes = fs::read(&path).unwrap();
     let windowed = SessionFile::open_windowed(&path).unwrap();
     assert!(
-        windowed.window.is_some(),
-        "the settings projection must use its windowed arm"
+        windowed.window.is_none(),
+        "daemon replays the complete committed log"
     );
     let branch_before = windowed.branch_file_entries();
     let context_before =
@@ -1168,9 +1144,11 @@ fn windowed_settings_projection_preserves_the_accepted_context_archive() {
             Some(pa_types::ai::ServiceTier::Flex)
         )
     );
-    assert!(
-        settings.archive.is_none() && settings.messages.is_empty(),
-        "this is a settings-only projection"
+    assert_eq!(settings.archive.as_ref(), Some(&archive));
+    assert_eq!(
+        serde_json::to_value(settings.messages).unwrap(),
+        serde_json::to_value(&context_before.messages).unwrap(),
+        "the full serving fold preserves accepted context alongside scalar settings"
     );
     assert_eq!(fs::read(&path).unwrap(), before_bytes);
     let retained = windowed
@@ -1380,11 +1358,7 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
         "childUsage": usage(20, 2, 2.0), "aggregateUsage": usage(120, 12, 10.0)
     });
     serde_json::from_str::<super::info::SessionInfoEntry<'_>>(&attributed.to_string()).unwrap();
-    let append = || {
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file, "{attributed}").unwrap();
-    };
+    let append = || super::info_tests::append_rows(&path, std::slice::from_ref(&attributed));
     append();
     let expected = Some(crate::session_usage::SessionUsageSummary {
         input_tokens: 100,
@@ -1411,8 +1385,8 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
 #[test]
 fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reopened-canonical.jsonl");
     let mut original = SessionFile::create("/repo", None, 0);
+    let path = dir.path().join(session_file_name(original.session_id()));
     original.header.rest.insert(
         "vendor".to_owned(),
         json!({
@@ -1433,15 +1407,17 @@ fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() 
         "wire discriminator is not a header extension"
     );
     let mut scan = SessionScanAccumulator::default();
-    fold_scan_entry(
-        &mut scan,
+    let row = pa_core::session_log::Row::decode(
         std::str::from_utf8(&before)
             .unwrap()
             .lines()
             .next()
-            .unwrap(),
+            .unwrap()
+            .as_bytes(),
+        0,
     )
     .unwrap();
+    fold_scan_entry(&mut scan, &row.body.to_string()).unwrap();
     assert_eq!(
         serde_json::to_value(&scan).unwrap()["header"],
         serde_json::to_value(&expected).unwrap()
@@ -1449,12 +1425,10 @@ fn real_reopen_preserves_exact_typed_header_and_unknown_fields_for_live_owner() 
     reopened.lease = Some(std::sync::Arc::new(
         crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap(),
     ));
-    let cursor = reopened.attach_canonical_owner().unwrap();
-    assert_eq!(
-        reopened.attach_canonical_owner().unwrap(),
-        cursor,
-        "real loaded header passes both unchanged strict owner checks"
-    );
+    let execution = reopened.lease.as_ref().unwrap();
+    execution.ensure_held(&path).unwrap();
+    execution.ensure_held(&path).unwrap();
+    assert_eq!(SessionFile::open_owned_log(&path).unwrap().header, expected);
     assert_eq!(
         fs::read(&path).unwrap(),
         before,

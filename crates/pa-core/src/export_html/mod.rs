@@ -164,7 +164,7 @@ pub fn tools_section(tools: &[Arc<dyn pa_agent::types::AgentTool>]) -> Vec<Value
 fn session_data_from_file(input_path: &Path) -> Result<SessionExportData> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut manager = SessionManager::in_memory(&cwd);
-    manager.set_session_file(input_path.to_path_buf(), None);
+    manager.set_session_file(input_path.to_path_buf(), None)?;
     let entries = manager.get_all_entries();
     let header = entries
         .iter()
@@ -196,27 +196,22 @@ fn session_data_from_file(input_path: &Path) -> Result<SessionExportData> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn fixture_session(dir: &Path) -> std::path::PathBuf {
-        let path = dir.join("fixture-session.jsonl");
-        let mut file = std::fs::File::create(&path).expect("create fixture");
-        writeln!(
-            file,
-            r#"{{"type":"session","id":"sess-1","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}}"#
-        )
-        .expect("write header");
-        writeln!(
-            file,
-            r#"{{"type":"message","id":"e1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{{"role":"user","content":"hello"}}}}"#
-        )
-        .expect("write user message");
-        writeln!(
-            file,
-            r#"{{"type":"message","id":"e2","parentId":"e1","timestamp":"2026-01-01T00:00:02.000Z","message":{{"role":"assistant","content":[{{"type":"text","text":"hi there"}}]}}}}"#
-        )
-        .expect("write assistant message");
-        path
+        let mut log =
+            crate::session_log::SessionLog::open(dir, "fixture-session", std::time::Instant::now())
+                .expect("create fixture log");
+        for row in [
+            serde_json::json!({"type":"session","id":"sess-1","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}),
+            serde_json::json!({"type":"message","id":"e1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"hello"}}),
+            serde_json::json!({"type":"message","id":"e2","parentId":"e1","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]}}),
+        ] {
+            assert!(matches!(
+                log.append(&row, std::time::Instant::now()),
+                crate::session_log::Outcome::Committed { .. }
+            ));
+        }
+        dir.join("fixture-session.jsonl")
     }
 
     /// The embedded base64 session data decodes to the exact

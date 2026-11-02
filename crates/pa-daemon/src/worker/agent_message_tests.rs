@@ -448,8 +448,12 @@ async fn clear_queue_bounces_recovered_agent_messages_to_their_senders() {
 
 #[cfg(unix)]
 async fn assert_clear_queue_bounces(restore_queue: bool) {
-    let dir = std::env::temp_dir().join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Unix sockets must fit SUN_LEN even when the runner's TMPDIR is deep.
+    let temp = tempfile::Builder::new()
+        .prefix("pa-am-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let dir = temp.path();
     let socket = dir.join("supervisor.sock");
     let (sends, _server) = crate::worker::tests::fake_supervisor(&socket);
     let config = WorkerConfig {
@@ -564,7 +568,6 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         "Your agent message was cleared from target's queue before delivery: please review the plan",
         "the bounce names the receiver and quotes the dropped body: {command}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A suspension that holds no parked work protects nothing (issue #33): its

@@ -20,7 +20,7 @@ impl HoldIdentity {
     /// From the typed lease rejection.
     fn from_error(error: &SessionAlreadyActiveError) -> Self {
         Self {
-            pid: error.holder_pid,
+            pid: error.holder_pid.filter(|pid| *pid != 0),
             active_session_id: error.active_session_id.clone(),
         }
     }
@@ -181,27 +181,15 @@ fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
 /// A bounded-cost scan, not a full load: reads line by line (constant
 /// memory); the latest `session_info` candidate wins.
 fn session_name_of(session_path: Option<&Path>) -> Option<String> {
-    use std::io::BufRead;
-    let path = session_path?;
-    let file = std::fs::File::open(path).ok()?;
+    let entries = pa_core::session::read::read_entries(session_path?).ok()?;
     let mut name = None;
-    for line in std::io::BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if !line.contains("\"session_info\"") {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) != Some("session_info") {
-            continue;
-        }
-        if let Some(found) = value.get("name").and_then(serde_json::Value::as_str) {
-            let trimmed = found.trim();
-            if !trimmed.is_empty() {
-                name = Some(trimmed.to_string());
+    for entry in entries {
+        if let pa_types::session::FileEntry::SessionInfo { payload, .. } = entry {
+            if let Some(found) = payload.name {
+                let trimmed = found.trim();
+                if !trimmed.is_empty() {
+                    name = Some(trimmed.to_string());
+                }
             }
         }
     }
@@ -389,6 +377,21 @@ pub(crate) fn create_failure_response(error: &anyhow::Error) -> DaemonResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn append_rows(path: &std::path::Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
     use pa_types::daemon::DaemonErrorInfo;
 
     /// No third "open a different session" option: the user is already
@@ -539,16 +542,13 @@ Session: ts01ab";
     fn the_footer_reads_the_session_name_and_the_path_fallback() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let file = dir.path().join("session.jsonl");
-        // One JSON object per line (JSONL): a line that continues onto
-        // the next is an invalid entry the loader silently skips.
-        std::fs::write(
+        append_rows(
             &file,
-            concat!(
-                "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
-                "{\"type\":\"session_info\",\"id\":\"e1\",\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane work\"}\n"
-            ),
-        )
-        .expect("write session file");
+            &[
+                serde_json::json!({"type":"session","version":3,"id":"session","timestamp":"2026-09-24T00:00:00Z","cwd":"/w"}),
+                serde_json::json!({"type":"session_info","id":"e1","name":"lane work"}),
+            ],
+        );
         let hold = HoldIdentity {
             pid: Some(4242),
             active_session_id: Some("ts01ab".to_string()),
@@ -569,14 +569,10 @@ Session: ts01ab";
             "without a holder id the footer names the file and its name: {message}"
         );
 
-        std::fs::write(
+        append_rows(
             &file,
-            concat!(
-                "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
-                "{\"type\":\"session_info\",\"id\":\"e1\",\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane\\nwork\"}\n"
-            ),
-        )
-        .expect("write session file");
+            &[serde_json::json!({"type":"session_info","id":"e2","name":"lane\nwork"})],
+        );
         let hold = HoldIdentity {
             pid: Some(4242),
             active_session_id: Some("ts01ab".to_string()),
@@ -586,6 +582,24 @@ Session: ts01ab";
             message.ends_with("Session: ts01ab (lane work)"),
             "a newline in the persisted name collapses to one footer line: {message}"
         );
+    }
+
+    #[test]
+    fn corrupt_session_does_not_supply_a_partial_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("session.jsonl");
+        append_rows(
+            &file,
+            &[
+                serde_json::json!({"type":"session","version":3,"id":"session","cwd":"/w","timestamp":"2026-09-24T00:00:00Z"}),
+                serde_json::json!({"type":"session_info","id":"name","name":"untrusted"}),
+            ],
+        );
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.pop();
+        std::fs::write(&file, &bytes).unwrap();
+        assert_eq!(session_name_of(Some(&file)), None);
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
     }
 
     /// The classification matrix. The rust shapes contain the

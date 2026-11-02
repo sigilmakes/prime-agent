@@ -244,16 +244,18 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         child_session_file.as_deref(),
                         &kickoff_row_id,
                     );
-                    let retried = if landed {
-                        Ok(())
-                    } else {
-                        watcher_this
-                            .prompt_child(
-                                &child_active_session_id,
-                                &kickoff_content,
-                                Some(&kickoff_row),
-                            )
-                            .await
+                    let retried = match landed {
+                        Ok(true) => Ok(()),
+                        Err(error) => Err(error),
+                        Ok(false) => {
+                            watcher_this
+                                .prompt_child(
+                                    &child_active_session_id,
+                                    &kickoff_content,
+                                    Some(&kickoff_row),
+                                )
+                                .await
+                        }
                     };
                     if let Err(retry_error) = retried {
                         eprintln!(
@@ -669,20 +671,77 @@ impl RlmSubagentHost for SupervisorChildSessions {
 /// failure: a row in the file was durably processed by the dead worker (a
 /// re-send would duplicate the first turn), a missing row provably never
 /// landed.
-fn session_file_carries_spawn_kickoff(session_file: Option<&str>, spawn_row_id: &str) -> bool {
-    let Some(path) = session_file.filter(|path| !path.is_empty()) else {
-        return false;
-    };
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("custom_message")
-                && entry.get("customType").and_then(Value::as_str)
-                    == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
-                && entry.pointer("/details/id").and_then(Value::as_str) == Some(spawn_row_id)
-        })
+fn session_file_carries_spawn_kickoff(
+    session_file: Option<&str>,
+    spawn_row_id: &str,
+) -> Result<bool> {
+    let path = session_file
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("cannot verify child kickoff without a session file"))?;
+    let entries = pa_core::session::read::read_entries(std::path::Path::new(path))
+        .context("cannot verify durable child kickoff")?;
+    Ok(entries.into_iter().any(|entry| match entry {
+        pa_types::session::FileEntry::CustomMessage { payload, .. } => {
+            payload.custom_type
+                == pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE
+                && payload
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(spawn_row_id)
+        }
+        _ => false,
+    }))
+}
+
+#[cfg(test)]
+mod kickoff_tests {
+    use super::*;
+    fn append_rows(path: &std::path::Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn kickoff_presence_requires_valid_durable_envelopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("child.jsonl");
+        assert!(session_file_carries_spawn_kickoff(None, "spawn:child").is_err());
+        assert!(
+            session_file_carries_spawn_kickoff(Some(file.to_str().unwrap()), "spawn:child")
+                .is_err()
+        );
+        append_rows(
+            &file,
+            &[
+                json!({"type":"session","version":3,"id":"child","cwd":"/w","timestamp":"2026-09-24T00:00:00Z"}),
+            ],
+        );
+        let path = Some(file.to_str().unwrap());
+        assert!(!session_file_carries_spawn_kickoff(path, "spawn:child").unwrap());
+        append_rows(
+            &file,
+            &[
+                json!({"type":"custom_message","id":"kickoff","customType":pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE,"content":"task","display":true,"details":{"id":"spawn:child"}}),
+            ],
+        );
+        assert!(session_file_carries_spawn_kickoff(path, "spawn:child").unwrap());
+        assert!(!session_file_carries_spawn_kickoff(path, "spawn:other").unwrap());
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.pop();
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(session_file_carries_spawn_kickoff(path, "spawn:child").is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    }
 }

@@ -4,6 +4,19 @@
 
 use super::*;
 
+fn write_saved_header(path: &std::path::Path, header: &serde_json::Value) {
+    let mut log = pa_core::session_log::SessionLog::open(
+        path.parent().expect("session directory"),
+        path.file_stem().unwrap().to_str().unwrap(),
+        std::time::Instant::now(),
+    )
+    .expect("open saved session log");
+    assert!(matches!(
+        log.append_first(header, std::time::Instant::now()),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
+}
+
 /// Explicit `--provider`/`--model` flags are authoritative for the worker's
 /// model resolution — no process-wide fallback may answer instead.
 #[test]
@@ -168,16 +181,14 @@ fn create_with_continue_recent_is_refused() {
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
     let cwd = dir.path().display().to_string();
     let saved = session_dir.join("saved00000000000000000000000001.jsonl");
-    std::fs::write(
+    write_saved_header(
         &saved,
-        format!(
-            concat!(
-                "{{\"type\":\"session\",\"version\":3,\"id\":\"saved00000000000000000000000001\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"{cwd}\"}}\n"
-            ),
-            cwd = cwd,
-        ),
-    )
-    .expect("write saved session");
+        &serde_json::json!({
+            "type": "session", "version": 3,
+            "id": "saved00000000000000000000000001",
+            "timestamp": "2024-01-01T00:00:00.000Z", "cwd": cwd,
+        }),
+    );
 
     client.send_command(
         "c1",
@@ -267,18 +278,14 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
             dir.path()
         };
         let saved = file_dir.join(format!("saved-{index}.jsonl"));
-        std::fs::write(
+        write_saved_header(
             &saved,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "session", "version": 3,
-                    "id": format!("cwd-regression-{index}"),
-                    "timestamp": "2026-10-12T00:00:00.000Z", "cwd": recorded,
-                })
-            ),
-        )
-        .expect("saved session");
+            &serde_json::json!({
+                "type": "session", "version": 3,
+                "id": format!("cwd-regression-{index}"),
+                "timestamp": "2026-10-12T00:00:00.000Z", "cwd": recorded,
+            }),
+        );
         let mut config = serde_json::json!({});
         if explicit {
             config["cwd"] = serde_json::json!(override_dir);
@@ -287,7 +294,10 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
             "type": "create", "sessionPath": if relative { saved.file_name().unwrap().to_str().unwrap() } else { saved.to_str().unwrap() }, "config": config,
         }));
         let response = client.read_response("resume");
-        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(
+            response["success"], true,
+            "reopen case {index}, explicit={explicit}, relative={relative}: {response}"
+        );
         let expected = if explicit { &override_dir } else { recorded };
         assert_eq!(
             response["data"]["cwd"],
@@ -348,17 +358,13 @@ fn missing_saved_cwd_requires_an_explicit_fallback() {
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
     let saved = dir.path().join("missing.jsonl");
-    std::fs::write(
+    write_saved_header(
         &saved,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "session", "version": 3, "id": "missing-cwd",
-                "timestamp": "2026-10-12T00:00:00.000Z", "cwd": dir.path().join("gone"),
-            })
-        ),
-    )
-    .unwrap();
+        &serde_json::json!({
+            "type": "session", "version": 3, "id": "missing-cwd",
+            "timestamp": "2026-10-12T00:00:00.000Z", "cwd": dir.path().join("gone"),
+        }),
+    );
     let socket = dir.path().join("daemon.sock");
     let _daemon = spawn_daemon_in(&socket, &agent_dir, dir.path());
     let (mut client, _) = Client::connect(&socket);
@@ -417,17 +423,13 @@ fn cold_reopen_python_kernel_uses_saved_cwd_and_explicit_override() {
     let (mut client, _) = Client::connect(&socket);
     for (index, explicit) in [false, true].into_iter().enumerate() {
         let saved = dir.path().join(format!("kernel-{index}.jsonl"));
-        std::fs::write(
+        write_saved_header(
             &saved,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "session", "version": 3, "id": format!("kernel-cwd-{index}"),
-                    "timestamp": "2026-10-12T00:00:00.000Z", "cwd": project,
-                })
-            ),
-        )
-        .unwrap();
+            &serde_json::json!({
+                "type": "session", "version": 3, "id": format!("kernel-cwd-{index}"),
+                "timestamp": "2026-10-12T00:00:00.000Z", "cwd": project,
+            }),
+        );
         let mut config = serde_json::json!({"script": script});
         if explicit {
             config["cwd"] = serde_json::json!(override_dir);

@@ -38,7 +38,7 @@ impl SessionEngine for RecordingEngine {
         _: usize,
         _: PromptRequest,
         _: &dyn Fn() -> bool,
-        _: &mut dyn FnMut(EngineEvent) -> bool,
+        _: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
     }
 
@@ -92,8 +92,65 @@ fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<Stri
     let engine: std::sync::Arc<dyn SessionEngine> = std::sync::Arc::new(RecordingEngine { events });
     let core = std::sync::Arc::clone(&worker.core);
     worker.engine = std::sync::Arc::clone(&engine);
-    worker.navigation = crate::session_navigation::SessionNavigation::new(engine, core);
+    worker.navigation = crate::session_navigation::SessionNavigation::new(
+        engine,
+        core,
+        worker.config.agent_dir.clone(),
+    );
     worker
+}
+
+#[tokio::test]
+async fn create_owns_actual_custom_path_until_worker_close() {
+    for explicit_path in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("custom-sessions");
+        let path = custom.join("custom.jsonl");
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let owner = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+        let visitor = recording_worker(dir.path(), std::sync::Arc::clone(&events));
+        let payload = if explicit_path {
+            json!({ "sessionPath": path, "cwd": "/tmp" })
+        } else {
+            json!({ "sessionDir": custom, "cwd": "/tmp" })
+        };
+        let created = owner.dispatch("create", &payload).await;
+        assert!(created.success, "{created:?}");
+        let path = {
+            let core = owner.core.lock().unwrap();
+            let store = core.store.as_ref().unwrap();
+            assert_eq!(store.path.parent(), Some(custom.as_path()));
+            store
+                .lease
+                .as_ref()
+                .unwrap()
+                .ensure_held(&store.path)
+                .unwrap();
+            store.path.clone()
+        };
+        assert!(path.is_file(), "create must publish at the selected path");
+        assert!(!dir.path().join("agent/session-logs").exists());
+        let before = std::fs::read(&path).unwrap();
+        let reopen = json!({ "sessionPath": path, "cwd": "/tmp" });
+        let refused = visitor.dispatch("create", &reopen).await;
+        assert!(
+            !refused.success,
+            "resident execution must exclude a rival: {refused:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let closed = owner.dispatch("shutdown", &json!({})).await;
+        assert!(closed.success, "{closed:?}");
+        let reopened = visitor.dispatch("create", &reopen).await;
+        assert!(
+            reopened.success,
+            "custom path must reopen after close: {reopened:?}"
+        );
+        let core = visitor.core.lock().unwrap();
+        let store = core.store.as_ref().unwrap();
+        assert_eq!(store.path, path);
+        store.lease.as_ref().unwrap().ensure_held(&path).unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
+    }
 }
 
 /// Two concurrent `switch_session` commands must not interleave their
@@ -403,7 +460,7 @@ fn a_large_valid_last_row_stays_intact_during_tail_repair() {
     session.rewrite().unwrap();
     let original = std::fs::read(&path).unwrap();
     assert!(original.len() > 1024 * 1024);
-    pa_core::session::manager::repair_jsonl_damage(&path);
+    crate::session_store::SessionFile::open_owned_log(&path).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
 
     {
@@ -415,7 +472,7 @@ fn a_large_valid_last_row_stays_intact_during_tail_repair() {
         torn.write_all(b"{\"type\":\"message\",\"id\":\"torn\"\xc3")
             .unwrap();
     }
-    pa_core::session::manager::repair_jsonl_damage(&path);
+    crate::session_store::SessionFile::open_owned_log(&path).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     let reopened = crate::session_store::SessionFile::open(&path).unwrap();
     assert!(reopened.entry(&id).is_some(), "the large row reloads");
@@ -468,6 +525,13 @@ async fn an_unleased_switch_never_rewrites_another_workers_damaged_file() {
         !switched.success,
         "the damaged target must fail open: {switched:?}"
     );
+    assert!(
+        matches!(
+            switched.error_info,
+            Some(crate::protocol::DaemonErrorInfo::SessionAlreadyActive { .. })
+        ),
+        "the refusal must identify the held execution lock: {switched:?}"
+    );
     assert_eq!(std::fs::read(&target).unwrap(), before);
     assert!(owner
         .core
@@ -482,7 +546,13 @@ async fn an_unleased_switch_never_rewrites_another_workers_damaged_file() {
     let killed = visitor.dispatch("kill", &json!({})).await;
     assert!(killed.success, "visitor kill failed: {killed:?}");
     let killed = owner.dispatch("kill", &json!({})).await;
-    assert!(killed.success, "owner kill failed: {killed:?}");
+    assert!(
+        !killed.success,
+        "a damaged live log must refuse archive append: {killed:?}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    let closed = owner.dispatch("shutdown", &json!({})).await;
+    assert!(closed.success, "owner shutdown failed: {closed:?}");
     drop(visitor);
     drop(owner);
 }

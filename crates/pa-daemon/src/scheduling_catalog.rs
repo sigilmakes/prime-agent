@@ -868,6 +868,21 @@ impl Supervisor {
 mod tests {
     use super::*;
 
+    fn write_session_rows(path: &std::path::Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .expect("create fixture session log");
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
     /// A worker registering while the blocking artifact scan is in flight
     /// owns its job before the passive path can write to the shared store.
     #[tokio::test(start_paused = true)]
@@ -881,9 +896,9 @@ mod tests {
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
         let session_file = sessions_dir.join("mid-scan.jsonl");
-        std::fs::write(
+        write_session_rows(
             &session_file,
-            [
+            &[
                 json!({
                     "type": "session", "version": 3, "id": "mid-scan",
                     "timestamp": "2026-10-04T00:00:00.000Z", "cwd": "/c",
@@ -893,14 +908,8 @@ mod tests {
                     "timestamp": "2026-10-04T00:00:01.000Z",
                     "state": { "status": "active" },
                 }),
-            ]
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-                + "\n",
-        )
-        .expect("session file");
+            ],
+        );
         let artifacts = agent_dir.join("session-artifacts").join("mid-scan");
         std::fs::create_dir_all(&artifacts).expect("artifacts partition");
         let job_file = artifacts.join("scheduled-jobs.json");
@@ -1053,16 +1062,7 @@ mod tests {
                 "state": { "status": "active" },
             }),
         ];
-        std::fs::write(
-            &session_file,
-            session_lines
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n",
-        )
-        .expect("session file");
+        write_session_rows(&session_file, &session_lines);
         let artifacts = agent_dir.join("session-artifacts").join("warm-1");
         std::fs::create_dir_all(&artifacts).expect("artifacts partition");
         std::fs::write(

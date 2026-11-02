@@ -3,9 +3,8 @@
 //! `SessionStream` is the seam the interactive mode and the replay binary
 //! share; `JsonlSessionStream` implements it over pa-types session entries.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use pa_types::session::{AgentMessage, FileEntry};
-use std::path::Path;
 
 /// A transcript item rendered by the agent view.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,42 +98,6 @@ impl JsonlSessionStream {
             finished: false,
         }
     }
-
-    /// Load all entries from a session JSONL file (skip undecodable lines).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` when the file cannot be read or a non-empty line fails
-    /// to decode as an entry (the error carries the line's 1-based number).
-    pub fn from_path(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading session {}", path.display()))?;
-        let entries = parse_jsonl(&raw)?;
-        Ok(Self::from_entries(entries))
-    }
-}
-
-/// Parse session JSONL text into file entries, ignoring blank lines.
-///
-/// # Errors
-///
-/// Returns `Err` on the first non-blank line that does not decode as a
-/// `FileEntry` (the error carries the line's 1-based number).
-pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
-    let mut entries = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<FileEntry>(line) {
-            Ok(entry) => entries.push(entry),
-            Err(e) => {
-                return Err(anyhow::anyhow!("line {}: {}", i + 1, e))
-                    .with_context(|| format!("parsing session entry {}", i + 1))
-            }
-        }
-    }
-    Ok(entries)
 }
 
 /// Fold a session entry into the transcript (paired tool results attach to
@@ -405,7 +368,7 @@ mod tests {
         // A replayed assistant message keeps its thinking blocks' type (dim/gated) alongside the
         // text, and flags its tool calls for the trailing spacer.
         let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"probe the replay trace","thinkingSignature":"sig-1"},{"type":"text","text":"body after thinking"},{"type":"toolCall","id":"toolu_1","name":"bash","arguments":{"command":"ls"}}],"api":"openai-completions","provider":"prime-inference","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1},"id":"e1"}"#;
-        let entries = parse_jsonl(line).unwrap();
+        let entries: Vec<FileEntry> = vec![serde_json::from_str(line).unwrap()];
         let items = entry_to_items(&entries[0]);
         let [TranscriptItem::Assistant {
             blocks,
@@ -431,7 +394,7 @@ mod tests {
         // verbatim, so a resumed session can replay its reasoning context to the provider
         // unchanged.
         let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"keep my signature","thinkingSignature":"sig-abc","redacted":false},{"type":"text","text":"done"}],"api":"openai-completions","provider":"prime-inference","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1},"id":"e1"}"#;
-        let entries = parse_jsonl(line).unwrap();
+        let entries: Vec<FileEntry> = vec![serde_json::from_str(line).unwrap()];
         let wire = serde_json::to_string(&entries[0]).unwrap();
         let reloaded: FileEntry = serde_json::from_str(&wire).unwrap();
         let rewire = serde_json::to_string(&reloaded).unwrap();
@@ -457,26 +420,5 @@ mod tests {
             rewire.contains("\"thinkingSignature\":\"sig-abc\""),
             "wire: {rewire}"
         );
-    }
-
-    #[test]
-    fn loads_real_session() {
-        let dir = std::path::Path::new("/home/ubuntu/.prime/agent/sessions");
-        if !dir.is_dir() {
-            return; // sandbox without agent state
-        }
-        let mut loaded = 0;
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if parse_jsonl(&raw).is_ok() {
-                    loaded += 1;
-                }
-            }
-        }
-        assert!(loaded > 0, "no sessions parsed");
     }
 }

@@ -147,7 +147,7 @@ struct MockCatalogServer {
 }
 
 impl MockCatalogServer {
-    async fn start(responses: Vec<Vec<u8>>) -> Self {
+    async fn start(responses: Vec<(&str, Vec<u8>)>) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -155,9 +155,15 @@ impl MockCatalogServer {
         let port = listener.local_addr().unwrap().port();
         let requests: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
-            responses,
-        )));
+        let mut routes: std::collections::HashMap<String, std::collections::VecDeque<Vec<u8>>> =
+            std::collections::HashMap::new();
+        for (path, response) in responses {
+            routes
+                .entry(path.to_string())
+                .or_default()
+                .push_back(response);
+        }
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(routes));
         let request_log = std::sync::Arc::clone(&requests);
         tokio::spawn(async move {
             loop {
@@ -185,10 +191,20 @@ impl MockCatalogServer {
                         }
                     }
                     let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let path = head
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string();
                     requests.lock().unwrap().push(head);
-                    let response = queue.lock().unwrap().pop_front().unwrap_or_else(|| {
-                        b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec()
-                    });
+                    let response = queue
+                        .lock()
+                        .unwrap()
+                        .get_mut(&path)
+                        .and_then(std::collections::VecDeque::pop_front)
+                        .unwrap_or_else(|| {
+                            b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec()
+                        });
                     let _ = socket.write_all(&response).await;
                     let _ = socket.flush().await;
                 });
@@ -257,7 +273,8 @@ fn pi_payload() -> String {
     data.push(serde_json::json!({
         "id": "internal/glm-5.3-fast",
         "display_name": "GLM 5.3 Fast (internal)",
-        "pricing": { "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1 },
+        "pricing": { "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
+            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0 },
         "specs": {
             "context_window": 400_000, "max_output_tokens": 131_072,
             "supports_reasoning": true,
@@ -271,11 +288,17 @@ fn pi_payload() -> String {
 /// at `server`; no bundled snapshot, so the compiled fallback is the
 /// base and only the fetches add the private team model).
 fn install_loopback_catalog(agent_dir: &std::path::Path, server: &MockCatalogServer) {
-    let catalog = pa_models::ModelCatalog::with_urls(
+    let discovery_urls = ["openrouter", "openai", "anthropic", "google", "default"]
+        .into_iter()
+        .map(|provider| (provider.to_string(), server.url("/blocked/discovery")))
+        .collect();
+    let catalog = pa_models::ModelCatalog::with_discovery_urls(
         Some(agent_dir.join("models")),
         None,
         &server.url("/catalog"),
         &server.url("/api/v1"),
+        &discovery_urls,
+        &server.url("/blocked"),
     );
     pa_core::models::install_catalog(&agent_dir.join("models.json"), std::sync::Arc::new(catalog));
 }
@@ -439,9 +462,9 @@ async fn revived_session_restores_its_pinned_model_not_the_startup_default() {
     let pi = pi_payload();
     let layer_a = serde_json::json!({ "schemaVersion": 1, "models": [] }).to_string();
     let server = MockCatalogServer::start(vec![
-        catalog_ok_json(&layer_a),
-        catalog_ok_json(&pi),
-        catalog_ok_json(&pi),
+        ("/catalog", catalog_ok_json(&layer_a)),
+        ("/api/v1/models", catalog_ok_json(&pi)),
+        ("/api/v1/models", catalog_ok_json(&pi)),
     ])
     .await;
     install_loopback_catalog(&agent_dir, &server);
@@ -541,9 +564,9 @@ async fn a_restore_decision_is_scoped_to_its_session_file() {
     let pi = pi_payload();
     let layer_a = serde_json::json!({ "schemaVersion": 1, "models": [] }).to_string();
     let server = MockCatalogServer::start(vec![
-        catalog_ok_json(&layer_a),
-        catalog_ok_json(&pi),
-        catalog_ok_json(&pi),
+        ("/catalog", catalog_ok_json(&layer_a)),
+        ("/api/v1/models", catalog_ok_json(&pi)),
+        ("/api/v1/models", catalog_ok_json(&pi)),
     ])
     .await;
     install_loopback_catalog(&agent_dir, &server);
@@ -581,9 +604,9 @@ async fn a_model_switch_never_leaks_into_the_replacement_session() {
     let pi = pi_payload();
     let layer_a = serde_json::json!({ "schemaVersion": 1, "models": [] }).to_string();
     let server = MockCatalogServer::start(vec![
-        catalog_ok_json(&layer_a),
-        catalog_ok_json(&pi),
-        catalog_ok_json(&pi),
+        ("/catalog", catalog_ok_json(&layer_a)),
+        ("/api/v1/models", catalog_ok_json(&pi)),
+        ("/api/v1/models", catalog_ok_json(&pi)),
     ])
     .await;
     install_loopback_catalog(&agent_dir, &server);
@@ -1009,7 +1032,7 @@ fn agent_engine_reports_model_resolution_failures() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     assert_eq!(events.len(), 2);

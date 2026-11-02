@@ -27,11 +27,11 @@ pub(crate) fn project_at(
     current_leaf: Option<&str>,
     strategy: &str,
     boundary: &ContextStartupBoundary,
-    admitted_user_ids: &[String],
+    admitted_input_ids: &[String],
 ) -> anyhow::Result<(SessionContext, Option<String>)> {
     if matches!(boundary, ContextStartupBoundary::Current) {
-        if !admitted_user_ids.is_empty() {
-            bail!("Current startup context cannot carry admitted-user proof");
+        if !admitted_input_ids.is_empty() {
+            bail!("Current startup context cannot carry admitted-input proof");
         }
         return Ok((
             project(entries, current_leaf, strategy),
@@ -65,11 +65,12 @@ pub(crate) fn project_at(
             FileEntry::Message {
                 message: AgentMessage::User(_),
                 ..
-            } => {
+            }
+            | FileEntry::CustomMessage { .. } => {
                 actual_ids.push(
                     entry
                         .id()
-                        .context("admitted user row lacks canonical ID")?
+                        .context("admitted input row lacks ID")?
                         .to_owned(),
                 );
             }
@@ -77,9 +78,9 @@ pub(crate) fn project_at(
             _ => bail!("startup context boundary would omit non-admitted canonical history"),
         }
     }
-    let unique: std::collections::HashSet<_> = admitted_user_ids.iter().collect();
-    if unique.len() != admitted_user_ids.len() || actual_ids != admitted_user_ids {
-        bail!("startup context admitted-user IDs do not match the canonical suffix");
+    let unique: std::collections::HashSet<_> = admitted_input_ids.iter().collect();
+    if unique.len() != admitted_input_ids.len() || actual_ids != admitted_input_ids {
+        bail!("startup context admitted-input IDs do not match the canonical suffix");
     }
     // Passing None into build_session_context means latest, not empty. Use an
     // actually empty projection, without changing or trimming the native source.
@@ -97,7 +98,7 @@ pub(crate) fn snapshot_at(
     plugins: &SessionPlugins,
     session: &SessionManager,
     boundary: &ContextStartupBoundary,
-    admitted_user_ids: &[String],
+    admitted_input_ids: &[String],
 ) -> anyhow::Result<
     impl std::future::Future<Output = anyhow::Result<(SessionContext, Option<String>)>> + Send + 'static,
 > {
@@ -106,11 +107,11 @@ pub(crate) fn snapshot_at(
     let current_leaf = session.get_leaf_id().map(str::to_owned);
     let strategy = super::route(&plugins.context_selection()?);
     let boundary = boundary.clone();
-    let admitted_user_ids = admitted_user_ids.to_vec();
+    let admitted_input_ids = admitted_input_ids.to_vec();
     Ok(async move {
         if matches!(boundary, ContextStartupBoundary::Current) {
-            if !admitted_user_ids.is_empty() {
-                bail!("Current startup context cannot carry admitted-user proof");
+            if !admitted_input_ids.is_empty() {
+                bail!("Current startup context cannot carry admitted-input proof");
             }
             current.await
         } else {
@@ -120,7 +121,7 @@ pub(crate) fn snapshot_at(
                 current_leaf.as_deref(),
                 &strategy,
                 &boundary,
-                &admitted_user_ids,
+                &admitted_input_ids,
             )
         }
     })
@@ -137,6 +138,52 @@ mod tests {
             timestamp: 0,
             rest: pa_types::JsonMap::new(),
         })
+    }
+
+    #[test]
+    fn startup_mixed_inputs_require_exact_order_and_preserve_prefix() {
+        let mut manager = SessionManager::in_memory(std::path::Path::new("/project"));
+        let history = manager.append_message(user("history")).unwrap();
+        let first = manager.append_message(user("first")).unwrap();
+        let custom = manager
+            .append_custom_message(
+                "input",
+                pa_types::ai::UserContent::Text("custom".into()),
+                true,
+                None,
+            )
+            .unwrap();
+        let last = manager.append_message(user("last")).unwrap();
+        let ids = vec![first, custom, last];
+        let boundary = ContextStartupBoundary::Leaf(history.clone());
+        let (context, leaf) = project_at(
+            manager.retained_entries(),
+            manager.get_leaf_id(),
+            "policy/a",
+            &boundary,
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(leaf.as_deref(), Some(history.as_str()));
+        assert_eq!(context.messages.len(), 1);
+        let mut reordered = ids.clone();
+        reordered.swap(0, 1);
+        assert!(project_at(
+            manager.retained_entries(),
+            manager.get_leaf_id(),
+            "policy/a",
+            &boundary,
+            &reordered
+        )
+        .is_err());
+        assert!(project_at(
+            manager.retained_entries(),
+            manager.get_leaf_id(),
+            "policy/a",
+            &boundary,
+            &ids[..2]
+        )
+        .is_err());
     }
 
     #[test]

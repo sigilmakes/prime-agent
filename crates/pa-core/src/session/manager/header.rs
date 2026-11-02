@@ -6,19 +6,18 @@ use super::{Path, SessionHeader};
 #[must_use]
 pub fn read_session_header(file_path: &Path) -> Option<SessionHeader> {
     use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let mut first_line = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut first_line)
+    let mut first = Vec::new();
+    std::io::BufReader::new(std::fs::File::open(file_path).ok()?)
+        .read_until(b'\n', &mut first)
         .ok()?;
-    let wrapper: SessionHeaderWrapper = serde_json::from_str(&first_line).ok()?;
-    Some(wrapper.header)
-}
-
-#[derive(serde::Deserialize)]
-struct SessionHeaderWrapper {
-    #[serde(flatten)]
-    header: SessionHeader,
+    if first.pop() != Some(b'\n') {
+        return None;
+    }
+    let row = crate::session_log::Row::decode(&first, 0).ok()?;
+    match serde_json::from_value::<pa_types::session::FileEntry>(row.body).ok()? {
+        pa_types::session::FileEntry::Header { header } => Some(header),
+        _ => None,
+    }
 }
 
 pub(super) fn is_valid_rlm_depth(value: Option<u64>) -> bool {

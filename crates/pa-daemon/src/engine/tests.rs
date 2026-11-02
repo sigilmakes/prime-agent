@@ -23,7 +23,7 @@ fn scripted_engine_replays_then_echoes() {
             if let EngineEvent::AssistantMessage(value) = event {
                 final_message = Some(value);
             }
-            true
+            true.into()
         });
         final_message
     };
@@ -77,7 +77,7 @@ fn scripted_assistant_and_tool_events_use_complete_native_message_wires() {
                 | EngineEvent::ToolResultMessage(value) => messages.push(value),
                 _ => {}
             }
-            true
+            true.into()
         },
     );
     assert_eq!(messages.len(), 3);
@@ -110,8 +110,8 @@ fn cancellation_stops_the_prompt() {
         &mut |event| {
             seen_clone.fetch_add(1, Ordering::SeqCst);
             match event {
-                EngineEvent::UserMessage(_) => false, // cancel right away
-                _ => true,
+                EngineEvent::UserMessage(_) => crate::engine::EmitResult::Stop, // cancel right away
+                _ => crate::engine::EmitResult::Continue,
             }
         },
     );

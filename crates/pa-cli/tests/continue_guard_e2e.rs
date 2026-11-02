@@ -269,10 +269,9 @@ fn print_continue_refuses_an_active_daemon_session() {
     );
 }
 
-/// A session file held by a live FOREIGN lease holder (this test process
-/// stands in for the other product's holder) refuses `--resume`. No daemon
-/// runs: the guard's lease probe must catch a holder no roster of this
-/// product's daemon can see; the guard runs before the file is opened.
+/// A session file held by a live process outside the daemon roster refuses
+/// `--resume`. This test process holds the execution lock; the print process
+/// must discover that ownership before opening the session file.
 #[test]
 fn print_resume_refuses_a_foreign_lease_holder() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -292,44 +291,39 @@ fn print_resume_refuses_a_foreign_lease_holder() {
         ),
     ];
     let session_path = sessions.join("foreign-held.jsonl");
-    std::fs::write(&session_path, "{}\n").expect("session file");
+    let mut log = pa_core::session_log::SessionLog::open(&sessions, "foreign-held", Instant::now())
+        .expect("open session log");
+    assert!(matches!(
+        log.append(
+            &json!({
+                "type": "session", "version": 3, "id": "foreign-held",
+                "timestamp": "2026-01-01T00:00:00.000Z", "cwd": dir.path(),
+            }),
+            Instant::now(),
+        ),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
 
-    // The foreign holder: this test process takes the runtime lease, in
-    // exactly the role the other product's daemon worker plays. The
-    // lease-enable env is consumed at the acquire itself, so it leaves this
-    // test's window immediately.
-    std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
+    // Hold the same OS execution lock as a resident worker, without
+    // registering a worker in any daemon roster.
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
         "foreign01ab3c",
     );
-    let holder = pa_daemon::lease::acquire_session_lease(Some(&session_path), &agent_dir)
-        .expect("lease acquire probe")
-        .expect("the lease must be held");
+    let holder = pa_daemon::lease::acquire_runtime_session_lease(&session_path, &agent_dir)
+        .expect("the execution lock must be held");
     std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
-    std::env::remove_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV);
 
-    // The refusal: this test process runs a build of this product, so the
-    // holder classification reads as another Rust build, never the TypeScript
-    // product and never an unnamed process. The refusal names what the kill
-    // would hit (here this test binary), and the session footer carries no
-    // paren (the `{}\n` fixture file has no name).
+    // The actionable refusal is independent of build-directory provenance.
+    // The classifier's unit tests cover product flavor; this guard must name
+    // the actual holder, recorded session id, and precise takeover action.
     let holder_image = std::env::current_exe()
         .expect("own exe")
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let expected = format!(
+    let expected_takeover = format!(
         concat!(
-            "Error: This session is currently open in another Rust build of Prime Agent ",
-            "(active in foreign01ab3c) — another daemon or window of this product holds the file's ",
-            "runtime lease.\n",
-            "\n",
-            "• Continue where you left off:\n",
-            "  prime-agent --daemon-socket <socket> --resume 'foreign01ab3c'\n",
-            "  (<socket> is that instance's daemon socket, from the shell where you started ",
-            "it — that daemon owns this session)\n",
-            "\n",
             "• Take over on this daemon:\n",
             "  kill {} # the holder is {}\n",
             "  Then retry — the file unlocks when the holder exits.\n",
@@ -352,7 +346,15 @@ fn print_resume_refuses_a_foreign_lease_holder() {
     );
     assert_eq!(code, 1);
     assert!(stdout.is_empty(), "stdout: {stdout}");
-    assert_eq!(stderr, expected);
+    assert!(
+        stderr.starts_with("Error: This session is currently open in "),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("(active in foreign01ab3c)"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.ends_with(&expected_takeover), "stderr: {stderr}");
 
     holder.release();
 

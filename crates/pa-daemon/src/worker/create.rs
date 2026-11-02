@@ -2,8 +2,7 @@
 //! construction of the live session.
 use super::{
     json, paths, response_failure, response_success, restore_queue_snapshot, session_file_name,
-    Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile, VecDeque,
-    Worker,
+    EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile, VecDeque, Worker,
 };
 
 use serde::Deserialize as _;
@@ -203,21 +202,21 @@ impl Worker {
         let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
-                let loaded = {
-                    let path = path.clone();
-                    let agent_dir = self.config.agent_dir.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let lease = crate::lease::acquire_runtime_session_lease(&path, &agent_dir)?;
-                        let path = lease.session_path.clone();
-                        pa_core::session::manager::repair_jsonl_damage(&path);
-                        let mut store = SessionFile::open_windowed(&path)?;
-                        store.lease = Some(Arc::new(lease));
-                        Ok(store)
-                    })
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(|result| result)
-                };
+                // Execution ownership is separate from the log's per-append lock.
+                // Hold it before owner repair and retain it with the serving fold.
+                let open_path = path.clone();
+                let agent_dir = self.config.agent_dir.clone();
+                let loaded = tokio::task::spawn_blocking(move || {
+                    let lease = std::sync::Arc::new(crate::lease::acquire_runtime_session_lease(
+                        &open_path, &agent_dir,
+                    )?);
+                    let mut opened = SessionFile::open_owned_log(&open_path)?;
+                    opened.lease = Some(lease);
+                    Ok::<_, anyhow::Error>(opened)
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result);
                 match loaded {
                     Ok(mut opened) => {
                         opened_existing_session = true;
@@ -283,15 +282,8 @@ impl Worker {
                         if let Err(error) = persisted {
                             return response_failure(None, "create", &error.to_string(), None);
                         }
-                        // Prime the usage fold on the file's final identity,
-                        // off the runtime and before the core lock:
-                        // summaries under the lock fold only the appended
-                        // tail.
-                        let primed = path.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            crate::session_store::read_session_info(&primed)
-                        })
-                        .await;
+                        // No old-file info priming: the session's info
+                        // comes from its log, like every other read.
                         opened
                     }
                     Err(error) => return crate::hold_refusal::create_failure_response(&error),
@@ -304,19 +296,20 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
-                let acquired = {
-                    let path = path.clone();
-                    let agent_dir = self.config.agent_dir.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::lease::acquire_runtime_session_lease(&path, &agent_dir)
-                    })
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(|lease| lease)
-                };
-                match acquired {
-                    Ok(lease) => created.lease = Some(Arc::new(lease)),
-                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        return response_failure(None, "create", &error.to_string(), None);
+                    }
+                }
+                let lease =
+                    match crate::lease::acquire_runtime_session_lease(path, &self.config.agent_dir)
+                    {
+                        Ok(lease) => std::sync::Arc::new(lease),
+                        Err(error) => return crate::hold_refusal::create_failure_response(&error),
+                    };
+                created.lease = Some(lease);
+                if let Err(error) = created.rekey_log_session_id(path) {
+                    return response_failure(None, "create", &error.to_string(), None);
                 }
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);
@@ -342,20 +335,19 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
-                let acquired = {
-                    let path = path.clone();
-                    let agent_dir = self.config.agent_dir.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::lease::acquire_runtime_session_lease(&path, &agent_dir)
-                    })
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(|lease| lease)
-                };
-                match acquired {
-                    Ok(lease) => created.lease = Some(Arc::new(lease)),
-                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        return response_failure(None, "create", &error.to_string(), None);
+                    }
                 }
+                let lease = match crate::lease::acquire_runtime_session_lease(
+                    &path,
+                    &self.config.agent_dir,
+                ) {
+                    Ok(lease) => std::sync::Arc::new(lease),
+                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
+                };
+                created.lease = Some(lease);
                 // One durable write instead of three: the prefix, the `active` state,
                 // and the session name land in a single rewrite; the create stays
                 // pathless until it succeeds, so no reader reads the file mid-create.
@@ -819,7 +811,3 @@ fn append_creation_prefix(
         );
     }
 }
-
-#[cfg(test)]
-#[path = "create_collapse_tests.rs"]
-mod create_collapse_tests;

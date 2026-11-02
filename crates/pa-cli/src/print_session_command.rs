@@ -303,9 +303,8 @@ mod tests {
                     on_late_sent_agent_message: None,
                     context_startup_boundary:
                         pa_core::session_engine::ContextStartupBoundary::Current,
-                    context_startup_admitted_user_ids: Vec::new(),
+                    context_startup_admitted_input_ids: Vec::new(),
                     on_initial_context_selection: None,
-                    canonical_live_owner: None,
                     ollama_cloud: None,
                     semantic_edges: None,
                     cron_store: None,

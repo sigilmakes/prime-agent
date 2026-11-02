@@ -11,16 +11,11 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
-    /// The worker owns the slot; the engine only writes into it.
-    fn set_canonical_step_admission(
-        &self,
-        admission: Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>,
-    ) {
-        *self
-            .canonical_step
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = admission;
+    fn persists_session_entries(&self) -> bool {
+        self.row_sink_ready
+            .load(std::sync::atomic::Ordering::Acquire)
     }
+
     /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
         let purge = self
@@ -625,9 +620,6 @@ impl SessionEngine for AgentSessionEngine {
         // Classify the same actual SDK snapshot that owns this transaction.
         // No SDK slot guard survives into canonical owner I/O.
         let session = self.session.blocking_lock().clone();
-        let canonical_bound = session
-            .as_ref()
-            .is_some_and(|engine| engine.session.has_canonical_live_owner());
         let run = async {
             let Some(engine) = session else {
                 anyhow::bail!("session not built");
@@ -644,14 +636,9 @@ impl SessionEngine for AgentSessionEngine {
                 )
                 .await
         };
-        let result = if canonical_bound {
-            // Core's inner provider-only race retains the exact ticket until
-            // the existing async pre-commit abandon has completed.
-            Ok(self.runtime.block_on(run))
-        } else {
-            self.runtime
-                .block_on(pa_agent::abort::race_with_abort(run, signal))
-        };
+        let result = self
+            .runtime
+            .block_on(pa_agent::abort::race_with_abort(run, signal));
         let compaction = match result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
@@ -691,39 +678,6 @@ impl SessionEngine for AgentSessionEngine {
                 }
             }
         }
-    }
-
-    fn canonical_navigation_session(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = anyhow::Result<
-                        Option<
-                            std::sync::Arc<
-                                pa_core::session_engine::canonical_live::CanonicalLiveSession,
-                            >,
-                        >,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async move {
-            let model = self.session_model()?;
-            self.ensure_core_session_async(&model).await?;
-            let live = {
-                let guard = self.session.lock().await;
-                guard
-                    .as_deref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("session disappeared before canonical navigation")
-                    })?
-                    .session
-                    .canonical_live_session()
-            };
-            Ok(live)
-        })
     }
 
     fn run_branch_summary(
@@ -835,14 +789,10 @@ impl SessionEngine for AgentSessionEngine {
                 let driver = engine.goal_driver.lock().await;
                 driver.ensure_ready()?;
             }
-            if engine.session.canonical_live_session().is_some() {
-                engine.session.rebuild_canonical_branch_context().await?;
-            } else {
-                engine
-                    .session
-                    .rebuild_branch_context(branch_entries)
-                    .await?;
-            }
+            engine
+                .session
+                .rebuild_branch_context(branch_entries)
+                .await?;
             // The rebuilt context reads the moved branch's own latest goal
             // entry; the announcement publishes while the driver lock is held.
             let mut driver = engine.goal_driver.lock().await;
@@ -986,21 +936,6 @@ impl SessionEngine for AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock") = None;
-        self.runtime.block_on(async {
-            let core = self.session.lock().await.clone();
-            if let Some(core) = core {
-                // Canonical delivery identities are consumed only by their
-                // matching owner receipt/ACK. Turn settlement cannot erase them.
-                if !core.session.has_canonical_live_owner() {
-                    core.session
-                        .shared_persistence()
-                        .lock()
-                        .await
-                        .replay_admitted_user_rows(Vec::new())
-                        .expect("clearing standalone admitted rows cannot fail");
-                }
-            }
-        });
     }
 
     fn run_side_question(
@@ -1358,9 +1293,17 @@ impl SessionEngine for AgentSessionEngine {
         _prompt_index: usize,
         mut request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
-        let mut emit = self.goal_tracking_emit(emit);
+        let accepted_inputs = std::cell::RefCell::new(Vec::new());
+        let mut publish = |event| {
+            let result = emit(event);
+            if let crate::engine::EmitResult::Accepted(id) = &result {
+                accepted_inputs.borrow_mut().push(id.clone());
+            }
+            result
+        };
+        let mut emit = self.goal_tracking_emit(&mut publish);
         // The accepted-turn row carries the skill-expanded text (the
         // transcript renders the skill card).
         if request.message.starts_with("/skill:") {
@@ -1399,7 +1342,9 @@ impl SessionEngine for AgentSessionEngine {
             if let Some(message) = execution.continuation_message {
                 if !emit(EngineEvent::CustomMessage(
                     crate::session_commands::custom_message_value(&message),
-                )) {
+                ))
+                .continues()
+                {
                     return;
                 }
                 self.run_turns(TurnPrompt::Injected(message), aborted, &mut emit);
@@ -1452,22 +1397,17 @@ impl SessionEngine for AgentSessionEngine {
                 "timestamp": now_millis(),
             }))
         };
-        // A blocked canonical view is a quarantined mirror, not lost history:
-        // a new prompt certifies the owner boundary once and reopens cold
-        // before its accepted row persists. A refused certification keeps the
-        // view, and the prompt refuses exactly once like before.
-        self.reopen_blocked_canonical_runtime();
-        // A create-owned warmup may still be adopting/ACKing metadata. Hold
+        // A create-owned warmup may still be building. Hold
         // its existing gate through accepted-row persistence, without holding
         // any SDK/owner/core guard or triggering a truly lazy build.
-        let build = match self.runtime.block_on(self.prompt_acceptance_build_guard()) {
+        let acceptance_guard = match self.runtime.block_on(self.prompt_acceptance_build_guard()) {
             Ok(build) => build,
             Err(error) => {
                 emit(EngineEvent::Done(Err(error.to_string())));
                 return;
             }
         };
-        if !emit(accepted) {
+        if !emit(accepted).continues() {
             return;
         }
         // The batched co-delivery rows: one accepted user row per batched
@@ -1489,12 +1429,28 @@ impl SessionEngine for AgentSessionEngine {
                 "role": "user",
                 "content": content,
                 "timestamp": now_millis(),
-            }))) {
+            })))
+            .continues()
+            {
                 return;
             }
         }
+        let accepted = accepted_inputs.take();
+        if let Err(error) = self.runtime.block_on(async {
+            let built = self.session.lock().await.clone();
+            if let Some(built) = built {
+                let persistence = built.session.shared_persistence();
+                let mut manager = persistence.lock().await;
+                manager.refresh_committed_entries()?;
+                manager.replay_admitted_input_rows(accepted)?;
+            }
+            Ok::<(), std::io::Error>(())
+        }) {
+            emit(EngineEvent::Done(Err(error.to_string())));
+            return;
+        }
         // The turn's ensure/build path must acquire this same gate itself.
-        drop(build);
+        drop(acceptance_guard);
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),
             None => TurnPrompt::User {

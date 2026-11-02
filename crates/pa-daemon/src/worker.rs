@@ -2,7 +2,6 @@
 //! The worker owns the session - the append-only store, the queue lanes, event sequencing, and turn
 //! execution.
 
-mod canonical_live;
 mod config;
 mod context_selection;
 mod env;
@@ -290,8 +289,6 @@ impl Worker {
             generation: crate::util::new_display_id(),
             last_event_sequence: 0,
             store: None,
-            canonical_step: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            context_selection_uncertain: None,
             cwd: String::new(),
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
@@ -630,6 +627,11 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
+                let plugin_core = Arc::clone(&core);
+                let job_events = Arc::clone(&events);
+                concrete.set_plugin_job_sink(Arc::new(move |session, job| {
+                    crate::plugin_job_events::publish(&plugin_core, &job_events, session, &job);
+                }));
                 // The bash-completion wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed`): the handler validates, the sink
                 // admits/withdraws through the queue lanes.
@@ -768,6 +770,7 @@ impl Worker {
         let navigation = crate::session_navigation::SessionNavigation::new(
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
+            config.agent_dir.clone(),
         );
         Worker {
             config,

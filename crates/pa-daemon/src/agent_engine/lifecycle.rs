@@ -13,10 +13,6 @@ use super::{
     SessionEngineConfig, SupervisorChildSessions, Value,
 };
 
-/// The instruction the floor appends to a bare skill invocation: ask what
-/// the user wants first, never an imperative to execute.
-pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
-
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config), the supervisor link, the children registry, and the
@@ -121,6 +117,7 @@ impl AgentSessionEngine {
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
+            row_sink_ready: std::sync::atomic::AtomicBool::new(false),
             runtime,
             config,
             #[cfg(test)]
@@ -131,7 +128,6 @@ impl AgentSessionEngine {
             goal_runtime: std::sync::Mutex::new(None),
             pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            canonical_step: std::sync::Mutex::new(None),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
             bash_completion_sink: std::sync::Mutex::new(None),
@@ -194,6 +190,7 @@ impl AgentSessionEngine {
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
             compaction_summary_sink: std::sync::Mutex::new(None),
+            plugin_job_sink: std::sync::Mutex::new(None),
             turn_activity_probe: std::sync::Mutex::new(None),
             progress_notes: std::sync::Mutex::new(None),
             progress_note_emit: std::sync::Mutex::new(None),
@@ -226,11 +223,6 @@ impl AgentSessionEngine {
     /// (built here when needed); non-skill inputs and build failures
     /// pass through unchanged.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
-        // The floor keys on the ORIGINAL invocation's shape, not the
-        // expanded parse: a skill body can contain a close tag plus a
-        // `\n\n` tail that parses as a trailing user message.
-        let bare_invocation = pa_types::slash_commands::parse_slash_command(text)
-            .is_some_and(|(name, args)| name.starts_with("skill:") && args.trim().is_empty());
         let Ok(model) = self.resolve_model() else {
             return text.to_string();
         };
@@ -238,17 +230,13 @@ impl AgentSessionEngine {
             eprintln!("skill submission expansion skipped: session build failed: {error:#}");
             return text.to_string();
         }
-        let expanded = self.runtime.block_on(async {
+        self.runtime.block_on(async {
             let guard = self.session.lock().await;
             match guard.as_deref() {
                 Some(engine) => engine.expand_skill_submission(text),
                 None => text.to_string(),
             }
-        });
-        if bare_invocation && pa_types::skill_blocks::parse_skill_block(&expanded).is_some() {
-            return format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}");
-        }
-        expanded
+        })
     }
 
     /// The async build of the core session, awaited on the caller's
@@ -310,6 +298,20 @@ impl AgentSessionEngine {
             .compaction_summary_sink
             .lock()
             .expect("compaction summary sink lock") = Some(sink);
+    }
+
+    /// Install the worker's terminal plugin-job observer for current and future sessions.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink lock is poisoned.
+    pub fn set_plugin_job_sink(&self, sink: pa_core::session_engine::PluginJobSink) {
+        *self.plugin_job_sink.lock().expect("plugin job sink lock") = Some(sink.clone());
+        if let Ok(guard) = self.session.try_lock() {
+            if let Some(engine) = guard.as_deref() {
+                engine.session.set_plugin_job_sink(sink);
+            }
+        }
     }
 
     /// Install the worker's turn-activity probe: deferred plugin jobs (the
@@ -392,7 +394,7 @@ impl AgentSessionEngine {
                     },
                 };
                 if let Err(persist_error) =
-                    pa_core::session::canonical::persist_metadata_entry(&handles.session, entry)
+                    pa_core::session::metadata::persist_metadata_entry(&handles.session, entry)
                         .await
                 {
                     eprintln!("pa-daemon: stale goal terminal persist failed: {persist_error:#}");
@@ -418,6 +420,14 @@ impl AgentSessionEngine {
             .clone()
         {
             built.session.set_compaction_summary_sink(sink);
+        }
+        if let Some(sink) = self
+            .plugin_job_sink
+            .lock()
+            .expect("plugin job sink lock")
+            .clone()
+        {
+            built.session.set_plugin_job_sink(sink);
         }
         if let Some(probe) = self
             .turn_activity_probe
@@ -502,24 +512,39 @@ impl AgentSessionEngine {
                 self.flush_pending_max_depth(&handles.session).await?;
             }
         }
+        let canonical_mirror = self
+            .row_sink_ready
+            .load(std::sync::atomic::Ordering::Acquire);
         let pending_branch = self
             .pending_branch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .take()
+            .filter(|_| !canonical_mirror);
         // Rehydrate the goal driver from the durable store (a moved
         // branch's latest entry wins), seeding the published baseline so
         // it never announces itself.
         let seed;
         let mut shared_window = None;
         let mut shared_branch = None;
+        let mut mirror_leaf = None;
         {
             let path = self
                 .session_file
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if let Some(entries) = &pending_branch {
+            if canonical_mirror {
+                // Startup already bound the canonical rows and their read cursor.
+                // Replacing them with an older navigation snapshot would lose
+                // committed ancestors without rewinding that cursor.
+                let persistence = built.session.shared_persistence();
+                let mut manager = persistence.lock().await;
+                manager.refresh_committed_entries()?;
+                seed = manager.active_goal_state();
+                mirror_leaf = manager.get_leaf_id().map(str::to_owned);
+                shared_branch = Some(manager.retained_entries().to_vec());
+            } else if let Some(entries) = &pending_branch {
                 seed = crate::goal_state_persist::goal_state_in_branch(entries);
             } else {
                 let (goal, window, branch) = tokio::task::spawn_blocking(move || {
@@ -564,7 +589,7 @@ impl AgentSessionEngine {
                     .map(pa_core::session::window::WindowedSessionStore::entries)
             })
             .or(shared_branch.as_deref());
-        let mut admitted_user_ids = Vec::new();
+        let mut admitted_input_ids = Vec::new();
         if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
             pa_core::session_engine::compaction_trace::trace(
                 "daemon.lazy_restore_boundary",
@@ -593,10 +618,10 @@ impl AgentSessionEngine {
                                     pa_types::session::FileEntry::Message {
                                         message: pa_types::session::AgentMessage::User(_),
                                         ..
-                                    }
+                                    } | pa_types::session::FileEntry::CustomMessage { .. }
                                 )
                             }) {
-                                admitted_user_ids.push(id.to_string());
+                                admitted_input_ids.push(id.to_string());
                             }
                         } else if matches!(boundary, PromptContextBoundary::Leaf(leaf)
                             if entry.id() == Some(leaf.as_str()))
@@ -630,7 +655,7 @@ impl AgentSessionEngine {
                 &serde_json::json!({
                     "priorUserRows": prompt_context.as_ref().map(|messages| messages.iter().filter(|message|
                         matches!(message, pa_types::session::AgentMessage::User(_))).count()),
-                    "replayedUserRows": admitted_user_ids.len(),
+                    "replayedUserRows": admitted_input_ids.len(),
                 }),
             );
         }
@@ -643,19 +668,23 @@ impl AgentSessionEngine {
                 pa_core::session_engine::ContextStartupBoundary::Leaf(leaf.clone())
             }
         };
-        let canonical_leaf = shared_window
-            .as_ref()
-            .map(pa_core::session::window::WindowedSessionStore::leaf_id)
-            .or_else(|| {
-                entries.and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .find_map(pa_types::session::FileEntry::id)
+        let canonical_leaf = if canonical_mirror {
+            mirror_leaf.as_deref()
+        } else {
+            shared_window
+                .as_ref()
+                .map(pa_core::session::window::WindowedSessionStore::leaf_id)
+                .or_else(|| {
+                    entries.and_then(|entries| {
+                        entries
+                            .iter()
+                            .rev()
+                            .find_map(pa_types::session::FileEntry::id)
+                    })
                 })
-            });
-        admitted_user_ids = match entries {
-            Some(entries) => super::context_selection::admitted_user_ids(
+        };
+        admitted_input_ids = match entries {
+            Some(entries) => super::context_selection::admitted_input_ids(
                 entries,
                 canonical_leaf,
                 &startup_boundary,
@@ -720,28 +749,17 @@ impl AgentSessionEngine {
                 *self.published_goal.lock().expect("published goal lock") = Some(state);
             }
         }
-        if let Some(live) = built.session.canonical_live_session() {
-            // This mirror is already bound. Restore the actual owner's exact
-            // raw receipt and ACK-approved pre-admission view, never reinstall
-            // the legacy window or replay a second local admission ledger.
-            live.observe().await?;
-            built.session.rebuild_canonical_branch_context().await?;
-            self.restore_quota_park(built).await;
-            self.flush_pending_stale_goal_terminal().await;
-            self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
-            return Ok(());
-        }
         if let Some(entries) = pending_branch {
             built
                 .session
-                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_user_ids)
+                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_input_ids)
                 .await?;
             built
                 .session
                 .shared_persistence()
                 .lock()
                 .await
-                .replay_admitted_user_rows(admitted_user_ids)?;
+                .replay_admitted_input_rows(admitted_input_ids)?;
             // A moved branch restores its own park (the early return would leave the previous
             // branch's park armed).
             self.restore_quota_park(built).await;
@@ -753,7 +771,7 @@ impl AgentSessionEngine {
         if let Some(window) = shared_window {
             built
                 .session
-                .restore_windowed_context_at(window, &startup_boundary, &admitted_user_ids)
+                .restore_windowed_context_at(window, &startup_boundary, &admitted_input_ids)
                 .await?;
             // This worker holds the runtime lease: exactly one writer per
             // lease certifies the window cache; the release flushes the
@@ -765,11 +783,17 @@ impl AgentSessionEngine {
                 .await
                 .set_append_ownership(pa_core::session::window::AppendOwnership::SessionLeaseHeld);
             self.flush_pending_stale_goal_terminal().await;
-        } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
+        } else if let Some(entries) = shared_branch
+            .take()
+            .filter(|entries| !canonical_mirror && !entries.is_empty())
+        {
             built
                 .session
-                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_user_ids)
+                .rebuild_branch_context_at(entries, &startup_boundary, &admitted_input_ids)
                 .await?;
+            self.flush_pending_stale_goal_terminal().await;
+        }
+        if canonical_mirror {
             self.flush_pending_stale_goal_terminal().await;
         }
         built
@@ -777,7 +801,7 @@ impl AgentSessionEngine {
             .shared_persistence()
             .lock()
             .await
-            .replay_admitted_user_rows(admitted_user_ids)?;
+            .replay_admitted_input_rows(admitted_input_ids)?;
         self.restore_quota_park(built).await;
         // The walk and replay allocated transient trees several times the
         // retained size: release the freed heap.
@@ -879,64 +903,23 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) -> anyhow::Result<()> {
         let mut completion_state = self.session_build.lock().await;
         let built = self.session.lock().await.clone();
-        if let Some(engine) = built {
-            engine.session.retire_completed_runtime().await?;
+        if let Some(built) = built {
+            built.session.agent().retire_completed_runtime()?;
         }
         *completion_state = None;
         self.clear_retired_runtime().await;
         Ok(())
-    }
-
-    /// Reopen a quarantined session runtime at a certified owner boundary.
-    ///
-    /// The actual owner must prove its last certified source unchanged and no
-    /// outstanding receipt before the cached SDK mirror is discarded. A refusal
-    /// keeps the cached runtime and its blocked view; nothing is retried.
-    pub(crate) async fn reopen_quarantined_session_runtime(&self) -> anyhow::Result<()> {
-        let mut completion_state = self.session_build.lock().await;
-        let store = self
-            .initial_context_selection_store
-            .lock()
-            .expect("initial context selection store lock")
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!("persistent session has no canonical owner to reopen")
-            })?;
-        store.retire_quarantined_owner()?;
-        *completion_state = None;
-        self.clear_retired_runtime().await;
-        Ok(())
-    }
-
-    /// A prompt is a new demand, never a retry: a blocked canonical view is
-    /// reopened once at a certified boundary before this prompt is admitted.
-    pub(crate) fn reopen_blocked_canonical_runtime(&self) {
-        if self.session_is_closed() {
-            return;
-        }
-        let blocked = self
-            .session
-            .blocking_lock()
-            .as_deref()
-            .and_then(|engine| engine.session.canonical_live_session())
-            .is_some_and(|live| live.projection_blocked());
-        if !blocked {
-            return;
-        }
-        if let Err(error) = self
-            .runtime
-            .block_on(self.reopen_quarantined_session_runtime())
-        {
-            eprintln!("pa-daemon: canonical runtime reopen refused: {error:#}");
-        }
     }
 
     /// Authorized cancel-and-replace already aborts and settles at the worker.
     /// It does not grant permission to reuse the old physical owner.
     pub(crate) async fn discard_replaced_session_runtime(&self) {
         let mut completion_state = self.session_build.lock().await;
-        if let Some(engine) = self.session.lock().await.as_ref() {
-            engine.session.close_runtime_admission_for_replacement();
+        if let Some(built) = self.session.lock().await.as_ref() {
+            built
+                .session
+                .agent()
+                .close_runtime_admission_for_replacement();
         }
         *completion_state = None;
         self.clear_retired_runtime().await;
@@ -944,6 +927,8 @@ impl AgentSessionEngine {
 
     /// Callers hold `session_build` across this cache and kernel teardown.
     async fn clear_retired_runtime(&self) {
+        self.row_sink_ready
+            .store(false, std::sync::atomic::Ordering::Release);
         let built = self.session.lock().await.take();
         *self
             .prompt_context_boundary
@@ -1256,13 +1241,12 @@ impl AgentSessionEngine {
                 .and_then(std::path::Path::parent)
                 .map(std::path::Path::to_owned)
         });
-        let (session_manager, on_initial_context_selection, canonical_live_owner) = self
-            .build_session_mirror(cwd.clone(), session_dir, session_file.clone())
-            .await?;
+        let (session_manager, on_initial_context_selection) =
+            self.build_session_mirror(&cwd, session_dir, session_file.clone())?;
         // Capture after the verified mirror: prompt admission sets its boundary
         // before appending any user row, including a create/prewarm race.
         let context_startup_boundary = self.context_startup_boundary();
-        let context_startup_admitted_user_ids = super::context_selection::admitted_user_ids(
+        let context_startup_admitted_input_ids = super::context_selection::admitted_input_ids(
             session_manager.retained_entries(),
             session_manager.get_leaf_id(),
             &context_startup_boundary,
@@ -1336,9 +1320,8 @@ impl AgentSessionEngine {
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager: Some(session_manager),
-            canonical_live_owner,
             context_startup_boundary,
-            context_startup_admitted_user_ids,
+            context_startup_admitted_input_ids,
             on_initial_context_selection,
             extra_host_handlers: self.extra_host_handlers(),
             conversation_log_path: session_file,

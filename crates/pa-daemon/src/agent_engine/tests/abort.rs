@@ -80,7 +80,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
             &|| false,
             &mut |event| {
                 turn_events.lock().unwrap().push(event);
-                true
+                true.into()
             },
         );
     });
@@ -206,7 +206,7 @@ fn abort_at_registered_run_start_preserves_the_accepted_turn_without_a_provider_
         },
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -692,7 +692,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
                 &|| false,
                 &mut move |event: EngineEvent| {
                     events.lock().unwrap().push(event);
-                    true
+                    true.into()
                 },
             );
         })

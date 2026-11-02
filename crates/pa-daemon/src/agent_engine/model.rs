@@ -74,6 +74,9 @@ impl AgentSessionEngine {
         {
             return Ok(());
         }
+        // Public model switches hold the construction gate before changing the
+        // SDK model. Adoption must share that fence, not only the target lock.
+        let _build = self.model_mutation_build_guard()?;
         let _reload_serialized = self
             .reload_lock
             .lock()
@@ -104,6 +107,8 @@ impl AgentSessionEngine {
         let level = pa_ai::models::clamp_thinking_level(&refreshed, self.effective_thinking());
         let session = self.session.blocking_lock().clone();
         if let Some(core) = session {
+            #[cfg(test)]
+            refresh_tests::probe_adoption(self);
             // Agent-only metadata update: no synthetic model_change row.
             self.runtime
                 .block_on(core.session.agent().set_model_and_thinking_level(
@@ -112,8 +117,7 @@ impl AgentSessionEngine {
                 ));
             core.update_model_facts(&refreshed);
         }
-        // Reload and model-switch credentials may have advanced while reading
-        // the catalog. Replace only model metadata, and only for the same id.
+        // Keep the serving credentials while replacing same-identity metadata.
         let mut target = self.provider_target.write().expect("provider target lock");
         if let Some(target) = target.as_mut().filter(|target| {
             target.model.provider == current.provider && target.model.id == current.id
@@ -646,6 +650,21 @@ mod refresh_tests {
     use pa_core::session_engine::provider_adapter::ProviderTarget;
     use serde_json::json;
 
+    type AdoptionProbe = Box<dyn FnOnce(&AgentSessionEngine)>;
+
+    std::thread_local! {
+        static ADOPTION_PROBE: std::cell::RefCell<Option<AdoptionProbe>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn probe_adoption(engine: &AgentSessionEngine) {
+        let probe = ADOPTION_PROBE.with(|slot| slot.borrow_mut().take());
+        if let Some(probe) = probe {
+            probe(engine);
+        }
+    }
+
     fn bare_engine(dir: &std::path::Path) -> AgentSessionEngine {
         let agent_dir = dir.join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -738,6 +757,93 @@ mod refresh_tests {
         assert!(!engine
             .model_metadata_refresh_pending
             .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn refresh_metadata_serializes_with_the_public_model_switch_gate() {
+        use std::cell::Cell;
+        use std::future::Future;
+        use std::rc::Rc;
+        use std::task::Poll;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = bare_engine(dir.path());
+        write_models(&engine, &["selected", "replacement"], 128_000);
+        engine.configure_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("selected".into()),
+            ..Default::default()
+        });
+        let original = engine.resolve_model().unwrap();
+        engine.ensure_core_session(&original).unwrap();
+        let core = engine.session.blocking_lock().clone().unwrap();
+        let original_wire: pa_agent::types::Model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&original).unwrap();
+        let probed = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&probed);
+        ADOPTION_PROBE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |engine| {
+                // Poll the same gate used by the public model switch once at
+                // adoption's SDK mutation boundary, without scheduling a race.
+                let blocked = engine.runtime.block_on(async {
+                    let mut guard = std::pin::pin!(engine.prompt_acceptance_build_guard());
+                    std::future::poll_fn(|context| {
+                        Poll::Ready(guard.as_mut().poll(context).is_pending())
+                    })
+                    .await
+                });
+                assert!(blocked, "adoption bypassed the model switch gate");
+                let core = engine.session.blocking_lock().clone().unwrap();
+                assert_eq!(
+                    engine.runtime.block_on(core.session.agent().state()).model,
+                    original_wire
+                );
+                assert_eq!(engine.session_model().unwrap().id, "selected");
+                observed.set(true);
+            }));
+        });
+        write_models(&engine, &["selected", "replacement"], 256_000);
+        engine.schedule_model_metadata_refresh();
+        engine.apply_scheduled_model_metadata_refresh().unwrap();
+        assert!(probed.get(), "the SDK adoption boundary was not reached");
+
+        // Exercise the real switch under the guard owned by handle_set_model.
+        let build = engine.model_mutation_build_guard().unwrap();
+        assert!(engine.switch_model(EngineModelSelection {
+            provider: Some("refresh-test".into()),
+            model: Some("replacement".into()),
+            api_key: Some("switch-live-key".into()),
+            ..Default::default()
+        }));
+        let switched_target = engine.provider_target.read().unwrap().clone().unwrap();
+        drop(build);
+        write_models(&engine, &["selected", "replacement"], 512_000);
+        engine.schedule_model_metadata_refresh();
+        engine.apply_scheduled_model_metadata_refresh().unwrap();
+
+        let target = engine.provider_target.read().unwrap().clone().unwrap();
+        assert_eq!(target.model.id, "replacement");
+        assert_eq!(target.model.context_window, 512_000);
+        assert_eq!(target.api_key.as_deref(), Some("switch-live-key"));
+        assert_eq!(target.api_key, switched_target.api_key);
+        assert_eq!(target.headers, switched_target.headers);
+        assert_eq!(target.service_tier, switched_target.service_tier);
+        assert_eq!(
+            engine.current_selection().model.as_deref(),
+            Some("replacement")
+        );
+        assert_eq!(engine.model_metadata().unwrap()["id"], "replacement");
+        assert_eq!(engine.model_context_window(), Some(512_000));
+        let facts = core.turn_boundary.bound().unwrap();
+        assert_eq!(facts.model_info.id, "replacement");
+        assert_eq!(facts.model_info.provider, "refresh-test");
+        assert_eq!(facts.context_window, Some(512_000));
+        let expected_wire: pa_agent::types::Model =
+            pa_core::session_engine::provider_adapter::json_round_trip(&target.model).unwrap();
+        assert_eq!(
+            engine.runtime.block_on(core.session.agent().state()).model,
+            expected_wire
+        );
     }
 
     #[test]
@@ -921,7 +1027,7 @@ mod refresh_tests {
             &|| false,
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
         let request = engine

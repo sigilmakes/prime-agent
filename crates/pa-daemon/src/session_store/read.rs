@@ -3,8 +3,8 @@
 
 use super::view::is_warning_shown_row;
 use super::{
-    anyhow, fold_child_usage_attributions, fs, message_text, BufRead, Context, HashMap, Map, Path,
-    PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader, SessionWindow, Value,
+    fold_child_usage_attributions, fs, BufRead, Context, HashMap, Map, Path, PathBuf, Read, Result,
+    SessionEntry, SessionFile, SessionHeader, Value,
 };
 
 const CURRENT_SESSION_VERSION: u32 = 3;
@@ -20,16 +20,19 @@ pub fn session_file_name(session_id: &str) -> String {
 
 #[must_use]
 pub fn parse_session_entries(content: &str) -> Vec<Value> {
-    content
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            serde_json::from_str(trimmed).ok()
-        })
-        .collect()
+    let mut seq = 0;
+    let mut rows = Vec::new();
+    for line in content.split_inclusive('\n') {
+        let Some(line) = line.strip_suffix('\n') else {
+            break;
+        };
+        let Ok(row) = pa_core::session_log::Row::decode(line.as_bytes(), seq) else {
+            return Vec::new();
+        };
+        seq = row.seq;
+        rows.push(row.body);
+    }
+    rows
 }
 
 /// The bounded first-line read cap for header-only judgments: a session
@@ -50,61 +53,22 @@ pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
     Some(header)
 }
 
-/// Read the file's first line when it ends within `max_bytes` bytes. `None`
-/// when no line ends within the bound: the caller judges with a full read,
-/// never on truncated bytes. A final line without a trailing newline still
-/// counts.
-pub(crate) fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
-    let mut file = fs::File::open(path).ok()?;
-    read_first_line_bounded_from(&mut file, max_bytes)
-}
-
-/// The bounded first-line read over an already-open handle (the roster gate shares one
-/// open with the fold).
-pub(crate) fn read_first_line_bounded_from(
-    file: &mut fs::File,
-    max_bytes: usize,
-) -> Option<Vec<u8>> {
-    // One byte over the cap separates a line that fits (judgeable) from an
-    // over-long one: a newline at index `max_bytes` still bounds a full line.
-    let mut buf = vec![0u8; max_bytes + 1];
-    let mut filled = 0;
-    while filled < buf.len() {
-        let read = file.read(&mut buf[filled..]).ok()?;
-        if read == 0 {
-            return (filled > 0).then(|| strip_line_return(&buf[..filled]));
-        }
-        if let Some(at) = buf[filled..filled + read]
-            .iter()
-            .position(|&byte| byte == b'\n')
-        {
-            if filled + at > max_bytes {
-                return None;
-            }
-            return Some(strip_line_return(&buf[..filled + at]));
-        }
-        filled += read;
-    }
-    None
-}
-
-/// Drop one `\r\n` line return off the line's own bytes, like `str::lines`.
-fn strip_line_return(line: &[u8]) -> Vec<u8> {
-    let mut line = line.to_vec();
-    if line.last() == Some(&b'\r') {
-        line.pop();
-    }
-    line
-}
-
 /// The session file's header, read from the first line bounded to
 /// [`SESSION_LIST_HEADER_READ_MAX_BYTES`]: `None` also covers an over-long
 /// first line — the bounded read refuses to judge a truncated one.
 #[must_use]
 pub fn read_session_header_bounded(path: &Path) -> Option<SessionHeader> {
-    let line = read_first_line_bounded(path, SESSION_LIST_HEADER_READ_MAX_BYTES)?;
-    let text = std::str::from_utf8(&line).ok()?;
-    parse_session_header_line(text)
+    let file = fs::File::open(path).ok()?;
+    let mut line = Vec::new();
+    std::io::BufReader::new(file)
+        .take(SESSION_LIST_HEADER_READ_MAX_BYTES as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.len() > SESSION_LIST_HEADER_READ_MAX_BYTES || line.pop() != Some(b'\n') {
+        return None;
+    }
+    let row = pa_core::session_log::Row::decode(&line, 0).ok()?;
+    parse_session_header_line(&serde_json::to_string(&row.body).ok()?)
 }
 
 /// Read the first line of a session file and parse it as a header.
@@ -113,7 +77,11 @@ pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
     let file = fs::File::open(path).ok()?;
     let mut first = String::new();
     std::io::BufReader::new(file).read_line(&mut first).ok()?;
-    parse_session_header_line(&first)
+    if !first.ends_with('\n') {
+        return None;
+    }
+    let row = pa_core::session_log::Row::decode(first.trim_end_matches('\n').as_bytes(), 0).ok()?;
+    parse_session_header_line(&serde_json::to_string(&row.body).ok()?)
 }
 
 /// A session file is valid when its first line is a `session` header, judged
@@ -123,6 +91,12 @@ pub fn is_valid_session_file(path: &Path) -> bool {
     read_session_header_bounded(path).is_some()
 }
 
+#[derive(Clone, Copy)]
+enum OpenPolicy {
+    Validate,
+    Repair,
+}
+
 impl SessionFile {
     /// Load an existing session file; malformed entry lines are skipped (the TS loader).
     ///
@@ -130,70 +104,106 @@ impl SessionFile {
     ///
     /// Returns an error when the file cannot be read, is empty, or its header is invalid.
     pub fn open(path: &Path) -> Result<Self> {
-        // Streamed line-by-line load: one line is resident at a time, so a grown session
-        // never holds the raw file bytes alongside the parsed entries.
-        let file = fs::File::open(path)
-            .with_context(|| format!("read session file {}", path.display()))?;
-        let mut lines = std::io::BufReader::new(file).lines();
-        let read_context = || format!("read session file {}", path.display());
-        let mut first = None;
-        for line in lines.by_ref() {
-            let line = line.with_context(read_context)?;
-            if !line.trim().is_empty() {
-                first = Some(line);
-                break;
+        Self::open_log_path(path, OpenPolicy::Validate)
+    }
+
+    /// Open an execution owner's actual log path, repairing only after the
+    /// transport established a supported header. Read-only callers use `open`.
+    pub(crate) fn open_owned_log(path: &Path) -> Result<Self> {
+        Self::open_log_path(path, OpenPolicy::Repair)
+    }
+
+    fn open_log_path(session_path: &Path, policy: OpenPolicy) -> Result<Self> {
+        // Bind relative selections before deriving the log directory or
+        // retaining a path that must survive later working-directory changes.
+        let absolute_path = std::path::absolute(session_path)?;
+        let session_path = absolute_path.as_path();
+        anyhow::ensure!(
+            session_path.is_file(),
+            "session log is unavailable: {}",
+            session_path.display()
+        );
+        let session_id = crate::session_transport::session_id_of(session_path)
+            .context("session path has no id")?;
+        let directory = session_path
+            .parent()
+            .context("session log has no directory")?;
+        let (mut log, repair) = match policy {
+            OpenPolicy::Repair => {
+                crate::session_transport::open_repaired_dir(directory, &session_id)
+                    .map_err(anyhow::Error::from)?
             }
+            OpenPolicy::Validate => (
+                pa_core::session_log::SessionLog::open(
+                    directory,
+                    &session_id,
+                    crate::session_transport::deadline(),
+                )?,
+                None,
+            ),
+        };
+        if let Some(report) = &repair {
+            eprintln!(
+                "pa-daemon: session log {} repaired: {} unusable trailing byte(s) after seq {}",
+                session_id, report.truncated_bytes, report.last_good_seq
+            );
         }
-        let first = first.ok_or_else(|| anyhow!("empty session file {}", path.display()))?;
-        let header_value: Value = serde_json::from_str(first.trim())
-            .with_context(|| format!("invalid session header in {}", path.display()))?;
-        if header_value.get("type").and_then(Value::as_str) != Some("session") {
-            return Err(anyhow!("missing session header in {}", path.display()));
+        let mut cursor = pa_core::session_log::ReadCursor::default();
+        let rows = log
+            .read_tail(&mut cursor, crate::session_transport::deadline())
+            .map_err(anyhow::Error::from)
+            .context("read the session log")?;
+        let Some(header_row) = rows.first() else {
+            anyhow::bail!("session log {session_id} holds no header row (the repair emptied it)");
+        };
+        if header_row.body.get("type").and_then(Value::as_str) != Some("session") {
+            anyhow::bail!("session log {session_id} row one is not a session header");
         }
-        let pa_types::session::FileEntry::Header { header } = serde_json::from_value(header_value)
-            .with_context(|| format!("invalid session header in {}", path.display()))?
+        let pa_types::session::FileEntry::Header { header } =
+            serde_json::from_value::<pa_types::session::FileEntry>(header_row.body.clone())
+                .context("invalid session header in the session log")?
         else {
-            return Err(anyhow!("missing session header in {}", path.display()));
+            anyhow::bail!("session log {session_id} row one is not a session header");
         };
         let mut file = SessionFile {
-            path: path.to_path_buf(),
+            path: session_path.to_path_buf(),
             header,
             entries: Vec::new(),
             by_id: HashMap::new(),
             leaf_id: None,
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown: false,
             skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
+            log_transport: None,
+            log_progress: super::log_wire::LogProgress::default(),
         };
-        for line in lines {
-            let line = line.with_context(read_context)?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+        for row in rows.iter().skip(1) {
+            if row.body.get("type").and_then(Value::as_str) == Some("branch_selection") {
+                let selected = row
+                    .body
+                    .get("selectedLeaf")
+                    .context("branch selection has no leaf")?;
+                file.leaf_id = match selected {
+                    Value::Null => None,
+                    Value::String(id) if file.by_id.contains_key(id) => Some(id.clone()),
+                    _ => anyhow::bail!("branch selection names an absent entry"),
+                };
                 continue;
             }
-            // Malformed lines are skipped, matching the TS loader. The
-            // count rides the store so the reopen that found damage can
-            // log it (the rows now STAY on disk: an append-only reopen
-            // never deletes what it skipped).
-            match serde_json::from_str::<SessionEntry>(trimmed) {
-                Ok(entry) => file.push_index(entry),
-                Err(_) => file.skipped_lines += 1,
-            }
+            let entry = serde_json::from_value::<SessionEntry>(row.body.clone())
+                .with_context(|| format!("invalid session entry at log seq {}", row.seq))?;
+            file.push_index(entry);
         }
         fold_child_usage_attributions(&mut file.entries);
-        // The once-per-lifecycle gate rides the ACTIVE branch, exactly
-        // like the windowed walk below: a marker on an abandoned or
-        // sibling branch never suppresses the warning for the open leaf
-        // (fail-open — an off-path marker must not hide the warning on a
-        // branch that never showed it).
         file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
+        file.log_progress = super::log_wire::LogProgress::opened(cursor, file.entries.len());
+        let wire = crate::session_transport::LogWire::held(
+            log,
+            directory,
+            rows.last().map_or(1, |row| row.seq),
+        );
+        file.log_transport = Some(wire);
         Ok(file)
     }
 
@@ -204,79 +214,9 @@ impl SessionFile {
     /// Returns an error when the windowed load fails or holds no header; a
     /// malformed retained row falls back to [`SessionFile::open`].
     pub fn open_windowed(path: &Path) -> Result<Self> {
-        let Some(mut window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
-            return Self::open(path);
-        };
-        let header = window
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                pa_types::session::FileEntry::Header { header } => Some(header.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow!("window has no session header"))?;
-        // The window's walk already hydrated the once-per-session-lifecycle
-        // warning gate from the whole active branch (the row may sit in the
-        // discarded prefix, far outside this store's retained rows).
-        let anthropic_warning_shown = window.anthropic_warning_shown();
-        let mut file = Self {
-            path: path.to_owned(),
-            header,
-            entries: Vec::new(),
-            by_id: HashMap::new(),
-            leaf_id: None,
-            window: None,
-            lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
-            anthropic_warning_shown,
-            skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
-        };
-        // The raw rows are consumed in place: each line String drops as soon as its
-        // parsed entry joins the store.
-        let raw_count = window.raw_entries().len();
-        for line in window
-            .take_metadata_entries()
-            .into_iter()
-            .chain(window.take_raw_entries())
-        {
-            let Ok(entry) = serde_json::from_str(&line) else {
-                return Self::open(path);
-            };
-            file.push_index(entry);
-        }
-        // The window parses the retained-target attributions BEFORE the raw
-        // retained rows, so the fold runs once every row is in.
-        fold_child_usage_attributions(&mut file.entries);
-        file.leaf_id = Some(window.leaf_id().to_owned());
-        let settings = window.settings();
-        file.window = Some(SessionWindow {
-            message_count: window.message_count(),
-            first_message: window
-                .first_user_message()
-                .map(message_text)
-                .filter(|text| !text.is_empty()),
-            loaded_entries: file.entries.len(),
-            compaction_count: window.compaction_count(),
-            has_thinking_level: window.has_thinking_level(),
-            has_service_tier: window.has_service_tier(),
-            model: settings.model.clone(),
-            boundary_model: window.boundary_model().cloned(),
-            thinking_level: settings.thinking_level.clone(),
-            service_tier: settings.service_tier,
-            // The retained rows joined the store verbatim above, so their ids are
-            // exactly the trailing `raw_count` store ids — no third parse pass.
-            retained_ids: file.entries[file.entries.len() - raw_count..]
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect(),
-            older_path_stats: window.older_path_stats().clone(),
-        });
-        Ok(file)
+        // One validated log replay owns history. Context projection remains the
+        // existing branch/compaction fold, not a second storage implementation.
+        Self::open(path)
     }
 
     #[cfg(test)]
@@ -300,15 +240,6 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
-        full.canonical_live.clone_from(&self.canonical_live);
-        full.canonical_delivered
-            .clone_from(&self.canonical_delivered);
-        full.canonical_delivered_custom
-            .clone_from(&self.canonical_delivered_custom);
-        full.epoch.clone_from(&self.epoch);
-        full.rows_written_without_epoch = self.rows_written_without_epoch;
-        full.child_usage_recovery
-            .clone_from(&self.child_usage_recovery);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
         // can disagree, a post-snapshot marker must hydrate, and an
@@ -337,14 +268,10 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
-            child_usage_recovery: super::child_usage::ChildUsageRecovery::default(),
             anthropic_warning_shown: false,
             skipped_lines: 0,
-            epoch: None,
-            rows_written_without_epoch: 0,
-            canonical_live: None,
-            canonical_delivered: std::collections::VecDeque::new(),
-            canonical_delivered_custom: std::collections::VecDeque::new(),
+            log_transport: None,
+            log_progress: super::log_wire::LogProgress::default(),
         }
     }
 }

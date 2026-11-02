@@ -786,7 +786,7 @@ impl SessionEngine for NoteWitnessEngine {
         _prompt_index: usize,
         _request: PromptRequest,
         _aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         emit(EngineEvent::AgentStart);
         if self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -1035,7 +1035,7 @@ impl SessionEngine for AbortSwallowedEngine {
         _prompt_index: usize,
         _request: PromptRequest,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) {
         emit(EngineEvent::AgentStart);
         // The mid-run note acceptance (the model's `rlm.progress_note`).

@@ -197,6 +197,75 @@ async fn active_migration_refuses_corruption_without_authoritative_empty_target(
     assert!(!f.agent.join("plugins/harness/store.json").exists());
 }
 
+#[tokio::test]
+async fn sparse_automatic_settings_review_plan_apply_and_publish_completion() {
+    let mut config = settings(true);
+    config["autoRefine"] = json!({"enabled":true});
+    config["auxiliaryModel"] = json!("aux/selected");
+    config["testProvider"] = json!(AUX_PROVIDER);
+    config["plugins"] = json!({"route":{"enabled":true,"path":"provider.lua"}});
+    let f = Fixture::new(config, LEGACY).await;
+    for turn in 1..=25 {
+        f.provider.push_text_turn("complete");
+        f.engine
+            .prompt(
+                "settled evidence",
+                crate::session_engine::PromptOptions::default(),
+            )
+            .await
+            .unwrap();
+        let state = f
+            .call("get", json!({"kind":"_policy","id":"automatic"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            state["value"]["turns"],
+            json!(turn),
+            "automatic observer failed: {state}"
+        );
+    }
+    let terminal = f.engine.drain_plugin_jobs().await;
+    assert_eq!(terminal.len(), 1, "{terminal:?}");
+    assert_eq!(terminal[0]["state"]["status"], "completed", "{terminal:?}");
+    assert_eq!(
+        terminal[0]["state"]["result"]["message"],
+        json!({
+            "customType":"refinement_outcome", "content":"fixture learned", "display":true,
+            "details":{"summary":"fixture learned","scope":"local","edits":[{
+                "action":"create","kind":"memory","id":"learned","applied":true,
+                "after":{"content":"auxiliary route"}
+            }]}
+        })
+    );
+    assert_eq!(
+        terminal[0]["state"]["result"]["applied"][0]["current"],
+        json!({"state":"Present","value":{"content":"auxiliary route"}})
+    );
+    assert_eq!(
+        f.call("get", json!({"kind":"memory","id":"learned"}))
+            .await
+            .unwrap()["value"]["content"],
+        "auxiliary route"
+    );
+    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
+    assert_eq!(requests.as_array().unwrap().len(), 2, "review and plan");
+    // The default cooldown suppresses the next otherwise-due interval.
+    for _ in 0..25 {
+        f.provider.push_text_turn("complete");
+        f.engine
+            .prompt(
+                "more evidence",
+                crate::session_engine::PromptOptions::default(),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        f.call_plugin("route", "requests", json!({})).await.unwrap(),
+        requests
+    );
+}
+
 const AUX_PROVIDER: &str = r#"
 local requests={}
 return {providers={{name='aux',mode='streaming',run=function(input,ctx)
@@ -226,6 +295,52 @@ async fn await_job(f: &Fixture, id: &Value) -> Value {
     .await
     .expect("deferred job settled")
 }
+#[tokio::test]
+async fn refinement_presentation_uses_committed_update_delete_and_empty_changes() {
+    let original = r#"{"summary":"fixture learned","edits":[{"action":"create","kind":"memory","id":"learned","value":{"content":"auxiliary route"}}]}"#;
+    for action in ["update", "delete", "none"] {
+        let edits = if action == "none" {
+            json!([])
+        } else {
+            json!([{"action":action,"kind":"memory","id":"learned","value":{"content":"changed"}}])
+        };
+        let proposal = json!({"summary":"fixture learned","edits":edits});
+        let mut config = settings(true);
+        config["auxiliaryModel"] = json!("aux/selected");
+        config["testProvider"] = json!(AUX_PROVIDER.replace(original, &proposal.to_string()));
+        config["plugins"] = json!({"route":{"enabled":true,"path":"provider.lua"}});
+        let f = Fixture::new(config, LEGACY).await;
+        f.call(
+            "create",
+            json!({"kind":"memory","id":"learned","value":{"content":"before"}}),
+        )
+        .await
+        .unwrap();
+        let job = f.call("refine", json!({})).await.unwrap();
+        let result = await_job(&f, &job["id"]).await;
+        assert_eq!(result["status"], "completed", "{result}");
+        let edits = result["result"]["message"]["details"]["edits"]
+            .as_array()
+            .unwrap();
+        if action == "none" {
+            assert!(edits.is_empty());
+        } else {
+            assert_eq!(edits[0]["action"], action);
+            assert_eq!(edits[0]["before"], json!({"content":"before"}));
+            assert_eq!(edits[0]["applied"], true);
+            if action == "update" {
+                assert_eq!(edits[0]["after"], json!({"content":"changed"}));
+            } else {
+                assert!(edits[0].get("after").is_none());
+            }
+        }
+        assert_eq!(
+            result["result"]["applied"].as_array().unwrap().len(),
+            edits.len()
+        );
+    }
+}
+
 #[tokio::test]
 async fn manual_and_interval_refinement_use_scoped_explicit_auxiliary_review_and_plan() {
     let mut settings = settings(true);
@@ -439,6 +554,29 @@ async fn retirement_cancels_owned_job_and_does_not_publish_after_reenable() {
 }
 
 #[tokio::test]
+async fn retired_job_outcomes_remain_drainable_without_publishing_into_new_generation() {
+    let f = held_fixture().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    f.engine
+        .session
+        .set_plugin_job_sink(Arc::new(move |session, job| {
+            tx.send((session.to_owned(), job)).unwrap();
+        }));
+    f.call("refine", json!({})).await.unwrap();
+    started(&f).await;
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(f.agent.join("settings.json")).unwrap()).unwrap();
+    config["plugins"]["harness"]["enabled"] = json!(false);
+    std::fs::write(f.agent.join("settings.json"), config.to_string()).unwrap();
+    f.engine.reload_plugins().await.unwrap();
+    let terminal = f.engine.drain_plugin_jobs().await;
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0]["state"]["status"], "failed");
+    assert!(rx.try_recv().is_err(), "retired generation cannot publish");
+    assert_eq!(f.engine.drain_plugin_jobs().await, terminal);
+}
+
+#[tokio::test]
 async fn dynamic_refine_command_schedules_after_public_command_persistence() {
     let mut config = settings(true);
     config["testProvider"] = json!(AUX_PROVIDER);
@@ -480,7 +618,8 @@ async fn accepted_compaction_schedules_exactly_one_automatic_auxiliary_review_an
     let mut config = settings(true);
     config["testProvider"] = json!(AUX_PROVIDER);
     config["auxiliaryModel"] = json!("aux/default");
-    config["plugins"] = json!({"default_context":{"config":{"policy":"full","compactors":["standard_compaction/standard"]}},"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":true,"turnInterval":10000,"compact":true,"cooldownMs":0}}},"route":{"enabled":true,"path":"provider.lua"}});
+    config["autoRefine"] = json!({"enabled":true});
+    config["plugins"] = json!({"default_context":{"config":{"policy":"full","compactors":["standard_compaction/standard"]}},"harness":{"config":{"auxiliaryModel":"aux/selected"}},"route":{"enabled":true,"path":"provider.lua"}});
     let f = Fixture::new(config, LEGACY).await;
     {
         let mut session = f.engine.session.session_handle().lock().await;

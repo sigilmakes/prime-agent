@@ -33,6 +33,14 @@ use serde_json::{json, Value};
 
 const OBJECTIVE: &str = "keep the lane alive until merged";
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Supervisor {
     child: Child,
     #[allow(dead_code)]
@@ -226,13 +234,7 @@ impl Session {
 
     fn session_state(&self) -> String {
         let mut state = String::new();
-        for line in std::fs::read_to_string(self.session_file())
-            .expect("session file readable")
-            .lines()
-        {
-            let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
+        for entry in persisted_rows(&self.session_file()) {
             if entry.get("type").and_then(Value::as_str) == Some("session_state") {
                 if let Some(status) = entry["state"]["status"].as_str() {
                     state = status.to_string();
@@ -245,11 +247,8 @@ impl Session {
     /// The session file's `thread_goal_state` rows (the durable goal record
     /// the continuation loop writes).
     fn goal_state_rows(&self) -> usize {
-        std::fs::read_to_string(self.session_file())
-            .expect("session file readable")
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        persisted_rows(&self.session_file())
+            .into_iter()
             .filter(|entry| {
                 entry.get("type").and_then(Value::as_str) == Some("custom")
                     && entry.get("customType").and_then(Value::as_str) == Some("thread_goal_state")

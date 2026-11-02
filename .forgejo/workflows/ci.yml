@@ -12,9 +12,6 @@ concurrency:
     group: ci-${{ github.ref }}
     cancel-in-progress: true
 
-permissions:
-    contents: read
-
 env:
     # The runner host has 32 cores and no container limits: a job may use a
     # quarter of them, and two jobs still leave the host responsive.
@@ -27,9 +24,71 @@ env:
     CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-    check:
+    # The cheapest gates run first and alone: a formatting, hook or lint
+    # failure stops the workflow before the package build and the workspace
+    # tests start, and the `docs_only` output lets a prose-only push report
+    # the same check names green without paying for either.
+    lint:
+        name: lint
         runs-on: gaia-runner
-        timeout-minutes: 120
+        timeout-minutes: 15
+        container:
+            image: fleet-ci:latest
+        outputs:
+            docs_only: ${{ steps.scope.outputs.docs_only }}
+        steps:
+            - name: Checkout
+              uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+              with:
+                  persist-credentials: false
+                  fetch-depth: 0
+              timeout-minutes: 5
+            - name: Classify the change
+              id: scope
+              timeout-minutes: 2
+              env:
+                  # The push's previous tip; a whole push is classified, not
+                  # just its last commit. Quoted, format-checked before use.
+                  BEFORE: ${{ github.event.before }}
+              run: |
+                  docs_only=false
+                  base="$BEFORE"
+                  if ! printf '%s' "$base" | grep -Eq '^[0-9a-f]{40}$'; then
+                      base=""
+                  fi
+                  if [ -z "$base" ] || ! git rev-parse --quiet --verify "$base^{commit}" >/dev/null 2>&1; then
+                      base=HEAD^
+                  fi
+                  if git rev-parse --quiet --verify "$base^{commit}" >/dev/null 2>&1; then
+                      git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed.txt"
+                      if [ -s "$RUNNER_TEMP/changed.txt" ] \
+                          && ! grep -qvE '^(docs/|\.changes/|[^/]+\.md$)' "$RUNNER_TEMP/changed.txt"; then
+                          docs_only=true
+                      fi
+                  fi
+                  echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+                  echo "Documentation-only change: $docs_only"
+            - name: Formatting
+              if: steps.scope.outputs.docs_only != 'true'
+              timeout-minutes: 5
+              run: nix develop --no-update-lock-file --command cargo fmt --all --check
+            - name: Hook regressions
+              if: steps.scope.outputs.docs_only != 'true'
+              timeout-minutes: 5
+              run: nix develop --no-update-lock-file --command make hooks-check
+            - name: Clippy
+              if: steps.scope.outputs.docs_only != 'true'
+              timeout-minutes: 10
+              run: nix develop --no-update-lock-file --command cargo clippy --locked --workspace --all-targets -- -D warnings
+            - name: Documentation-only change
+              if: steps.scope.outputs.docs_only == 'true'
+              run: echo "No build-affecting files changed; the gates stay green."
+
+    package:
+        name: package
+        needs: lint
+        runs-on: gaia-runner
+        timeout-minutes: 30
         container:
             image: fleet-ci:latest
         steps:
@@ -37,16 +96,20 @@ jobs:
               uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
               with:
                   persist-credentials: false
-            - name: Fast formatting and runner regressions
-              run: |
-                  nix develop --no-update-lock-file --command cargo fmt --all --check
-                  nix develop --no-update-lock-file --command make hooks-check
-            - name: Build and audited offline checks
-              run: nix flake check --no-update-lock-file --print-build-logs --keep-going
+              timeout-minutes: 5
+            - name: Downstream Nix checks
+              if: needs.lint.outputs.docs_only != 'true'
+              timeout-minutes: 25
+              run: nix flake check --no-update-lock-file --print-build-logs
+            - name: Documentation-only change
+              if: needs.lint.outputs.docs_only == 'true'
+              run: echo "No build-affecting files changed; the package is unchanged."
 
     workspace:
+        name: workspace
+        needs: lint
         runs-on: gaia-runner
-        timeout-minutes: 185
+        timeout-minutes: 40
         container:
             image: fleet-ci:latest
         steps:
@@ -54,16 +117,26 @@ jobs:
               uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
               with:
                   persist-credentials: false
+              timeout-minutes: 5
             - name: Checkout pinned TypeScript parity reference
+              if: needs.lint.outputs.docs_only != 'true'
               uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
               with:
                   ref: 239dbe344fcaf671af9898906ff952be73995614
                   path: ts-reference
                   persist-credentials: false
+              timeout-minutes: 5
             - name: Build pinned TypeScript parity reference
+              if: needs.lint.outputs.docs_only != 'true'
+              timeout-minutes: 10
               run: nix build ./ts-reference#prime-agent --no-update-lock-file --out-link "$RUNNER_TEMP/pa-ts-reference"
             - name: Full workspace gates with private state and a real kernel
+              if: needs.lint.outputs.docs_only != 'true'
+              timeout-minutes: 30
               run: |
                   export PA_TS_BINARY="$RUNNER_TEMP/pa-ts-reference/bin/prime-agent"
                   export PA_TS_REFERENCE="$GITHUB_WORKSPACE/ts-reference"
-                  nix develop --no-update-lock-file --command python3 -B scripts/check_workspace.py --require-ts-reference --timeout 10800
+                  nix develop --no-update-lock-file --command python3 -B scripts/check_workspace.py --require-ts-reference --skip-lint --timeout 1740
+            - name: Documentation-only change
+              if: needs.lint.outputs.docs_only == 'true'
+              run: echo "No build-affecting files changed; the workspace tests are unchanged."

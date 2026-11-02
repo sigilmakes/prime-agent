@@ -248,29 +248,39 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
     }
 }
 
-/// The resumed worker refuses reads until its canonical owner holds the
-/// adopted lease, so a probe re-asks through that handshake instead of
-/// failing on it; any other refusal still fails.
-fn messages_once_adopted(client: &mut Client, id: &str, active_session_id: &str) -> Option<String> {
+fn messages_once_resumed(client: &mut Client, id: &str, active_session_id: &str) -> String {
     client.send_command(
         id,
         &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
-    if response["success"] == true {
-        return Some(serde_json::to_string(&response["data"]).expect("messages json"));
-    }
-    let unresolved = response["error"]
-        .as_str()
-        .is_some_and(|error| error.contains("Canonical source is unresolved"));
-    assert!(unresolved, "get_messages failed: {response}");
-    None
+    assert_eq!(response["success"], true, "get_messages failed: {response}");
+    serde_json::to_string(&response["data"]).expect("messages json")
 }
 
-/// A TS-era session file (the entry shapes the TypeScript product
-/// writes). `state` is the durable lifecycle status TS leaves on the file
-/// ("active" = never archived, the shape the old ungated re-arm woke).
-fn write_ts_era_session(agent_dir: &Path, session_id: &str, name: &str, state: &str) -> PathBuf {
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    use pa_core::session_log::{Outcome, SessionLog};
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    assert!(!path.exists(), "fixture log must not exist");
+    let mut log = SessionLog::open(
+        path.parent().expect("session directory"),
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .expect("session ID"),
+        deadline(),
+    )
+    .expect("open fixture log");
+    for line in content.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture payload");
+        assert!(matches!(
+            log.append(&row, deadline()),
+            Outcome::Committed { .. }
+        ));
+    }
+}
+
+/// A saved native session with its durable lifecycle status.
+fn write_saved_session(agent_dir: &Path, session_id: &str, name: &str, state: &str) -> PathBuf {
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let path = sessions.join(format!("{session_id}.jsonl"));
@@ -281,6 +291,7 @@ fn write_ts_era_session(agent_dir: &Path, session_id: &str, name: &str, state: &
     let lines = json_lines(vec![
         json!({
             "type": "session",
+            "version": 3,
             "id": session_id,
             "timestamp": "2026-01-05T10:00:00.000Z",
             "cwd": cwd,
@@ -307,7 +318,7 @@ fn write_ts_era_session(agent_dir: &Path, session_id: &str, name: &str, state: &
             "message": { "role": "user", "content": "the ts era turn", "timestamp": 1_767_000_000_000_u64 },
         }),
     ]);
-    std::fs::write(&path, lines).expect("write session file");
+    write_session_rows(&path, &lines);
     path
 }
 
@@ -396,7 +407,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     write_models_json(&agent_dir, &url);
 
     let session_id = "11111111-2222-3333-4444-555555555555";
-    let session_file = write_ts_era_session(&agent_dir, session_id, "the ts era session", "active");
+    let session_file = write_saved_session(&agent_dir, session_id, "the ts era session", "active");
     let file_before = std::fs::read(&session_file).expect("read before");
 
     write_scheduled_jobs(
@@ -488,7 +499,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         .to_string();
 
     let fired = wait_until(Duration::from_secs(30), || {
-        let text = messages_once_adopted(&mut client, "gm1", &active_id)?;
+        let text = messages_once_resumed(&mut client, "gm1", &active_id);
         (text.contains("the stale heartbeat ping") && text.contains("dormant reply"))
             .then_some(text)
     });
@@ -511,9 +522,9 @@ fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
     write_models_json(&agent_dir, &url);
 
     let live_session = "aaaaaaaa-0000-4000-8000-000000000001";
-    let live_file = write_ts_era_session(&agent_dir, live_session, "old ts session", "active");
+    let live_file = write_saved_session(&agent_dir, live_session, "old ts session", "active");
     let stopped_session = "aaaaaaaa-0000-4000-8000-000000000002";
-    let stopped_file = write_ts_era_session(
+    let stopped_file = write_saved_session(
         &agent_dir,
         stopped_session,
         "stopped ts session",

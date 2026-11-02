@@ -31,7 +31,7 @@ impl AgentSessionEngine {
     /// A consumed compaction stops the run; the model resumes on the next prompt.
     pub(super) fn run_turn_boundary(
         &self,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> BoundaryRun {
         // Fast path: nothing scheduled (the common turn).
         let has_pending = {
@@ -74,7 +74,9 @@ impl AgentSessionEngine {
                     "requested",
                     pending.instructions.as_deref(),
                 ),
-            }) {
+            })
+            .continues()
+            {
                 return BoundaryRun::Cancelled;
             }
         }
@@ -112,7 +114,9 @@ impl AgentSessionEngine {
                 if let Some(message) = &run.ipython_state {
                     if !emit(EngineEvent::CustomMessage(
                         crate::session_commands::custom_message_value(message),
-                    )) {
+                    ))
+                    .continues()
+                    {
                         return BoundaryRun::Cancelled;
                     }
                 }
@@ -122,7 +126,7 @@ impl AgentSessionEngine {
                 let result = crate::compaction::compaction_result_value(&run.result, &run.entry);
                 let event =
                     crate::compaction::compaction_end_success("requested", &result, false, None);
-                if !emit(EngineEvent::Compaction { entry, event }) {
+                if !emit(EngineEvent::Compaction { entry, event }).continues() {
                     return BoundaryRun::Cancelled;
                 }
                 stopped_for_compaction = true;

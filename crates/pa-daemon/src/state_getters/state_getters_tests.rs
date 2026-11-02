@@ -4,6 +4,7 @@
 //! shared `created_worker` fixtures.
 
 use super::*;
+use crate::session_store::log_reader_tests::write_jsonl_fixture;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -192,7 +193,7 @@ async fn get_context_tree_folds_the_captured_attributions() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/attribution-fold-captured.jsonl");
     let session_file = root.join("captured.jsonl");
-    std::fs::copy(&fixture, &session_file).unwrap();
+    write_jsonl_fixture(&session_file, &std::fs::read_to_string(&fixture).unwrap());
     let worker = created_worker_at(&root, &session_file).await;
     let response = worker
         .dispatch(
@@ -273,7 +274,7 @@ async fn get_context_tree_breaks_own_usage_down_by_model() {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&session_file, content).unwrap();
+    write_jsonl_fixture(&session_file, &content);
     let worker = created_worker_at(&root, &session_file).await;
     let response = worker
         .dispatch(
@@ -361,7 +362,7 @@ async fn get_context_tree_omits_the_breakdown_when_an_attribution_exceeds_its_bu
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&session_file, content).unwrap();
+    write_jsonl_fixture(&session_file, &content);
     let worker = created_worker_at(&root, &session_file).await;
     let response = worker
         .dispatch(
@@ -417,7 +418,7 @@ async fn get_context_tree_keeps_the_breakdown_when_an_attribution_fits_its_bucke
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&session_file, content).unwrap();
+    write_jsonl_fixture(&session_file, &content);
     let worker = created_worker_at(&root, &session_file).await;
     let response = worker
         .dispatch(
@@ -463,7 +464,7 @@ async fn get_context_tree_lists_persisted_children() {
     .map(std::string::ToString::to_string)
     .collect::<Vec<_>>()
     .join("\n");
-    std::fs::write(&session_file, content).unwrap();
+    write_jsonl_fixture(&session_file, &content);
     // The artifact tree lives under the worker's agent dir (the writer's
     // addressing): one settled child with a grandchild in a sibling tree.
     let artifacts = agent_dir.join("session-artifacts");
@@ -481,15 +482,14 @@ async fn get_context_tree_lists_persisted_children() {
             json!({"type": "session", "version": 3, "id": session, "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}),
         ];
         lines.extend(write_child(stop));
-        std::fs::write(
-            dir.join(format!("{session}.jsonl")),
-            lines
+        write_jsonl_fixture(
+            &dir.join(format!("{session}.jsonl")),
+            &lines
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n"),
-        )
-        .unwrap();
+        );
     };
     let child_dir = artifacts.join(session_id).join("sub-003f741a");
     write_session(&child_dir, child_session, "stop");

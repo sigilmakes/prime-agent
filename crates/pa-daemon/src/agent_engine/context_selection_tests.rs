@@ -52,6 +52,35 @@ struct RefusingSelectionStore {
 }
 
 impl InitialContextSelectionStore for RefusingSelectionStore {
+    fn mirror_seed(&self) -> anyhow::Result<Option<MirrorSeed>> {
+        let store = crate::session_store::SessionFile::open(&self.source.path)?;
+        Ok(Some(MirrorSeed {
+            header: store.header.clone(),
+            entries: crate::session_tree::file_entries(&store),
+            leaf_id: store.leaf_id().map(str::to_owned),
+            cursor: store.sdk_read_cursor(),
+        }))
+    }
+
+    fn entry_writer(
+        &self,
+        _source: ContextSelectionSource,
+    ) -> Arc<dyn pa_core::session::manager::SessionEntryWriter> {
+        struct RefusingWriter;
+        impl pa_core::session::manager::SessionEntryWriter for RefusingWriter {
+            fn read_tail(
+                &self,
+                _cursor: &mut pa_core::session_log::ReadCursor,
+            ) -> std::io::Result<Vec<FileEntry>> {
+                Ok(Vec::new())
+            }
+            fn append(&self, _entry: &mut FileEntry) -> std::io::Result<()> {
+                Err(std::io::Error::other(ACK_ERROR))
+            }
+        }
+        Arc::new(RefusingWriter)
+    }
+
     fn capture(&self, expected_file: &Path) -> anyhow::Result<ContextSelectionSource> {
         anyhow::ensure!(expected_file == self.source.path, "unexpected fixture path");
         self.captures.fetch_add(1, Ordering::SeqCst);
@@ -237,16 +266,23 @@ fn branch_summary_ack_failure_reaches_no_model() {
     };
     let entries = vec![user_entry("u1", None, "Summarize this fixture branch")];
     let session_file = session_dir.join("owned-ack-fixture.jsonl");
-    let mut fixture = serde_json::to_string(&FileEntry::Header {
+    let mut log = pa_core::session_log::SessionLog::open(
+        &session_dir,
+        "owned-ack-fixture",
+        crate::session_transport::deadline(),
+    )
+    .unwrap();
+    for entry in std::iter::once(FileEntry::Header {
         header: header.clone(),
     })
-    .unwrap();
-    fixture.push('\n');
-    for entry in &entries {
-        fixture.push_str(&serde_json::to_string(entry).unwrap());
-        fixture.push('\n');
+    .chain(entries.iter().cloned())
+    {
+        assert!(matches!(
+            log.append(&entry, crate::session_transport::deadline()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
-    std::fs::write(&session_file, fixture.as_bytes()).unwrap();
+    let fixture = std::fs::read_to_string(&session_file).unwrap();
     let commits = Arc::new(AtomicUsize::new(0));
     let selections = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(RefusingSelectionStore {
@@ -293,7 +329,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
         }
     );
     assert_eq!(commits.load(Ordering::SeqCst), 1);
-    assert_eq!(store.captures.load(Ordering::SeqCst), 2);
+    assert_eq!(store.captures.load(Ordering::SeqCst), 1);
     // A failed warmup/build is the same failure at every demand seam. Do not
     // rerun its acknowledged selection callback or persist a fresh User first.
     let model = engine.session_model().unwrap();
@@ -320,7 +356,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
                 crate::engine::EngineEvent::Done(result) => done = Some(result),
                 _ => {}
             }
-            true
+            true.into()
         },
     );
     assert!(!accepted);
@@ -330,7 +366,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
         1,
         "build callback must not rerun"
     );
-    assert_eq!(store.captures.load(Ordering::SeqCst), 2);
+    assert_eq!(store.captures.load(Ordering::SeqCst), 1);
     assert_eq!(
         *selections.lock().unwrap(),
         vec![ContextSelection {
@@ -357,12 +393,12 @@ fn admitted_current_has_empty_proof_without_traversing_suffix() {
     // Current is intentionally not a graph validator; SDK owns prefix validation.
     let entries = vec![user_entry("cycle", Some("cycle"), "body")];
     assert!(
-        admitted_user_ids(&entries, Some("cycle"), &ContextStartupBoundary::Current)
+        admitted_input_ids(&entries, Some("cycle"), &ContextStartupBoundary::Current)
             .unwrap()
             .is_empty()
     );
     assert!(
-        admitted_user_ids(&[], None, &ContextStartupBoundary::Current)
+        admitted_input_ids(&[], None, &ContextStartupBoundary::Current)
             .unwrap()
             .is_empty()
     );
@@ -378,12 +414,14 @@ fn admitted_empty_returns_exact_fifo_users_on_selected_branch() {
         metadata_entry("tip", Some("u2")),
     ];
     assert_eq!(
-        admitted_user_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap(),
+        admitted_input_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap(),
         vec!["u1", "u2"]
     );
-    assert!(admitted_user_ids(&[], None, &ContextStartupBoundary::Empty)
-        .unwrap()
-        .is_empty());
+    assert!(
+        admitted_input_ids(&[], None, &ContextStartupBoundary::Empty)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -397,13 +435,13 @@ fn admitted_leaf_excludes_boundary_and_unselected_sibling() {
     ];
     let boundary = ContextStartupBoundary::Leaf("boundary".to_owned());
     assert_eq!(
-        admitted_user_ids(&entries, Some("tip"), &boundary).unwrap(),
+        admitted_input_ids(&entries, Some("tip"), &boundary).unwrap(),
         vec!["new"]
     );
-    assert!(admitted_user_ids(&entries, Some("boundary"), &boundary)
+    assert!(admitted_input_ids(&entries, Some("boundary"), &boundary)
         .unwrap()
         .is_empty());
-    let error = admitted_user_ids(
+    let error = admitted_input_ids(
         &entries,
         Some("tip"),
         &ContextStartupBoundary::Leaf("sibling".to_owned()),
@@ -416,25 +454,25 @@ fn admitted_leaf_excludes_boundary_and_unselected_sibling() {
 fn admitted_missing_entry_fails_closed() {
     let entries = vec![user_entry("tip", Some("missing"), "body")];
     let error =
-        admitted_user_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap_err();
+        admitted_input_ids(&entries, Some("tip"), &ContextStartupBoundary::Empty).unwrap_err();
     assert!(
         error.to_string().contains("missing entry missing"),
         "{error}"
     );
-    assert!(admitted_user_ids(&[], Some("missing"), &ContextStartupBoundary::Empty).is_err());
+    assert!(admitted_input_ids(&[], Some("missing"), &ContextStartupBoundary::Empty).is_err());
 }
 
 #[test]
 fn admitted_missing_leaf_boundary_fails_closed() {
     let entries = vec![user_entry("tip", None, "body")];
-    let error = admitted_user_ids(
+    let error = admitted_input_ids(
         &entries,
         Some("tip"),
         &ContextStartupBoundary::Leaf("absent".to_owned()),
     )
     .unwrap_err();
     assert!(error.to_string().contains("boundary is absent"), "{error}");
-    assert!(admitted_user_ids(
+    assert!(admitted_input_ids(
         &[],
         None,
         &ContextStartupBoundary::Leaf("absent".to_owned())
@@ -448,7 +486,8 @@ fn admitted_cycle_fails_closed() {
         user_entry("a", Some("b"), "one"),
         user_entry("b", Some("a"), "two"),
     ];
-    let error = admitted_user_ids(&entries, Some("b"), &ContextStartupBoundary::Empty).unwrap_err();
+    let error =
+        admitted_input_ids(&entries, Some("b"), &ContextStartupBoundary::Empty).unwrap_err();
     assert!(error.to_string().contains("contains a cycle"), "{error}");
 }
 
@@ -459,139 +498,7 @@ fn admitted_same_body_distinct_ids_are_preserved() {
         user_entry("second", Some("first"), "same body"),
     ];
     assert_eq!(
-        admitted_user_ids(&entries, Some("second"), &ContextStartupBoundary::Empty).unwrap(),
+        admitted_input_ids(&entries, Some("second"), &ContextStartupBoundary::Empty).unwrap(),
         vec!["first", "second"]
-    );
-}
-
-/// The read refusal must actually REFUSE. A `Some` from the owner that never became an
-/// `Err` would leave a poisoned epoch serving a mirror built from a tail nobody
-/// classified, so this test drives `build_session_mirror` itself, not the predicate.
-struct PoisonedSelectionStore {
-    source: ContextSelectionSource,
-    captures: AtomicUsize,
-}
-
-impl InitialContextSelectionStore for PoisonedSelectionStore {
-    fn capture(&self, _expected_file: &Path) -> anyhow::Result<ContextSelectionSource> {
-        // Reaching here would mean the refusal did not run before the build.
-        self.captures.fetch_add(1, Ordering::SeqCst);
-        Ok(self.source.clone())
-    }
-
-    fn commit(
-        &self,
-        _source: ContextSelectionSource,
-        _selection: ContextSelection,
-    ) -> ContextSelectionCommitFuture {
-        unreachable!("a refused mirror never commits a selection");
-    }
-
-    fn canonical_read_refusal(&self) -> Option<pa_core::session::canonical::CanonicalStoreError> {
-        Some(crate::session_store::canonical_adapter::refused_poisoned_read())
-    }
-}
-
-#[tokio::test]
-async fn a_poisoned_epoch_refuses_the_session_mirror_before_building_it() {
-    use pa_core::session::canonical::{CanonicalSourceDisposition, CanonicalStoreError};
-
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let cwd = dir.path().join("project");
-    let session_dir = dir.path().join("sessions");
-    for path in [&agent_dir, &cwd, &session_dir] {
-        std::fs::create_dir_all(path).unwrap();
-    }
-    std::fs::write(
-        agent_dir.join("models.json"),
-        serde_json::json!({ "providers": { (PROVIDER): {
-            "api": "openai-completions", "baseUrl": "http://127.0.0.1:9/v1",
-            "apiKey": "none",
-            "models": [{ "id": MODEL, "name": "Owned gate test model",
-                "api": "openai-completions", "reasoning": false,
-                "contextWindow": 128_000, "maxTokens": 4096 }]
-        } } })
-        .to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        serde_json::json!({
-            "harnessRefinements": false, "enableBuiltinSkills": false,
-            "prewarmIpythonKernel": false, "contextStrategy": "default_context/rolling"
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let header = SessionHeader {
-        version: Some(3),
-        id: "poisoned-read-fixture".to_owned(),
-        timestamp: "2026-01-01T00:00:00.000Z".to_owned(),
-        cwd: cwd.to_string_lossy().into_owned(),
-        parent_session: None,
-        rlm_depth: Some(0),
-        git: None,
-        rest: pa_types::JsonMap::new(),
-    };
-    let session_file = session_dir.join("poisoned-read-fixture.jsonl");
-    let mut fixture = serde_json::to_string(&FileEntry::Header {
-        header: header.clone(),
-    })
-    .unwrap();
-    fixture.push('\n');
-    fixture.push_str(&serde_json::to_string(&user_entry("u1", None, "hi")).unwrap());
-    fixture.push('\n');
-    std::fs::write(&session_file, fixture.as_bytes()).unwrap();
-
-    let store = Arc::new(PoisonedSelectionStore {
-        source: ContextSelectionSource {
-            header,
-            path: session_file.clone(),
-            lease: Weak::new(),
-        },
-        captures: AtomicUsize::new(0),
-    });
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
-        cwd: cwd.clone(),
-        agent_dir,
-        provider: Some(PROVIDER.to_owned()),
-        model: Some(MODEL.to_owned()),
-        api_key: None,
-        thinking: None,
-        session_dir: Some(session_dir.clone()),
-        session_file: Some(session_file.clone()),
-        faux_script: None,
-        supervisor_link: None,
-        telemetry_disabled: Some(true),
-        cron_store: None,
-        queued_steering_probe: None,
-    })
-    .unwrap();
-    engine.set_initial_context_selection_store(store.clone());
-
-    let Err(error) = engine
-        .build_session_mirror(cwd, Some(session_dir), Some(session_file.clone()))
-        .await
-    else {
-        panic!("a poisoned epoch must not build a mirror")
-    };
-    let refusal = error
-        .downcast_ref::<CanonicalStoreError>()
-        .expect("the refusal stays typed, not a string");
-    assert_eq!(refusal.source, CanonicalSourceDisposition::NeedsReconcile);
-    assert_eq!(
-        refusal.detail,
-        "canonical epoch is poisoned by an uncertain write"
-    );
-    assert_eq!(
-        store.captures.load(Ordering::SeqCst),
-        0,
-        "the refusal runs BEFORE the capture, so nothing is read at all"
-    );
-    assert_eq!(
-        std::fs::read(&session_file).unwrap(),
-        fixture.as_bytes(),
-        "a refused read never rewrites the source"
     );
 }

@@ -5,7 +5,6 @@ use super::{
     AgentSessionEngine, DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile,
     TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
-use crate::engine::SessionEngine;
 
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a read-only
@@ -120,9 +119,6 @@ impl Worker {
         {
             return response_failure(None, "shutdown", &format!("{error:#}"), None);
         }
-        // The epoch drain runs at the external idle boundary, with no core lock
-        // held and no remaining child accounting producer admitted by this close.
-        self.drain_canonical_epoch().await;
         if let Some(agent_engine) = &self.agent_engine {
             agent_engine.dispose_kernel().await;
         }
@@ -134,75 +130,6 @@ impl Worker {
         let reporter = self.herdr.lock().unwrap().clone();
         reporter.release().await;
         response_success(None, "shutdown", None)
-    }
-
-    /// Close the live canonical epoch and wait, bounded, for it to drain.
-    ///
-    /// The three lock-shape constraints are not style:
-    ///
-    /// * never inside the `shutdown_requested` scoped lock: `wait_drained` awaits,
-    ///   and holding the core lock across it wedges every reader;
-    /// * never inside [`Self::await_session_work_settled`]: that function takes the
-    ///   core lock at its flag check, so a drain nested there can deadlock;
-    /// * a `Pending`, `Blocked` or elapsed wait KEEPS the epoch and mints no
-    ///   successor. A refusal is not a drain, and this is not a spin loop.
-    ///
-    /// The sequence itself is forced by two facts:
-    ///
-    /// * `wait_drained` WAITS rather than reporting `Pending`, and the epoch's own
-    ///   serving anchor counts in every drain view, so every holder must give up
-    ///   its handle before the wait or the close hangs for the whole budget;
-    /// * dropping an epoch is NOT a clean release. An abandoned anchor poisons the
-    ///   epoch and quarantines projection on purpose, so the ordered boundary is
-    ///   `CanonicalEpoch::finish_ordered_boundary`, which consumes the epoch.
-    async fn drain_canonical_epoch(&self) {
-        /// Long enough for a settled turn's final flight to classify, short enough
-        /// that an uncertain write cannot hold the exit open.
-        const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
-        let handle = {
-            let mut core = self.core.lock().unwrap();
-            // The step slot and the engine's admission both hold epoch clones. Clear
-            // them here, under the one lock, so the handle taken below is the last one.
-            core.canonical_step.lock().unwrap().take();
-            core.store.as_mut().and_then(|store| store.epoch.take())
-        };
-        if let Some(engine) = self.agent_engine.as_ref() {
-            engine.set_canonical_step_admission(None);
-        }
-        // No epoch attached is the pre-genesis window: nothing to drain, and this is
-        // not an error (the counter already states that rows were uncovered).
-        let Some(crate::session_store::canonical_adapter::EpochHandle(epoch)) = handle else {
-            return;
-        };
-        let closing = epoch.request_close();
-        // Consume the ordered boundary: this releases the serving anchor WITHOUT
-        // poisoning, which is the only clean way out. `Arc::try_unwrap` failing means
-        // a holder we do not know about still owns a clone; that is recorded, not
-        // forced, because dropping the last `Arc` instead would quarantine the epoch.
-        let Ok(epoch) = std::sync::Arc::try_unwrap(epoch) else {
-            eprintln!(
-                "pa-daemon: canonical epoch kept live at shutdown: a handle outlived the drain"
-            );
-            return;
-        };
-        epoch.finish_ordered_boundary();
-        match tokio::time::timeout(DRAIN_BUDGET, closing.wait_drained()).await {
-            Ok(pa_core::session_engine::canonical_coordinator::CanonicalDrainView::Drained) => {
-                if let Err(refusal) = closing.finish() {
-                    // `Pending`/`Blocked`/`WouldDrainSelf`: the epoch stays live and no
-                    // successor is minted. Recorded, never retried in a loop.
-                    eprintln!("pa-daemon: canonical epoch kept live at shutdown: {refusal:?}");
-                }
-            }
-            Ok(view) => {
-                eprintln!("pa-daemon: canonical epoch did not drain at shutdown: {view:?}");
-            }
-            Err(_) => {
-                eprintln!(
-                    "pa-daemon: canonical drain timed out after {DRAIN_BUDGET:?}; epoch kept live"
-                );
-            }
-        }
     }
 
     /// Wait until no turn or compaction run is in flight: the kernel dispose
@@ -497,8 +424,9 @@ impl Worker {
                     // releases exactly this handle — never the mutable mirror, which a
                     // core rebuild may have re-swapped.
                     let mint_pending_handle = engine.goal_pending_handle();
+                    let mint_engine = std::sync::Arc::clone(&engine);
                     let continuation = tokio::task::spawn_blocking(move || {
-                        engine.mint_post_compaction_goal_continuation()
+                        mint_engine.mint_post_compaction_goal_continuation()
                     })
                     .await
                     .unwrap_or_else(|error| {
@@ -521,7 +449,7 @@ impl Worker {
                                 if let Some(store) = core
                                     .store
                                     .as_mut()
-                                    .filter(|store| !store.is_canonical_bound())
+                                    .filter(|_| !engine.persists_session_entries())
                                 {
                                     let _ = store.persist_entry(
                                         "custom",

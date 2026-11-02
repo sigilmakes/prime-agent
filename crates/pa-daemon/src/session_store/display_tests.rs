@@ -1,12 +1,13 @@
 //! Display projection regressions use the on-disk public read seam.
 use super::*;
+use crate::session_store::log_reader_tests::write_jsonl_fixture;
 
 fn display_fixture(rows: Vec<Value>) -> (tempfile::TempDir, SessionFile) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("display.jsonl");
     let mut lines = vec![json!({"type":"session","version":3,"id":"display","cwd":"/tmp","timestamp":"1970-01-01T00:00:01.000Z"}).to_string()];
     lines.extend(rows.into_iter().map(|row| row.to_string()));
-    fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    write_jsonl_fixture(&path, &lines.join("\n"));
     let store = SessionFile::open(&path).unwrap();
     (dir, store)
 }

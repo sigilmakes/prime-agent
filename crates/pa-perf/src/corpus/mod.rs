@@ -57,8 +57,8 @@ impl Profile {
     }
 }
 
-/// Whether the warm-up pass runs the product's window-store open over the
-/// generated session files (writing their window-cache sidecars).
+/// Whether the warm-up pass primes the SDK's sparse window cache over the
+/// generated top-level and archived session logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheMode {
@@ -390,10 +390,8 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
         set_mtime(&file, start + HOUR_MS)?;
     }
 
-    // The warm-up pass: the product's own window-store open writes the
-    // window-cache sidecars (the info-cache sidecar has no product writer
-    // outside a worker lease release; the bench measures that warmth via
-    // the daemon's own process cache — see README).
+    // This is the SDK sparse cache, not a daemon scan cache. The serving
+    // reader always replays the canonical SessionLog.
     if options.cache == CacheMode::Warm {
         warm_sidecars(&sessions_dir, &archive_dir)?;
     }
@@ -489,7 +487,7 @@ fn spawn_and_count(
 ) -> anyhow::Result<usize> {
     let children = artifacts::spawn_child(ledger, artifacts_root, id, file, 1, tree, cwd, rng)?;
     for child in &children {
-        *total_rows += count_rows(child);
+        *total_rows += pa_core::session::read::read_entries(child)?.len() - 1;
     }
     Ok(children.len())
 }
@@ -536,18 +534,15 @@ pub(crate) fn set_mtime(path: &Path, millis: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn count_rows(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .map(|text| text.lines().filter(|line| !line.is_empty()).count())
-        .unwrap_or(0)
-}
-
 fn warm_sidecars(sessions_dir: &Path, archive_dir: &Path) -> anyhow::Result<()> {
     for dir in [sessions_dir, archive_dir] {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "jsonl") {
-                let _ = pa_core::session::window::WindowedSessionStore::open(&path)?;
+                pa_core::session::window::WindowedSessionStore::open(&path)?.with_context(
+                    || format!("corpus session has no SDK window: {}", path.display()),
+                )?;
+                pa_core::session::window::flush_cache(&path)?;
             }
         }
     }

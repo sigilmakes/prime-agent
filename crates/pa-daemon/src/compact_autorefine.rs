@@ -429,7 +429,7 @@ mod tests {
             &[],
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
         assert!(execution.is_some(), "the /refine command ran");
@@ -474,7 +474,7 @@ mod tests {
             &[],
             &mut |event| {
                 events.push(event);
-                true
+                true.into()
             },
         );
         let errors: Vec<String> = events

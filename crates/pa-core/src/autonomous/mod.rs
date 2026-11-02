@@ -438,6 +438,7 @@ pub fn autonomous_continuation_loop_row(
 ) -> pa_agent::types::AgentMessage {
     pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(
         pa_agent::types::UserMessage {
+            rest: serde_json::Map::default(),
             content: pa_agent::types::UserContent::Parts(vec![pa_agent::types::UserPart::Text(
                 pa_agent::types::TextContent {
                     text: text.to_string(),

@@ -385,7 +385,7 @@ async fn goal_pause_withdraws_the_queued_continuation() {
 }
 
 /// A scripted goal session's dispatch worker with a durable session
-/// file, so the `thread_goal_state` mirror is observable.
+/// log, so the `thread_goal_state` mirror is observable.
 async fn goal_dispatch_worker_with_store(
     goal: serde_json::Value,
 ) -> (std::sync::Arc<Worker>, PathBuf) {
@@ -418,25 +418,39 @@ async fn goal_dispatch_worker_with_store(
         )
         .await;
     assert!(created.success, "create failed: {created:?}");
-    let file = std::fs::read_dir(&session_dir)
-        .expect("session dir readable")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        .expect("session file created");
+    let file = PathBuf::from(
+        created.data.as_ref().expect("create summary")["sessionFile"]
+            .as_str()
+            .expect("actual durable session path"),
+    );
+    assert_eq!(file.parent(), Some(session_dir.as_path()));
     (worker, file)
 }
 
-/// The session file's `thread_goal_state` custom rows, in order.
+/// The session log's `thread_goal_state` custom rows, in order. The log
+/// row's body is the `FileEntry` JSON the funnel wrote.
 fn thread_goal_state_rows(path: &std::path::Path) -> Vec<Value> {
-    crate::session_store::parse_session_entries(&std::fs::read_to_string(path).expect("read"))
-        .into_iter()
-        .filter(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("custom")
-                && entry.get("customType").and_then(Value::as_str)
-                    == Some(pa_core::goals::GOAL_STATE_CUSTOM_TYPE)
-        })
-        .collect()
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("log file name")
+        .to_owned();
+    pa_core::session_log::SessionLog::open(
+        path.parent().expect("actual log directory"),
+        &session_id,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .expect("open the actual serving log")
+    .read_since(0)
+    .expect("read durable goal rows")
+    .into_iter()
+    .map(|row| row.body)
+    .filter(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("custom")
+            && entry.get("customType").and_then(Value::as_str)
+                == Some(pa_core::goals::GOAL_STATE_CUSTOM_TYPE)
+    })
+    .collect()
 }
 
 /// The mirror row is what a recovery rebuild replays.

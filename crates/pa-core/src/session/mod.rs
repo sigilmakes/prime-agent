@@ -1,8 +1,9 @@
 //! Session entry parsing, migration, context reconstruction, and tree.
-pub mod canonical;
 pub mod discovery;
 pub mod manager;
 pub mod manager_ext;
+pub mod metadata;
+pub mod read;
 pub mod tree;
 pub mod window;
 mod window_cache;
@@ -14,7 +15,6 @@ use pa_types::session::{
     AgentMessage, CompactionEntry, CompactionSummaryMessage, CustomMessage, CustomMessageEntry,
     FileEntry,
 };
-use pa_types::JsonMap;
 
 /// Current on-disk session format version.
 pub const CURRENT_SESSION_VERSION: u32 = 3;
@@ -525,7 +525,7 @@ pub(crate) fn create_custom_message(
         display: payload.display,
         details: payload.details.clone(),
         timestamp: timestamp_to_millis(entry.timestamp()),
-        rest: JsonMap::new(),
+        rest: payload.rest.clone(),
     }
 }
 

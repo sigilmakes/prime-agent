@@ -329,15 +329,10 @@ pub(crate) fn opt_in_fsync_calls() -> usize {
 }
 
 /// Atomic write: temp file + rename, private mode like `writeFileAtomicSync`.
+/// Explicit [`AtomicWriteOptions`] match the TS `writeFileAtomicSync(path, data, options)` shape.
 /// TS default durability: NO fsync (opt-in) — a hard crash leaves either the
-/// previous file or the new file. Sites needing the pre-rename fsync opt in
-/// through [`atomic_write_with`]; the audit is per call site, never blanket.
-pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    atomic_write_with(path, content, AtomicWriteOptions::default())
-}
-
-/// [`atomic_write`] with explicit [`AtomicWriteOptions`]: the TS
-/// `writeFileAtomicSync(path, data, options)` shape.
+/// previous file or the new file. Sites needing the pre-rename fsync opt in;
+/// the audit is per call site, never blanket.
 pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions) -> Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {
@@ -444,7 +439,7 @@ mod tests {
         let path = dir.path().join("state.json");
 
         let before = opt_in_fsync_calls();
-        atomic_write(&path, "default bytes\n").unwrap();
+        atomic_write_with(&path, "default bytes\n", AtomicWriteOptions::default()).unwrap();
         assert_eq!(
             opt_in_fsync_calls(),
             before,

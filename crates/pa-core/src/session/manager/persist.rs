@@ -1,23 +1,23 @@
-//! The persist concern: the entry index, the rewrite/flush/notify plumbing,
-//! the durable append arm, and the atomic session-file write
-//! (TS `writeFileAtomicSync`).
+//! Durable manager writes through the session-log core only.
+use super::{FileEntry, SessionManager, SessionPersistListener};
+use crate::session_log::{Outcome, ReadCursor, SessionLog};
+use std::io;
+use std::time::Instant;
 
-use super::{
-    serialize_entry, AgentMessage, FileEntry, Path, PathBuf, SessionManager,
-    SessionPersistListener, Write,
-};
+pub(super) struct StandaloneLog {
+    log: SessionLog,
+    cursor: ReadCursor,
+    seq: u64,
+    initialized: usize,
+    pending: Option<(u64, FileEntry)>,
+    initial_recover: Option<crate::session_log::Recover>,
+    initial_pending: Option<(u64, FileEntry)>,
+}
 
 impl SessionManager {
-    pub(super) fn refresh_has_assistant_entry(&mut self, entries: &[FileEntry]) {
-        self.has_assistant_entry = entries.iter().any(|entry| {
-            matches!(
-                entry,
-                FileEntry::Message {
-                    message: AgentMessage::Assistant(_),
-                    ..
-                }
-            )
-        });
+    /// Route every new row through the host's durable log.
+    pub fn set_entry_writer(&mut self, writer: std::sync::Arc<dyn super::SessionEntryWriter>) {
+        self.entry_writer = Some(writer);
     }
 
     pub(super) fn build_index(&mut self) {
@@ -29,16 +29,26 @@ impl SessionManager {
             if matches!(entry, FileEntry::Header { .. }) {
                 continue;
             }
+            if let FileEntry::Unknown { rest } = entry {
+                if rest.get("type").and_then(serde_json::Value::as_str) == Some("branch_selection")
+                {
+                    self.leaf_id = rest
+                        .get("selectedLeaf")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    continue;
+                }
+            }
             if let Some(id) = entry.id() {
-                self.by_id.insert(id.to_string(), index);
-                self.leaf_id = Some(id.to_string());
+                self.by_id.insert(id.to_owned(), index);
+                self.leaf_id = Some(id.to_owned());
             }
             if let FileEntry::Label { payload, .. } = entry {
                 if let Some(label) = &payload.label {
                     self.labels_by_id
                         .insert(payload.target_id.clone(), label.clone());
                     self.label_timestamps_by_id
-                        .insert(payload.target_id.clone(), entry.timestamp().to_string());
+                        .insert(payload.target_id.clone(), entry.timestamp().to_owned());
                 } else {
                     self.labels_by_id.remove(&payload.target_id);
                     self.label_timestamps_by_id.remove(&payload.target_id);
@@ -47,123 +57,375 @@ impl SessionManager {
         }
     }
 
-    pub(super) fn rewrite_file(&mut self) {
-        if let Err(error) = self.try_rewrite_file() {
-            tracing::error!(%error, "session rewrite failed");
-        }
-    }
-
-    fn try_rewrite_file(&mut self) -> std::io::Result<()> {
-        assert!(
-            self.window.is_none(),
-            "hydrate full session history before this operation"
-        );
-        let Some(session_file) = &self.session_file else {
-            return Ok(());
-        };
-        if !self.persist {
-            return Ok(());
-        }
-        let mut content = String::new();
-        for (index, entry) in self.file_entries.iter().enumerate() {
-            if index > 0 {
-                content.push('\n');
-            }
-            content.push_str(&serialize_entry(entry));
-        }
-        content.push('\n');
-        if let Some(parent) = session_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        atomic_write(session_file, &content)?;
-        self.notify_persist_listeners();
-        Ok(())
-    }
-
     fn notify_persist_listeners(&self) {
-        let Some(session_file) = &self.session_file else {
-            return;
-        };
-        for listener in &self.persist_listeners {
-            listener(session_file);
+        if let Some(path) = &self.session_file {
+            for listener in &self.persist_listeners {
+                listener(path);
+            }
         }
     }
+
     pub fn on_persist(&mut self, listener: SessionPersistListener) {
         self.persist_listeners.push(listener);
     }
 
     #[must_use]
     pub fn is_persisted(&self) -> bool {
-        self.persist
+        self.persist || self.entry_writer.is_some()
     }
-    /// Force-write all in-memory entries immediately (pre-model durability).
+
+    /// Bind the independent cursor captured with the authoritative startup seed.
+    pub fn set_committed_cursor(&mut self, cursor: ReadCursor) {
+        self.read_cursor = cursor;
+    }
+
+    /// Refresh committed history before inference or choosing an append parent.
     ///
     /// # Errors
+    /// Returns log contention, replacement, checksum, ordering or I/O failures.
     ///
-    /// I/O error when the session file rewrite fails; unpersisted or
-    /// already-flushed managers never touch the disk.
-    pub fn flush_now(&mut self) -> std::io::Result<()> {
-        if !self.persist || self.session_file.is_none() {
+    /// # Panics
+    /// Panics if a successful initial flush did not initialize the standalone log.
+    pub fn refresh_committed_entries(&mut self) -> io::Result<()> {
+        let entries = if let Some(writer) = &self.entry_writer {
+            writer.read_tail(&mut self.read_cursor)?
+        } else if self.persist {
+            self.flush_now()?;
+            let state = self.standalone_log.as_mut().expect("flush initialized log");
+            if let Some((seq, pending)) = &state.pending {
+                let outcome = state
+                    .log
+                    .append_at_checked(*seq, pending, &state.cursor, Instant::now())
+                    .map_err(io::Error::other)?;
+                committed(outcome)?;
+            }
+            let rows = state
+                .log
+                .read_tail(&mut state.cursor, Instant::now())
+                .map_err(io::Error::other)?;
+            if let Some(row) = rows.last() {
+                state.seq = row.seq;
+            }
+            rows.into_iter()
+                .map(|row| serde_json::from_value(row.body).map_err(io::Error::from))
+                .collect::<io::Result<Vec<_>>>()?
+        } else {
             return Ok(());
+        };
+        let mut changed = false;
+        for entry in entries {
+            if matches!(entry, FileEntry::Header { .. })
+                || entry.id().is_some_and(|id| self.by_id.contains_key(id))
+            {
+                continue;
+            }
+            if let Some(window) = &mut self.window {
+                window.append_entry(entry.clone());
+            }
+            self.file_entries.push(entry);
+            changed = true;
         }
-        if self.flushed && self.session_file.as_ref().is_some_and(|path| path.exists()) {
-            return Ok(());
+        if changed {
+            super::super::apply_child_usage_attributions(&mut self.file_entries);
+            self.build_index();
         }
-        self.try_rewrite_file()?;
-        self.flushed = true;
         Ok(())
     }
-    pub(super) fn persist_entry(&mut self, index: usize) -> std::io::Result<()> {
-        if !self.persist || self.session_file.is_none() {
+
+    /// Persist the initial history without rewriting any existing row.
+    ///
+    /// # Errors
+    /// Returns log contention, damage, mismatch or I/O errors; never repairs.
+    ///
+    /// # Panics
+    /// Panics if an unresolved initial append has lost its retained recovery token.
+    pub fn flush_now(&mut self) -> io::Result<()> {
+        if !self.persist
+            || self.entry_writer.is_some()
+            || (self.standalone_log.is_some() && self.flushed)
+        {
             return Ok(());
         }
-        let is_session_state_or_info = matches!(
-            self.file_entries[index],
-            FileEntry::SessionState { .. }
-                | FileEntry::SessionInfo { .. }
-                | FileEntry::Compaction { .. }
-        ) || matches!(&self.file_entries[index], FileEntry::Custom {payload,..} if payload.custom_type==pa_types::session::CONTEXT_SELECTION_CUSTOM_TYPE);
-        let has_compaction = self
-            .file_entries
-            .iter()
-            .any(|entry| matches!(entry, FileEntry::Compaction { .. }));
-        if !self.has_assistant_entry && !is_session_state_or_info && !has_compaction {
-            self.flushed = false;
-            return Ok(());
-        }
-        let file_exists = self.session_file.as_ref().is_some_and(|path| path.exists());
-        if self.window.is_none() && (!self.flushed || !file_exists) {
-            // Recover from the session file disappearing under a live session:
-            // append would recreate a headerless stub.
-            self.try_rewrite_file()?;
-            self.flushed = true;
+        let mut state = if let Some(state) = self.standalone_log.take() {
+            state
         } else {
-            let entry = serialize_entry(&self.file_entries[index]);
-            if let Some(session_file) = &self.session_file {
-                let mut line = entry.into_bytes();
-                line.push(b'\n');
-                super::window::append_cached(session_file, &line, self.append_ownership)?;
+            let path = self.session_file.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "persisted manager has no session path",
+                )
+            })?;
+            if self.flushed {
+                std::fs::metadata(path)?;
+            }
+            let dir = path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "session path has no parent")
+            })?;
+            let id = path.file_stem().and_then(|id| id.to_str()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "session path has no UTF-8 id")
+            })?;
+            std::fs::create_dir_all(dir)?;
+            let mut log = SessionLog::open(dir, id, Instant::now()).map_err(io::Error::other)?;
+            let mut cursor = ReadCursor::default();
+            let rows = log
+                .read_tail(&mut cursor, Instant::now())
+                .map_err(io::Error::other)?;
+            if !self.flushed && !rows.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "new session target already contains a log",
+                ));
+            }
+            if !self.flushed && rows.is_empty() {
+                if let Some(FileEntry::Header { header }) = self.file_entries.first_mut() {
+                    if header.git.is_none() {
+                        header.git = super::capture_git_context(&self.cwd);
+                    }
+                }
+            }
+            let mut existing = rows
+                .iter()
+                .map(|row| serde_json::from_value(row.body.clone()).map_err(io::Error::from))
+                .collect::<io::Result<Vec<FileEntry>>>()?;
+            super::super::apply_child_usage_attributions(&mut existing);
+            if self.window.is_some() {
+                if existing.first().map(serde_json::to_value).transpose()?
+                    != self
+                        .file_entries
+                        .first()
+                        .map(serde_json::to_value)
+                        .transpose()?
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "session window header differs from durable log",
+                    ));
+                }
+                self.standalone_log = Some(StandaloneLog {
+                    initialized: self.file_entries.len(),
+                    seq: rows.last().map_or(0, |row| row.seq),
+                    log,
+                    cursor,
+                    pending: None,
+                    initial_recover: None,
+                    initial_pending: None,
+                });
+                return Ok(());
+            }
+            let shared = existing.len().min(self.file_entries.len());
+            if serde_json::to_value(&existing[..shared])?
+                != serde_json::to_value(&self.file_entries[..shared])?
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing session log differs from manager history",
+                ));
+            }
+            if existing.len() > self.file_entries.len() {
+                self.file_entries
+                    .extend(existing.into_iter().skip(self.file_entries.len()));
+                self.build_index();
+            }
+            StandaloneLog {
+                initialized: rows.len(),
+                seq: rows.last().map_or(0, |row| row.seq),
+                log,
+                cursor,
+                pending: None,
+                initial_recover: None,
+                initial_pending: None,
+            }
+        };
+        let mut foreign_added = false;
+        let result = (|| {
+            while state.initialized < self.file_entries.len() {
+                let (seq, entry) = state
+                    .initial_pending
+                    .get_or_insert_with(|| {
+                        (state.seq + 1, self.file_entries[state.initialized].clone())
+                    })
+                    .clone();
+                let outcome = if let Some(recover) = &state.initial_recover {
+                    recover.recover(Instant::now()).map_err(io::Error::other)?
+                } else if state.initialized == 0 && !self.flushed {
+                    state.log.append_first(&entry, Instant::now())
+                } else {
+                    state
+                        .log
+                        .append_at_checked(seq, &entry, &state.cursor, Instant::now())
+                        .map_err(io::Error::other)?
+                };
+                let outcome = match outcome {
+                    Outcome::Unknown { recover } => {
+                        state.initial_recover = Some(recover);
+                        state
+                            .initial_recover
+                            .as_ref()
+                            .expect("recover retained")
+                            .recover(Instant::now())
+                            .map_err(io::Error::other)?
+                    }
+                    outcome => outcome,
+                };
+                if matches!(
+                    &outcome,
+                    Outcome::Committed { .. } | Outcome::NotWritten { .. }
+                ) {
+                    state.initial_recover = None;
+                }
+                committed(outcome)?;
+                state.initial_pending = None;
+                state.seq = state.seq.max(seq);
+                state.initialized += 1;
+                let rows = state
+                    .log
+                    .read_tail(&mut state.cursor, Instant::now())
+                    .map_err(io::Error::other)?;
+                for row in rows {
+                    state.seq = row.seq;
+                    let foreign: FileEntry = serde_json::from_value(row.body)?;
+                    if matches!(foreign, FileEntry::Header { .. })
+                        || foreign.id().is_some_and(|id| {
+                            self.file_entries[..state.initialized]
+                                .iter()
+                                .any(|entry| entry.id() == Some(id))
+                        })
+                    {
+                        continue;
+                    }
+                    self.file_entries.insert(state.initialized, foreign);
+                    foreign_added = true;
+                    state.initialized += 1;
+                }
+            }
+            Ok(())
+        })();
+        if foreign_added {
+            super::super::apply_child_usage_attributions(&mut self.file_entries);
+            self.build_index();
+        }
+        self.standalone_log = Some(state);
+        if result.is_ok() {
+            self.flushed = true;
+            self.notify_persist_listeners();
+        }
+        result
+    }
+
+    pub(super) fn persist_entry(&mut self, entry: &mut FileEntry) -> io::Result<()> {
+        if let Some(writer) = &self.entry_writer {
+            return writer.append(entry);
+        }
+        if !self.persist {
+            return Ok(());
+        }
+        self.flush_now()?;
+        let mut state = self
+            .standalone_log
+            .take()
+            .expect("flush initialized standalone log");
+        let result = (|| {
+            let rows = state
+                .log
+                .read_tail(&mut state.cursor, Instant::now())
+                .map_err(io::Error::other)?;
+            let mut changed = false;
+            for row in rows {
+                state.seq = row.seq;
+                if state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|(seq, _)| *seq == row.seq)
+                {
+                    let pending = &state.pending.as_ref().expect("pending exists").1;
+                    if serde_json::to_value(pending)? != row.body {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "pending session row was replaced",
+                        ));
+                    }
+                } else {
+                    let foreign: FileEntry = serde_json::from_value(row.body)?;
+                    if let Some(window) = &mut self.window {
+                        window.append_entry(foreign.clone());
+                    }
+                    self.file_entries.push(foreign);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.build_index();
+            }
+            if let Some((_, pending)) = &state.pending {
+                let payload = |row: &FileEntry| -> io::Result<serde_json::Value> {
+                    let mut value = serde_json::to_value(row)?;
+                    if let Some(object) = value.as_object_mut() {
+                        for key in ["id", "parentId", "timestamp"] {
+                            object.remove(key);
+                        }
+                    }
+                    Ok(value)
+                };
+                if payload(pending)? != payload(entry)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "a different session append is pending; retry it first",
+                    ));
+                }
+                *entry = pending.clone();
+            } else {
+                state.pending = Some((state.seq + 1, entry.clone()));
+            }
+            {
+                let seq = state.pending.as_ref().expect("pending exists").0;
+                let outcome = state
+                    .log
+                    .append_at_checked(seq, entry, &state.cursor, Instant::now())
+                    .map_err(io::Error::other)?;
+                if matches!(&outcome, Outcome::Busy { .. } | Outcome::NotWritten { .. }) {
+                    state.pending = None;
+                }
+                committed(outcome)?;
+                // Leave the independent read cursor before this commit. The next
+                // refresh folds this row and every concurrent row, skipping our
+                // already-published identity rather than losing foreign writes.
+                state.seq = state.seq.max(seq);
+            }
+            state.pending = None;
+            Ok(())
+        })();
+        self.standalone_log = Some(state);
+        if result.is_ok() {
+            if let Some(path) = &self.session_file {
+                super::super::window_cache::committed(path, entry, self.append_ownership);
             }
             self.notify_persist_listeners();
         }
-        Ok(())
+        result
     }
 }
 
-/// Atomic session-file write: private temp + fsync + rename (the
-/// `writeFileAtomicSync` shape; the win32 destination-busy retry rides
-/// along in `rename_onto`). The fsync is deliberate (TS passes none; a
-/// non-synced rename can zero the file on a hard crash); other sites are
-/// TS-default.
-pub(super) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
-    let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        crate::platform::perms::set_private_mode(&mut options);
-        let mut file = options.open(&temp)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
+fn committed(outcome: Outcome) -> io::Result<()> {
+    match outcome {
+        Outcome::Committed { .. } => Ok(()),
+        Outcome::Unknown { recover } => {
+            match recover.recover(Instant::now()).map_err(io::Error::other)? {
+                Outcome::Committed { .. } => Ok(()),
+                other => Err(io::Error::other(format!(
+                    "session append recovery: {other:?}"
+                ))),
+            }
+        }
+        Outcome::Busy { .. } => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "session log is busy",
+        )),
+        Outcome::NotWritten { reason } => Err(io::Error::other(format!(
+            "session append not written: {reason:?}"
+        ))),
     }
-    crate::platform::rename_onto_durable(&temp, path)
 }
+
+#[cfg(test)]
+#[path = "persist_tests.rs"]
+mod tests;

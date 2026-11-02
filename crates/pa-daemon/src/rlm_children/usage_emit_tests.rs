@@ -2,6 +2,21 @@ use super::*;
 use pa_core::session_engine::rlm_usage::RlmChildUsageReport;
 use std::sync::Arc;
 
+fn append_session_rows(path: &Path, rows: &[serde_json::Value]) {
+    let mut log = pa_core::session_log::SessionLog::open(
+        path.parent().unwrap(),
+        path.file_stem().unwrap().to_str().unwrap(),
+        std::time::Instant::now(),
+    )
+    .expect("fixture session log");
+    for row in rows {
+        assert!(matches!(
+            log.append(row, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
+}
+
 /// A capturing sink: reports land in a shared vector for assertions;
 /// `fail` flips `record` into a failing no-op.
 #[derive(Default)]
@@ -91,15 +106,19 @@ fn registry(agent_dir: &Path) -> SupervisorChildSessions {
 /// captured completion (the branch-verified TS fixture row's child usage).
 fn child_file(dir: &Path) -> PathBuf {
     let path = dir.join("child.jsonl");
-    std::fs::write(
-        &path,
-        concat!(
-            r#"{"type":"session","id":"child-1","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/tmp","version":3}"#, "\n",
-            r#"{"type":"custom_message","id":"c0","parentId":null,"timestamp":"2026-09-23T00:00:01.000Z","customType":"agent_message","content":"[task from parent]\n\nthe task","display":true,"details":{"id":"spawn:child-1","message":"the task"}}"#, "\n",
-            r#"{"type":"message","id":"a1","parentId":"c0","timestamp":"2026-09-23T00:00:02.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,"cost":{"input":0.0075312,"output":0.0014645,"cacheRead":0,"cacheWrite":0,"total":0.0089957}}}}"#, "\n",
-        ),
-    )
-    .unwrap();
+    let content = concat!(
+        r#"{"type":"session","id":"child-1","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/tmp","version":3}"#,
+        "\n",
+        r#"{"type":"custom_message","id":"c0","parentId":null,"timestamp":"2026-09-23T00:00:01.000Z","customType":"agent_message","content":"[task from parent]\n\nthe task","display":true,"details":{"id":"spawn:child-1","message":"the task"}}"#,
+        "\n",
+        r#"{"type":"message","id":"a1","parentId":"c0","timestamp":"2026-09-23T00:00:02.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,"cost":{"input":0.0075312,"output":0.0014645,"cacheRead":0,"cacheWrite":0,"total":0.0089957}}}}"#,
+        "\n",
+    );
+    let rows: Vec<serde_json::Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    append_session_rows(&path, &rows);
     path
 }
 
@@ -352,12 +371,8 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     // appends its row; the next emit bills only that row.
     SupervisorChildSessionsInner::arm_usage_watch(&sessions.inner, &record).await;
     assert_eq!(record.lock().await.attributed_rows, Some(2));
-    let mut content = std::fs::read_to_string(Path::new(&child_one)).expect("child file");
-    content.push_str(
-        r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-23T00:00:03.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15,"cost":{"input":0.1,"output":0.05,"cacheRead":0,"cacheWrite":0,"total":0.15}}}}"#,
-    );
-    content.push('\n');
-    std::fs::write(Path::new(&child_one), content).expect("append the row");
+    let later: serde_json::Value = serde_json::from_str(r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-23T00:00:03.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15,"cost":{"input":0.1,"output":0.05,"cacheRead":0,"cacheWrite":0,"total":0.15}}}}"#).unwrap();
+    append_session_rows(Path::new(&child_one), &[later]);
     sessions.inner.emit_child_usage(&record).await;
     let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
@@ -371,7 +386,6 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
 /// behind it are drained once before the caller's final forget.
 #[tokio::test]
 async fn canceled_interval_keeps_identity_and_drains_new_rows_before_forget() {
-    use std::io::Write;
     struct CancelFirstSink {
         attempts: std::sync::Mutex<Vec<RlmChildUsageReport>>,
         started: tokio::sync::Notify,
@@ -427,20 +441,16 @@ async fn canceled_interval_keeps_identity_and_drains_new_rows_before_forget() {
     emit.abort();
     assert!(emit.await.unwrap_err().is_cancelled());
     let pending = record.lock().await.pending_usage_report.clone().unwrap();
-    let mut later: serde_json::Value = std::fs::read_to_string(&file)
+    let mut later = pa_core::session::read::read_entries(&file)
         .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
         .find(|row| row["message"]["role"] == "assistant")
         .unwrap();
     later["id"] = serde_json::json!("new-completion");
     later["parentId"] = serde_json::json!("a0");
     later["message"]["usage"]["input"] = serde_json::json!(70);
-    let mut append = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&file)
-        .unwrap();
-    writeln!(append, "{}", serde_json::to_string(&later).unwrap()).unwrap();
+    append_session_rows(&file, &[later]);
     sessions.inner.emit_child_usage(&record).await;
     sessions.inner.forget_child_usage(&record).await;
     {
@@ -1155,11 +1165,7 @@ impl RlmChildUsageSink for FinalWatcherSink {
                     "usage":{"input":7,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":10,
                         "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}
                 }});
-                let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(&self.child_file)
-                    .unwrap();
-                std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
+                append_session_rows(&self.child_file, &[row]);
                 self.capture.record(report).await
             } else if attempt == 2 || !self.recovered.load(std::sync::atomic::Ordering::Relaxed) {
                 false

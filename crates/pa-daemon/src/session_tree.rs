@@ -130,37 +130,6 @@ fn message_text(message: &Value) -> String {
     }
 }
 
-/// Envelope-free context-policy intent for an already computed branch summary.
-/// The actual owner supplies its row identity and new-branch parent.
-pub(crate) fn branch_summary_intent(
-    from_id: Option<&str>,
-    summary: &str,
-    details: Option<Value>,
-    usage: Option<Value>,
-    model: Option<(&str, &str)>,
-) -> Result<FileEntry> {
-    let mut rest = pa_types::JsonMap::new();
-    if let Some((provider, model_id)) = model {
-        rest.insert("provider".into(), json!(provider));
-        rest.insert("modelId".into(), json!(model_id));
-    }
-    Ok(FileEntry::BranchSummary {
-        base: pa_types::session::EntryBase {
-            id: None,
-            parent_id: None,
-            timestamp: None,
-            rest,
-        },
-        payload: pa_types::session::BranchSummaryEntry {
-            from_id: from_id.unwrap_or("root").to_owned(),
-            summary: summary.to_owned(),
-            details,
-            from_hook: None,
-            usage: usage.map(serde_json::from_value).transpose()?,
-        },
-    })
-}
-
 impl SessionFile {
     /// `branch`: move the leaf onto an existing entry; the next append
     /// parents from there.
@@ -169,17 +138,19 @@ impl SessionFile {
     ///
     /// Returns an error when the target entry does not exist; a `None` id clears the leaf.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
-        if self.is_canonical_bound() {
-            return self.advance_canonical_branch(id).map_err(Into::into);
-        }
-        match id {
-            Some(id) => {
-                if self.entry(id).is_none() {
-                    return Err(anyhow!("Entry {id} not found"));
-                }
-                self.leaf_id = Some(id.to_string());
+        if let Some(id) = id {
+            if self.entry(id).is_none() {
+                return Err(anyhow!("Entry {id} not found"));
             }
-            None => self.leaf_id = None,
+            if !self.path.as_os_str().is_empty() {
+                self.persist_branch_selection(Some(id))?;
+            }
+            self.leaf_id = Some(id.to_string());
+        } else {
+            if !self.path.as_os_str().is_empty() {
+                self.persist_branch_selection(None)?;
+            }
+            self.leaf_id = None;
         }
         Ok(())
     }
@@ -200,10 +171,6 @@ impl SessionFile {
         usage: Option<Value>,
         model: Option<(&str, &str)>,
     ) -> Result<String> {
-        anyhow::ensure!(
-            !self.is_canonical_bound(),
-            "canonical branch summaries require prepared navigation and context-policy receipts"
-        );
         self.branch_to(from_id)?;
         let mut fields = json!({
             "fromId": from_id.unwrap_or("root"),
@@ -240,8 +207,7 @@ impl SessionFile {
             Some(label) => fields["label"] = json!(label),
             None => fields["label"] = Value::Null,
         }
-        self.persist_owner_metadata("label", fields)
-            .map_err(Into::into)
+        self.persist_entry("label", fields)
     }
 
     /// The root-to-leaf path of the (new) current leaf as typed entries.
@@ -511,30 +477,29 @@ mod tests {
     }
 
     #[test]
-    fn branch_summary_intent_preserves_output_without_a_canonical_envelope() {
-        let entry = branch_summary_intent(
-            Some("selected-parent"),
-            "retained paid summary",
-            Some(json!({"readFiles":["one"],"native":{"bytes":"AA=="}})),
-            None,
-            Some(("actual-provider", "actual-aux-model")),
-        )
-        .unwrap();
-        let value = serde_json::to_value(&entry).unwrap();
+    fn branch_summary_preserves_paid_output_and_unknown_details() {
+        let (_dir, mut store) = temp_store();
+        let parent = message_entry(&mut store, "user", "selected parent");
+        let id = store
+            .append_branch_summary(
+                Some(&parent),
+                "retained paid summary",
+                Some(json!({"readFiles":["one"],"native":{"bytes":"AA=="}})),
+                None,
+                None,
+                Some(("actual-provider", "actual-aux-model")),
+            )
+            .unwrap();
+        let reopened = SessionFile::open(&store.path).unwrap();
+        let entry = reopened.entry(&id).unwrap();
+        assert_eq!(entry.fields["summary"], "retained paid summary");
         assert_eq!(
-            value,
-            json!({
-                "type":"branch_summary", "id":null, "parentId":null, "timestamp":null,
-                "fromId":"selected-parent", "summary":"retained paid summary",
-                "details":{"readFiles":["one"],"native":{"bytes":"AA=="}},
-                "provider":"actual-provider", "modelId":"actual-aux-model"
-            })
+            entry.fields["details"],
+            json!({"readFiles":["one"],"native":{"bytes":"AA=="}})
         );
-        assert!(pa_core::session::canonical::CanonicalEntryDraft::new(
-            pa_core::session::canonical::CanonicalMutationKind::ContextPolicy,
-            entry,
-        )
-        .is_ok());
+        assert_eq!(entry.fields["provider"], "actual-provider");
+        assert_eq!(entry.fields["modelId"], "actual-aux-model");
+        assert_eq!(entry.parent_id.as_deref(), Some(parent.as_str()));
     }
 
     #[test]
@@ -677,5 +642,44 @@ mod tests {
         let entries = file_entries(&store);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id().unwrap(), a);
+    }
+    #[test]
+    fn selection_survives_reopen_without_a_following_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selection.jsonl");
+        let mut store = SessionFile::create("/fixture", None, 0);
+        store.set_path(path.clone());
+        let first = store
+            .persist_entry(
+                "message",
+                json!({"message": {"role": "user", "content": "first", "timestamp": 1}}),
+            )
+            .unwrap();
+        store
+            .persist_entry(
+                "message",
+                json!({"message": {"role": "assistant", "content": [], "timestamp": 2}}),
+            )
+            .unwrap();
+        store.branch_to(Some(&first)).unwrap();
+        let reopened = SessionFile::open(&path).unwrap();
+        assert_eq!(reopened.leaf_id(), Some(first.as_str()));
+        assert_eq!(reopened.entries().len(), 2);
+        store.branch_to(None).unwrap();
+        assert_eq!(SessionFile::open(&path).unwrap().leaf_id(), None);
+    }
+    #[test]
+    fn legacy_open_never_repairs_or_rewrites_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.jsonl");
+        for bytes in [
+            b"{\"type\":\"session\",\"id\":\"legacy\"}\n".as_slice(),
+            b"{\"seq\":1,\"row\":",
+            b"",
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(SessionFile::open(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
     }
 }

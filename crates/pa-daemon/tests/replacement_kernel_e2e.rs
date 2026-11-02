@@ -17,6 +17,27 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    use pa_core::session_log::{Outcome, SessionLog};
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    assert!(!path.exists(), "fixture log must not exist");
+    let mut log = SessionLog::open(
+        path.parent().expect("session directory"),
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .expect("session ID"),
+        deadline(),
+    )
+    .expect("open fixture log");
+    for line in content.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture payload");
+        assert!(matches!(
+            log.append(&row, deadline()),
+            Outcome::Committed { .. }
+        ));
+    }
+}
+
 /// Every test scans the whole process table (the kernel is a worker
 /// child, not a test-process child), so this std lock serializes them.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -469,19 +490,19 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
 
     // A prepared target replaces the runtime: kernel turnover + cold namespace.
     let target = dir.path().join("sessions").join("switch-target.jsonl");
-    std::fs::write(
+    write_session_rows(
         &target,
-        format!(
+        &format!(
             "{}\n",
             json!({
                 "type": "session",
+                "version": 3,
                 "id": "switch-target",
                 "timestamp": "2026-09-21T00:00:00.000Z",
                 "cwd": dir.path().to_string_lossy(),
             })
         ),
-    )
-    .expect("write switch target");
+    );
     client.send_command(
         "s2",
         &json!({
@@ -620,19 +641,19 @@ fn switch_session_rebinds_the_kernel_cwd_onto_the_target_session() {
 
     // A target session file recording the OTHER directory as its cwd.
     let target = sessions_dir.join("switch-target.jsonl");
-    std::fs::write(
+    write_session_rows(
         &target,
-        format!(
+        &format!(
             "{}\n",
             json!({
                 "type": "session",
+                "version": 3,
                 "id": "switch-target",
                 "timestamp": "2026-09-21T00:00:00.000Z",
                 "cwd": beta.to_string_lossy(),
             })
         ),
-    )
-    .expect("write switch target");
+    );
     client.send_command(
         "s1",
         &json!({

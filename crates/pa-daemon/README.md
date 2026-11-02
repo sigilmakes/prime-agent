@@ -78,7 +78,10 @@ session files, descent is membership at any parent-walk step, and
 present rows by agent id or session file are never overwritten - at
 subscribe, spawn-admission, and worker-stop moments, so subscribers see
 the full family, not just resident rows), cloud sandbox attach, session
-leases (`core/session-lease.ts` port). Daemon-owned RLM spawn ledger (`rlm_ledger.rs`):
+execution locks (`lease.rs`): OS file locks exclude duplicate resident workers,
+separate from the session log's per-append lock. Holder metadata is courtesy
+information only; process exit releases ownership without stale-owner recovery.
+Daemon-owned RLM spawn ledger (`rlm_ledger.rs`):
 one append-only JSONL per sessions dir (spawn/rename/delete admissions with
 the TS `rlm-ledger.ts` record grammar, bounds, stat-guarded replay, and
 legacy-registry seeding) plus the per-child display files; family topology
@@ -271,6 +274,18 @@ attached UIs daemon-wide).
 No agent behavior inside workers beyond hosting a pa-core engine; no UI.
 
 ## Public API
+
+`AgentSessionEngine::set_plugin_job_sink` wires the host observer onto current and
+future sessions. The worker persists terminal generic plugin-job outcomes and
+publishes them through the existing custom-message event transport, fenced by
+the durable session identity. Successful jobs may supply `result.message` with
+`customType` (nonempty string), `content` (string), `display` (boolean), and optional
+object `details`. The host publishes that existing custom-message payload without
+plugin-specific rendering rules. Absent projections use the generic job outcome;
+malformed projections keep the committed result and show a generic outcome with
+an explicit projection diagnostic. Failed jobs always show the generic error.
+Failed outcome persistence is visible without re-running the completed job.
+
 Supervisor entrypoint, worker entrypoint, `mcp_login::{WorkerMcpLoginUi, wire_worker_mcp_login}` (the worker's browser+callback login behind `mcp.begin_login`; wired by the agent engine before sessions register host handlers), client connection API for pa-tui/pa-cli, `acp::daemon::{run_daemon_attached_acp_mode, DaemonAcpOptions}` (pa-cli dispatches `--mode acp` through it), `agent_messaging::LinkAgentMessageController` + `rlm_children::{SupervisorChildSessions, ParentIdentity, RlmChildIdentity}` (e2e verifiers construct the worker-side family controller and the children registry; the engine wires the same types), `agent_engine::AgentSessionEngine::dispose_kernel` (the session-end kernel teardown the worker invokes at kill/shutdown/orphan exit — the engine outlives the session, so the pa-core engine-drop teardown cannot run there), the worker's `get_mcp_connections` command (`mcp_connections.rs`: the `/mcp` view's roster from the session's MCP manager overlaid with the session kernel's per-server tool listing, plus the api-key credential rows the same response serves — Rust-native session-plane extension; the TS daemon has no counterpart). Supervision internals `pub(crate)`.
 
 

@@ -31,6 +31,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -238,13 +246,7 @@ fn worker_descriptor_of(agent_dir: &Path, socket: &Path, session_id: &str) -> (P
 
 fn session_state(session_file: &Path) -> String {
     let mut state = String::new();
-    for line in std::fs::read_to_string(session_file)
-        .expect("session file readable")
-        .lines()
-    {
-        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
+    for entry in persisted_rows(session_file) {
         if entry.get("type").and_then(Value::as_str) == Some("session_state") {
             if let Some(status) = entry["state"]["status"].as_str() {
                 state = status.to_string();

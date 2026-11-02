@@ -32,6 +32,7 @@ fn catalog_session_match<'a>(
 /// RESTORES first so the wake spawns over the live path. Misses are `None`
 /// (the caller answers its unknown-target error, not a catalog one).
 pub(crate) fn resolve_saved_session(
+    agent_dir: &Path,
     sessions_dir: &Path,
     archive_dir: &Path,
     selector: &str,
@@ -54,7 +55,7 @@ pub(crate) fn resolve_saved_session(
     };
     match matched {
         Some(info) => {
-            let restored = restore_session(archive_dir, sessions_dir, &info.id)
+            let restored = restore_session(agent_dir, archive_dir, sessions_dir, &info.id)
                 .with_context(|| format!("restore archived session {}", info.id))?;
             let mut info = info.clone();
             info.path = restored;
@@ -86,7 +87,7 @@ mod tests {
         }));
         let path = dir.join(session_file_name(session.session_id()));
         session.set_path(path.clone());
-        session.rewrite().unwrap();
+        crate::session_store::log_reader_tests::write_log_fixture(&path, &session);
         (session.session_id().to_string(), path)
     }
 
@@ -95,11 +96,11 @@ mod tests {
         let dir = temp_dir();
         let archive = dir.join("archive");
         let (id, _path) = write_session(&dir, "/work/a", Some("alpha"));
-        let found = resolve_saved_session(&dir, &archive, &id[..8], "/work/a")
+        let found = resolve_saved_session(&dir, &dir, &archive, &id[..8], "/work/a")
             .unwrap()
             .expect("id prefix resolves");
         assert_eq!(found.id, id);
-        let found = resolve_saved_session(&dir, &archive, "alpha", "/work/a")
+        let found = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/a")
             .unwrap()
             .expect("name resolves");
         assert_eq!(found.id, id);
@@ -112,12 +113,12 @@ mod tests {
         let archive = dir.join("archive");
         let (id, _path) = write_session(&dir, "/work/a", Some("alpha"));
         // A different cwd still resolves through the global pass.
-        let found = resolve_saved_session(&dir, &archive, "alpha", "/work/other")
+        let found = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/other")
             .unwrap()
             .expect("global fallback");
         assert_eq!(found.id, id);
         // The local pass serves the session's own cwd.
-        let found = resolve_saved_session(&dir, &archive, &id[..8], "/work/a")
+        let found = resolve_saved_session(&dir, &dir, &archive, &id[..8], "/work/a")
             .unwrap()
             .expect("local pass");
         assert_eq!(found.cwd, "/work/a");
@@ -130,7 +131,7 @@ mod tests {
         let archive = dir.join("archive");
         write_session(&dir, "/work/a", Some("alpha"));
         write_session(&dir, "/work/a", Some("alpha"));
-        let error = resolve_saved_session(&dir, &archive, "alpha", "/work/a").unwrap_err();
+        let error = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/a").unwrap_err();
         assert_eq!(error.to_string(), "Ambiguous session selector \"alpha\"");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -142,7 +143,7 @@ mod tests {
         std::fs::create_dir_all(&archive).unwrap();
         let (id, path) = write_session(&archive, "/work/a", Some("alpha"));
         // The archived file restores and resolves with its live path.
-        let found = resolve_saved_session(&dir, &archive, "alpha", "/work/a")
+        let found = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/a")
             .unwrap()
             .expect("archived name resolves");
         assert_eq!(found.id, id);
@@ -151,7 +152,7 @@ mod tests {
         assert!(!path.is_file(), "left the archive");
         // After the restore the live catalog serves the selector, and a second resolve
         // does not fail (no stale archive row).
-        let again = resolve_saved_session(&dir, &archive, "alpha", "/work/a")
+        let again = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/a")
             .unwrap()
             .expect("live again");
         assert_eq!(again.path, dir.join(session_file_name(&id)));
@@ -164,7 +165,7 @@ mod tests {
         std::fs::create_dir_all(&archive).unwrap();
         let (live_id, _path) = write_session(&dir, "/work/a", Some("alpha"));
         let (archived_id, _path) = write_session(&archive, "/work/a", Some("alpha"));
-        let found = resolve_saved_session(&dir, &archive, "alpha", "/work/a")
+        let found = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/a")
             .unwrap()
             .expect("resolves");
         assert_eq!(found.id, live_id);
@@ -179,7 +180,7 @@ mod tests {
         std::fs::create_dir_all(&archive).unwrap();
         write_session(&archive, "/work/a", Some("alpha"));
         write_session(&archive, "/work/a", Some("alpha"));
-        let error = resolve_saved_session(&dir, &archive, "alpha", "/work/a").unwrap_err();
+        let error = resolve_saved_session(&dir, &dir, &archive, "alpha", "/work/a").unwrap_err();
         assert_eq!(error.to_string(), "Ambiguous session selector \"alpha\"");
     }
 
@@ -188,7 +189,7 @@ mod tests {
         let dir = temp_dir();
         let archive = dir.join("archive");
         write_session(&dir, "/work/a", Some("alpha"));
-        let found = resolve_saved_session(&dir, &archive, "ghost", "/work/a").unwrap();
+        let found = resolve_saved_session(&dir, &dir, &archive, "ghost", "/work/a").unwrap();
         assert!(found.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }

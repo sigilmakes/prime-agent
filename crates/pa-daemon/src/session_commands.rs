@@ -21,21 +21,23 @@ pub(crate) fn run_session_command(
     engine: &AgentSessionEngine,
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
-    emit: &mut dyn FnMut(EngineEvent) -> bool,
+    emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
 ) -> Option<SessionCommandExecution> {
     let is_compact = command.name == "compact";
     // The durable echo row goes out before execution (TS records the attempted command
     // before the queue runs it).
     if !emit(EngineEvent::CustomMessage(custom_message_value(
         &session_command_echo_row(command),
-    ))) {
+    )))
+    .continues()
+    {
         return None;
     }
     if is_compact {
         let custom_instructions = compact_custom_instructions(command);
         let start =
             crate::compaction::compaction_start_event("manual", custom_instructions.as_deref());
-        if !emit(EngineEvent::CompactionStart { event: start }) {
+        if !emit(EngineEvent::CompactionStart { event: start }).continues() {
             return None;
         }
     }
@@ -56,7 +58,7 @@ pub(crate) fn run_session_command(
                 return None;
             }
             for message in &execution.messages {
-                if !emit(EngineEvent::CustomMessage(custom_message_value(message))) {
+                if !emit(EngineEvent::CustomMessage(custom_message_value(message))).continues() {
                     return None;
                 }
             }
@@ -71,7 +73,7 @@ pub(crate) fn run_session_command(
         .as_ref()
         .and_then(|compaction| compaction.ipython_state.as_ref())
     {
-        if !emit(EngineEvent::CustomMessage(custom_message_value(message))) {
+        if !emit(EngineEvent::CustomMessage(custom_message_value(message))).continues() {
             return None;
         }
     }
@@ -88,7 +90,7 @@ pub(crate) fn run_session_command(
     // The executor's first row is the echo (already emitted); the rest of
     // the durable rows follow in order.
     for message in execution.messages.iter().skip(1) {
-        if !emit(EngineEvent::CustomMessage(custom_message_value(message))) {
+        if !emit(EngineEvent::CustomMessage(custom_message_value(message))).continues() {
             return None;
         }
     }
@@ -107,7 +109,7 @@ fn compact_custom_instructions(command: &SessionSlashCommand) -> Option<String> 
 fn emit_compact_end(
     command: &SessionSlashCommand,
     execution: &SessionCommandExecution,
-    emit: &mut dyn FnMut(EngineEvent) -> bool,
+    emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
 ) -> bool {
     let custom_instructions = compact_custom_instructions(command);
     let (entry, event) = if let Some(compaction) = &execution.compaction {
@@ -154,7 +156,7 @@ fn emit_compact_end(
             ),
         )
     };
-    emit(EngineEvent::Compaction { entry, event })
+    emit(EngineEvent::Compaction { entry, event }).continues()
 }
 
 /// Parse a session command out of a prompt, if it is one.

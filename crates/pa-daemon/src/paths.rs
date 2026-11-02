@@ -53,7 +53,7 @@ pub fn agent_dir() -> Result<PathBuf> {
 }
 
 /// The sessions root: the `PRIME_AGENT_SESSION_DIR` override when set
-/// (tilde expanded), else `<agent-dir>/sessions`.
+/// (tilde expanded), else `<agent-dir>/session-logs`.
 ///
 /// # Errors
 ///
@@ -61,7 +61,7 @@ pub fn agent_dir() -> Result<PathBuf> {
 pub fn sessions_dir(agent_dir: &Path) -> Result<PathBuf> {
     match std::env::var_os(SESSION_DIR_ENV) {
         Some(dir) if !dir.is_empty() => expand_tilde(&dir.to_string_lossy()),
-        _ => Ok(agent_dir.join("sessions")),
+        _ => Ok(agent_dir.join("session-logs")),
     }
 }
 

@@ -6,6 +6,22 @@ fn session_dir() -> std::path::PathBuf {
     dir
 }
 
+fn write_fixture_log(path: &std::path::Path, content: &str) {
+    let mut log = pa_core::session_log::SessionLog::open(
+        path.parent().unwrap(),
+        path.file_stem().unwrap().to_str().unwrap(),
+        crate::session_transport::deadline(),
+    )
+    .expect("create fixture log");
+    for line in content.lines() {
+        let row: Value = serde_json::from_str(line).expect("fixture row");
+        assert!(matches!(
+            log.append(&row, crate::session_transport::deadline()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
+}
+
 fn header_line(id: &str) -> String {
     format!(
         "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}}\n"
@@ -181,7 +197,7 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     for _ in 0..800 {
         fixture.row(|prev, id| message_row(prev, id, &tool_result_message()));
     }
-    std::fs::write(&path, fixture.content).unwrap();
+    write_fixture_log(&path, &fixture.content);
 
     let worker = worker_over(&dir, &path).await;
     let full = full_messages(&worker).await;
@@ -290,7 +306,7 @@ async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
     for _ in 0..post {
         fixture.row(|prev, id| message_row(prev, id, &assistant_message("after compaction")));
     }
-    std::fs::write(&path, fixture.content).unwrap();
+    write_fixture_log(&path, &fixture.content);
 
     let worker = worker_over(&dir, &path).await;
     let full = full_messages(&worker).await;
@@ -337,7 +353,7 @@ async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
                 };
                 fixture.row(|prev, id| message_row(prev, id, &message));
             }
-            std::fs::write(&path, fixture.content).unwrap();
+            write_fixture_log(&path, &fixture.content);
             let worker = worker_over(dir.path(), &path).await;
             let data = attach(&worker, TUI_CAPABILITIES).await;
             let snapshot = &data["snapshot"];
@@ -370,7 +386,7 @@ async fn a_chunked_windowed_attach_streams_the_count_it_carries() {
         };
         fixture.row(|prev, id| message_row(prev, id, &message));
     }
-    std::fs::write(&path, fixture.content).unwrap();
+    write_fixture_log(&path, &fixture.content);
 
     let worker = worker_over(&dir, &path).await;
     let full = full_messages(&worker).await;
@@ -473,7 +489,7 @@ async fn a_windowed_attach_keeps_interleaved_tool_pairs_together() {
         for _ in 0..510 {
             fixture.row(|prev, id| message_row(prev, id, &assistant_message("newer history")));
         }
-        std::fs::write(&path, fixture.content).unwrap();
+        write_fixture_log(&path, &fixture.content);
         let worker = worker_over(dir.path(), &path).await;
         let full = full_messages(&worker).await;
         let data = attach(&worker, TUI_CAPABILITIES).await;
@@ -517,7 +533,7 @@ async fn branched_worker() -> (tempfile::TempDir, std::sync::Arc<Worker>) {
             message_row(prev, id, &assistant_message(&format!("original {index}")))
         });
     }
-    std::fs::write(&path, fixture.content).unwrap();
+    write_fixture_log(&path, &fixture.content);
     let worker = worker_over(dir.path(), &path).await;
     (dir, worker)
 }
@@ -644,35 +660,45 @@ async fn display_transcript_restores_precompaction_history_without_sibling_leaka
             &json!({"role":"user","content":"after","timestamp":2000}),
         )
     });
-    std::fs::write(&path, fixture.content).unwrap();
-    let worker = worker_over(dir.path(), &path).await;
+    write_fixture_log(&path, &fixture.content);
+    // The SDK model reader remains sparse; the daemon serving fold now owns
+    // the full log. Prove the window on this same persisted fixture directly.
+    let window = pa_core::session::window::WindowedSessionStore::open(&path)
+        .expect("open SDK window")
+        .expect("compacted log yields a sparse window");
+    assert!(!window.full_history(), "SDK window must stay sparse");
     assert!(
-        worker
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_ref()
-            .unwrap()
-            .window
-            .is_some(),
-        "exercise trimmed create/rehydrate path"
+        window.entries().len() < fixture.id,
+        "older bodies are omitted"
     );
+    assert_eq!(
+        window.context().messages.len(),
+        3,
+        "summary, kept user, and new user"
+    );
+    let worker = worker_over(dir.path(), &path).await;
     let legacy = full_messages(&worker).await;
     assert_eq!(legacy.len(), 3);
     assert_eq!(legacy[0]["role"], "compactionSummary");
     let mut capabilities = TUI_CAPABILITIES.to_vec();
     capabilities.push("display_transcript");
-    // A failed display read cannot make an existing session unattachable.
-    let held_path = path.with_extension("held");
-    std::fs::rename(&path, &held_path).unwrap();
-    let fallback = attach(&worker, &capabilities).await;
+    // The daemon already holds full history, so a missing source no longer
+    // triggers hydration. Exercise the existing display-error projection directly.
+    let fallback = worker.handle_attach_projection(
+        &json!({
+            "activeSessionId": "windowed-session",
+            "clientId": "windowed-client",
+            "capabilities": capabilities,
+        }),
+        Some("display history unavailable".to_string()),
+    );
+    assert!(fallback.success, "fallback attach failed: {fallback:?}");
+    let fallback = fallback.data.expect("fallback attach data");
     assert_eq!(fallback["snapshot"]["messages"], json!(legacy));
     assert!(fallback["snapshot"]["displayTranscriptError"].is_string());
     assert!(fallback["snapshot"].get("displayTranscript").is_none());
     assert!(fallback["snapshot"].get("historyBefore").is_none());
-    std::fs::rename(&held_path, &path).unwrap();
-    // A retry hydrates the full branch; the failed read never poisons the store.
+    // A normal retry serves the full branch; the display error never poisons the store.
     let data = attach(&worker, &capabilities).await;
     let snapshot = &data["snapshot"];
     assert_eq!(snapshot["displayTranscript"], true);
@@ -831,7 +857,7 @@ async fn display_transcript_corrupt_branch_attach_falls_back_without_sibling_lea
             "leaf",
             &json!({"role":"user","content":"selected","timestamp":1}),
         );
-    std::fs::write(&path, content).unwrap();
+    write_fixture_log(&path, &content);
     let worker = worker_over(dir.path(), &path).await;
     let legacy = full_messages(&worker).await;
     assert_eq!(

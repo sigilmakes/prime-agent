@@ -288,12 +288,11 @@ async fn daemon_roster(socket: &Path) -> Vec<(PathBuf, String)> {
 }
 
 fn read_entries(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .expect("read session file")
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()
-        .expect("valid session entries")
+    pa_core::session::read::read_entries(path)
+        .expect("the session log validates")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
 }
 
 fn session_files(dir: &Path) -> Vec<PathBuf> {

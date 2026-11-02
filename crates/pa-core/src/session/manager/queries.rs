@@ -8,9 +8,6 @@ impl SessionManager {
     /// attached window contributes only its settings overlay.
     #[must_use]
     pub fn active_context(&self) -> super::SessionContext {
-        if self.canonical_binding().is_some() {
-            return self.canonical_visible_context();
-        }
         let mut context = super::build_session_context(&self.file_entries, self.get_leaf_id());
         if let Some(window) = &self.window {
             if !window.full_history() {
@@ -39,7 +36,6 @@ impl SessionManager {
             .map(|window| window.source_path().to_owned())
             .or_else(|| self.session_file.clone().filter(|path| path.exists()));
         let retained = self.file_entries.clone();
-        let canonical_coverage = self.canonical_raw_coverage();
         // Full-history fast path: the retained copy is exactly the file's rows
         // plus the unpersisted tail; without the lease the gate stays closed.
         let fast_path = self
@@ -48,23 +44,15 @@ impl SessionManager {
             .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
             && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld;
         async move {
-            match canonical_coverage {
-                Some(super::canonical::CanonicalRawCoverage::Full) => return Ok(retained),
-                Some(super::canonical::CanonicalRawCoverage::OwnerVerifiedSparse) => {
-                    anyhow::bail!("full canonical history requires an owner-certified checkpoint")
-                }
-                None => {}
-            }
             if fast_path {
                 return Ok(retained);
             }
             let Some(path) = path else {
                 return Ok(retained);
             };
-            let mut entries = tokio::task::spawn_blocking(move || {
-                std::fs::read_to_string(path).map(|text| super::parse_session_entries(&text))
-            })
-            .await??;
+            let mut entries =
+                tokio::task::spawn_blocking(move || super::super::read::read_entries(&path))
+                    .await??;
             let ids: std::collections::HashSet<String> = entries
                 .iter()
                 .filter_map(|entry| entry.id().map(str::to_owned))
@@ -393,7 +381,6 @@ impl SessionManager {
                 .cloned(),
         );
         let leaf = self.leaf_id.clone();
-        self.refresh_has_assistant_entry(&entries);
         self.file_entries = entries;
         self.build_index();
         self.leaf_id = leaf;

@@ -29,7 +29,7 @@
                 ] ++ lib.optionals stdenv.hostPlatform.isLinux [ tini ];
                 # Cold CI bootstrap must use a Nix-native interpreter, not a uv download.
                 PA_WORKSPACE_BOOTSTRAP_PYTHON = "${pkgs.python311}/bin/python3.11";
-                CARGO_BUILD_JOBS = "2";
+                CARGO_BUILD_JOBS = "8";
                 CARGO_PROFILE_DEV_DEBUG = "0";
                 CARGO_PROFILE_TEST_DEBUG = "0";
                 # Python kernel wheels need the same native libraries as the

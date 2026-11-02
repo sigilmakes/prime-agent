@@ -254,11 +254,10 @@ impl Harness {
             .map(|entry| entry.path())
             .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
             .expect("one session file");
-        std::fs::read_to_string(&file)
-            .expect("session file readable")
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).expect("session entry parses"))
+        pa_core::session::read::read_entries(&file)
+            .expect("session log validates")
+            .into_iter()
+            .map(|entry| serde_json::to_value(entry).expect("session entry serializes"))
             .collect()
     }
 

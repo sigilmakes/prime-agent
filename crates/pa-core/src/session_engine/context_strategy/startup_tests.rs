@@ -138,7 +138,7 @@ impl StartupFixture {
             model_info: Some(self.model.clone()),
             session_manager: Some(manager),
             context_startup_boundary: boundary,
-            context_startup_admitted_user_ids: admitted,
+            context_startup_admitted_input_ids: admitted,
             on_initial_context_selection: commit,
             stream_fn: Some(self.provider.stream_fn()),
             prewarm_ipython_kernel: Some(false),

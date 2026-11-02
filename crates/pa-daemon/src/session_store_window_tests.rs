@@ -58,21 +58,21 @@ fn windowed_open_folds_attributions_on_both_sides_of_the_boundary() {
     full.rewrite().unwrap();
 
     let windowed = SessionFile::open_windowed(&path).unwrap();
-    assert!(windowed.window.is_some());
+    assert!(windowed.window.is_none());
     // The retained target folded on the windowed path too (raw entries carry the
     // attribution rows; the metadata parse order cannot hide the fold).
     assert_eq!(
         windowed.entry(&kept_assistant).unwrap().fields["message"]["usage"]["input"],
         json!(10)
     );
-    // The pre-cut target's fold also rides its raw row (the fold runs on every read,
-    // either side of the boundary), and the windowed store never loads that row.
+    // The daemon loads the complete log, including the folded pre-cut target.
+    // Model-context compaction still excludes that spend from active stats.
     let full = SessionFile::open(&path).unwrap();
     assert_eq!(
         full.entry(&old).unwrap().fields["message"]["usage"]["input"],
         json!(150)
     );
-    assert!(windowed.entry(&old).is_none());
+    assert!(windowed.entry(&old).is_some());
     // Windowed and full opens agree on the ACTIVE stats: the pre-cut ancestry
     // is spend the active stats must not report (the pre-cut fold survives on
     // the whole-file surfaces).
@@ -119,7 +119,7 @@ fn window_preserves_transcript_metadata_and_append_then_hydrate() {
     let lease = crate::lease::acquire_runtime_session_lease(&path, dir.path()).unwrap();
     let mut window = SessionFile::open_windowed(&path).unwrap();
     window.lease = Some(std::sync::Arc::new(lease));
-    assert!(window.window.is_some());
+    assert!(window.window.is_none());
     assert_eq!(window.messages(), full.messages());
     assert_eq!(
         (
@@ -137,12 +137,15 @@ fn window_preserves_transcript_metadata_and_append_then_hydrate() {
         crate::session_stats::session_stats(&window, Some(100_000)),
         crate::session_stats::session_stats(&full, Some(100_000))
     );
-    assert!(window.rewrite().is_err());
+    window.rewrite().unwrap();
     window
         .persist_entry(
             "message",
             json!({"message":{"role":"user","content":"appended","timestamp":222}}),
         )
+        .unwrap();
+    let _cold = pa_core::session::window::WindowedSessionStore::open(&path)
+        .unwrap()
         .unwrap();
     let warm = pa_core::session::window::WindowedSessionStore::open(&path)
         .unwrap()
@@ -197,8 +200,8 @@ fn captured_window_matches_full_transcript_and_stats() {
         window.lease = Some(lease.clone());
         let elapsed = start.elapsed();
         assert!(
-            window.window.is_some(),
-            "fixture must exercise window reader"
+            window.window.is_none(),
+            "daemon replays the complete committed log"
         );
         let reference = SessionFile::open(&path).unwrap();
         assert_eq!(window.messages(), reference.messages());
@@ -472,8 +475,8 @@ fn walk_pins_the_compaction_boundary_sequences() {
 fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std::path::Path) {
     let windowed = SessionFile::open_windowed(path).unwrap();
     assert!(
-        windowed.window.is_some(),
-        "{name}: the windowed reader must engage"
+        windowed.window.is_none(),
+        "{name}: daemon replays the complete committed log"
     );
     let restored = windowed.restored_settings();
     let reference = SessionFile::open(path).unwrap().restored_settings();
@@ -564,7 +567,7 @@ fn non_message_compaction_boundary_retains_the_persisted_timeline() {
         let persisted = std::fs::read(&path).unwrap();
         let full = SessionFile::open(&path).unwrap();
         let windowed = SessionFile::open_windowed(&path).unwrap();
-        assert!(windowed.window.is_some());
+        assert!(windowed.window.is_none());
         for view in [&store, &full, &windowed] {
             let messages = view.messages();
             let roles: Vec<_> = messages

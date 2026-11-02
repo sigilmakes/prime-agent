@@ -114,6 +114,28 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// One saved-session fixture: header, display name, and an exchange.
 /// Identical timestamps make the list order fall to the title tie-break.
 fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> PathBuf {
@@ -134,7 +156,7 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
             index * 1000 + 1
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
+    append_session_rows(&path, &content);
     path
 }
 
@@ -144,7 +166,7 @@ async fn entry_anchor_selects_the_left_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
 
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -217,7 +239,7 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
     let dir = tempfile::TempDir::new().expect("temp dir");
 
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -306,7 +328,7 @@ async fn rename_saved_session_renames_the_row_and_the_file() {
     let dir = tempfile::TempDir::new().expect("temp dir");
 
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
     let path = write_fixture(
@@ -377,7 +399,10 @@ async fn rename_saved_session_renames_the_row_and_the_file() {
             .is_some_and(|frame| !frame.contains("gateway worker")),
         "the final frame dropped the old name:\n{rendered}"
     );
-    let content = std::fs::read_to_string(&path).expect("read fixture");
+    let content = serde_json::to_string(
+        &pa_core::session::read::read_entries(&path).expect("validated fixture"),
+    )
+    .expect("serialize session entries");
     assert!(
         content.contains("\"name\":\"renamed agent\""),
         "the fixture gained the session_info name entry:\n{content}"

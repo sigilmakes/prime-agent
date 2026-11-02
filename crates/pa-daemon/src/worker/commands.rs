@@ -260,18 +260,7 @@ impl Worker {
                 None,
             ));
         }
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return Err(response_failure(
-                None,
-                command_type,
-                "Canonical source is unresolved; reconcile before reading or starting work",
-                None,
-            ));
-        }
+
         // The shutdown admission gate: a command dispatched while the graceful stop
         // is closing must not start new work the exit would orphan (an execute_bash
         // racing the shutdown would spawn a child the exit leaves running).
@@ -494,13 +483,7 @@ impl Worker {
             return response;
         }
         let (core, inputs) = self.summary_inputs();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(None, "get_state", "Canonical source is unresolved", None);
-        }
+
         let summary = self.summary_locked(&core, inputs);
         response_success(
             None,
@@ -516,18 +499,7 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(
-                None,
-                "get_session_header",
-                "Canonical source is unresolved",
-                None,
-            );
-        }
+
         let Some(store) = core.store.as_ref() else {
             return response_failure(
                 None,
@@ -550,18 +522,7 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(
-                None,
-                "get_session_stats",
-                "Canonical source is unresolved",
-                None,
-            );
-        }
+
         let Some(store) = core.store.as_ref() else {
             return response_failure(
                 None,
@@ -594,13 +555,7 @@ impl Worker {
             })
             .unwrap_or_default();
         let core = self.core.lock().unwrap();
-        if core
-            .store
-            .as_ref()
-            .is_some_and(crate::session_store::SessionFile::canonical_source_uncertain)
-        {
-            return response_failure(None, "get_messages", "Canonical source is unresolved", None);
-        }
+
         let display = super::connection::wants_display_transcript(payload);
         if display
             && payload
@@ -804,6 +759,29 @@ impl Worker {
 
     async fn handle_kill(&self, payload: &Value) -> DaemonResponse {
         let reason = KillCloseReason::from_payload(payload);
+        // The `archived` entry lands before the turn's aborted row (the abort flag
+        // below gates the aborted row), so the file order stays the TS one.
+        // The guard rides a block, not an explicit drop: a `drop(core)` does not
+        // end the guard's slot in an async generator (the awaits need Send).
+        {
+            let mut core = self.core.lock().unwrap();
+            // `shutdown` keeps the resume entry, so its file stays
+            // live on disk; the killed and replaced closes archive.
+            if reason != KillCloseReason::Shutdown {
+                if let Some(store) = core
+                    .store
+                    .as_mut()
+                    .filter(|store| store.state().as_deref() != Some("archived"))
+                {
+                    if let Err(error) = store.persist_entry(
+                        "session_state",
+                        json!({ "state": { "status": "archived" } }),
+                    ) {
+                        return response_failure(None, "kill", &error.to_string(), None);
+                    }
+                }
+            }
+        }
         // The session is closing: the continuation mint sites and
         // their settle-hook retries bail from here on.
         if let Some(agent_engine) = &self.agent_engine {
@@ -836,32 +814,13 @@ impl Worker {
         if let Err(error) = self.close_rlm_children(child_reason).await {
             return response_failure(None, "kill", &format!("{error:#}"), None);
         }
-        // The `archived` entry lands before the turn's aborted row (the abort flag
-        // below gates the aborted row), so the file order stays the TS one.
-        // The guard rides a block, not an explicit drop: a `drop(core)` does not
-        // end the guard's slot in an async generator (the awaits need Send).
-        {
-            let mut core = self.core.lock().unwrap();
-            // `shutdown` keeps the resume entry, so its file stays
-            // live on disk; the killed and replaced closes archive.
-            if reason != KillCloseReason::Shutdown {
-                if let Some(store) = core.store.as_mut() {
-                    if let Err(error) = store.persist_owner_metadata(
-                        "session_state",
-                        json!({ "state": { "status": "archived" } }),
-                    ) {
-                        return response_failure(None, "kill", &error.to_string(), None);
-                    }
-                }
-            }
-            core.created = false;
-        }
         // The abort funnel fires BEFORE every close step that can wait on the
         // session mutex the running turn holds across its provider wait: the later
         // awaits settle on an already-cancelled turn. The cancel sweep must land
         // before the close clears the lanes.
         {
             let mut core = self.core.lock().unwrap();
+            core.created = false;
             core.abort_requested = true;
             core.steering.clear();
             core.follow_up.clear();
@@ -935,9 +894,7 @@ impl Worker {
             .as_ref()
             .and_then(|store| store.session_name().map(str::to_string));
         if let Some(store) = core.store.as_mut() {
-            if let Err(error) =
-                store.persist_owner_metadata("session_info", json!({ "name": name }))
-            {
+            if let Err(error) = store.persist_entry("session_info", json!({ "name": name })) {
                 return response_failure(None, command, &error.to_string(), None);
             }
         }

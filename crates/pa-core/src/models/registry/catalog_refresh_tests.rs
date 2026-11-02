@@ -3,14 +3,14 @@
 
 use super::*;
 use crate::auth::manager::{AuthStorage, NoOAuth, OAuthIntegration};
-use crate::auth::types::AuthStorageData;
+use crate::auth::types::{AuthCredential, AuthStorageData};
 use crate::models::{catalog_chain, private_auth, session_restore};
 use pa_types::ai::Model;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Notify};
@@ -37,6 +37,7 @@ struct Loopback {
     requests: Arc<Mutex<Vec<String>>>,
     observed: mpsc::UnboundedReceiver<String>,
     task: tokio::task::JoinHandle<()>,
+    routes: Arc<Mutex<HashMap<String, Reply>>>,
 }
 
 impl Loopback {
@@ -45,7 +46,8 @@ impl Loopback {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
-        let routes = Arc::new(routes);
+        let routes = Arc::new(Mutex::new(routes));
+        let server_routes = Arc::clone(&routes);
         let (events, observed) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             let mut workers = tokio::task::JoinSet::new();
@@ -54,7 +56,7 @@ impl Loopback {
                     accepted = listener.accept() => {
                         let (mut socket, _) = accepted.unwrap();
                         let seen = Arc::clone(&seen);
-                        let routes = Arc::clone(&routes);
+                        let routes = Arc::clone(&server_routes);
                         let events = events.clone();
                         workers.spawn(async move {
                             let mut bytes = Vec::new();
@@ -81,7 +83,7 @@ impl Loopback {
                             let path = head.split_whitespace().nth(1).unwrap().to_string();
                             seen.lock().unwrap().push(String::from_utf8(bytes).unwrap());
                             events.send(path.clone()).unwrap();
-                            let reply = routes.get(&path).cloned().unwrap_or(Reply { status: 500, body: json!({"unexpected":path}), gate: None });
+                            let reply = routes.lock().unwrap().get(&path).cloned().unwrap_or(Reply { status: 500, body: json!({"unexpected":path}), gate: None });
                             if let Some(gate) = reply.gate { gate.notified().await; }
                             let body = reply.body.to_string();
                             let response = format!("HTTP/1.1 {} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", reply.status, body.len());
@@ -98,6 +100,7 @@ impl Loopback {
             requests,
             observed,
             task,
+            routes,
         }
     }
 
@@ -223,7 +226,11 @@ async fn ollama_forwards_custom_authorization_only_on_the_configured_origin() {
         &path,
         json!({"ollama-cloud":{
             "baseUrl":format!("{}/v1",server.base),
-            "headers":{"Authorization":"Basic fixture-custom-authorization", "X-Do-Not-Forward":"private-header"}
+            "headers":{"Authorization":"Basic fixture-custom-authorization", "X-Do-Not-Forward":"private-header"},
+            "discovery":{"format":"ollama","defaults":{
+                "contextWindow":32_000,"maxTokens":4_000,"reasoning":false,"input":["text"],
+                "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}
+            }}
         }}),
     );
     let mut registry = ModelRegistry::create(auth(json!({})), &path);
@@ -243,7 +250,9 @@ async fn ollama_forwards_custom_authorization_only_on_the_configured_origin() {
     assert_eq!(requests.len(), 2);
     for request in &requests {
         assert!(request.contains("authorization: Basic fixture-custom-authorization"));
-        assert!(!request.to_ascii_lowercase().contains("x-do-not-forward"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("x-do-not-forward: private-header"));
     }
     assert!(requests
         .iter()
@@ -266,7 +275,8 @@ async fn ollama_cross_origin_override_never_sends_custom_authorization() {
         &path,
         json!({"ollama-cloud":{
             "baseUrl":format!("{}/v1",different_origin.base),
-            "headers":{"Authorization":"Bearer fixture-must-not-leak"}
+            "headers":{"Authorization":"Bearer fixture-must-not-leak"},
+            "discovery":{"format":"ollama","url":server.base}
         }}),
     );
     let mut registry = ModelRegistry::create(auth(json!({})), &path);
@@ -367,6 +377,42 @@ async fn local_apply_never_runs_command_keys_or_oauth_including_prime_credential
     );
 }
 
+#[tokio::test]
+async fn local_apply_does_not_replace_deferred_auth_with_models_json_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let marker = dir.path().join("command-ran");
+    write_config(
+        &path,
+        json!({"openai":{"apiKey":"fixture-lower-priority-key"},
+        "google":{"apiKey":"fixture-lower-priority-key"}}),
+    );
+    let command = format!("!printf ran > '{}'", marker.display());
+    let probe = Arc::new(OAuthProbe::default());
+    let data = AuthStorageData(
+        json!({
+            "openai":{"type":"api_key","key":command},
+            "google":{"type":"oauth","access":"expired","refresh":"fixture-refresh","expires":0}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let mut registry = ModelRegistry::create(
+        AuthStorage::in_memory_without_env(&data, probe.clone()),
+        &path,
+    );
+    let custom = registry.load_custom_models_file(&path);
+    let inputs = registry.catalog_inputs(&custom, true);
+    assert!(!inputs
+        .sources
+        .iter()
+        .any(|source| matches!(source.id.as_str(), "openai" | "google")));
+    assert!(!marker.exists());
+    assert_eq!(probe.keys.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.refreshes.load(Ordering::SeqCst), 0);
+}
+
 fn private_wire(model: &Model) -> Value {
     json!({"id":model.id, "display_name":model.name,
         "pricing":{"input_usd_per_mtok":0.0,"output_usd_per_mtok":0.0},
@@ -383,65 +429,44 @@ fn prime_auth() -> AuthStorage {
 }
 
 #[tokio::test]
-async fn private_prime_401_tombstone_prevents_fresh_registry_from_loading_valid_legacy_cache() {
+async fn private_prime_401_revokes_the_scoped_snapshot_for_fresh_registries() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.json");
+    let model = private_auth::get_private_prime_inference_models()
+        .into_iter()
+        .next()
+        .unwrap();
+    let route = "/prime/api/v1/models";
     let server = Loopback::start(HashMap::from([(
-        "/prime/api/v1/models".into(),
+        route.into(),
+        Reply::json(json!({"data":[private_wire(&model)]})),
+    )]))
+    .await;
+    install(&path, &server);
+    let mut registry = ModelRegistry::create(prime_auth(), &path);
+    let selected = selected("prime-inference-private");
+    registry.refresh_catalog_sources(Some(&selected)).await;
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|candidate| candidate.provider == "prime-inference" && candidate.id == model.id));
+    server.routes.lock().unwrap().insert(
+        route.into(),
         Reply {
             status: 401,
             body: json!({}),
             gate: None,
         },
-    )]))
-    .await;
-    install(&path, &server);
-    let model = private_auth::get_private_prime_inference_models()
-        .into_iter()
-        .next()
-        .unwrap();
-    let fingerprint =
-        private_auth::private_prime_authorization_fingerprint("fixture-prime-key", "fixture-team");
-    private_auth::write_private_prime_authorization_cache(
-        &path,
-        &private_auth::PrivatePrimeAuthorizationCache {
-            fingerprint: fingerprint.clone(),
-            items: vec![private_wire(&model)],
-            models: vec![model.clone()],
-            refreshed_at: now_millis(),
-        },
     );
-    let mut registry = ModelRegistry::create(prime_auth(), &path);
-    registry.load_private_authorization_from_cache();
-    assert!(registry
-        .get_available()
-        .iter()
-        .any(|candidate| candidate.provider == "prime-inference" && candidate.id == model.id));
-    let report = registry
-        .refresh_catalog_sources(Some(&selected("prime-inference-private")))
-        .await;
+    let report = registry.refresh_catalog_sources(Some(&selected)).await;
     assert_eq!(
         report.sources,
         vec![ModelRefreshSourceResult {
             source: "prime-inference-private".into(),
             status: ModelRefreshStatus::Failed,
             reason: Some(ModelRefreshReason::AuthRejected),
-            model_count: None
+            model_count: None,
         }]
-    );
-    let cached = private_auth::read_private_prime_authorization_cache(&path)
-        .expect("valid legacy file intentionally remains");
-    assert_eq!(cached.fingerprint, fingerprint);
-    assert!(cached
-        .models
-        .iter()
-        .any(|candidate| candidate.id == model.id));
-    let revisioned =
-        private_auth::private_catalog_cache(Some(&path), &format!("{}/prime/api/v1", server.base));
-    revisioned.reload_from_disk(&fingerprint);
-    assert!(
-        revisioned.has_revocation(&fingerprint),
-        "revocation is on disk, not only stale auth state"
     );
     let mut fresh = ModelRegistry::create(prime_auth(), &path);
     fresh.load_private_authorization_from_cache();
@@ -457,8 +482,8 @@ async fn private_prime_401_tombstone_prevents_fresh_registry_from_loading_valid_
     assert!(fresh.authorized_private_ids.is_empty());
     assert_eq!(
         server.requests().len(),
-        1,
-        "local reload/apply never retries authorization"
+        2,
+        "fresh registry and local adoption never fetch"
     );
 }
 
@@ -472,7 +497,9 @@ async fn timed_out_restore_keeps_late_publication_and_zero_budget_cached_fast_pa
         ("/openrouter".into(), Reply { status:200, gate:Some(Arc::clone(&gate)), body:json!({"data":[{
             "id":id,"name":"Published dated model","context_length":200_000,
             "top_provider":{"max_completion_tokens":16_384},
-            "pricing":{"prompt":"0.000001","completion":"0.000002"},
+            "pricing":{"prompt":"0.000001","completion":"0.000002",
+                "input_cache_read":"0","input_cache_write":"0"},
+            "supported_parameters":[],
             "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}
         }]}) }),
         ("/default".into(), Reply::json(json!({"schemaVersion":1,"defaultModel":format!("openrouter/{id}")}))),
@@ -481,17 +508,8 @@ async fn timed_out_restore_keeps_late_publication_and_zero_budget_cached_fast_pa
         ("/curated".into(), Reply::json(json!({"schemaVersion":1,"models":[]}))),
     ])).await;
     install(&path, &server);
-    // A caller deadline must cover both a held HTTP response and a sibling's
-    // advisory publication lock. Neither deadline may cancel the owned job.
-    std::fs::create_dir_all(dir.path().join("models")).unwrap();
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.path().join("models/openrouter-models.v1.json.lock"))
-        .unwrap();
-    lock.lock().unwrap();
+    // Cache's own suite covers held publisher locks. At this caller seam a
+    // held HTTP response proves timeout does not cancel the owned publication.
     let mut registry = ModelRegistry::create(
         auth(json!({"openrouter":{"type":"api_key","key":"fixture-openrouter-key"}})),
         &path,
@@ -529,31 +547,6 @@ async fn timed_out_restore_keeps_late_publication_and_zero_budget_cached_fast_pa
     assert!(result.is_none(), "held HTTP cannot have published the ID");
     drop(restore);
     gate.notify_one();
-    // Give the response time to reach the held publication lock. This caller
-    // also has a finite budget; a lock cannot turn readiness into an infinite wait.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
-        session_restore::find_session_model_with_readiness_wait(
-            &mut registry,
-            "openrouter",
-            id,
-            200,
-        ),
-    )
-    .await
-    .expect("caller deadline covers held publication lock");
-    assert!(result.is_none(), "the lock still prevents publication");
-    assert_eq!(
-        server
-            .requests()
-            .iter()
-            .filter(|request| request.starts_with("GET /openrouter "))
-            .count(),
-        1,
-        "a second caller coalesces with the retained discovery"
-    );
-    drop(lock);
     let model = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             registry.refresh();
@@ -569,7 +562,7 @@ async fn timed_out_restore_keeps_late_publication_and_zero_budget_cached_fast_pa
         }
     })
     .await
-    .expect("the owned job publishes after the lock releases");
+    .expect("the owned job publishes after the HTTP gate releases");
     let cached = tokio::time::timeout(
         Duration::from_millis(50),
         session_restore::find_session_model_with_readiness_wait(&mut registry, "openrouter", id, 0),
@@ -603,4 +596,307 @@ async fn timed_out_restore_keeps_late_publication_and_zero_budget_cached_fast_pa
         .iter()
         .filter(|request| request.starts_with("GET /openrouter "))
         .all(|request| request.contains("authorization: Bearer fixture-openrouter-key")));
+}
+
+#[tokio::test]
+async fn codex_refresh_adds_provider_models_and_local_apply_updates_the_picker_registry() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let id = "fixture-codex-discovered-2099";
+    let server = Loopback::start(HashMap::from([(
+        "/codex/models?client_version=0.159.0".into(),
+        Reply::json(json!({"models":[{
+            "slug":id, "display_name":"Discovered Codex model",
+            "context_window":400_000,
+            "supported_reasoning_levels":[{"effort":"medium"},{"effort":"high"}],
+            "input_modalities":["text","image"], "visibility":"list"
+        }]})),
+    )]))
+    .await;
+    install(&path, &server);
+    write_config(
+        &path,
+        json!({"openai-codex":{
+            "baseUrl":server.base,
+            "discovery":{"format":"codex","defaults":{
+                "contextWindow":32000,"maxTokens":8000,"reasoning":false,"input":["text"],
+                "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}
+            }}
+        }}),
+    );
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        json!({"https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account"}}).to_string(),
+    );
+    let credentials = json!({"openai-codex":{
+        "type":"api_key", "key":format!("fixture.{claims}.signature")
+    }});
+    let mut registry = ModelRegistry::create(auth(credentials.clone()), &path);
+    assert!(!registry.get_all().iter().any(|model| model.id == id));
+    let report = registry
+        .refresh_catalog_sources(Some(&selected("openai-codex")))
+        .await;
+    assert_eq!(
+        report.sources,
+        vec![ModelRefreshSourceResult {
+            source: "openai-codex".into(),
+            status: ModelRefreshStatus::Updated,
+            model_count: Some(1),
+            reason: None
+        }]
+    );
+    let discovered = registry
+        .get_available()
+        .into_iter()
+        .find(|model| model.provider == "openai-codex" && model.id == id)
+        .expect("provider refresh must publish the discovered model to the picker registry")
+        .clone();
+    assert_eq!(discovered.name, "Discovered Codex model");
+    assert_eq!(discovered.context_window, 400_000);
+    assert_eq!(discovered.api, "openai-codex-responses");
+    assert_eq!(discovered.base_url, server.base);
+    let mut fresh = ModelRegistry::create(auth(credentials), &path);
+    let applied = fresh.apply_catalog_refresh(Some(report.started_at)).await;
+    assert!(applied
+        .applied
+        .iter()
+        .any(|source| source == "openai-codex"));
+    assert_eq!(
+        fresh
+            .get_available()
+            .into_iter()
+            .find(|model| model.provider == "openai-codex" && model.id == id),
+        Some(&discovered)
+    );
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "local snapshot adoption never fetches"
+    );
+    let other_claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        json!({"https://api.openai.com/auth":{"chatgpt_account_id":"other-account"}}).to_string(),
+    );
+    let other = ModelRegistry::create(
+        auth(json!({"openai-codex":{
+            "type":"api_key", "key":format!("fixture.{other_claims}.signature")
+        }})),
+        &path,
+    );
+    assert!(
+        !other.get_available().iter().any(|model| model.id == id),
+        "a different credential scope cannot inherit the discovery snapshot"
+    );
+}
+
+#[tokio::test]
+async fn explicit_discovery_auth_replaces_inference_auth_case_insensitively() {
+    for discovery in [
+        json!({"format":"openai","apiKey":"catalog-key"}),
+        json!({"format":"openai","headers":{"AUTHORIZATION":"Bearer catalog-key"}}),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        let server = Loopback::start(HashMap::from([(
+            "/v1/models".into(),
+            Reply::json(json!({"data":[{"id":"new"}]})),
+        )]))
+        .await;
+        install(&path, &server);
+        write_config(
+            &path,
+            json!({"gateway":{
+                "baseUrl":format!("{}/v1",server.base), "api":"openai-completions", "apiKey":"inference-key",
+                "headers":{"Authorization":"Bearer inference-key"}, "discovery":discovery
+            }}),
+        );
+        let mut registry = ModelRegistry::create(auth(json!({})), &path);
+        assert!(registry.get_error().is_none(), "{:?}", registry.get_error());
+        let report = registry
+            .refresh_catalog_sources(Some(&selected("gateway")))
+            .await;
+        assert_eq!(report.sources[0].status, ModelRefreshStatus::Updated);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("authorization: Bearer catalog-key"));
+        assert!(!requests[0].contains("inference-key"));
+    }
+}
+
+#[tokio::test]
+async fn id_only_builtin_lists_do_not_admit_untrusted_chat_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let known = pa_models::transports::compiled_models()
+        .iter()
+        .find(|model| model.provider == "openai")
+        .unwrap()
+        .clone();
+    let server = Loopback::start(HashMap::from([(
+        "/openai".into(),
+        Reply::json(json!({"data":[{"id":known.id},{"id":"text-embedding-fixture-2099"}]})),
+    )]))
+    .await;
+    install(&path, &server);
+    write_config(
+        &path,
+        json!({"openai":{"apiKey":"fixture-key","headers":{}}}),
+    );
+    let mut registry = ModelRegistry::create(auth(json!({})), &path);
+    registry
+        .refresh_catalog_sources(Some(&selected("openai")))
+        .await;
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "openai" && model.id == known.id));
+    assert!(!registry
+        .get_all()
+        .iter()
+        .any(|model| model.id == "text-embedding-fixture-2099"));
+}
+
+#[tokio::test]
+async fn custom_discovery_admits_new_ids_only_with_explicit_complete_defaults() {
+    for allow_new in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        let server = Loopback::start(HashMap::from([(
+            "/v1/models".into(),
+            Reply::json(json!({"data":[{"id":"new-gateway-model"}]})),
+        )]))
+        .await;
+        install(&path, &server);
+        let mut discovery = json!({"format":"openai"});
+        if allow_new {
+            discovery["defaults"] = json!({
+                "contextWindow":32000, "maxTokens":4000, "reasoning":false, "input":["text"],
+                "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}
+            });
+        }
+        write_config(
+            &path,
+            json!({"gateway":{
+                "baseUrl":format!("{}/v1",server.base), "api":"openai-completions", "apiKey":"fixture-key", "discovery":discovery
+            }}),
+        );
+        let mut registry = ModelRegistry::create(auth(json!({})), &path);
+        assert!(registry.get_error().is_none(), "{:?}", registry.get_error());
+        registry
+            .refresh_catalog_sources(Some(&selected("gateway")))
+            .await;
+        assert_eq!(
+            registry
+                .get_available()
+                .iter()
+                .any(|model| model.provider == "gateway" && model.id == "new-gateway-model"),
+            allow_new
+        );
+    }
+}
+
+#[test]
+fn inherited_team_environment_change_supersedes_publication() {
+    struct EnvCleanup(String);
+    impl Drop for EnvCleanup {
+        fn drop(&mut self) {
+            std::env::remove_var(&self.0);
+        }
+    }
+    let name = format!("PA_CATALOG_TEAM_SCOPE_{}", std::process::id());
+    let _cleanup = EnvCleanup(name.clone());
+    std::env::set_var(&name, "fixture-team-one");
+    let mut registry = ModelRegistry::in_memory(auth(json!({"prime-inference":{
+        "type":"api_key", "key":"fixture-key", "primeTeam":{"teamId":name,"name":"Fixture"}
+    }})));
+    let (_, inputs) = registry.prepare_catalog(true);
+    let source = inputs
+        .sources
+        .iter()
+        .find(|source| source.id == "prime-inference-private")
+        .unwrap();
+    let guard = source.is_current.as_ref().unwrap();
+    assert!(guard());
+    std::env::set_var(&name, "fixture-team-two");
+    assert!(
+        !guard(),
+        "a header-resolved team change must fence the old request"
+    );
+}
+
+#[test]
+fn picker_availability_never_executes_stored_commands_or_oauth_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("picker-auth-command-ran");
+    let command = format!("!printf ran > '{}'; printf fixture-key", marker.display());
+    let probe = Arc::new(OAuthProbe::default());
+    let data = AuthStorageData(
+        json!({
+            "openai":{"type":"api_key","key":command},
+            "anthropic":{"type":"oauth","access":"fixture","refresh":"fixture-refresh","expires":0}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let mut auth = AuthStorage::in_memory_without_env(&data, probe.clone());
+    auth.set_runtime_api_key("openai", "fixture-runtime".into());
+    let mut registry = ModelRegistry::create(auth, dir.path().join("models.json"));
+    assert!(registry.get_provider_auth_status("openai").source.is_some());
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "openai"));
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "anthropic"));
+    registry.auth.remove_runtime_api_key("openai");
+    assert!(registry
+        .get_available()
+        .iter()
+        .any(|model| model.provider == "openai"));
+    assert!(
+        !marker.exists(),
+        "painting availability must not execute stored or lower command candidates"
+    );
+    assert_eq!(probe.keys.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn protocol_headers_do_not_authorize_unconfigured_provider_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let server = Loopback::start(HashMap::from([(
+        "/anthropic".into(),
+        Reply::json(json!({"data":[]})),
+    )]))
+    .await;
+    install(&path, &server);
+    let mut registry = ModelRegistry::create(auth(json!({})), &path);
+    let report = registry
+        .refresh_catalog_sources(Some(&selected("anthropic")))
+        .await;
+    assert_eq!(
+        report.sources,
+        vec![ModelRefreshSourceResult {
+            source: "anthropic".into(),
+            status: ModelRefreshStatus::Skipped,
+            reason: Some(ModelRefreshReason::Unconfigured),
+            model_count: None,
+        }]
+    );
+    assert!(server.requests().is_empty());
+
+    registry
+        .auth
+        .set_runtime_api_key("anthropic", "fixture-key".into());
+    registry
+        .refresh_catalog_sources(Some(&selected("anthropic")))
+        .await;
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("x-api-key: fixture-key"));
+    assert!(requests[0].contains("anthropic-version: 2023-06-01"));
 }

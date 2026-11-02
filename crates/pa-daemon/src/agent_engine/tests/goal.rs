@@ -48,7 +48,7 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
         })
         .unwrap(),
     );
-    let _canonical_owner = own_canonical_store(&engine, store);
+    let _canonical_owner = own_log_store(&engine, store);
     // The turn-end seam: the engine has no worker, so a collector
     // stands in for the queue-lane admission sink.
     let goal_work = goal_admission_collector(&engine);
@@ -140,7 +140,7 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     let context = events
@@ -247,7 +247,7 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
         queued_steering_probe: None,
     })
     .unwrap();
-    let _canonical_owner = own_canonical_store(&engine, store);
+    let _canonical_owner = own_log_store(&engine, store);
     let mut events: Vec<EngineEvent> = Vec::new();
     admit(
         &engine,
@@ -462,7 +462,7 @@ pub(crate) fn admit_request(
 ) {
     engine.run_prompt(0, request, &|| false, &mut |event| {
         events.push(event);
-        true
+        true.into()
     });
 }
 
@@ -855,7 +855,7 @@ fn injected_custom_turn_holds_one_representation() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     let custom_rows: Vec<&Value> = events
@@ -1019,7 +1019,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
-    let _canonical_owner = own_canonical_store(&engine, store);
+    let _canonical_owner = own_log_store(&engine, store);
     let fixture =
         abort_fixture::AbortFixture::install(&engine, abort_fixture::AbortCase::BeforeStream);
     // No worker owns the queue here: minted continuation work collects
@@ -1060,7 +1060,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
             &|| false,
             &mut |event| {
                 row_events.lock().unwrap().push(event);
-                true
+                true.into()
             },
         );
     });
@@ -1220,15 +1220,26 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
     for (name, rows, terminated, window_serves) in classes {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
-        let mut content = rows
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if terminated {
-            content.push('\n');
+        let mut log = pa_core::session_log::SessionLog::open(
+            dir.path(),
+            "session",
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        for mut row in rows {
+            if row["type"] == "session" {
+                row["id"] = json!("session");
+            }
+            assert!(matches!(
+                log.append(&row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
         }
-        std::fs::write(&path, content).unwrap();
+        if !terminated {
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
         let opened = pa_core::session::window::WindowedSessionStore::open(&path);
         let window_served = opened.as_ref().is_ok_and(std::option::Option::is_some);
         assert_eq!(
@@ -1248,6 +1259,11 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             shared,
             crate::goal_state_persist::persisted_goal_state(Some(&path)),
             "goal class {name}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "read-only goal restoration does not repair"
         );
     }
 }

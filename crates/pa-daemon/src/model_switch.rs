@@ -97,9 +97,9 @@ impl Worker {
                 if let Some(store) = core
                     .store
                     .as_mut()
-                    .filter(|store| !store.is_canonical_bound())
+                    .filter(|_| !engine.persists_session_entries())
                 {
-                    // The live Core switch already adopted and ACKed its real row.
+                    // The SDK sink already committed a built session's row.
                     // TS `appendModelChange` records every switch, even to
                     // the current model.
                     if store
@@ -207,9 +207,9 @@ impl Worker {
                 if let Some(store) = core
                     .store
                     .as_mut()
-                    .filter(|store| !store.is_canonical_bound())
+                    .filter(|_| !engine.persists_session_entries())
                 {
-                    // A bound live Core switch has already committed this intent.
+                    // The SDK sink already committed a built session's row.
                     if store
                         .persist_entry(
                             "thinking_level_change",

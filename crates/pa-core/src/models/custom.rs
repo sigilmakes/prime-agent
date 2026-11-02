@@ -144,6 +144,42 @@ pub struct ProviderConfig {
     pub auth_header: Option<bool>,
     pub models: Option<Vec<ModelDefinition>>,
     pub model_overrides: Option<BTreeMap<String, ModelOverride>>,
+    pub discovery: Option<DiscoveryConfig>,
+}
+
+/// Explicit authorization to list models from a locally selected endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryConfig {
+    pub format: DiscoveryFormat,
+    pub url: Option<String>,
+    pub api_key: Option<String>,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub defaults: Option<ModelDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoveryFormat {
+    Openai,
+    Openrouter,
+    Anthropic,
+    Google,
+    Codex,
+    Ollama,
+}
+
+impl DiscoveryFormat {
+    pub fn catalog_format(self) -> pa_models::CatalogFormat {
+        match self {
+            Self::Openai => pa_models::CatalogFormat::OpenAi,
+            Self::Openrouter => pa_models::CatalogFormat::OpenRouter,
+            Self::Anthropic => pa_models::CatalogFormat::Anthropic,
+            Self::Google => pa_models::CatalogFormat::Google,
+            Self::Codex => pa_models::CatalogFormat::Codex,
+            Self::Ollama => pa_models::CatalogFormat::Ollama,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -155,6 +191,7 @@ pub struct ModelsConfig {
 #[derive(Debug, Default)]
 pub struct CustomModelsResult {
     pub models: Vec<Model>,
+    pub providers: BTreeMap<String, ProviderConfig>,
     pub provider_overrides: HashMap<String, ProviderOverride>,
     pub model_overrides: HashMap<String, BTreeMap<String, ModelOverride>>,
     pub error: Option<String>,
@@ -199,6 +236,7 @@ pub fn validate_config(
                 && provider_config.headers.is_none()
                 && provider_config.compat.is_none()
                 && !has_model_overrides
+                && provider_config.discovery.is_none()
             {
                 return Err(format!(
                     "Provider {provider_name}: must specify \"baseUrl\", \"headers\", \"compat\", \"modelOverrides\", or \"models\"."
@@ -214,6 +252,54 @@ pub fn validate_config(
                 return Err(format!(
                     "Provider {provider_name}: \"apiKey\" is required when defining custom models."
                 ));
+            }
+        }
+        if let Some(discovery) = &provider_config.discovery {
+            if !is_built_in && (provider_config.base_url.is_none() || provider_config.api.is_none())
+            {
+                return Err(format!(
+                    "Provider {provider_name}: discovery requires baseUrl and api"
+                ));
+            }
+            if discovery.url.as_ref().is_some_and(|url| {
+                reqwest::Url::parse(url).map_or(true, |url| {
+                    !matches!(url.scheme(), "http" | "https")
+                        || !url.username().is_empty()
+                        || url.password().is_some()
+                        || url.fragment().is_some()
+                })
+            }) {
+                return Err(format!("Provider {provider_name}: invalid discovery URL"));
+            }
+            if let Some(defaults) = &discovery.defaults {
+                if defaults.context_window.is_none_or(|value| value == 0)
+                    || defaults.max_tokens.is_none_or(|value| value == 0)
+                    || defaults.input.as_ref().is_none_or(Vec::is_empty)
+                    || defaults.reasoning.is_none()
+                    || defaults.cost.is_none()
+                {
+                    return Err(format!("Provider {provider_name}: discovery defaults require contextWindow, maxTokens, input, reasoning and cost"));
+                }
+                let valid_input = defaults.input.as_ref().is_some_and(|input| {
+                    input.iter().any(|mode| mode == "text")
+                        && input
+                            .iter()
+                            .all(|mode| matches!(mode.as_str(), "text" | "image"))
+                });
+                let valid_cost = defaults.cost.as_ref().is_some_and(|cost| {
+                    [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                        .iter()
+                        .all(|value| value.is_some_and(|value| value.is_finite() && value >= 0.0))
+                });
+                if !valid_input || !valid_cost {
+                    return Err(format!("Provider {provider_name}: discovery defaults require supported chat input and all four finite nonnegative cost fields"));
+                }
+                if defaults.api.is_some()
+                    || defaults.base_url.is_some()
+                    || defaults.headers.is_some()
+                {
+                    return Err(format!("Provider {provider_name}: discovery defaults cannot select transport or headers"));
+                }
             }
         }
         for model in models {
@@ -364,6 +450,60 @@ pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     result
 }
 
+pub(super) fn model_from_definition(
+    provider_name: &str,
+    provider_config: &ProviderConfig,
+    model_def: &ModelDefinition,
+    defaults: Option<(String, String)>,
+) -> Option<Model> {
+    let (default_api, default_url) = defaults.unzip();
+    let api = model_def
+        .api
+        .clone()
+        .or_else(|| provider_config.api.clone())
+        .or(default_api);
+    let api = api?;
+    let base_url = model_def
+        .base_url
+        .clone()
+        .or_else(|| provider_config.base_url.clone())
+        .or(default_url);
+    let base_url = base_url?;
+    let compat = merge_compat(None, compat_from_value(provider_config.compat.as_ref()));
+    Some(Model {
+        id: model_def.id.clone(),
+        name: model_def
+            .name
+            .clone()
+            .unwrap_or_else(|| model_def.id.clone()),
+        api,
+        provider: provider_name.to_string(),
+        base_url,
+        reasoning: model_def.reasoning.unwrap_or(false),
+        // The definition's `thinkingLevelMap` is the model's,
+        // parsed from the same wire names the override merge uses.
+        thinking_level_map: model_def.thinking_level_map.as_ref().and_then(|map| {
+            serde_json::from_value::<pa_types::ai::ThinkingLevelMap>(
+                serde_json::to_value(map).ok()?,
+            )
+            .ok()
+        }),
+        input: model_inputs(model_def.input.as_ref()),
+        cost: model_def.cost.as_ref().map_or_else(
+            || cost_from_config(&ModelCostConfig::default()),
+            cost_from_config,
+        ),
+        context_window: model_def.context_window.unwrap_or(128_000),
+        max_tokens: model_def.max_tokens.unwrap_or(16_384),
+        // A configured `maxTokens` is explicit; the 16_384
+        // default is not, so a defaulted model stays capped.
+        max_tokens_explicit: model_def.max_tokens.is_some(),
+        featured: None,
+        headers: None,
+        compat,
+    })
+}
+
 pub fn load_custom_models(
     content: &str,
     built_in_providers: &dyn Fn(&str) -> bool,
@@ -385,7 +525,10 @@ pub fn load_custom_models(
         };
     }
 
-    let mut result = CustomModelsResult::default();
+    let mut result = CustomModelsResult {
+        providers: config.providers.clone(),
+        ..Default::default()
+    };
     for (provider_name, provider_config) in &config.providers {
         if provider_config.base_url.is_some() || provider_config.compat.is_some() {
             result.provider_overrides.insert(
@@ -407,51 +550,11 @@ pub fn load_custom_models(
         }
         let defaults = built_in_defaults(provider_name);
         for model_def in model_defs {
-            let api = model_def
-                .api
-                .clone()
-                .or_else(|| provider_config.api.clone())
-                .or_else(|| defaults.as_ref().map(|(api, _)| api.clone()));
-            let Some(api) = api else { continue };
-            let base_url = model_def
-                .base_url
-                .clone()
-                .or_else(|| provider_config.base_url.clone())
-                .or_else(|| defaults.as_ref().map(|(_, url)| url.clone()));
-            let Some(base_url) = base_url else { continue };
-            let compat = merge_compat(None, compat_from_value(provider_config.compat.as_ref()));
-            result.models.push(Model {
-                id: model_def.id.clone(),
-                name: model_def
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| model_def.id.clone()),
-                api,
-                provider: provider_name.clone(),
-                base_url,
-                reasoning: model_def.reasoning.unwrap_or(false),
-                // The definition's `thinkingLevelMap` is the model's,
-                // parsed from the same wire names the override merge uses.
-                thinking_level_map: model_def.thinking_level_map.as_ref().and_then(|map| {
-                    serde_json::from_value::<pa_types::ai::ThinkingLevelMap>(
-                        serde_json::to_value(map).ok()?,
-                    )
-                    .ok()
-                }),
-                input: model_inputs(model_def.input.as_ref()),
-                cost: model_def.cost.as_ref().map_or_else(
-                    || cost_from_config(&ModelCostConfig::default()),
-                    cost_from_config,
-                ),
-                context_window: model_def.context_window.unwrap_or(128_000),
-                max_tokens: model_def.max_tokens.unwrap_or(16_384),
-                // A configured `maxTokens` is explicit; the 16_384
-                // default is not, so a defaulted model stays capped.
-                max_tokens_explicit: model_def.max_tokens.is_some(),
-                featured: None,
-                headers: None,
-                compat,
-            });
+            if let Some(model) =
+                model_from_definition(provider_name, provider_config, model_def, defaults.clone())
+            {
+                result.models.push(model);
+            }
         }
     }
     result
@@ -460,6 +563,48 @@ pub fn load_custom_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_urls_keep_credentials_out_of_the_authority_and_fragment() {
+        for url in [
+            "https://fixture-user:fixture-password@catalog.test/models",
+            "https://catalog.test/models#fixture-token",
+            "ftp://catalog.test/models",
+        ] {
+            let document = serde_json::json!({"providers":{"gateway":{
+                "baseUrl":"https://gateway.test/v1","api":"openai-completions",
+                "discovery":{"format":"openai","url":url}}}});
+            let config = parse_models_config(&document.to_string()).unwrap();
+            assert!(validate_config(&config, &|_| false).is_err());
+        }
+        let document = serde_json::json!({"providers":{"gateway":{
+            "baseUrl":"https://gateway.test/v1","api":"openai-completions",
+            "discovery":{"format":"openai","url":"https://catalog.test/models?tenant=a"}}}});
+        let config = parse_models_config(&document.to_string()).unwrap();
+        assert!(validate_config(&config, &|_| false).is_ok());
+    }
+
+    #[test]
+    fn discovery_defaults_reject_invented_modalities_and_incomplete_pricing() {
+        let defaults = serde_json::json!({"contextWindow":32000,"maxTokens":4000,"reasoning":false,"input":["text"],
+            "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}});
+        for invalid in ["input", "missing-price", "negative-price"] {
+            let mut defaults = defaults.clone();
+            match invalid {
+                "input" => defaults["input"] = serde_json::json!(["typo"]),
+                "missing-price" => {
+                    defaults["cost"].as_object_mut().unwrap().remove("input");
+                }
+                _ => defaults["cost"]["input"] = serde_json::json!(-1),
+            }
+            let document = serde_json::json!({"providers":{"gateway":{"baseUrl":"https://gateway.test/v1","api":"openai-completions",
+                "discovery":{"format":"openai","defaults":defaults}}}});
+            let config = parse_models_config(&document.to_string()).unwrap();
+            assert!(
+                validate_config(&config, &|_| false).is_err(),
+                "invalid defaults: {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn strips_comments_and_trailing_commas() {

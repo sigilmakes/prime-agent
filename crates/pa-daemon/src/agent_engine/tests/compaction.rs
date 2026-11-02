@@ -59,7 +59,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
         queued_steering_probe: None,
     };
     let engine = AgentSessionEngine::new(config()).unwrap();
-    let owner = own_canonical_store(&engine, store);
+    let owner = own_log_store(&engine, store);
     let listener = engine
         .runtime
         .block_on(async { tokio::net::TcpListener::from_std(socket).unwrap() });
@@ -95,7 +95,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
     let source: Vec<serde_json::Value> = std::str::from_utf8(&prefix)
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["row"].clone())
         .collect();
     let source_ids: Vec<_> = source
         .iter()
@@ -134,7 +134,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
     let suffix: Vec<serde_json::Value> = std::str::from_utf8(&durable[prefix.len()..])
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["row"].clone())
         .collect();
     let [row] = suffix.as_slice() else {
         panic!("one exact archive suffix")
@@ -152,17 +152,6 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
         .unwrap();
     let archive: serde_json::Value = serde_json::from_str(archive).unwrap();
     assert_eq!(archive["response_json"], envelope);
-    {
-        let session = engine.session.blocking_lock();
-        session
-            .as_ref()
-            .unwrap()
-            .session
-            .canonical_live_session()
-            .unwrap()
-            .ensure_ready()
-            .unwrap();
-    }
     engine
         .runtime
         .block_on(engine.retire_session_runtime())
@@ -171,15 +160,13 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
     drop(owner);
     let reopened = crate::session_store::SessionFile::open(&path).unwrap();
     let cold = AgentSessionEngine::new(config()).unwrap();
-    let cold_owner = own_canonical_store(&cold, reopened);
+    let cold_owner = own_log_store(&cold, reopened);
     let cold_model = cold.resolve_model().unwrap();
     cold.runtime
         .block_on(cold.ensure_core_session_async(&cold_model))
         .unwrap();
     let cold_bytes = std::fs::read(&path).unwrap();
     let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        use sha2::Digest as _;
-
         assert!(
             cold_bytes.starts_with(&durable),
             "cold initialization must preserve the entire ACKed physical prefix"
@@ -187,7 +174,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
         let bootstrap: Vec<serde_json::Value> = std::str::from_utf8(&cold_bytes[durable.len()..])
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["row"].clone())
             .collect();
         let service_tier = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir)
             .get_default_service_tier();
@@ -272,12 +259,6 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
         {
             let session = cold.session.blocking_lock();
             let session = session.as_ref().unwrap();
-            session
-                .session
-                .canonical_live_session()
-                .unwrap()
-                .ensure_ready()
-                .unwrap();
             assert!(cold
                 .runtime
                 .block_on(session.session.agent().state())
@@ -286,41 +267,20 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
             let persistence = session.session.shared_persistence();
             cold.runtime.block_on(async {
                 let manager = persistence.lock().await;
-                let header = manager.canonical_raw_header().unwrap();
-                let certified = manager
-                    .canonical_raw_full_rows()
-                    .expect("this bounded fixture must retain certified full raw history");
-                let mut certified_bytes = header.raw().to_vec();
-                for entry in certified {
-                    certified_bytes.extend_from_slice(entry.raw());
-                }
+                let actual: Vec<serde_json::Value> = manager
+                    .history_snapshot()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
+                    .map(|entry| serde_json::to_value(entry).unwrap())
+                    .collect();
                 assert_eq!(
-                    certified_bytes, cold_bytes,
-                    "every certified physical byte must match disk"
+                    actual, owner_rows,
+                    "exact committed envelopes must survive cold replay"
                 );
-                assert_eq!(certified.len(), owner_rows.len());
-                for (owner_entry, certified_entry) in owner_rows.iter().zip(certified) {
-                    assert_eq!(owner_entry["id"].as_str(), certified_entry.entry().id());
-                    let physical: serde_json::Value =
-                        serde_json::from_slice(certified_entry.raw()).unwrap();
-                    assert_eq!(
-                        owner_entry, &physical,
-                        "owner rows must match exact certified raw values in order"
-                    );
-                }
-                let binding = manager.canonical_binding().unwrap();
-                assert_eq!(binding.selected_leaf, owner_leaf);
-                assert_eq!(
-                    binding.frontier.bytes,
-                    u64::try_from(cold_bytes.len()).unwrap()
-                );
-                assert_eq!(
-                    binding.frontier.rows,
-                    u64::try_from(certified.len() + 1).unwrap()
-                );
-                let certificate: [u8; 32] = sha2::Sha256::digest(&cold_bytes).into();
-                assert_eq!(binding.frontier.prefix_certificate, certificate);
-                let visible = manager.canonical_visible_context();
+                assert_eq!(manager.get_leaf_id(), owner_leaf.as_deref());
+                let visible = manager.active_context();
                 assert!(
                     visible.messages.is_empty(),
                     "no duplicate semantic tail may become visible"
@@ -1106,7 +1066,7 @@ fn threshold_below_the_headroom_stays_silent() {
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     assert_eq!(assistant_texts(&events), vec!["plain reply".to_string()]);

@@ -158,6 +158,17 @@ impl ExportCommands {
                 pa_core::session::manager::format_iso_now().replace([':', '.'], "-")
             )),
         };
+        anyhow::ensure!(
+            crate::lease::canonical_session_path(&file_path)
+                != crate::lease::canonical_session_path(&store.path),
+            "Cannot export a session onto its source: {}",
+            file_path.display()
+        );
+        // The destination is a native session log even when its chosen name
+        // has no extension. Its existing execution lock excludes live owners
+        // and fresh-session creation throughout publication.
+        let _target_lease =
+            crate::lease::acquire_runtime_session_lease(&file_path, &self.agent_dir)?;
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -169,7 +180,7 @@ impl ExportCommands {
             "timestamp": pa_core::session::manager::format_iso_now(),
             "cwd": core.cwd,
         });
-        let mut lines = vec![serde_json::to_string(&header)?];
+        let mut rows = Vec::new();
         // The branch walks root-to-leaf; parent ids re-chain linearly so
         // the exported file resumes as one straight session.
         let mut previous: Option<String> = None;
@@ -182,11 +193,40 @@ impl ExportCommands {
                 };
             }
             previous = value.get("id").and_then(Value::as_str).map(str::to_string);
-            lines.push(serde_json::to_string(&value)?);
+            rows.push(value);
         }
-        let body = format!("{}\n", lines.join("\n"));
-        std::fs::write(&file_path, body)
-            .with_context(|| format!("writing {}", file_path.display()))?;
+        // JSONL is importable session history, not the display/RPC row stream.
+        // Use the normal log writer so exports obey the same CRC/sequence
+        // contract as every strict session reader. Publish only complete bytes.
+        let staging = file_path.with_file_name(format!(".session-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&staging)?;
+        let staged_file = staging.join("export.jsonl");
+        let result = (|| -> Result<()> {
+            let wire = crate::session_transport::LogWire::fresh(&staged_file);
+            let mut flushed = 0;
+            wire.flush(
+                "export",
+                &header,
+                &rows,
+                &mut flushed,
+                &pa_core::session_log::ReadCursor::default(),
+            )?;
+            drop(wire);
+            pa_core::platform::rename_onto_durable(&staged_file, &file_path)
+                .with_context(|| format!("writing {}", file_path.display()))?;
+            Ok(())
+        })();
+        // These names belong only to this private staging directory; no
+        // execution owner or log reader can retain its lock inode.
+        for path in [staged_file, staging.join("export.lock")] {
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(error).with_context(|| format!("cleaning {}", path.display()));
+                }
+            }
+        }
+        std::fs::remove_dir(&staging)?;
+        result?;
         Ok(file_path.to_string_lossy().into_owned())
     }
 }
@@ -222,11 +262,38 @@ impl pa_core::export_html::ToolHtmlRenderer for ExportToolRenderer<'_> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    fn write_session_log(path: impl AsRef<Path>, content: impl AsRef<str>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let directory = path.parent().expect("fixture directory");
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .expect("fixture id");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)?;
+        for line in content
+            .as_ref()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let row: serde_json::Value = serde_json::from_str(line)?;
+            anyhow::ensure!(
+                matches!(
+                    log.append(&row, deadline),
+                    pa_core::session_log::Outcome::Committed { .. }
+                ),
+                "fixture row must commit"
+            );
+        }
+        Ok(())
+    }
 
     fn core_with_session(dir: &Path) -> SessionCore {
         let file = dir.join("sess.jsonl");
-        std::fs::write(
+        write_session_log(
             &file,
             concat!(
                 r##"{"type":"session","id":"sess-1","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"##,
@@ -280,19 +347,88 @@ mod tests {
             .and_then(Value::as_str)
             .expect("path in response")
             .to_string();
-        let body = std::fs::read_to_string(&path).expect("read export");
-        let lines: Vec<&str> = body.lines().collect();
+        let entries = pa_core::session::read::read_entries(Path::new(&path))
+            .expect("the JSONL export is a validated session log");
+        let lines: Vec<Value> = entries
+            .into_iter()
+            .map(|entry| serde_json::to_value(entry).expect("export entry"))
+            .collect();
         assert_eq!(lines.len(), 3);
-        let header: Value = serde_json::from_str(lines[0]).expect("header line");
+        let header = &lines[0];
         assert_eq!(header["type"], "session");
         assert_eq!(header["id"], "sess-1");
         assert_eq!(header["cwd"], dir.path().display().to_string());
-        let first: Value = serde_json::from_str(lines[1]).expect("first entry");
+        let first = &lines[1];
         assert_eq!(first["id"], "e1");
         assert_eq!(first["parentId"], Value::Null);
-        let second: Value = serde_json::from_str(lines[2]).expect("second entry");
+        let second = &lines[2];
         assert_eq!(second["id"], "e2");
         assert_eq!(second["parentId"], "e1");
+    }
+
+    #[test]
+    fn jsonl_export_refuses_the_source_and_a_live_destination() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let core = core_with_session(dir.path());
+        let source = core.store.as_ref().expect("session store").path.clone();
+        let source_before = std::fs::read(&source).expect("source bytes");
+        // The command's output is a session log regardless of its filename.
+        let target = dir.path().join("existing-export");
+        std::fs::copy(&source, &target).expect("existing native export");
+        let target_before = std::fs::read(&target).expect("target bytes");
+        let agent_dir = dir.path().join("agent");
+        let holder = crate::lease::acquire_runtime_session_lease(&target, &agent_dir)
+            .expect("live target owner");
+        let engine: Arc<dyn SessionEngine> = Arc::new(crate::engine::ScriptedEngine::default());
+        let exports = ExportCommands::new(engine, Arc::new(Mutex::new(core)), agent_dir);
+        let source_response = exports.export_jsonl(&json!({ "outputPath": source }));
+        assert!(!source_response.success, "source export must be refused");
+        let target_response = exports.export_jsonl(&json!({ "outputPath": target }));
+        assert!(!target_response.success, "live target must be refused");
+        assert_eq!(std::fs::read(&source).expect("source bytes"), source_before);
+        assert_eq!(std::fs::read(&target).expect("target bytes"), target_before);
+
+        holder.release();
+        std::fs::write(&target, b"not a session log").expect("idle non-log target");
+        let response = exports.export_jsonl(&json!({ "outputPath": target }));
+        assert!(
+            response.success,
+            "idle target overwrite: {:?}",
+            response.error
+        );
+        let exported = pa_core::session::read::read_entries(&target)
+            .expect("the replacement is a valid session log");
+        assert_eq!(exported.len(), 3);
+        assert_eq!(std::fs::read(&source).expect("source bytes"), source_before);
+    }
+
+    #[test]
+    fn failed_jsonl_export_preserves_the_source_and_existing_destination() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut core = core_with_session(dir.path());
+        let store = core.store.as_mut().expect("session store");
+        let source = store.path.clone();
+        let source_before = std::fs::read(&source).expect("source bytes");
+        // The native log refuses a row beyond its 16 MiB read limit. A
+        // failed export must not truncate an earlier successful export.
+        store.append_message(&json!({ "role": "user", "content": "x".repeat(16 * 1024 * 1024) }));
+        let target = dir.path().join("export.jsonl");
+        let target_before = b"previous export\n";
+        std::fs::write(&target, target_before).expect("existing export");
+        let engine: Arc<dyn SessionEngine> = Arc::new(crate::engine::ScriptedEngine::default());
+        let exports =
+            ExportCommands::new(engine, Arc::new(Mutex::new(core)), dir.path().join("agent"));
+        let response = exports.export_jsonl(&json!({ "outputPath": target }));
+        assert!(!response.success, "oversized row must be refused");
+        assert_eq!(std::fs::read(&target).expect("target bytes"), target_before);
+        assert_eq!(std::fs::read(&source).expect("source bytes"), source_before);
+        assert!(std::fs::read_dir(dir.path())
+            .expect("export directory")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".session-export-")));
     }
 
     #[tokio::test]

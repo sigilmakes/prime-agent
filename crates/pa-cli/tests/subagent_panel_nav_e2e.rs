@@ -119,6 +119,28 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// One saved-session fixture: a header with the subagent linkage
 /// (`parentSession`, `rlmDepth`), a display name, and an exchange.
 fn write_fixture(
@@ -151,22 +173,18 @@ fn write_fixture(
             index * 1000 + 1
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
+    append_session_rows(&path, &content);
     path
 }
 
 /// One billed assistant turn appended to a fixture transcript: the
 /// usage-bearing row the own-usage fold reads.
 fn append_billed_turn(path: &Path, id: &str, input: u64, output: u64, cost: f64) {
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .expect("open the fixture for its billed turn");
-    let _ = writeln!(
-        file,
+    let row = format!(
         "{{\"type\":\"message\",\"id\":\"{id}\",\"timestamp\":\"2026-09-29T00:00:02.100Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"prime-inference\",\"model\":\"internal/glm-5.3-fast\",\"content\":[{{\"type\":\"text\",\"text\":\"work complete\"}}],\"stopReason\":\"stop\",\"timestamp\":2100,\"usage\":{{\"input\":{input},\"output\":{output},\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":{},\"cost\":{{\"input\":0.0,\"output\":{cost},\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":{cost}}}}}}}}}",
         input + output,
     );
+    append_session_rows(path, &row);
 }
 
 /// The first frame showing `marker` (the state before the later keystrokes
@@ -245,7 +263,7 @@ fn session_options(
 async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -430,7 +448,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
 async fn the_title_bills_a_passive_subagents_spend() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -515,7 +533,7 @@ async fn the_title_bills_a_passive_subagents_spend() {
 async fn the_title_bills_a_deleted_subagents_spend() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 

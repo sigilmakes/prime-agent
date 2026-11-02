@@ -28,7 +28,9 @@ rustPlatform.buildRustPackage {
         bash ${./check_audited.sh}
         runHook postCheck
     '';
-    CARGO_BUILD_JOBS = "2";
+    # The CI host has 32 cores; two jobs left the release build as the
+    # slowest job on every push. Eight still leaves the host responsive.
+    CARGO_BUILD_JOBS = "8";
     CARGO_PROFILE_RELEASE_DEBUG = "0";
     postInstall = ''
         mkdir -p "$out/lib/prime-agent"

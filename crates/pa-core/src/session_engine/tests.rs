@@ -406,11 +406,12 @@ async fn prompt_persists_tool_results() {
         .join(format!("{}.jsonl", engine.session_id().await))
         .to_string_lossy()
         .to_string();
-    let lines: Vec<serde_json::Value> = std::fs::read_to_string(file)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let lines: Vec<serde_json::Value> =
+        crate::session::read::read_entries(std::path::Path::new(&file))
+            .expect("validated durable tool results")
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect();
     let entry = lines
         .iter()
         .find(|entry| {
@@ -630,7 +631,7 @@ async fn run_boundaries_record_git_state() {
     git(repo.path(), &["init", "-q", "-b", "main"]);
     git(repo.path(), &["config", "user.email", "t@t.co"]);
     git(repo.path(), &["config", "user.name", "t"]);
-    commit(repo.path(), "init");
+    let initial_sha = commit(repo.path(), "init");
 
     let provider = Arc::new(ScriptedProvider::new(test_model()));
     provider.push_text_turn("ok");
@@ -643,7 +644,17 @@ async fn run_boundaries_record_git_state() {
         ..Default::default()
     };
     let agent = Agent::new(options);
-    let session = SessionManager::persisted(repo.path(), sessions.path());
+    let mut session = SessionManager::persisted(repo.path(), sessions.path());
+    session.flush_now().unwrap();
+    assert_eq!(
+        session.get_header().unwrap().git,
+        Some(pa_types::session::GitContext {
+            repo_url: None,
+            commit: Some(initial_sha),
+            branch: Some("main".to_string()),
+            rest: pa_types::JsonMap::new(),
+        })
+    );
     let engine = AgentSession::new(Arc::new(agent), session, vec![])
         .await
         .unwrap();
@@ -685,4 +696,196 @@ async fn run_boundaries_record_git_state() {
             },
         ]
     );
+}
+
+#[tokio::test]
+async fn durable_event_failure_refuses_local_message_publication() {
+    struct RefusingWriter;
+    impl crate::session::manager::SessionEntryWriter for RefusingWriter {
+        fn append(&self, _: &mut pa_types::session::FileEntry) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected durable event refusal"))
+        }
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<pa_types::session::FileEntry>> {
+            Ok(Vec::new())
+        }
+    }
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let before = manager.retained_entries().to_vec();
+    manager.set_entry_writer(std::sync::Arc::new(RefusingWriter));
+    let manager = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+    let event = pa_agent::types::AgentEvent::MessageEnd {
+        message: pa_agent::types::AgentMessage::user("must not be delivered"),
+    };
+    assert!(super::persist_event(&manager, event).await.is_err());
+    assert_eq!(manager.lock().await.retained_entries(), before);
+}
+
+#[tokio::test]
+async fn custom_event_replays_exact_admitted_row_without_another_append() {
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let row = pa_types::session::CustomMessage {
+        custom_type: "accepted-custom".to_owned(),
+        content: pa_types::ai::UserContent::Text("delivered once".to_owned()),
+        display: true,
+        details: None,
+        timestamp: 1,
+        rest: pa_types::JsonMap::new(),
+    };
+    let id = manager
+        .append_custom_message(
+            &row.custom_type,
+            row.content.clone(),
+            row.display,
+            row.details.clone(),
+        )
+        .unwrap();
+    manager.replay_admitted_custom_rows(vec![id]).unwrap();
+    let before = manager.retained_entries().to_vec();
+    let manager = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+    let event = pa_agent::types::AgentEvent::MessageEnd {
+        message: session_message_to_loop(&SessionAgentMessage::Custom(row)).unwrap(),
+    };
+    super::persist_event(&manager, event).await.unwrap();
+    assert_eq!(manager.lock().await.retained_entries(), before);
+}
+
+#[tokio::test]
+async fn admitted_user_event_uses_stored_message_not_transient_timestamp() {
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let original: SessionAgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"user", "content":"durable accepted input", "timestamp":7, "futureField":{"exact":true}
+    })).unwrap();
+    let id = manager.append_message(original.clone()).unwrap();
+    manager
+        .replay_admitted_input_rows(vec![id.clone()])
+        .unwrap();
+    let before = manager.retained_entries().to_vec();
+    let manager = Arc::new(tokio::sync::Mutex::new(manager));
+    let event = AgentEvent::MessageEnd {
+        message: AgentMessage::user("a transient reconstruction must not replace the named row"),
+    };
+    let actual = super::persist_event(&manager, event).await.unwrap();
+    let AgentEvent::MessageEnd { message } = actual else {
+        panic!("message end expected")
+    };
+    assert_eq!(
+        serde_json::to_value(&message).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_eq!(manager.lock().await.retained_entries(), before);
+}
+
+#[tokio::test]
+async fn admitted_custom_event_uses_stored_timestamp_details_and_extra_fields() {
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let id = manager
+        .append_metadata_intent(
+            serde_json::from_value(serde_json::json!({
+                "type":"custom_message", "customType":"accepted", "content":"durable custom input",
+                "display":true, "details":{"source":"durable"}, "futureField":{"exact":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    manager
+        .replay_admitted_input_rows(vec![id.clone()])
+        .unwrap();
+    let before = manager.retained_entries().to_vec();
+    let row = before
+        .iter()
+        .find(|entry| entry.id() == Some(id.as_str()))
+        .unwrap();
+    let FileEntry::CustomMessage { payload, .. } = row else {
+        panic!("custom row expected")
+    };
+    let original = SessionAgentMessage::Custom(crate::session::create_custom_message(payload, row));
+    let manager = Arc::new(tokio::sync::Mutex::new(manager));
+    let transient: AgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"custom", "customType":"accepted", "content":"transient", "display":false,
+        "details":null, "timestamp":1
+    }))
+    .unwrap();
+    let actual = super::persist_event(&manager, AgentEvent::MessageEnd { message: transient })
+        .await
+        .unwrap();
+    let AgentEvent::MessageEnd { message } = actual else {
+        panic!("message end expected")
+    };
+    assert_eq!(
+        serde_json::to_value(&message).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_eq!(manager.lock().await.retained_entries(), before);
+}
+
+#[tokio::test]
+async fn context_custom_prefix_cannot_consume_the_admitted_custom_input() {
+    let mut manager = SessionManager::in_memory(std::path::Path::new("/tmp"));
+    let id = manager
+        .append_metadata_intent(
+            serde_json::from_value(serde_json::json!({
+                "type":"custom_message", "customType":"accepted", "content":"durable input",
+                "display":true, "details":{"id":"accepted-input"}, "futureField":{"exact":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    manager
+        .replay_admitted_input_rows(vec![id.clone()])
+        .unwrap();
+    let accepted = manager.get_entry_by_id(&id).unwrap().clone();
+    let FileEntry::CustomMessage { payload, .. } = &accepted else {
+        panic!("custom row expected")
+    };
+    let canonical =
+        SessionAgentMessage::Custom(crate::session::create_custom_message(payload, &accepted));
+    let manager = Arc::new(tokio::sync::Mutex::new(manager));
+    let mut prefix: AgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"custom", "customType":"context-notice", "content":"context prefix", "display":true,
+        "timestamp":1
+    }))
+    .unwrap();
+    let AgentMessage::Custom(custom) = &mut prefix else {
+        panic!("custom prefix expected")
+    };
+    custom.delivery = pa_agent::types::CustomMessageDelivery::Context;
+    let prefix_event = super::persist_event(&manager, AgentEvent::MessageEnd { message: prefix })
+        .await
+        .unwrap();
+    let AgentEvent::MessageEnd { message: prefix } = prefix_event else {
+        panic!("message end expected")
+    };
+    assert_eq!(
+        serde_json::to_value(prefix).unwrap()["customType"],
+        "context-notice"
+    );
+    let input: AgentMessage = serde_json::from_value(serde_json::json!({
+        "role":"custom", "customType":"accepted", "content":"transient input", "display":false,
+        "details":null, "timestamp":2
+    }))
+    .unwrap();
+    let input_event = super::persist_event(&manager, AgentEvent::MessageEnd { message: input })
+        .await
+        .unwrap();
+    let AgentEvent::MessageEnd { message: input } = input_event else {
+        panic!("message end expected")
+    };
+    assert_eq!(
+        serde_json::to_value(input).unwrap(),
+        serde_json::to_value(canonical).unwrap()
+    );
+    let manager = manager.lock().await;
+    assert_eq!(manager.get_entry_by_id(&id), Some(&accepted));
+    let custom_types: Vec<_> = manager
+        .retained_entries()
+        .iter()
+        .filter_map(|row| match row {
+            FileEntry::CustomMessage { payload, .. } => Some(payload.custom_type.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(custom_types, ["accepted", "context-notice"]);
 }

@@ -129,37 +129,34 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
             index * 1000 + 1
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
-    // Inspect the exact physical bytes through the production row parser.
-    // Like RawCapture, a valid header is separate from known-body fallback.
-    let physical = std::fs::read(&path).expect("read fixture parser diagnostic");
-    let mut offset = 0_u64;
-    for (ordinal, bytes) in physical.split_inclusive(|byte| *byte == b'\n').enumerate() {
-        let row = pa_core::session::canonical::CanonicalJournalRow::parse(
-            std::sync::Arc::from(bytes),
-            offset,
-            u64::try_from(ordinal).expect("fixture row ordinal"),
-        )
-        .unwrap_or_else(|_| panic!("[chat-history-wire] kind=parse_error ordinal={ordinal}"));
-        if ordinal == 0 {
-            assert!(
-                matches!(row.entry(), pa_types::session::FileEntry::Header { .. }),
-                "[chat-history-wire] kind=invalid_header ordinal={ordinal}"
-            );
-        } else {
-            let wire: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_else(|_| {
-                panic!("[chat-history-wire] kind=json_error ordinal={ordinal}")
-            });
-            assert!(
-                !(wire["type"] == "message"
-                    && matches!(row.entry(), pa_types::session::FileEntry::Unknown { .. })),
-                "[chat-history-wire] kind=unknown_known_message ordinal={ordinal}"
-            );
+    let mut log = pa_core::session_log::SessionLog::open(dir, id, std::time::Instant::now())
+        .expect("fixture log");
+    let mut parent = None;
+    for (ordinal, line) in content.lines().enumerate() {
+        let mut body: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        if ordinal != 0 {
+            body["parentId"] = serde_json::to_value(&parent).unwrap();
+            parent = body["id"].as_str().map(str::to_owned);
         }
-        offset = offset
-            .checked_add(u64::try_from(bytes.len()).expect("fixture row length"))
-            .expect("fixture physical offset");
+        let typed: pa_types::session::FileEntry = serde_json::from_value(body.clone())
+            .unwrap_or_else(|_| panic!("[chat-history-wire] kind=parse_error ordinal={ordinal}"));
+        assert!(
+            !matches!(typed, pa_types::session::FileEntry::Unknown { .. }),
+            "[chat-history-wire] kind=unknown_known_message ordinal={ordinal}"
+        );
+        assert!(matches!(
+            log.append(&body, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
+    let entries = pa_core::session::read::read_entries(&path).expect("strict fixture log read");
+    assert!(
+        matches!(
+            entries.first(),
+            Some(pa_types::session::FileEntry::Header { .. })
+        ),
+        "[chat-history-wire] kind=invalid_header"
+    );
     path
 }
 

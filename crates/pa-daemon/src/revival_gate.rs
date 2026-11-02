@@ -25,7 +25,7 @@ pub(crate) enum RevivalVeto {
     /// The session's durable state is `archived`: the stop lifecycle's belt
     /// (#2592) is durable stop intent — no automatic path may flip it back active.
     SessionArchived,
-    /// A live lease holds the session file: another worker process (this daemon's or another
+    /// An OS execution lock holds the session file: another worker process (this daemon's or another
     /// daemon's, on a shared agent dir) owns the session — one owning daemon, one owning worker.
     LiveLeaseHeld { pid: u32 },
     /// The newest `busy` record predates the freshness bound: the evidence of interrupted work is
@@ -45,7 +45,7 @@ impl RevivalVeto {
                     .to_string()
             }
             RevivalVeto::LiveLeaseHeld { pid } => format!(
-                "a live worker (pid {pid}) holds its session lease; not revived (one owning daemon)"
+                "a live worker (pid {pid}) holds its session execution lock; not revived (one owning daemon)"
             ),
             RevivalVeto::StaleBusyEvidence { recorded_at } => format!(
                 "its busy evidence is stale (recorded {recorded_at}); not revived (reopens on the next client open)"
@@ -297,9 +297,7 @@ mod tests {
         let agent_dir = agent_dir();
         // A live lease written the way another daemon's worker writes it
         // (this test process holds it): the file is owned elsewhere.
-        std::env::set_var(crate::lease::SESSION_LEASES_ENABLED_ENV, "1");
         let lease = crate::lease::acquire_runtime_session_lease(&file, &agent_dir);
-        std::env::remove_var(crate::lease::SESSION_LEASES_ENABLED_ENV);
         let _lease = lease.expect("the test process acquires the lease");
         let veto = revival_veto(
             &agent_dir,
@@ -319,9 +317,7 @@ mod tests {
         // A lease whose owner is long dead is stale ownership, not a live
         // one: the gate must not park genuinely interrupted work behind a
         // dead holder's record.
-        std::env::set_var(crate::lease::SESSION_LEASES_ENABLED_ENV, "1");
         let lease = crate::lease::acquire_runtime_session_lease(&file, &agent_dir);
-        std::env::remove_var(crate::lease::SESSION_LEASES_ENABLED_ENV);
         drop(lease.expect("the test process acquires the lease"));
         assert!(revival_veto(
             &agent_dir,

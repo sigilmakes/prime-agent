@@ -133,7 +133,7 @@ async fn public_engine_orders_failures_and_commits_once_then_restores() {
         .get_session_file()
         .unwrap()
         .to_owned();
-    let manager = SessionManager::open(&f.cwd, path.parent().unwrap(), &path);
+    let manager = SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap();
     let restored = create_session(SessionEngineConfig {
         cwd: f.cwd.clone(),
         agent_dir: f.agent.clone(),
@@ -659,7 +659,7 @@ async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuat
         model: Some(super::super::provider_adapter::json_round_trip(&model).unwrap()),
         model_info: Some(model.clone()),
         stream_fn: Some(stream),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -782,7 +782,7 @@ async fn snap_archive_expands_on_compaction_restore_and_branch_without_duplicate
         model: Some(super::super::provider_adapter::json_round_trip(&model).unwrap()),
         model_info: Some(model),
         stream_fn: Some(f.provider.stream_fn()),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -860,7 +860,11 @@ async fn snap_archive_switches_to_a_nonvision_model_as_text_and_keeps_the_archiv
         !body.contains("\"type\":\"image\""),
         "nonvision model received an image block"
     );
-    assert!(body.contains("Text fallback"));
+    assert_eq!(
+        body.matches("Text fallback").count(),
+        1,
+        "archive expanded more than once"
+    );
     assert!(body.contains("switch-source-"));
     let entries = f.engine.session.entries().await;
     assert!(
@@ -951,7 +955,7 @@ async fn selected_strategy_is_durable_before_compaction_and_not_reselected_from_
         model: Some(super::super::provider_adapter::json_round_trip(&f.model).unwrap()),
         model_info: Some(f.model.clone()),
         stream_fn: Some(f.provider.stream_fn()),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -1021,7 +1025,7 @@ async fn reopened(f: &Fixture) -> SessionEngine {
         model: Some(super::super::provider_adapter::json_round_trip(&f.model).unwrap()),
         model_info: Some(f.model.clone()),
         stream_fn: Some(f.provider.stream_fn()),
-        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path)),
+        session_manager: Some(SessionManager::open(&f.cwd, path.parent().unwrap(), &path).unwrap()),
         prewarm_ipython_kernel: Some(false),
         daemonless: true,
         ..Default::default()
@@ -1801,7 +1805,6 @@ async fn reference_replay_is_rejected_before_actual_provider_or_selection_public
     assert_eq!(f.state().await, before);
     let plugins = Arc::clone(f.engine.session.plugins.as_ref().unwrap());
     let stream = wrap_stream_fn(
-        ModelContextSource::Assembled,
         plugins,
         Arc::new(std::sync::RwLock::new(None)),
         f.provider.stream_fn(),
@@ -1810,6 +1813,7 @@ async fn reference_replay_is_rejected_before_actual_provider_or_selection_public
     let context = pa_agent::stream::LlmContext {
         messages: vec![pa_agent::types::Message::User(
             pa_agent::types::UserMessage {
+                rest: serde_json::Map::default(),
                 content: pa_agent::types::UserContent::Text("not persisted".into()),
                 timestamp: 0,
             },
@@ -1929,6 +1933,7 @@ async fn reference_model_echo_matches_prior_tool_image_signature_conversion_and_
     ])).unwrap();
     messages.push(pa_agent::types::Message::User(
         pa_agent::types::UserMessage {
+            rest: serde_json::Map::default(),
             content: pa_agent::types::UserContent::Text("x".repeat(32 * 1024 * 1024)),
             timestamp: 4,
         },
@@ -1937,7 +1942,6 @@ async fn reference_model_echo_matches_prior_tool_image_signature_conversion_and_
     assert_eq!(old, messages);
     let plugins = Arc::clone(f.engine.session.plugins.as_ref().unwrap());
     let stream = wrap_stream_fn(
-        ModelContextSource::Assembled,
         plugins,
         Arc::new(std::sync::RwLock::new(None)),
         f.provider.stream_fn(),
@@ -2020,7 +2024,6 @@ async fn reference_selected_disable_fails_closed_until_explicit_recovery() {
     f.engine.reload_plugins().await.unwrap();
     let plugins = Arc::clone(f.engine.session.plugins.as_ref().unwrap());
     let stream = wrap_stream_fn(
-        ModelContextSource::Assembled,
         plugins,
         Arc::new(std::sync::RwLock::new(None)),
         f.provider.stream_fn(),
@@ -2109,4 +2112,44 @@ async fn oversized_legacy_compactor_remains_a_failed_stage_not_a_chain_bypass() 
         matches!(invocation.next().await,Some(crate::plugins::InvocationEvent::Finished(Ok(crate::plugins::InvocationOutcome::Unary(value)))) if value==json!(0)),
         "oversized JSON callback must not receive empty bodies"
     );
+}
+
+#[tokio::test]
+async fn before_model_refreshes_foreign_committed_rows_without_appending() {
+    struct Tail(std::sync::Mutex<Vec<FileEntry>>);
+    impl crate::session::manager::SessionEntryWriter for Tail {
+        fn append(&self, _: &mut FileEntry) -> std::io::Result<()> {
+            panic!("model context refresh must not append");
+        }
+        fn read_tail(
+            &self,
+            _: &mut crate::session_log::ReadCursor,
+        ) -> std::io::Result<Vec<FileEntry>> {
+            Ok(std::mem::take(&mut *self.0.lock().unwrap()))
+        }
+    }
+    let f = Fixture::new(ORDERED, "policy/view", false).await;
+    let persistence = f.engine.session.shared_persistence();
+    let parent = persistence.lock().await.get_leaf_id().map(str::to_owned);
+    let entry: FileEntry = serde_json::from_value(json!({
+        "type":"message", "id":"foreign", "parentId":parent,
+        "timestamp":"2026-01-01T00:00:00Z", "message":user("foreign committed input")
+    }))
+    .unwrap();
+    persistence
+        .lock()
+        .await
+        .set_entry_writer(Arc::new(Tail(std::sync::Mutex::new(vec![entry]))));
+    let hook = before_model(
+        persistence.clone(),
+        f.engine.session.plugins.as_ref().unwrap().clone(),
+        f.engine.session.context_archive.clone(),
+    );
+    let messages = hook(Vec::new(), pa_agent::abort::AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(serde_json::to_string(&messages)
+        .unwrap()
+        .contains("foreign committed input"));
+    assert_eq!(persistence.lock().await.get_leaf_id(), Some("foreign"));
 }

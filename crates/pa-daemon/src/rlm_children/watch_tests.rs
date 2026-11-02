@@ -138,16 +138,36 @@ async fn spawn_fake_supervisor(
                                 None,
                             )
                         }
-                        "create" => response_success(
-                            Some(&id),
-                            command_type,
-                            Some(json!({
-                                "activeSessionId": "child-live",
-                                "sessionId": "child-file",
-                                "sessionFile": *child_session_file,
-                                "sessionName": "f20-worker",
-                            })),
-                        ),
+                        "create" => {
+                            let path = Path::new(child_session_file.as_str());
+                            let mut log = pa_core::session_log::SessionLog::open(
+                                path.parent().unwrap(),
+                                path.file_stem().unwrap().to_str().unwrap(),
+                                std::time::Instant::now(),
+                            )
+                            .expect("create fake child session log");
+                            let header = json!({
+                                "type": "session", "version": 3, "id": "child-file",
+                                "timestamp": crate::util::now_iso(),
+                                "cwd": command["config"]["cwd"].as_str().expect("child cwd"),
+                                "rlmDepth": command["config"]["rlmDepth"],
+                                "parentSession": command["config"]["parentSessionPath"],
+                            });
+                            assert!(matches!(
+                                log.append(&header, std::time::Instant::now()),
+                                pa_core::session_log::Outcome::Committed { .. }
+                            ));
+                            response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({
+                                    "activeSessionId": "child-live",
+                                    "sessionId": "child-file",
+                                    "sessionFile": *child_session_file,
+                                    "sessionName": "f20-worker",
+                                })),
+                            )
+                        }
                         "prompt" => {
                             child_subagents
                                 .prompt_admissions

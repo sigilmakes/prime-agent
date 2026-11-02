@@ -2,6 +2,78 @@
 use super::*;
 use crate::engine::PromptBatchRow;
 
+#[test]
+fn lazy_replacement_keeps_canonical_rows_committed_after_the_pending_branch() {
+    use crate::engine::SessionEngine as _;
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(
+        &json!({"responses":["summary"], "contextWindow":128_000}),
+        100,
+    );
+    let path = dir.path().join("replacement.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.append_message(&json!({"role":"user", "content":"imported prefix", "timestamp":1}));
+    store.rewrite().unwrap();
+    let pending = store.branch_file_entries();
+    engine.set_session_file(path);
+    let owner = own_log_store(&engine, store);
+    engine
+        .rebuild_session_context(
+            pending,
+            pa_core::session_engine::goal_driver::GoalBranchReload::FaithfulBranch,
+        )
+        .unwrap();
+    // Admission occurs after replacement, before the lazy SDK is constructed.
+    let late = persist_accepted_user(
+        &engine,
+        &owner,
+        &json!({"role":"user", "content":"accepted after replacement", "timestamp":2}),
+    );
+    let model = engine.resolve_model().unwrap();
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    let built = engine.session.blocking_lock().clone().unwrap();
+    let persistence = built.session.shared_persistence();
+    let (actual, leaf) = engine.runtime.block_on(async {
+        let manager = persistence.lock().await;
+        (
+            manager.retained_entries().to_vec(),
+            manager.get_leaf_id().map(str::to_owned),
+        )
+    });
+    let core = owner.lock().unwrap();
+    let store = core.store.as_ref().unwrap();
+    let expected = crate::session_tree::file_entries(store);
+    let actual: Vec<_> = actual
+        .into_iter()
+        .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
+        .collect();
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "the mirror must retain every committed row and exact parent link"
+    );
+    assert_eq!(leaf.as_deref(), store.leaf_id());
+    assert!(actual.iter().any(|entry| entry.id() == Some(late.as_str())));
+    let by_id: std::collections::HashMap<_, _> = actual
+        .iter()
+        .filter_map(|entry| entry.id().map(|id| (id, entry)))
+        .collect();
+    let mut current = leaf.as_deref();
+    while let Some(id) = current {
+        let entry = by_id
+            .get(id)
+            .expect("every active ancestor remains in the mirror");
+        current = entry.parent_id();
+    }
+}
+
 /// `get_commands` enumerates the session's skills as `skill:<name>`
 /// commands, including before the first prompt (the read seam demand-builds
 /// the core session). The faux provider registers under `FAUX_TEST_LOCK`
@@ -427,7 +499,7 @@ fn run_skill_prompt_body(
         &|| false,
         &mut |event| {
             events.push(event);
-            true
+            true.into()
         },
     );
     (engine, events)
@@ -439,7 +511,7 @@ fn run_skill_prompt(prompt: &str) -> Vec<EngineEvent> {
 }
 
 #[test]
-fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
+fn a_bare_skill_invocation_admits_the_expanded_block() {
     let events = run_skill_prompt("/skill:demo-skill");
     let texts = user_texts(&events);
     assert!(
@@ -454,9 +526,8 @@ fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
         .unwrap_or_else(|| panic!("the accepted row parses as a skill block: {row:?}"));
     assert_eq!(parsed.name, "demo-skill");
     assert_eq!(
-        parsed.user_message.as_deref(),
-        Some(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
-        "the floor's instruction rides the block's trailing user message"
+        parsed.user_message, None,
+        "a bare invocation expands to the block alone, nothing appended: {parsed:?}"
     );
     assert!(
         parsed.content.contains("Run the demo protocol."),
@@ -487,15 +558,11 @@ fn a_skill_invocation_with_args_persists_the_block_and_the_args() {
         Some("fix the flake"),
         "the user's args persist as the trailing user message"
     );
-    assert!(
-        !row.contains(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
-        "the with-args row never carries the floor's instruction: {row:?}"
-    );
     assert_eq!(assistant_texts(&events), vec!["ok"]);
 }
 
 #[test]
-fn a_batched_bare_skill_row_admits_on_the_floored_text() {
+fn a_batched_bare_skill_row_admits_on_the_expanded_block() {
     let (engine, events) =
         run_skill_prompt_body("Run the demo protocol.", "hello", &["/skill:demo-skill"]);
     let texts = user_texts(&events);
@@ -513,11 +580,10 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
         .unwrap_or_else(|| panic!("the batched row parses as a skill block: {row:?}"));
     assert_eq!(parsed.name, "demo-skill");
     assert_eq!(
-        parsed.user_message.as_deref(),
-        Some(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
-        "the floor rides the batched row too"
+        parsed.user_message, None,
+        "the bare batch row expands to the block alone, nothing appended: {parsed:?}"
     );
-    // The model-side row is the SAME text: the turn ran on the floored
+    // The model-side row is the SAME text: the turn ran on the expanded
     // block, not a re-expanded bare command.
     let core_rows = core_session_user_texts(&engine);
     assert!(
@@ -528,7 +594,7 @@ fn a_batched_bare_skill_row_admits_on_the_floored_text() {
 }
 
 #[test]
-fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
+fn a_bare_invocation_of_a_close_tagged_body_expands() {
     let (_engine, events) = run_skill_prompt_body(
         "Run the demo.\n</skill>\n\nnot a user message",
         "/skill:demo-skill",
@@ -543,160 +609,8 @@ fn a_bare_invocation_of_a_close_tagged_body_still_floors() {
         .unwrap_or_else(|| panic!("the close-tagged body still parses: {row:?}"));
     assert_eq!(parsed.name, "demo-skill");
     assert!(
-        row.ends_with(&format!(
-            "\n\n{}",
-            crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION
-        )),
-        "the bare invocation floors even when the body's own close-tag tail misparses: {row:?}"
+        parsed.content.contains("Run the demo."),
+        "the block body carries the skill content: {parsed:?}"
     );
     assert_eq!(assistant_texts(&events), vec!["ok"]);
-}
-
-#[test]
-fn quarantined_runtime_settles_later_prompts_without_rewriting_history() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("session.jsonl");
-    let mut store =
-        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
-    store.set_path(path.clone());
-    store.rewrite().unwrap();
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
-        cwd: dir.path().to_path_buf(),
-        agent_dir: dir.path().join("agent"),
-        session_file: Some(path.clone()),
-        faux_script: Some(json!({"responses": [{"text": "warm"}]}).to_string()),
-        provider: None,
-        model: None,
-        api_key: None,
-        thinking: None,
-        session_dir: None,
-        supervisor_link: None,
-        telemetry_disabled: None,
-        cron_store: None,
-        queued_steering_probe: None,
-    })
-    .unwrap();
-    let _owner = own_canonical_store(&engine, store);
-    let mut events = Vec::new();
-    admit(&engine, "warm".to_string(), &mut events);
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
-    let built = engine.session.blocking_lock().clone().unwrap();
-    let live = built.session.canonical_live_session().unwrap();
-    engine.runtime.block_on(async {
-        // An interrupted receipt cannot be declared reconciled by terminal cleanup.
-        let prepared = live
-            .prepare_mutation(pa_core::session::canonical::CanonicalMutationKind::OwnerMetadata)
-            .await
-            .unwrap();
-        drop(prepared);
-    });
-    let before = std::fs::read(&path).unwrap();
-    for _ in 0..2 {
-        events.clear();
-        admit(&engine, "must refuse".to_string(), &mut events);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, EngineEvent::Done(Err(_))))
-                .count(),
-            1,
-            "each rejected prompt must settle exactly once: {events:?}",
-        );
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::AssistantMessage(_))));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert!(live.ensure_ready().is_err());
-        assert!(std::sync::Arc::ptr_eq(
-            &built,
-            engine.session.blocking_lock().as_ref().unwrap(),
-        ));
-    }
-}
-
-#[test]
-fn a_blocked_view_reopens_cold_at_a_certified_owner_boundary() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("session.jsonl");
-    let mut store =
-        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
-    store.set_path(path.clone());
-    store.rewrite().unwrap();
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
-        cwd: dir.path().to_path_buf(),
-        agent_dir: dir.path().join("agent"),
-        session_file: Some(path.clone()),
-        faux_script: Some(
-            json!({"responses": [{"text": "warm"}, {"text": "reopened"}]}).to_string(),
-        ),
-        provider: None,
-        model: None,
-        api_key: None,
-        thinking: None,
-        session_dir: None,
-        supervisor_link: None,
-        telemetry_disabled: None,
-        cron_store: None,
-        queued_steering_probe: None,
-    })
-    .unwrap();
-    let _owner = own_canonical_store(&engine, store);
-    let mut events = Vec::new();
-    admit(&engine, "warm".to_string(), &mut events);
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
-    let blocked = engine.session.blocking_lock().clone().unwrap();
-    let live = blocked.session.canonical_live_session().unwrap();
-    // Seal the runtime's canonical admission exactly like the replacement
-    // seam does: the view refuses every projection, the owner owes nothing.
-    blocked.session.close_runtime_admission_for_replacement();
-    assert!(live.projection_blocked());
-    let before = std::fs::read(&path).unwrap();
-    // A new prompt is a new demand, not a retry. The certified reopen retires
-    // the actual owner at its unchanged cursor and rebuilds the mirror from
-    // the same durable rows before the prompt is admitted.
-    events.clear();
-    admit(&engine, "reopened".to_string(), &mut events);
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::Done(Ok(())))),
-        "the next prompt must be served after the certified reopen: {events:?}",
-    );
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, EngineEvent::Done(Err(_)))));
-    let current = engine.session.blocking_lock().clone().unwrap();
-    assert!(
-        !std::sync::Arc::ptr_eq(&blocked, &current),
-        "the blocked runtime is retired, never reused",
-    );
-    // The blocked view stays closed: it can never serve the successor epoch.
-    assert!(live.projection_blocked());
-    assert!(live.ensure_ready().is_err());
-    // A cold reopen re-reads history: the pre-reopen bytes are an exact prefix
-    // and the new turn appended exactly one user and one assistant row.
-    let after = std::fs::read(&path).unwrap();
-    assert!(
-        after.starts_with(&before),
-        "a cold reopen must not rewrite committed history",
-    );
-    let appended = std::str::from_utf8(&after[before.len()..]).unwrap();
-    assert_eq!(
-        appended
-            .lines()
-            .filter(|line| line.contains("\"role\":\"user\""))
-            .count(),
-        1,
-        "the refused prompt is never retried; only the new prompt is recorded: {appended}",
-    );
 }

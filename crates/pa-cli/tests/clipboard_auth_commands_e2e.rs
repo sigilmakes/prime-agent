@@ -942,17 +942,23 @@ async fn tui_import_replaces_the_session_from_a_fixture() {
     assert!(fixture.is_file(), "the export wrote the fixture");
     // The gone-cwd fixture: a header cwd that no longer exists (TS `MissingSessionCwdError`).
     let gone_cwd = dir.path().join("gone-dir");
-    let lines: Vec<String> = std::fs::read_to_string(&fixture)
-        .expect("read fixture")
-        .lines()
-        .map(str::to_string)
-        .collect();
-    let mut header: serde_json::Value =
-        serde_json::from_str(&lines[0]).expect("the fixture header parses");
-    header["cwd"] = serde_json::json!(gone_cwd.display().to_string());
-    let mut gone_lines = vec![header.to_string()];
-    gone_lines.extend(lines.into_iter().skip(1));
-    std::fs::write(&gone_fixture, gone_lines.join("\n")).expect("write gone-cwd fixture");
+    let entries = pa_core::session::read::read_entries(&fixture).expect("the export validates");
+    let mut log = pa_core::session_log::SessionLog::open(
+        dir.path(),
+        "gone-cwd-fixture",
+        std::time::Instant::now(),
+    )
+    .expect("open gone-cwd fixture");
+    for entry in entries {
+        let mut row = serde_json::to_value(entry).expect("fixture row");
+        if row["type"] == "session" {
+            row["cwd"] = serde_json::json!(gone_cwd.display().to_string());
+        }
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
 
     let fresh_id = create_session_via_daemon(
         &supervisor.socket,

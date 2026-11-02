@@ -25,11 +25,20 @@ pub(crate) struct PreparedReplacement {
 pub(crate) struct SessionNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
+    agent_dir: std::path::PathBuf,
 }
 
 impl SessionNavigation {
-    pub(crate) fn new(engine: Arc<dyn SessionEngine>, core: Arc<Mutex<SessionCore>>) -> Self {
-        SessionNavigation { engine, core }
+    pub(crate) fn new(
+        engine: Arc<dyn SessionEngine>,
+        core: Arc<Mutex<SessionCore>>,
+        agent_dir: std::path::PathBuf,
+    ) -> Self {
+        SessionNavigation {
+            engine,
+            core,
+            agent_dir,
+        }
     }
 
     /// Swap the live session onto `file` (store, engine session file, rebuilt
@@ -47,11 +56,6 @@ impl SessionNavigation {
                 .await;
         let previous = {
             let mut core = self.core.lock().unwrap();
-            if let Some(previous) = core.store.as_mut() {
-                previous
-                    .invalidate_canonical_owner()
-                    .map_err(|error| error.to_string())?;
-            }
             core.store.replace(file)
         };
         // The old store's lease release flushes the window and info
@@ -88,7 +92,9 @@ impl SessionNavigation {
                 Ok(Some(source))
             }
             Some(source) => source.acquire_target(path).map(Some),
-            None => Ok(None),
+            None => crate::lease::acquire_runtime_session_lease(path, &self.agent_dir)
+                .map(Arc::new)
+                .map(Some),
         }
     }
 
@@ -208,21 +214,22 @@ impl SessionNavigation {
                 ));
             }
         };
+        // Validate the exact source snapshot before acquiring or touching the target.
+        let bytes = std::fs::read(resolved)
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
+        pa_core::session::read::read_entries_from(std::io::Cursor::new(&bytes))
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
         std::fs::create_dir_all(target.parent().unwrap_or(std::path::Path::new(".")))
-            .map_err(|error| error.to_string())
-            .ok();
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
         let lease = self
             .target_lease(&target)
             .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))?;
-        if std::fs::canonicalize(&target).ok() != std::fs::canonicalize(resolved).ok() {
-            if let Err(error) = std::fs::copy(resolved, &target) {
-                return Err(response_failure(
-                    None,
-                    "import_jsonl",
-                    &error.to_string(),
-                    None,
-                ));
-            }
+        if crate::lease::canonical_session_path(&target)
+            != crate::lease::canonical_session_path(resolved)
+        {
+            publish_import(&target, &bytes).map_err(|error| {
+                response_failure(None, "import_jsonl", &error.to_string(), None)
+            })?;
         }
         self.open_replacement(
             &target.to_string_lossy(),
@@ -246,12 +253,14 @@ impl SessionNavigation {
             Some(lease) => Some(lease),
             None => self
                 .target_lease(std::path::Path::new(path))
-                .map_err(|error| response_failure(None, command, &error.to_string(), None))?,
+                .map_err(|error| {
+                    let info = error
+                        .downcast_ref::<crate::lease::SessionAlreadyActiveError>()
+                        .map(crate::lease::SessionAlreadyActiveError::error_info);
+                    response_failure(None, command, &error.to_string(), info)
+                })?,
         };
-        if lease.is_some() {
-            pa_core::session::manager::repair_jsonl_damage(std::path::Path::new(path));
-        }
-        let mut file = SessionFile::open(std::path::Path::new(path))
+        let mut file = SessionFile::open_owned_log(std::path::Path::new(path))
             .map_err(|error| response_failure(None, command, &error.to_string(), None))?;
         file.lease = lease;
         let cwd =
@@ -282,6 +291,32 @@ impl SessionNavigation {
         }
         Ok(PreparedReplacement { file, cwd })
     }
+}
+
+/// Publish only into an absent destination while excluding append and repair.
+/// The execution lease is held by the caller; it is a separate lock.
+fn publish_import(target: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    let lock = pa_core::session_log::Disk::open_lock(
+        &pa_core::session_log::RealDisk,
+        &target.with_extension("lock"),
+    )?;
+    lock.try_lock().map_err(anyhow::Error::from)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    pa_core::platform::perms::set_private_mode(&mut options);
+    let parent = target.parent().unwrap_or(std::path::Path::new("."));
+    let staged = parent.join(format!(".session-import-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = options.open(&staged)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // Like archive/ledger publication, hard_link is atomic and never replaces
+    // an existing name. Only complete, synced bytes become the session file.
+    std::fs::hard_link(&staged, target)?;
+    pa_core::platform::fs::sync_directory(parent)?;
+    std::fs::remove_file(&staged)?;
+    Ok(())
 }
 
 /// Rebuild the engine's live context onto the moved session (the same
@@ -450,6 +485,101 @@ mod tests {
             .await;
         assert!(created.success, "create failed: {created:?}");
         worker
+    }
+
+    fn write_import_log(path: &std::path::Path) {
+        write_navigation_log(path, "/tmp");
+    }
+
+    fn write_navigation_log(path: &std::path::Path, cwd: &str) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            crate::session_transport::deadline(),
+        )
+        .unwrap();
+        assert!(matches!(
+            log.append(
+                &json!({
+                    "type": "session", "version": 3,
+                    "id": path.file_stem().unwrap().to_str().unwrap(), "cwd": cwd,
+                    "timestamp": "2026-10-31T00:00:00.000Z"
+                }),
+                crate::session_transport::deadline()
+            ),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
+    }
+
+    #[test]
+    fn import_publication_never_overwrites_and_respects_the_append_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        write_import_log(&source);
+        let bytes = std::fs::read(&source).unwrap();
+        let target = dir.path().join("target.jsonl");
+        std::fs::write(&target, b"original bytes").unwrap();
+        assert!(publish_import(&target, &bytes).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+        let absent = dir.path().join("absent.jsonl");
+        let lock = pa_core::session_log::Disk::open_lock(
+            &pa_core::session_log::RealDisk,
+            &absent.with_extension("lock"),
+        )
+        .unwrap();
+        lock.try_lock().unwrap();
+        assert!(publish_import(&absent, &bytes).is_err());
+        assert!(!absent.exists());
+        drop(lock);
+        publish_import(&absent, &bytes).unwrap();
+        assert_eq!(std::fs::read(&absent).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn import_prepare_preserves_current_bytes_on_invalid_sources_and_collisions() {
+        let worker = created_worker().await;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        let target = sessions.join("current.jsonl");
+        write_import_log(&target);
+        let original = std::fs::read(&target).unwrap();
+        {
+            let mut core = worker.core.lock().unwrap();
+            let mut store = SessionFile::open(&target).unwrap();
+            store.lease = Some(Arc::new(
+                crate::lease::acquire_runtime_session_lease(&target, &dir.path().join("agent"))
+                    .unwrap(),
+            ));
+            core.store = Some(store);
+        }
+        let source = external.join("current.jsonl");
+        for bad in [
+            b"{\"type\":\"session\",\"id\":\"legacy\"}\n".as_slice(),
+            b"corrupt\n",
+        ] {
+            std::fs::write(&source, bad).unwrap();
+            assert!(worker
+                .navigation
+                .prepare_import_jsonl(&json!({"inputPath": source}))
+                .is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+            assert_eq!(std::fs::read(&source).unwrap(), bad);
+        }
+        // A valid external log with the same basename must not clobber current state either.
+        std::fs::write(&source, &original).unwrap();
+        assert!(worker
+            .navigation
+            .prepare_import_jsonl(&json!({"inputPath": source}))
+            .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        let prepared = worker
+            .navigation
+            .prepare_import_jsonl(&json!({"inputPath": target}));
+        assert!(prepared.is_ok(), "a valid exact-path import is a no-op");
+        assert_eq!(std::fs::read(&target).unwrap(), original);
     }
 
     #[tokio::test]
@@ -624,19 +754,7 @@ mod tests {
         // A target session file recording another existing cwd.
         let target_cwd = tempfile::TempDir::new().expect("target cwd");
         let target = target_cwd.path().join("switch-target.jsonl");
-        std::fs::write(
-            &target,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "session",
-                    "id": "switch-target",
-                    "timestamp": "2026-09-21T00:00:00.000Z",
-                    "cwd": target_cwd.path().to_string_lossy(),
-                })
-            ),
-        )
-        .expect("write switch target");
+        write_navigation_log(&target, &target_cwd.path().to_string_lossy());
         let switched = worker
             .dispatch(
                 "switch_session",
@@ -657,19 +775,10 @@ mod tests {
         // (TS `MissingSessionCwdError`); the live session keeps its rebound cwd.
         let gone_dir = tempfile::TempDir::new().expect("gone dir");
         let gone = gone_dir.path().join("gone-target.jsonl");
-        std::fs::write(
+        write_navigation_log(
             &gone,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "session",
-                    "id": "gone-target",
-                    "timestamp": "2026-09-21T00:00:00.000Z",
-                    "cwd": gone_dir.path().join("missing-cwd"),
-                })
-            ),
-        )
-        .expect("write gone target");
+            &gone_dir.path().join("missing-cwd").to_string_lossy(),
+        );
         let failed = worker
             .dispatch(
                 "switch_session",
@@ -736,7 +845,7 @@ mod tests {
             let store = core.store.as_mut().expect("created store");
             let entry_id = store
                 .append_message(&json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
-            let _ = store.rewrite();
+            store.rewrite().expect("persist the fork branch point");
             entry_id
         };
         let added = worker

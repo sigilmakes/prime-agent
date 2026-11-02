@@ -925,6 +925,21 @@ impl Worker {
 
 #[cfg(test)]
 mod tombstone_usage_tests {
+    fn append_session_rows(path: &Path, rows: &[serde_json::Value]) {
+        let mut log = pa_core::session_log::SessionLog::open(
+            path.parent().unwrap(),
+            path.file_stem().unwrap().to_str().unwrap(),
+            std::time::Instant::now(),
+        )
+        .expect("fixture session log");
+        for row in rows {
+            assert!(matches!(
+                log.append(row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -964,14 +979,7 @@ mod tombstone_usage_tests {
                 }
             }
         });
-        {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
-            writeln!(file, "{usage_row}").unwrap();
-        }
+        append_session_rows(&path, &[usage_row]);
         path
     }
 

@@ -18,7 +18,7 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
-use pa_tui::session::{parse_jsonl, JsonlSessionStream, SessionStream};
+use pa_tui::session::{JsonlSessionStream, SessionStream};
 use pa_tui::theme::{ColorMode, Theme};
 use pa_tui::view::AgentView;
 
@@ -30,7 +30,11 @@ const TABLE_SESSION: &str = concat!(
 );
 
 fn frame_text(session: &str, width: u16, height: u16) -> Vec<String> {
-    let entries = parse_jsonl(session).expect("session parses");
+    let entries = session
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("typed render fixture"))
+        .collect();
     let mut stream = JsonlSessionStream::from_entries(entries);
     let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
     while let pa_tui::session::SessionEvent::Item(item) = stream.poll().expect("poll") {

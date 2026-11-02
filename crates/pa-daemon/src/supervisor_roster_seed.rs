@@ -482,12 +482,42 @@ pub(crate) fn family_descends_from(
 
 #[cfg(test)]
 pub(crate) mod tests {
+
     use super::*;
     use crate::registry::ResidentWorker;
     use crate::rlm_ledger::RlmLedgerEdge;
     use crate::supervisor::ClientRouting;
     use pa_types::daemon::agent_roster::AgentRosterStatus;
     use serde_json::Map;
+
+    pub(crate) fn write_session_log(
+        path: impl AsRef<Path>,
+        content: impl AsRef<str>,
+    ) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let directory = path.parent().expect("fixture directory");
+        let id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .expect("fixture id");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)?;
+        for line in content
+            .as_ref()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let row: serde_json::Value = serde_json::from_str(line)?;
+            anyhow::ensure!(
+                matches!(
+                    log.append(&row, deadline),
+                    pa_core::session_log::Outcome::Committed { .. }
+                ),
+                "fixture row must commit"
+            );
+        }
+        Ok(())
+    }
 
     fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
         RlmLedgerEdge {
@@ -567,7 +597,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let child = dir.join("sub-9.jsonl");
         // The child file carries the durable display rows the hydration reads.
-        std::fs::write(
+        write_session_log(
             &child,
             "{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"/tmp/project\"}\n             {\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}\n             {\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}\n",
         )
@@ -626,7 +656,7 @@ pub(crate) mod tests {
     pub(crate) async fn roster_fixture() -> (PathBuf, Arc<Supervisor>, PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("pa-roster-{}", uuid::Uuid::new_v4()));
         let agent_dir = dir.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
+        let sessions_dir = crate::paths::sessions_dir(&agent_dir).expect("native sessions dir");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let root_file = sessions_dir.join("root-1.jsonl");
         let child_file = sessions_dir.join("sub-9.jsonl");
@@ -644,7 +674,7 @@ pub(crate) mod tests {
 
     /// A session transcript with the durable display rows.
     pub(crate) fn write_display_file(path: &Path, cwd: &str) {
-        std::fs::write(
+        write_session_log(
             path,
             format!(
                 "{{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}}\n{{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}}\n"
@@ -798,7 +828,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -839,7 +869,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -870,7 +900,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -923,7 +953,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -956,7 +986,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -1002,7 +1032,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,
@@ -1025,7 +1055,13 @@ pub(crate) mod tests {
         );
         let _ = drain_roster_pushes(&mut events);
 
-        // The transcript becomes readable: the next walk re-finds the row.
+        // Replace the corrupt transcript with a new valid log at the same path.
+        std::fs::rename(&child_file, child_file.with_extension("corrupt"))
+            .expect("retain corrupt fixture");
+        assert_eq!(
+            std::fs::read(child_file.with_extension("corrupt")).unwrap(),
+            b"not a session transcript\n"
+        );
         write_display_file(&child_file, "/the/real/cwd");
         let retry = supervisor.seed_roster_family_edges(&root_file).await;
         assert_eq!(retry.len(), 1, "the marked row is the candidate");
@@ -1057,7 +1093,7 @@ pub(crate) mod tests {
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
-            &agent_dir.join("sessions"),
+            &crate::paths::sessions_dir(&agent_dir).expect("native sessions dir"),
             "sub-9",
             &root_file,
             &child_file,

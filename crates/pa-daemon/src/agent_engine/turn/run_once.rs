@@ -79,28 +79,8 @@ impl AgentSessionEngine {
             std::sync::Mutex<Vec<pa_types::session::ModelChangeEntry>>,
         >,
         aborted: &dyn Fn() -> bool,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> crate::engine::EmitResult,
     ) -> anyhow::Result<TurnOnce> {
-        // Live canonical sessions admit each ACTUAL model callback in Core,
-        // not this whole prompt attempt. Keep legacy standalone admission only.
-        let live_canonical = self
-            .session
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|engine| engine.session.has_canonical_live_owner());
-        if !live_canonical {
-            if let Some(admission) = self
-                .canonical_step
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-            {
-                admission.admit(std::sync::Arc::new(
-                    crate::session_store::canonical_adapter::ProviderStepIdentity,
-                ))?;
-            }
-        }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
         // AgentStart is an awaited listener call after the run owns its abort
         // controller. Hold it until this driver transfers the delivery's cancel
@@ -435,7 +415,7 @@ impl AgentSessionEngine {
                 event = rx.recv() => {
                     match event {
                         Some(event) => {
-                            if !emit(event) {
+                            if !emit(event).continues() {
                                 aborted = true;
                             }
                         }
@@ -449,7 +429,7 @@ impl AgentSessionEngine {
                         Err(error) => admission_error = Some(error),
                     }
                     while let Ok(event) = rx.try_recv() {
-                        if !emit(event) {
+                        if !emit(event).continues() {
                             aborted = true;
                             break;
                         }

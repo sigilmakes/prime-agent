@@ -31,6 +31,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -678,10 +686,8 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
     // A completed scripted child must persist a native assistant before
     // restart. The running-child case has no assistant yet by design.
     if display_status == "completed" {
-        let completed_rows = std::fs::read_to_string(&child_file).expect("completed child journal");
-        let completed_assistant = completed_rows
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("child journal row"))
+        let completed_assistant = persisted_rows(&child_file)
+            .into_iter()
             .find(|row| row["type"] == "message" && row["message"]["role"] == "assistant")
             .expect("completed child assistant");
         let native_message: pa_types::ai::Message =

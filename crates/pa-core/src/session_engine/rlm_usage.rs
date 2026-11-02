@@ -115,13 +115,7 @@ impl RlmChildUsageStore for SessionUsageStore {
             // This fallback owns only standalone transcripts. Bound child hosts
             // must inject an owner usage store at engine construction: their
             // stable report identity is not a locally minted canonical row ID.
-            if session.canonical_binding().is_some()
-                || session.canonical_metadata_writer().is_some()
-            {
-                return Err(std::io::Error::other(
-                    "canonical child usage requires an owning RLM usage store",
-                ));
-            }
+
             // The thin idempotency check: a row this id already wrote is
             // confirmed, whatever the caller's last attempt returned. The
             // retained scan is the same view `last_assistant` reads, so a
@@ -466,54 +460,6 @@ mod tests {
     use super::*;
     use pa_types::ai::{AssistantMessage, StopReason, UsageCost};
 
-    struct ForbiddenMetadataWriter;
-
-    impl crate::session::canonical::CanonicalMetadataWriter for ForbiddenMetadataWriter {
-        fn observe_metadata_source(
-            self: std::sync::Arc<Self>,
-        ) -> crate::session::canonical::CanonicalFuture<()> {
-            panic!("bound usage fallback must not observe or mint canonical metadata")
-        }
-
-        fn append_metadata_from(
-            self: std::sync::Arc<Self>,
-            _entry: pa_types::session::FileEntry,
-            _expected: crate::session::canonical::CanonicalCursor,
-        ) -> crate::session::canonical::CanonicalFuture<
-            crate::session::canonical::CanonicalMetadataReceipt,
-        > {
-            panic!("this standalone test writer has no certified canonical source")
-        }
-
-        fn append_metadata(
-            self: std::sync::Arc<Self>,
-            _entry: pa_types::session::FileEntry,
-        ) -> crate::session::canonical::CanonicalFuture<String> {
-            panic!("standalone usage fallback must not invent a generic metadata retry identity")
-        }
-    }
-
-    #[tokio::test]
-    async fn bound_fallback_refuses_without_minting_or_folding_usage() {
-        let (_tmp, manager) = manager_with_assistant(Usage::default());
-        let writer: std::sync::Arc<dyn crate::session::canonical::CanonicalMetadataWriter> =
-            std::sync::Arc::new(ForbiddenMetadataWriter);
-        manager
-            .lock()
-            .await
-            .bind_canonical_metadata_writer(std::sync::Arc::downgrade(&writer));
-        let before = manager.lock().await.retained_entries().to_vec();
-        let target = before.last().unwrap().id().unwrap().to_owned();
-        let result = SessionUsageStore(manager.clone())
-            .append_attribution("stable-report-id", &target, Usage::default(), None)
-            .await;
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("owning RLM usage store"));
-        assert_eq!(manager.lock().await.retained_entries(), before.as_slice());
-    }
-
     /// `Usage` block with a single cost total.
     fn usage_block(
         input: u64,
@@ -581,10 +527,17 @@ mod tests {
             .get_session_file()
             .expect("session file")
             .to_path_buf();
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
+        let bytes = std::fs::read(path).expect("durable attribution log");
+        let mut seq = 0;
+        bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(|line| {
+                let line = line.strip_suffix(b"\n").expect("complete durable row");
+                let row = crate::session_log::Row::decode(line, seq)
+                    .expect("validated raw attribution row");
+                seq = row.seq;
+                row.body
+            })
             .collect()
     }
 

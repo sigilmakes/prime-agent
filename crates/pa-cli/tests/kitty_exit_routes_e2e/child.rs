@@ -159,24 +159,27 @@ pub(super) fn child_run(route: &str, socket: PathBuf) {
 fn replay_stream() -> pa_tui::session::JsonlSessionStream {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let path = dir.path().join("replay.jsonl");
-    let mut entries = String::new();
-    for _ in 0..2 {
-        entries.push_str(
-            &serde_json::to_string(&json!({
-                "type": "message",
-                "message": {
-                    "role": "user",
-                    "content": [{ "type": "text", "text": "replay row" }],
-                    "timestamp": 0u64,
-                },
-            }))
-            .expect("serialize replay entry"),
-        );
-        entries.push('\n');
+    let mut log =
+        pa_core::session_log::SessionLog::open(dir.path(), "replay", std::time::Instant::now())
+            .expect("fixture log");
+    let header = json!({"type":"session","version":3,"id":"replay","cwd":"/tmp",
+        "timestamp":"2026-01-01T00:00:00Z"});
+    assert!(matches!(
+        log.append(&header, std::time::Instant::now()),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
+    for index in 0..2 {
+        let row = json!({"type":"message","id":format!("input-{index}"),
+            "message":{"role":"user","content":[{"type":"text","text":"replay row"}],"timestamp":0}});
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
-    std::fs::write(&path, entries).expect("write replay jsonl");
     std::mem::forget(dir);
-    pa_tui::session::JsonlSessionStream::from_path(&path).expect("replay stream")
+    pa_tui::session::JsonlSessionStream::from_entries(
+        pa_core::session::read::read_entries(&path).expect("replay log"),
+    )
 }
 
 use pa_tui::agents_view::{run_agents_view, AgentsViewOptions, AgentsViewUiMode};

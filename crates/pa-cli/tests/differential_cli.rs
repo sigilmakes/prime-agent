@@ -759,9 +759,22 @@ fn differential_session_export_matches_ts_binary() {
     let rs_sandbox = sandbox("rs-export");
     let sandbox_roots: Vec<&Path> = vec![&ts_sandbox, &rs_sandbox];
     let fixture = "fixture-session.jsonl";
-    for sandbox in [&ts_sandbox, &rs_sandbox] {
-        std::fs::write(sandbox.join("cwd").join(fixture), fixture_session())
-            .expect("write fixture");
+    // Each product reads its own on-disk protocol; the exported payload is
+    // still compared byte-for-byte after decoding below.
+    std::fs::write(ts_sandbox.join("cwd").join(fixture), fixture_session())
+        .expect("write TS fixture");
+    let mut log = pa_core::session_log::SessionLog::open(
+        &rs_sandbox.join("cwd"),
+        "fixture-session",
+        std::time::Instant::now(),
+    )
+    .expect("open native fixture");
+    for line in fixture_session().lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(matches!(
+            log.append(&row, std::time::Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
 
     let ts_out = run(

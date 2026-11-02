@@ -480,22 +480,6 @@ pub(crate) fn admit_goal_follow_up(
         crate::engine::GoalTurnEndWork::Continuation(follow_up) => (Lane::FollowUp, follow_up),
     };
     if let Some(goal) = &follow_up.goal_update {
-        {
-            let mut guard = core.lock().unwrap();
-            if let Some(store) = guard
-                .store
-                .as_mut()
-                .filter(|store| !store.is_canonical_bound())
-            {
-                let _ = store.persist_entry(
-                    "custom",
-                    json!({
-                        "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
-                        "data": goal,
-                    }),
-                );
-            }
-        }
         emit_worker_event_with(core, events, json!({ "type": "goal_update", "goal": goal }));
     }
     {

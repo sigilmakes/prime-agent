@@ -843,6 +843,7 @@ impl AgentInner {
                 }
                 vec![AgentMessage::Standard(crate::types::Message::User(
                     crate::types::UserMessage {
+                        rest: serde_json::Map::default(),
                         content: crate::types::UserContent::Parts(content),
                         timestamp: crate::now_ms(),
                     },
@@ -2041,24 +2042,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authoritative_message_end_timestamp_reduces_and_publishes_exact_returned_slot() {
+    async fn authoritative_message_end_preserves_timestamp_and_metadata_after_abort() {
         let original =
             AgentMessage::Standard(crate::types::Message::User(crate::types::UserMessage {
+                rest: serde_json::Map::default(),
                 content: crate::types::UserContent::Text("exact named row".into()),
                 timestamp: 999,
             }));
         let canonical =
             AgentMessage::Standard(crate::types::Message::User(crate::types::UserMessage {
+                rest: serde_json::Map::from_iter([(
+                    "futureField".to_owned(),
+                    serde_json::json!({"exact":true}),
+                )]),
                 content: crate::types::UserContent::Text("exact named row".into()),
                 timestamp: 7,
             }));
         let hook_input = original.clone();
         let hook_output = canonical.clone();
         let agent = Agent::new(AgentOptions {
-            before_event: Some(Arc::new(move |event, _signal| {
+            before_event: Some(Arc::new(move |event, signal| {
                 let expected = hook_input.clone();
                 let authoritative = hook_output.clone();
                 Box::pin(async move {
+                    assert!(
+                        signal.is_aborted(),
+                        "canonical admitted rows still publish after abort"
+                    );
                     let AgentEvent::MessageEnd { message } = event else {
                         panic!("exact MessageEnd slot expected")
                     };
@@ -2070,7 +2080,8 @@ mod tests {
             })),
             ..Default::default()
         });
-        activate_event_test_run(&agent);
+        let controller = activate_event_test_run(&agent);
+        controller.abort();
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let observed = delivered.clone();
         agent

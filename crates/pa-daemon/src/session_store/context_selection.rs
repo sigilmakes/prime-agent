@@ -232,20 +232,22 @@ mod tests {
         full.append_message(&json!({"role": "user", "content": "after", "timestamp": 221}));
         full.rewrite().unwrap();
 
-        // Read-only open: like the existing window fixtures, no append lease is needed.
+        // The SDK still provides sparse model context independently of the daemon fold.
+        let sdk = pa_core::session::window::WindowedSessionStore::open(&path)
+            .unwrap()
+            .unwrap();
+        assert!(!sdk.raw_entries().iter().any(|raw| raw.contains(&choice_id)));
+        assert!(sdk
+            .metadata_entries()
+            .iter()
+            .any(|raw| raw.contains(&choice_id)));
+        assert!(!sdk.raw_entries().iter().any(|raw| raw.contains(&discarded)));
         let mut windowed = SessionFile::open_windowed(&path).unwrap();
-        let window = windowed.window.as_ref().expect("window reader must engage");
-        assert!(!window.retained_ids.contains(&choice_id));
-        assert!(
-            windowed.entry(&choice_id).is_some(),
-            "choice is sparse metadata"
-        );
-        assert!(
-            windowed.entry(&discarded).is_none(),
-            "old message body stays unloaded"
-        );
+        assert!(windowed.window.is_none());
+        assert!(windowed.entry(&choice_id).is_some());
+        assert!(windowed.entry(&discarded).is_some());
         let loaded_count = windowed.entries().len();
-        assert!(loaded_count < full.entries().len());
+        assert_eq!(loaded_count, full.entries().len());
 
         // The reader must use the loaded metadata, not reopen a source file.
         let unavailable_path = dir.path().join("not-written.jsonl");
@@ -255,8 +257,8 @@ mod tests {
             windowed.latest_context_selection().unwrap(),
             Some(selection("fixture/sparse"))
         );
-        assert!(windowed.window.is_some());
+        assert!(windowed.window.is_none());
         assert_eq!(windowed.entries().len(), loaded_count);
-        assert!(windowed.entry(&discarded).is_none());
+        assert!(windowed.entry(&discarded).is_some());
     }
 }

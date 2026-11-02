@@ -125,7 +125,9 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     ]);
 
     let mut session = SessionManager::in_memory(&cwd);
-    session.materialize_session_file(Some(sessions_dir));
+    session
+        .materialize_session_file(Some(sessions_dir))
+        .expect("persist kernel test session");
 
     let model = scripted_model();
     let provider = std::sync::Arc::new(ScriptedProvider::new(model.clone()));
@@ -144,7 +146,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
-        context_startup_admitted_user_ids: Vec::new(),
+        context_startup_admitted_input_ids: Vec::new(),
         on_initial_context_selection: None,
         ollama_cloud: None,
         semantic_edges: None,
@@ -162,7 +164,6 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         generic_mcp_servers: Vec::new(),
         allow_recursion: None,
         session_manager: Some(session),
-        canonical_live_owner: None,
         extra_host_handlers: None,
         conversation_log_path: None,
         additional_skill_paths: Vec::new(),

@@ -70,9 +70,8 @@ async fn faux_engine_with_settings(
     let engine = create_session(SessionEngineConfig {
         on_late_sent_agent_message: None,
         context_startup_boundary: pa_core::session_engine::ContextStartupBoundary::Current,
-        context_startup_admitted_user_ids: Vec::new(),
+        context_startup_admitted_input_ids: Vec::new(),
         on_initial_context_selection: None,
-        canonical_live_owner: None,
         ollama_cloud: None,
         semantic_edges: None,
         cron_store: None,
@@ -399,7 +398,8 @@ async fn stale_overflow_error_recovers_before_the_next_prompt_after_a_resume() {
         .map(|entry| entry.path())
         .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
         .expect("the run-one session file");
-    let resumed = SessionManager::open(dir_a.path(), &dir_a.path().join("sessions"), &session_file);
+    let resumed = SessionManager::open(dir_a.path(), &dir_a.path().join("sessions"), &session_file)
+        .expect("reopen the persisted session");
     let (engine_b, _dir_b, model_b) = faux_engine_with_settings(
         json!({
             "responses": [
@@ -880,7 +880,8 @@ async fn pre_turn_threshold_arm_compacts_a_resumed_session_before_the_prompt() {
         .map(|entry| entry.path())
         .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
         .expect("the run-one session file");
-    let resumed = SessionManager::open(dir_a.path(), &dir_a.path().join("sessions"), &session_file);
+    let resumed = SessionManager::open(dir_a.path(), &dir_a.path().join("sessions"), &session_file)
+        .expect("reopen the persisted session");
     let (engine_b, _dir_b, model_b) = faux_engine_with_settings(
         json!({
             "contextWindow": 20000,

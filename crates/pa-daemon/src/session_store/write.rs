@@ -1,12 +1,7 @@
-//! The write arm: the in-memory append family, the atomic full-file rewrite, the durable
-//! append-with-rewrite-bootstrap persist paths, and the store lease discipline that
-//! serializes writers onto the file.
-
-use pa_core::session_engine::canonical_coordinator::CanonicalWriteCertainty;
+//! Session row builders and durable append publication.
 
 use super::{
-    fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
-    SessionFile, SessionHeader, Value, Write,
+    json, new_entry_id, HashMap, PathBuf, Result, SessionEntry, SessionFile, SessionHeader, Value,
 };
 
 impl SessionEntry {
@@ -29,37 +24,11 @@ impl SessionEntry {
 
 impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
-    pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
-        anyhow::ensure!(
-            self.canonical_live.is_none(),
-            "canonical owner requires explicit append and adoption ACK"
-        );
-        anyhow::ensure!(
-            self.child_usage_recovery.pending.is_none(),
-            "confirm unresolved attribution before persisting appended rows"
-        );
-        let mut bytes = Vec::new();
-        for entry in &self.entries[start..] {
-            write_line(&mut bytes, entry)?;
-        }
-        match &self.lease {
-            Some(lease) => lease.append(&self.path, &bytes)?,
-            None => pa_core::session::window::append_cached(
-                &self.path,
-                &bytes,
-                pa_core::session::window::AppendOwnership::Unleased,
-            )?,
-        }
-        Ok(())
+    pub(crate) fn persist_appended(&mut self, start: usize) -> Result<()> {
+        self.flush_unmaterialized_log_tail(start)
     }
 
     pub fn append_entry(&mut self, type_: &str, fields: Value) -> String {
-        // This legacy nonfallible builder is not a canonical writer. If a caller
-        // uses it after attach, invalidate the owner before any local mutation;
-        // an append/rollback ABA must never certify the old source as usable.
-        if let Some(owner) = &self.canonical_live {
-            owner.invalidate();
-        }
         let parent_id = self.leaf_id.clone();
         let mut entry = SessionEntry::new(
             type_,
@@ -105,64 +74,21 @@ impl SessionFile {
         )
     }
 
-    /// Write the full file atomically (header + every entry). The temp is
-    /// fsynced before the rename (TS `_rewriteFile` passes no `fsync` option),
-    /// so a hard crash cannot zero out rows the durable append landed.
+    /// Materialize the unflushed entry tail in the append-only log.
     ///
     /// # Errors
-    ///
-    /// Returns an error when the store only holds a window, or the write,
-    /// flush, sync, or rename fails; an empty path answers `Ok(())`.
-    pub fn rewrite(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.canonical_live.is_none(),
-            "cannot rewrite a bound canonical journal"
-        );
-        anyhow::ensure!(
-            self.child_usage_recovery.pending.is_none(),
-            "confirm unresolved attribution before rewriting session"
-        );
-        anyhow::ensure!(
-            self.window.is_none(),
-            "full history required before rewriting session"
-        );
-        let path = self.path.as_path();
-        let Some(path) = (if path.as_os_str().is_empty() {
-            None
-        } else {
-            Some(path)
-        }) else {
+    /// Returns the log's refusal; an empty path stays in memory.
+    pub fn rewrite(&mut self) -> Result<()> {
+        if self.path.as_os_str().is_empty() {
             return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create session dir {}", parent.display()))?;
         }
-        let temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
-        {
-            let file =
-                fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
-            let mut writer = std::io::BufWriter::new(file);
-            write_line(&mut writer, &session_header_line(&self.header))?;
-            for entry in &self.entries {
-                write_line(&mut writer, entry)?;
-            }
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-        }
-        pa_core::platform::rename_onto(&temp, path)
-            .with_context(|| format!("persist {}", path.display()))?;
-        Ok(())
+        self.flush_unmaterialized_log_tail(0)
     }
 
-    /// Append one entry line to the file, rewriting first when the file is
-    /// missing. The entry joins the index only after its line reaches the
-    /// file; a failed `sync_data` keeps it indexed (a reload would load it
-    /// as the leaf) and the error still surfaces.
+    /// Commit one row before publishing it in the serving fold.
     ///
     /// # Errors
-    ///
-    /// Returns an error when the append or the post-write durability sync fails.
+    /// Returns the log's refusal without indexing an uncommitted row.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
         self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
     }
@@ -180,7 +106,7 @@ impl SessionFile {
     /// in-memory flag stays unset then, so the next open re-warns (a lost
     /// marker costs one repeated warning, never a suppressed one).
     pub fn mark_anthropic_warning_shown(&mut self) -> Result<()> {
-        self.persist_owner_metadata(
+        self.persist_entry(
             "custom",
             json!({
                 "customType": pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,
@@ -208,6 +134,10 @@ impl SessionFile {
         fields: Value,
         timestamp: &str,
     ) -> Result<String> {
+        if let Some(entry) = self.pending_log_entry(entry_type, &fields) {
+            return self.persist_built_log_entry(entry);
+        }
+        self.observe_log_tail()?;
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),
@@ -223,218 +153,26 @@ impl SessionFile {
         self.persist_built_entry(entry)
     }
 
-    /// [`Self::persist_entry`] for the native final output: the admitted provider
-    /// step travels with the row.
-    ///
-    /// # Errors
-    /// As [`Self::persist_entry`], plus the step refusal.
-    pub fn persist_message_with_step(
-        &mut self,
-        fields: Value,
-        step: &pa_core::session_engine::canonical_coordinator::CanonicalProviderStep,
-    ) -> Result<String> {
-        let mut entry = SessionEntry::new(
-            "message",
-            self.leaf_id.clone(),
-            &self.by_id,
-            fields,
-            &crate::util::now_iso(),
-        );
-        if self.window.is_some() {
-            entry.id = uuid::Uuid::new_v4().to_string();
-        }
-        self.persist_built_entry_with_step(entry, Some(step))
-    }
-
-    /// The durable-append core [`Self::persist_entry_at`] and the attribution
-    /// append-once share: the entry arrives fully built (its id included),
-    /// its line reaches the file first, and the entry joins the index only
-    /// after, so a failed append leaves no indexed row a reload would
-    /// resurface as the leaf.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the store only holds a window without a file,
-    /// or the append, flush, sync, or the bootstrap rewrite fails.
+    /// Commit through the log before publishing the row in the serving fold.
     pub(super) fn persist_built_entry(&mut self, entry: SessionEntry) -> Result<String> {
-        self.persist_built_entry_with_step(entry, None)
-    }
-
-    /// [`Self::persist_built_entry`] for a row that carries an admitted provider
-    /// step: the native final output. The step is valid for ONE row, so it is a
-    /// parameter rather than a field on the store - nothing can survive a write.
-    ///
-    /// # Errors
-    /// As [`Self::persist_built_entry`], plus a refusal when an assistant row is
-    /// persisted under a live epoch without a step.
-    pub(super) fn persist_built_entry_with_step(
-        &mut self,
-        entry: SessionEntry,
-        step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
-    ) -> Result<String> {
-        anyhow::ensure!(
-            self.canonical_live.is_none(),
-            "canonical owner requires explicit append and adoption ACK"
-        );
-        self.persist_owned_entry(entry, step)
-    }
-
-    /// Sole physical writer; only the explicit live owner may call this while bound.
-    pub(super) fn persist_owned_entry(
-        &mut self,
-        entry: SessionEntry,
-        step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
-    ) -> Result<String> {
-        self.persist_granted_entry(entry, step, None)
-    }
-
-    pub(super) fn persist_granted_entry(
-        &mut self,
-        mut entry: SessionEntry,
-        step: Option<&pa_core::session_engine::canonical_coordinator::CanonicalProviderStep>,
-        granted: Option<pa_core::session_engine::canonical_coordinator::CanonicalAppendGrant>,
-    ) -> Result<String> {
-        self.confirm_child_usage_write()?;
-        // A preflight recovery can advance the leaf after the caller built its
-        // generic row. Preserve that recovered parent instead of branching it away.
-        entry.parent_id.clone_from(&self.leaf_id);
-        anyhow::ensure!(
-            self.window.is_none() || self.path.exists(),
-            "window-backed session file is missing"
-        );
-        let id = entry.id.clone();
-        // Canonical admission for this row, taken before any byte moves: a user
-        // row takes a prepare-phase flight (no draft exists for it), every other
-        // row takes a requested-mutation grant. With no epoch attached the row is
-        // counted instead - the counter states the fact, never a policy.
-        let epoch = self.epoch.clone();
-        // One row, one step: the worker sets this immediately before an assistant
-        // row and it is consumed here, so a later row can never borrow it.
-        let mut grant = if let Some(grant) = granted {
-            Some(grant)
-        } else if let Some(handle) = epoch.as_ref() {
-            let admitted = super::canonical_adapter::grant_for_row(&handle.0, &entry, step)?;
-            if admitted.is_none() {
-                self.rows_written_without_epoch += 1;
-            }
-            admitted
-        } else {
-            self.rows_written_without_epoch += 1;
-            None
-        };
-        // Captured rather than re-tested later: this branch REQUIRES an existing
-        // file, and that is what makes `Known` provable for the append below.
-        let existed_before = !self.path.as_os_str().is_empty() && self.path.exists();
-        if existed_before {
-            let mut bytes = Vec::new();
-            write_line(&mut bytes, &entry)?;
-            #[cfg(test)]
-            if let Some(cut) = (entry.type_ == "child_usage_attributed")
-                .then(|| super::child_usage_tests::PARTIAL_CHILD_APPEND.with(std::cell::Cell::take))
-                .flatten()
-            {
-                // Isolated unleased fixture only: simulate write_all's partial
-                // prefix + Err postcondition, not a real injected OS failure.
-                anyhow::ensure!(
-                    self.lease.is_none() && cut < bytes.len(),
-                    "invalid partial append fixture"
-                );
-                let mut file = fs::OpenOptions::new().append(true).open(&self.path)?;
-                file.write_all(&bytes[..cut])?;
-                file.flush()?;
-                anyhow::bail!("injected partial attribution append error");
-            }
-            let appended = match &self.lease {
-                Some(lease) => lease.append(&self.path, &bytes),
-                None => pa_core::session::window::append_cached(
-                    &self.path,
-                    &bytes,
-                    pa_core::session::window::AppendOwnership::Unleased,
-                )
-                .with_context(|| format!("append to {}", self.path.display())),
-            };
-            // `Known` is provable HERE only because this branch requires a file that
-            // already existed: the bootstrap rewrite created it durably, so this
-            // append puts no directory entry at stake. `window::append_cached` opens
-            // with create-if-missing and does NOT sync the parent directory on a
-            // create, so if the file could vanish between the guard above and that
-            // open, a successful write would still be an unproven create and this
-            // classification would be a lie. The assertion pins the assumption the
-            // guard rests on, so a later reader cannot turn it into a race.
-            debug_assert!(
-                existed_before,
-                "the durable append branch requires a file that already existed"
-            );
-            // Settle before the row joins the index: a caller must never observe an
-            // indexed row whose flight is still unclassified. An early failure above
-            // drops the grant unclassified, which fails closed and poisons the epoch.
-            if let Some(grant) = grant.take() {
-                grant.settle(certainty_of(&appended))?;
-            }
-            appended?;
-            #[cfg(test)]
-            if entry.type_ == "child_usage_attributed"
-                && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
-                    .with(|fault| fault.replace(false))
-            {
-                anyhow::bail!("injected post-append pre-index error");
-            }
-            // The line is in the file now: index it so the in-memory leaf matches what a
-            // reload sees.
+        if self.path.as_os_str().is_empty() {
+            let id = entry.id.clone();
             self.push_index(entry);
-        } else {
-            // The rewrite path serializes the whole index, so the entry must be
-            // indexed first; a failed rewrite rolls the index back. The live
-            // attribution fold is DEFERRED until the rewrite succeeds.
-            let previous_leaf = self.leaf_id.clone();
-            #[cfg(test)]
-            let entry_is_child = entry.type_ == "child_usage_attributed";
-            self.push_index_inner(entry, false);
-            let rewritten = self.rewrite();
-            #[cfg(test)]
-            let rewritten = rewritten.and_then(|()| {
-                if entry_is_child
-                    && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
-                        .with(|fault| fault.replace(false))
-                {
-                    anyhow::bail!("injected post-bootstrap pre-index error");
-                }
-                Ok(())
-            });
-            if let Err(error) = rewritten {
-                self.by_id.remove(&id);
-                self.entries.pop();
-                self.leaf_id = previous_leaf;
-                if let Some(grant) = grant.take() {
-                    grant.settle(CanonicalWriteCertainty::Uncertain)?;
-                }
-                return Err(error);
-            }
-            if let Some(grant) = grant.take() {
-                grant.settle(CanonicalWriteCertainty::Known)?;
-            }
-            self.fold_attribution_id(&id);
+            return Ok(id);
         }
-        Ok(id)
-    }
-
-    /// Rows this store persisted while no canonical epoch was attached.
-    ///
-    /// The name states the fact rather than the policy, so it stays true if the
-    /// policy changes. A turn that writes content leaves this at zero.
-    #[must_use]
-    pub fn rows_written_without_epoch(&self) -> u64 {
-        self.rows_written_without_epoch
+        self.persist_built_log_entry(entry)
     }
 
     /// Point the session at a concrete file path (after `create`), preserving entries.
     pub fn set_path(&mut self, path: PathBuf) {
         if self.path != path {
-            // An invalidated old scope is never recycled for another path.
-            if let Some(owner) = &self.canonical_live {
-                owner.invalidate();
-            }
             self.lease = None;
+        }
+        if self.path != path && !path.as_os_str().is_empty() {
+            self.log_transport = Some(crate::session_transport::LogWire::fresh(&path));
+            if let Some(id) = crate::session_transport::session_id_of(&path) {
+                self.header.id = id;
+            }
         }
         self.path = path;
     }
@@ -458,23 +196,4 @@ pub fn session_header_line(header: &SessionHeader) -> Value {
             .map(|(key, value)| (key.clone(), value.clone())),
     );
     Value::Object(ordered)
-}
-
-fn write_line<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
-    let mut line = serde_json::to_string(value)?;
-    line.push('\n');
-    writer.write_all(line.as_bytes())?;
-    Ok(())
-}
-
-/// Classify one append attempt for the canonical epoch.
-///
-/// A failed append is `Uncertain`: bytes may have reached the file before the
-/// error, and the epoch must not drain across a state nobody proved.
-fn certainty_of(result: &Result<()>) -> CanonicalWriteCertainty {
-    if result.is_ok() {
-        CanonicalWriteCertainty::Known
-    } else {
-        CanonicalWriteCertainty::Uncertain
-    }
 }

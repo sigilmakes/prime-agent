@@ -391,27 +391,34 @@ impl ScanEntry {
     }
 }
 
-/// Whole-file scan over every parsable line; invalid lines contribute nothing.
+/// Whole-file usage over validated log rows. A torn append is ignored;
+/// complete corruption rejects the scan rather than hiding billed work.
 fn scan_file(path: &Path) -> Option<UsageScan> {
     let file = fs::File::open(path).ok()?;
     let mut scan = UsageScan::default();
     let mut reader = BufReader::new(file);
     let mut line = String::new();
+    let mut last_seq = 0;
     loop {
         line.clear();
-        if reader.read_line(&mut line).ok()? == 0 {
+        if reader.read_line(&mut line).ok()? == 0 || !line.ends_with('\n') {
             break;
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        let row =
+            pa_core::session_log::Row::decode(line.trim_end_matches('\n').as_bytes(), last_seq)
+                .ok()?;
+        if last_seq == 0
+            && row.body.get("type").and_then(serde_json::Value::as_str) != Some("session")
+        {
+            return None;
         }
-        let Ok(entry) = serde_json::from_str::<ScanEntry>(trimmed) else {
+        last_seq = row.seq;
+        let Ok(entry) = serde_json::from_value::<ScanEntry>(row.body) else {
             continue;
         };
         entry.fold_into(&mut scan);
     }
-    Some(scan)
+    (last_seq > 0).then_some(scan)
 }
 
 /// Whole-file own usage (the saved-row summary) for the one-off readers
@@ -768,19 +775,31 @@ mod tests {
 
     #[test]
     fn read_own_usage_summary_scans_a_file() {
+        use std::io::Write;
+
         let dir = std::env::temp_dir().join(format!("session-usage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"2026-09-23T00:00:00.000Z\",\"cwd\":\"/t\"}\n",
-                "{\"type\":\"message\",\"id\":\"a\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"output\":10,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":110,\"cost\":{\"input\":0.0,\"output\":1.0,\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":1.0}}}}\n",
-                "{\"type\":\"child_usage_attributed\",\"targetId\":\"a\",\"childUsage\":{\"input\":30,\"output\":3,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":33,\"cost\":{\"input\":0.0,\"output\":0.3,\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":0.3}},\"aggregateUsage\":{\"input\":130,\"output\":13,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":143,\"cost\":{\"input\":0.0,\"output\":1.3,\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":1.3}}}\n",
-                "not json at all\n",
-            ),
+        let mut log = pa_core::session_log::SessionLog::open(
+            &dir,
+            "session",
+            crate::session_transport::deadline(),
         )
         .unwrap();
+        for row in [
+            json!({"type":"session","id":"s","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/t"}),
+            message(
+                "a",
+                "assistant",
+                &serde_json::to_value(usage(100, 10, 1.0)).unwrap(),
+            ),
+            attribution("a", &usage(30, 3, 0.3), &usage(130, 13, 1.3)),
+        ] {
+            assert!(matches!(
+                log.append(&row, crate::session_transport::deadline()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
         assert_eq!(
             read_own_usage_summary(&path),
             Some(SessionUsageSummary {
@@ -789,6 +808,12 @@ mod tests {
                 cost: 1.0
             })
         );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"not json at all\n").unwrap();
+        assert!(read_own_usage_summary(&path).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

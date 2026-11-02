@@ -116,6 +116,28 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// One saved-session fixture: header, display name, and a user/assistant
 /// exchange whose texts feed the name/first-message/transcript search.
 fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> PathBuf {
@@ -136,7 +158,7 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
             index * 1000 + 1
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
+    append_session_rows(&path, &content);
     path
 }
 
@@ -177,7 +199,7 @@ fn dump_frames(label: &str, frames: &[String]) {
 async fn search_matches_names_ids_and_cwd_never_transcripts() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -336,7 +358,7 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
 async fn ranked_hits_sort_by_relevance_then_recency() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 

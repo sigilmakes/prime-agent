@@ -146,12 +146,11 @@ fn session_files(home: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 fn read_entries(path: &std::path::Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()
-        .unwrap()
+    pa_core::session::read::read_entries(path)
+        .expect("validated session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }
 
 /// The goal cap's text-mode end state: the capped run exits 1 with the reason, and a later
@@ -1116,6 +1115,11 @@ fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
         stderr.contains("Cannot fork: source session file is empty or invalid:"),
         "stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("session log has no header"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(std::fs::read(&empty).expect("source remains readable"), b"");
 
     // The flag conflicts still refuse (TS validateForkFlags).
     let (stdout, stderr, code) = run_in_home(

@@ -31,6 +31,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+fn persisted_rows(path: &std::path::Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize session entry"))
+        .collect()
+}
+
 struct Supervisor {
     child: Child,
     socket: PathBuf,
@@ -328,6 +336,24 @@ fn serve(
         if line == "\r\n" {
             break;
         }
+    }
+    let mut request = head.lines().next().unwrap_or_default().split_whitespace();
+    let method = request.next().unwrap_or_default();
+    let path = request.next().unwrap_or_default();
+    if method == "GET" && path == "/v1/models" {
+        let body = r#"{"data":[]}"#;
+        return stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    }
+    if method != "POST" || path != "/v1/chat/completions" {
+        return stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
     }
     let mut content_length = 0usize;
     for line in head.lines() {
@@ -1023,11 +1049,8 @@ fn goal_continuation_refuses_after_the_402_corpse() {
         .map(|entry| entry.path())
         .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
         .expect("one session file");
-    let goal_rows: Vec<Value> = std::fs::read_to_string(&session_file)
-        .expect("session file readable")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+    let goal_rows: Vec<Value> = persisted_rows(&session_file)
+        .into_iter()
         .filter(|entry| {
             entry.get("type").and_then(Value::as_str) == Some("custom")
                 && entry.get("customType").and_then(Value::as_str) == Some("thread_goal_state")

@@ -49,7 +49,7 @@ pub(crate) use tests::FAUX_TEST_LOCK;
 mod context_selection;
 pub(crate) use context_selection::{
     canonical_mirror_header, ContextSelectionCommitFuture, ContextSelectionSource,
-    InitialContextSelectionStore,
+    InitialContextSelectionStore, MirrorSeed,
 };
 
 mod goalcore;
@@ -120,6 +120,9 @@ pub(crate) type TestStreamDecorator =
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
+    /// Whether the current SDK writes exact rows through the serving log sink.
+    pub(crate) row_sink_ready: std::sync::atomic::AtomicBool,
+
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     #[cfg(test)]
@@ -163,10 +166,6 @@ pub struct AgentSessionEngine {
     /// daemon worker.
     pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
-    /// The worker's shared canonical step channel: `None` until the worker wires
-    /// it, which is the honest "no epoch attached" state rather than a guess.
-    pub(crate) canonical_step:
-        std::sync::Mutex<Option<crate::session_store::canonical_adapter::CanonicalStepAdmission>>,
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
@@ -249,6 +248,7 @@ pub struct AgentSessionEngine {
     /// session. `None` without a worker pump.
     compaction_summary_sink:
         std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
+    plugin_job_sink: std::sync::Mutex<Option<pa_core::session_engine::PluginJobSink>>,
     /// The worker's turn-activity probe, adopted onto every built session so
     /// deferred plugin jobs wait for the turn boundary (retries included).
     turn_activity_probe: std::sync::Mutex<Option<pa_core::session_engine::TurnActivityProbe>>,
