@@ -1072,13 +1072,18 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         }),
     );
     rows.push(row);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut text = String::new();
+    let mut log = pa_core::session_log::SessionLog::open(
+        path.parent().unwrap(),
+        path.file_stem().unwrap().to_str().unwrap(),
+        Instant::now(),
+    )
+    .unwrap();
     for row in rows {
-        text.push_str(&serde_json::to_string(&row).unwrap());
-        text.push('\n');
+        assert!(matches!(
+            log.append(&row, Instant::now()),
+            pa_core::session_log::Outcome::Committed { .. }
+        ));
     }
-    std::fs::write(path, text).unwrap();
 }
 
 #[test]
@@ -1086,10 +1091,10 @@ fn corpus_fixture_has_a_null_root_and_preserves_every_nonroot_parent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sessions/corpus.jsonl");
     write_corpus_fixture(&path, 0);
-    let rows: Vec<Value> = std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+    let rows: Vec<Value> = pa_core::session::read::read_entries(&path)
+        .expect("validated corpus session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("corpus entry JSON"))
         .collect();
     assert_eq!(rows[0]["type"], "session");
     assert!(
