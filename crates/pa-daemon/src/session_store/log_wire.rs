@@ -237,7 +237,7 @@ impl SessionFile {
     }
 
     /// Selection is durable state but not an entry in the conversation tree.
-    pub(crate) fn persist_branch_selection(&self, leaf: Option<&str>) -> Result<()> {
+    pub(crate) fn persist_branch_selection(&mut self, leaf: Option<&str>) -> Result<()> {
         self.flush_unmaterialized_log_tail(0)?;
         let wire = self
             .log_transport
@@ -261,14 +261,19 @@ impl SessionFile {
     /// `persist_appended`) every row from the caller's start, whichever is
     /// later. The flush's rows join the fold's index through the same paths
     /// that put them in memory, so this only moves durability.
-    pub(crate) fn flush_unmaterialized_log_tail(&self, requested_start: usize) -> Result<()> {
+    pub(crate) fn flush_unmaterialized_log_tail(&mut self, requested_start: usize) -> Result<()> {
         self.flush_log_tail_from(requested_start, &[])
     }
 
-    fn flush_log_tail_from(&self, requested_start: usize, extra_row: &[Value]) -> Result<()> {
+    fn flush_log_tail_from(&mut self, requested_start: usize, extra_row: &[Value]) -> Result<()> {
         let Some(wire) = self.log_transport.as_ref() else {
             anyhow::bail!("not a log-transported session");
         };
+        if wire.needs_initial_header() && self.header.git.is_none() {
+            self.header.git = pa_core::session::manager::capture_git_context(std::path::Path::new(
+                &self.header.cwd,
+            ));
+        }
         let session_id = self.header.id.clone();
         anyhow::ensure!(
             !session_id.is_empty(),

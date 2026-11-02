@@ -176,6 +176,13 @@ impl SessionManager {
                     "new session target already contains a log",
                 ));
             }
+            if !self.flushed && rows.is_empty() {
+                if let Some(FileEntry::Header { header }) = self.file_entries.first_mut() {
+                    if header.git.is_none() {
+                        header.git = super::capture_git_context(&self.cwd);
+                    }
+                }
+            }
             let mut existing = rows
                 .iter()
                 .map(|row| serde_json::from_value(row.body.clone()).map_err(io::Error::from))

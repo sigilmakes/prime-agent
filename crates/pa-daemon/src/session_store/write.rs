@@ -24,7 +24,7 @@ impl SessionEntry {
 
 impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
-    pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
+    pub(crate) fn persist_appended(&mut self, start: usize) -> Result<()> {
         self.flush_unmaterialized_log_tail(start)
     }
 
@@ -78,7 +78,7 @@ impl SessionFile {
     ///
     /// # Errors
     /// Returns the log's refusal; an empty path stays in memory.
-    pub fn rewrite(&self) -> Result<()> {
+    pub fn rewrite(&mut self) -> Result<()> {
         if self.path.as_os_str().is_empty() {
             return Ok(());
         }

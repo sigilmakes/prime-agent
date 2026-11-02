@@ -281,6 +281,14 @@ impl WireState {
 }
 
 impl LogWire {
+    /// Only a fresh header without an undecided original may be prepared.
+    pub(crate) fn needs_initial_header(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.header_written && state.pending.is_none()
+    }
     /// Exact durable bytes on the rare known-ID retry path, before view overlays.
     pub(crate) fn committed_row(&self, id: &str) -> Result<Value, LogWireError> {
         let state = self
@@ -694,6 +702,56 @@ mod tests {
         }
     }
 
+    fn init_git_repo(cwd: &Path) {
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .arg(cwd)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+
+    #[test]
+    fn fresh_publication_captures_git_without_changing_reopened_absent_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo");
+        std::fs::create_dir(&cwd).unwrap();
+        let mut fresh = SessionFile::create(cwd.to_str().unwrap(), None, 0);
+        let path = dir.path().join("fresh.jsonl");
+        fresh.set_path(path.clone());
+        assert!(!path.exists());
+        assert!(fresh.header.git.is_none());
+        // Capture belongs to publication, not the no-I/O staging constructor.
+        init_git_repo(&cwd);
+        fresh.rewrite().unwrap();
+        assert_eq!(
+            fresh.header.git.as_ref().unwrap().branch.as_deref(),
+            Some("main")
+        );
+        let reopened = SessionFile::open(&path).unwrap();
+        assert_eq!(reopened.header.git, fresh.header.git);
+        drop(reopened);
+
+        let mut absent = fresh.header.clone();
+        absent.id = "absent".into();
+        absent.git = None;
+        let mut log = SessionLog::open(dir.path(), "absent", deadline()).unwrap();
+        assert!(matches!(
+            log.append_first(
+                &crate::session_store::session_header_line(&absent),
+                deadline()
+            ),
+            Outcome::Committed { .. }
+        ));
+        let absent_path = dir.path().join("absent.jsonl");
+        let bytes = std::fs::read(&absent_path).unwrap();
+        let mut reopened = SessionFile::open(&absent_path).unwrap();
+        reopened.rewrite().unwrap();
+        assert!(reopened.header.git.is_none());
+        assert_eq!(std::fs::read(&absent_path).unwrap(), bytes);
+    }
+
     #[test]
     fn a_fresh_wire_refuses_identical_and_different_rival_headers() {
         for same_header in [true, false] {
@@ -734,7 +792,7 @@ mod tests {
     #[test]
     fn a_fresh_wire_refuses_torn_bytes_without_repairing_them() {
         let dir = temp_dir("fresh-torn");
-        let (store, _) = fresh_log_session(&dir, "fresh-torn");
+        let (mut store, _) = fresh_log_session(&dir, "fresh-torn");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fresh-torn.jsonl");
         let bytes = b"{\"seq\":1";
@@ -759,15 +817,31 @@ mod tests {
                 std::sync::Arc::clone(&fake),
             ),
         );
+        let cwd = dir.join("repo");
+        std::fs::create_dir(&cwd).unwrap();
+        init_git_repo(&cwd);
+        store.header.cwd = cwd.to_str().unwrap().into();
         store
             .rewrite()
             .expect_err("header barrier lost, recovery busy");
+        assert_eq!(
+            store.header.git.as_ref().unwrap().branch.as_deref(),
+            Some("main")
+        );
+        assert!(std::process::Command::new("git")
+            .current_dir(&cwd)
+            .args(["symbolic-ref", "HEAD", "refs/heads/changed"])
+            .output()
+            .unwrap()
+            .status
+            .success());
         let bytes = std::fs::read(dir.join("unknown-first.jsonl")).unwrap();
         let header =
             session_log::Row::decode(bytes.strip_suffix(b"\n").expect("complete header row"), 0)
                 .expect("exactly one validated header envelope");
         assert_eq!(header.seq, 1);
         assert_eq!(header.body["type"], "session");
+        assert_eq!(header.body["git"]["branch"], "main");
         fake.release_rival();
         store
             .rewrite()
@@ -858,7 +932,7 @@ mod tests {
         assert!(SessionFile::open_owned_log(&legacy).is_err());
         assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
 
-        let (store, path) = fresh_log_session(&dir, "fresh");
+        let (mut store, path) = fresh_log_session(&dir, "fresh");
         assert!(!path.exists());
         store.rewrite().expect("fresh header");
         let replay = SessionFile::open(&path).expect("exact selected path");
@@ -1005,7 +1079,7 @@ mod tests {
         let session_path = sessions_dir.join("log-e2e.jsonl");
         // Seed the exact selected path before its worker reopens it.
         {
-            let (store, path) = fresh_log_session(&sessions_dir, "log-e2e");
+            let (mut store, path) = fresh_log_session(&sessions_dir, "log-e2e");
             assert_eq!(path, session_path);
             store.rewrite().expect("durable header before worker");
             let log = SessionLog::open(&sessions_dir, "log-e2e", deadline()).expect("log");
