@@ -631,7 +631,7 @@ async fn run_boundaries_record_git_state() {
     git(repo.path(), &["init", "-q", "-b", "main"]);
     git(repo.path(), &["config", "user.email", "t@t.co"]);
     git(repo.path(), &["config", "user.name", "t"]);
-    commit(repo.path(), "init");
+    let initial_sha = commit(repo.path(), "init");
 
     let provider = Arc::new(ScriptedProvider::new(test_model()));
     provider.push_text_turn("ok");
@@ -644,7 +644,17 @@ async fn run_boundaries_record_git_state() {
         ..Default::default()
     };
     let agent = Agent::new(options);
-    let session = SessionManager::persisted(repo.path(), sessions.path());
+    let mut session = SessionManager::persisted(repo.path(), sessions.path());
+    session.flush_now().unwrap();
+    assert_eq!(
+        session.get_header().unwrap().git,
+        Some(pa_types::session::GitContext {
+            repo_url: None,
+            commit: Some(initial_sha),
+            branch: Some("main".to_string()),
+            rest: pa_types::JsonMap::new(),
+        })
+    );
     let engine = AgentSession::new(Arc::new(agent), session, vec![])
         .await
         .unwrap();
