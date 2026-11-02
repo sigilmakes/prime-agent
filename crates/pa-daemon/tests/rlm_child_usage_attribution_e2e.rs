@@ -36,7 +36,7 @@ impl Drop for Daemon {
     fn drop(&mut self) {
         // The supervisor owns the worker and kernel tree; kill the whole
         // group so a following test cannot race a lingering kernel.
-        let _ = pa_core::platform::kill_process_group_or_pid(self.child.id() as i32);
+        let _ = pa_core::platform::kill_process_group_or_pid(self.child.id().cast_signed());
         let _ = self.child.wait();
     }
 }
