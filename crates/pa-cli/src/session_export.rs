@@ -41,16 +41,18 @@ mod tests {
     fn exports_a_session_file() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let input = dir.path().join("s.jsonl");
-        std::fs::write(
-            &input,
-            concat!(
-                r##"{"type":"session","id":"s","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"##,
-                "\n",
-                r##"{"type":"message","id":"e1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"hi"}}"##,
-                "\n",
-            ),
-        )
-        .expect("write session");
+        let mut log =
+            pa_core::session_log::SessionLog::open(dir.path(), "s", std::time::Instant::now())
+                .expect("open session log");
+        for row in [
+            serde_json::json!({"type":"session","id":"s","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}),
+            serde_json::json!({"type":"message","id":"e1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"hi"}}),
+        ] {
+            assert!(matches!(
+                log.append(&row, std::time::Instant::now()),
+                pa_core::session_log::Outcome::Committed { .. }
+            ));
+        }
         let out = dir.path().join("exported.html");
         let parsed = parsed_with(Some(input.to_str().unwrap()), &[out.to_str().unwrap()]);
         let agent_dir = dir.path().join("agent");
