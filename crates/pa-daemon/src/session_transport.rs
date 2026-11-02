@@ -40,6 +40,21 @@ pub(crate) fn deadline() -> Instant {
     Instant::now() + LOG_OPEN_DEADLINE
 }
 
+/// How long one wire operation rides out a busy lock before it reports it.
+///
+/// The core never waits: one `try_lock` refusal comes back as `Busy`. A holder
+/// keeps the lock for exactly one operation, so the refusal is transient by
+/// construction — but it is not imaginary: a *reader* that opens a live session
+/// (usage attribution, the roster) scans under the same exclusive lock, and a
+/// live worker's next row then lands inside that scan. Refusing the row there
+/// aborts the writer's turn for a lock the reader is about to release. This
+/// budget is the ceiling: a wedged holder is still reported, never waited on
+/// forever.
+const BUSY_RETRY_BUDGET: Duration = Duration::from_millis(250);
+
+/// One retry's pause: long enough for a scan of a session file to finish.
+const BUSY_RETRY_STEP: Duration = Duration::from_millis(2);
+
 /// Why one wire step failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LogWireError {
@@ -129,13 +144,21 @@ impl WireState {
             return Ok(());
         }
         std::fs::create_dir_all(self.directory.clone()).map_err(LogWireError::Io)?;
-        let log = match self.disk.clone() {
-            Some(disk) => {
-                SessionLog::open_with(disk, &self.directory.clone(), session_id, deadline())
-                    .map_err(open_error)?
+        let until = Instant::now() + BUSY_RETRY_BUDGET;
+        let log = loop {
+            let opened = match self.disk.clone() {
+                Some(disk) => {
+                    SessionLog::open_with(disk, &self.directory.clone(), session_id, deadline())
+                }
+                None => SessionLog::open(&self.directory.clone(), session_id, deadline()),
+            };
+            match opened {
+                Ok(log) => break log,
+                Err(session_log::Error::Busy { .. }) if Instant::now() < until => {
+                    std::thread::sleep(BUSY_RETRY_STEP);
+                }
+                Err(error) => return Err(open_error(error)),
             }
-            None => SessionLog::open(&self.directory.clone(), session_id, deadline())
-                .map_err(open_error)?,
         };
         self.log = Some(log);
         Ok(())
@@ -151,12 +174,45 @@ impl WireState {
     /// re-present the same bytes and must re-pin at the pending's seq for
     /// the core to answer from the landed row instead of repeating it.
     fn refresh_tail(&mut self) -> Result<(), LogWireError> {
-        let log = self.log.as_mut().expect("the caller ran ensure_open first");
-        let rows = log.refresh(deadline()).map_err(open_error)?;
+        let until = Instant::now() + BUSY_RETRY_BUDGET;
+        let rows = loop {
+            let log = self.log.as_mut().expect("the caller ran ensure_open first");
+            match log.refresh(deadline()) {
+                Ok(rows) => break rows,
+                Err(session_log::Error::Busy { .. }) if Instant::now() < until => {
+                    std::thread::sleep(BUSY_RETRY_STEP);
+                }
+                Err(error) => return Err(open_error(error)),
+            }
+        };
         if let Some(last) = rows.last() {
             self.next_seq = last.seq + 1;
         }
         Ok(())
+    }
+
+    /// Extend one fold's cursor under the lock, riding out a live holder: the
+    /// reader that keeps this writer's next row out is usually a scan of this
+    /// same file (usage attribution, the roster) that is about to release it.
+    fn read_tail_retrying(
+        &mut self,
+        cursor: &mut session_log::ReadCursor,
+    ) -> Result<Vec<session_log::Row>, LogWireError> {
+        let until = Instant::now() + BUSY_RETRY_BUDGET;
+        loop {
+            let log = self.log.as_mut().expect("ensure_open succeeded");
+            match log.read_tail(cursor, deadline()) {
+                Ok(rows) => return Ok(rows),
+                Err(session_log::ReadError::Log(session_log::Error::Busy { .. }))
+                    if Instant::now() < until =>
+                {
+                    std::thread::sleep(BUSY_RETRY_STEP);
+                }
+                Err(error) => {
+                    return Err(LogWireError::Refused(anyhow::Error::from(error)));
+                }
+            }
+        }
     }
 
     /// Reuse the original recovery capability until it decides durability.
@@ -218,13 +274,37 @@ impl WireState {
                 .as_ref()
                 .filter(|pending| pending.row == *row)
                 .map_or(self.next_seq, |pending| pending.seq);
-            let outcome = if !self.header_written
-                && row.get("type").and_then(Value::as_str) == Some("session")
-            {
-                log.append_first(row, deadline())
-            } else {
-                log.append_at_checked(seq, row, cursor, deadline())
-                    .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))?
+            // The holder keeps the lock for one operation only; a reader
+            // scanning this file is the holder this writer can meet most
+            // easily. Ride that out instead of dropping the caller's row.
+            let until = Instant::now() + BUSY_RETRY_BUDGET;
+            let outcome = loop {
+                let result = if !self.header_written
+                    && row.get("type").and_then(Value::as_str) == Some("session")
+                {
+                    match log.append_first(row, deadline()) {
+                        Outcome::Busy { holder, .. } => Err(LogWireError::Busy {
+                            holder: holder.map_or_else(
+                                || "another writer".to_owned(),
+                                |holder| format!("pid {}", holder.pid),
+                            ),
+                        }),
+                        outcome => Ok(outcome),
+                    }
+                } else {
+                    log.append_at_checked(seq, row, cursor, deadline())
+                        .map_err(|error| match error {
+                            session_log::ReadError::Log(error) => open_error(error),
+                            other => LogWireError::Refused(anyhow::Error::from(other)),
+                        })
+                };
+                match result {
+                    Ok(outcome) => break outcome,
+                    Err(LogWireError::Busy { .. }) if Instant::now() < until => {
+                        std::thread::sleep(BUSY_RETRY_STEP);
+                    }
+                    Err(error) => return Err(error),
+                }
             };
             match outcome {
                 Outcome::Committed { seq, .. } => {
@@ -341,12 +421,7 @@ impl LogWire {
         if !state.header_written {
             return Ok(Vec::new());
         }
-        state
-            .log
-            .as_mut()
-            .expect("ensure_open succeeded")
-            .read_tail(cursor, deadline())
-            .map_err(|error| LogWireError::Refused(anyhow::Error::from(error)))
+        state.read_tail_retrying(cursor)
     }
     /// A fresh intent for an exact durable path, including a custom directory.
     /// The initial header must win an atomic first append; existing bytes
@@ -573,6 +648,82 @@ mod tests {
         store.set_path(session_path.clone());
         store.rekey_log_session_id(&session_path).expect("re-key");
         (store, session_path)
+    }
+
+    /// A [`pa_core::session_log::Disk`] whose first few lock attempts are
+    /// refused: what a reader scanning the same session file looks like to a
+    /// live writer. The refusals are finite, which is the contract a live
+    /// holder upholds — it publishes the lock only for one operation.
+    struct BusyFirstLocks {
+        real: pa_core::session_log::RealDisk,
+        refusals: std::sync::atomic::AtomicU64,
+    }
+
+    impl pa_core::session_log::Disk for BusyFirstLocks {
+        fn open_log(&self, path: &Path) -> io::Result<(File, bool)> {
+            self.real.open_log(path)
+        }
+
+        fn open_lock(&self, path: &Path) -> io::Result<File> {
+            self.real.open_lock(path)
+        }
+
+        fn open_rw(&self, path: &Path) -> io::Result<File> {
+            self.real.open_rw(path)
+        }
+
+        fn open_read(&self, path: &Path) -> io::Result<File> {
+            self.real.open_read(path)
+        }
+
+        fn write(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+            self.real.write(file, bytes)
+        }
+
+        fn fsync(&self, file: &File) -> io::Result<()> {
+            self.real.fsync(file)
+        }
+
+        fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+            self.real.sync_dir(dir)
+        }
+
+        fn len(&self, file: &File) -> io::Result<u64> {
+            self.real.len(file)
+        }
+
+        fn truncate(&self, file: &File, len: u64) -> io::Result<()> {
+            self.real.truncate(file, len)
+        }
+
+        fn try_lock(&self, file: &File) -> io::Result<bool> {
+            if self.refusals.fetch_add(1, Ordering::SeqCst) < 3 {
+                return Ok(false);
+            }
+            self.real.try_lock(file)
+        }
+
+        fn unlock(&self, file: &File) -> io::Result<()> {
+            self.real.unlock(file)
+        }
+    }
+
+    /// A row written while a reader scans the same session file: the lock is
+    /// refused three times and then free, so the row must land instead of the
+    /// turn being refused for a holder that was about to release.
+    #[test]
+    fn a_transient_lock_holder_is_ridden_out_instead_of_refusing_the_row() {
+        let dir = temp_dir("busy-first");
+        let session_path = dir.join("busy.jsonl");
+        let disk = std::sync::Arc::new(BusyFirstLocks {
+            real: pa_core::session_log::RealDisk,
+            refusals: std::sync::atomic::AtomicU64::new(0),
+        });
+        let wire = LogWire::defer_with_disk(&session_path, disk);
+        let (mut store, _) = fresh_log_session_with(&dir, "busy", wire);
+        store
+            .persist_entry("custom", json!({ "customType": "probe", "data": {} }))
+            .expect("a brief holder must not refuse the row");
     }
 
     /// A [`pa_core::session_log::Disk`] wrapper that fails exactly one fsync —
