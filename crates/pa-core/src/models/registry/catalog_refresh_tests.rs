@@ -863,3 +863,40 @@ fn picker_availability_never_executes_stored_commands_or_oauth_adapters() {
     assert_eq!(probe.keys.load(Ordering::SeqCst), 0);
     assert_eq!(probe.refreshes.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn protocol_headers_do_not_authorize_unconfigured_provider_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let server = Loopback::start(HashMap::from([(
+        "/anthropic".into(),
+        Reply::json(json!({"data":[]})),
+    )]))
+    .await;
+    install(&path, &server);
+    let mut registry = ModelRegistry::create(auth(json!({})), &path);
+    let report = registry
+        .refresh_catalog_sources(Some(&selected("anthropic")))
+        .await;
+    assert_eq!(
+        report.sources,
+        vec![ModelRefreshSourceResult {
+            source: "anthropic".into(),
+            status: ModelRefreshStatus::Skipped,
+            reason: Some(ModelRefreshReason::Unconfigured),
+            model_count: None,
+        }]
+    );
+    assert!(server.requests().is_empty());
+
+    registry
+        .auth
+        .set_runtime_api_key("anthropic", "fixture-key".into());
+    registry
+        .refresh_catalog_sources(Some(&selected("anthropic")))
+        .await;
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("x-api-key: fixture-key"));
+    assert!(requests[0].contains("anthropic-version: 2023-06-01"));
+}

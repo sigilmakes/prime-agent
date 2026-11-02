@@ -236,6 +236,15 @@ impl ModelRegistry {
                 // Explicit discovery headers have the final word over a generated API key.
                 headers.entry(auth_header.into()).or_insert(value);
             }
+            if headers.is_empty()
+                && !matches!(
+                    format,
+                    CatalogFormat::OpenRouter | CatalogFormat::PrimeInference
+                )
+                && config.discovery.is_none()
+            {
+                continue;
+            }
             if format == CatalogFormat::Anthropic {
                 headers
                     .entry("anthropic-version".into())
@@ -247,15 +256,6 @@ impl ModelRegistry {
                         .entry("chatgpt-account-id".into())
                         .or_insert(account);
                 }
-            }
-            if headers.is_empty()
-                && !matches!(
-                    format,
-                    CatalogFormat::OpenRouter | CatalogFormat::PrimeInference
-                )
-                && config.discovery.is_none()
-            {
-                continue;
             }
             let guard = self.source_publication_guard(&provider, &config);
             let unknown_models = if let Some(defaults) =
