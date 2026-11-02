@@ -111,16 +111,16 @@ fn tool_result_entries_persisted_and_streamed() {
     assert_eq!(stats["data"]["toolResults"], 1, "stats: {stats}");
     assert_eq!(stats["data"]["totalMessages"], 4, "stats: {stats}");
 
-    // The TS envelope shape on disk.
+    // The stored tool result keeps the session entry shape.
     let session_file = std::path::PathBuf::from(
         stats["data"]["sessionFile"]
             .as_str()
             .expect("session file in stats"),
     );
-    let entries: Vec<serde_json::Value> = std::fs::read_to_string(&session_file)
-        .expect("read session file")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("parse entry line"))
+    let entries: Vec<serde_json::Value> = pa_core::session::read::read_entries(&session_file)
+        .expect("session log validates")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry serializes"))
         .collect();
     let tool_result_entry = entries
         .iter()
