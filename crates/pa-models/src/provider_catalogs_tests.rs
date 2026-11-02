@@ -151,6 +151,7 @@ fn credentials(provider: &str, secret: &str) -> CatalogInputs {
     let format = match provider {
         "openrouter" => CatalogFormat::OpenRouter,
         "anthropic" => CatalogFormat::Anthropic,
+        "google" => CatalogFormat::Google,
         "ollama-cloud" => CatalogFormat::Ollama,
         _ => CatalogFormat::OpenAi,
     };
@@ -604,4 +605,78 @@ async fn changed_credentials_cancel_inflight_publication_without_cross_account_m
         .any(|model| model.id == "test/stale-account-a"));
     assert!(!dir.path().join("openrouter-models.v1.json").exists());
     assert_eq!(server.count(), 1);
+}
+
+#[tokio::test]
+async fn dropped_readiness_wait_keeps_the_started_publication_alive() {
+    let gate = Arc::new(Semaphore::new(0));
+    let response_gate = Arc::clone(&gate);
+    let server = Server::start(move |_| Response {
+        status: 200,
+        body: json!({"data":[rich("test/late-publication")]}),
+        gate: Some(Arc::clone(&response_gate)),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(server.catalog(dir.path()));
+    let auth = credentials("openrouter", "fixture-key");
+    let first_catalog = Arc::clone(&catalog);
+    let first_auth = auth.clone();
+    let caller = tokio::spawn(async move {
+        refresh(&first_catalog, true, &first_auth, Some(&only("openrouter"))).await
+    });
+    server.received(1).await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    let reports = refresh(&catalog, false, &auth, Some(&only("openrouter"))).await;
+    assert!(matches!(reports[0].status, Status::Updated | Status::Stale));
+    assert!(snapshot(&catalog, &auth)
+        .iter()
+        .any(|model| model.id == "test/late-publication"));
+    assert_eq!(
+        server.count(),
+        1,
+        "the next waiter joins the surviving publication"
+    );
+}
+
+#[tokio::test]
+async fn provider_refresh_keeps_effective_bundled_models_beyond_compiled_templates() {
+    for provider in ["openai", "anthropic", "google", "openrouter"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut baseline = crate::transports::compiled_models()
+            .iter()
+            .find(|model| model.provider == provider)
+            .unwrap()
+            .clone();
+        baseline.id = format!("fixture-{provider}-bundled-only");
+        baseline.name = "Trusted packaged model".into();
+        std::fs::write(
+            dir.path().join(crate::bundled::PACKAGED_MODEL_CATALOG_FILE),
+            json!({"schemaVersion":1,"models":[baseline]}).to_string(),
+        )
+        .unwrap();
+        let known = crate::transports::compiled_models()
+            .iter()
+            .find(|model| model.provider == provider)
+            .unwrap()
+            .id
+            .clone();
+        let response = if provider == "google" {
+            json!({"models":[{"name":format!("models/{known}"),"supportedGenerationMethods":["generateContent"]}]})
+        } else {
+            json!({"data":[{"id":known}]})
+        };
+        let server = Server::start(move |_| Response::json(response.clone())).await;
+        let catalog = server.catalog(dir.path());
+        let auth = credentials(provider, "fixture-key");
+        assert!(snapshot(&catalog, &auth).contains(&baseline));
+        let reports = refresh(&catalog, true, &auth, Some(&only(provider))).await;
+        assert_eq!(reports[0].status, Status::Updated);
+        assert!(
+            snapshot(&catalog, &auth).contains(&baseline),
+            "{provider} refresh removed trusted packaged model"
+        );
+    }
 }

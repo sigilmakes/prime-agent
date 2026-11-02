@@ -269,7 +269,7 @@ impl ProviderCatalog {
         policy: RefreshPolicy,
         selected: Option<&[String]>,
     ) -> Vec<ModelRefreshSourceResult> {
-        let mut tasks = tokio::task::JoinSet::new();
+        let mut tasks = Vec::new();
         for (index, source) in sources
             .iter()
             .enumerate()
@@ -277,7 +277,7 @@ impl ProviderCatalog {
         {
             let cache = self.cache(source);
             let source = source.clone();
-            tasks.spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 let format = source.format;
                 let fetch_payload = if format == CatalogFormat::Ollama {
                     let url = source.url.clone();
@@ -325,11 +325,11 @@ impl ProviderCatalog {
                         report.models.as_ref().map(Vec::len),
                     ),
                 )
-            });
+            }));
         }
         let mut reports = Vec::new();
-        while let Some(result) = tasks.join_next().await {
-            reports.push(result.expect("discovery refresh task panicked"));
+        for task in tasks {
+            reports.push(task.await.expect("discovery refresh task panicked"));
         }
         reports.sort_by_key(|(index, _)| *index);
         reports.into_iter().map(|(_, report)| report).collect()
@@ -367,9 +367,22 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn positive(value: Option<&serde_json::Value>) -> Option<u64> {
-    value
-        .and_then(serde_json::Value::as_u64)
-        .filter(|value| *value > 0)
+    let value = value?;
+    if let Some(integer) = value.as_u64() {
+        return (integer > 0).then_some(integer);
+    }
+    let number = value.as_f64()?;
+    if number.is_finite()
+        && number > 0.0
+        && number.fract() == 0.0
+        && number < 18_446_744_073_709_551_616.0
+    {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let integer = number as u64;
+        Some(integer)
+    } else {
+        None
+    }
 }
 
 fn price(value: Option<&serde_json::Value>) -> Option<f64> {

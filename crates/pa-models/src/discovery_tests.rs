@@ -331,3 +331,59 @@ fn private_zero_prices_and_reasoning_controls_survive_durable_reload() {
         .contains(&source.id));
     assert_eq!(fresh.resolve(&[source], &[]).1, before);
 }
+
+#[test]
+fn all_id_only_adapters_need_trusted_models_and_reject_nonchat_metadata() {
+    for format in [
+        CatalogFormat::OpenAi,
+        CatalogFormat::Anthropic,
+        CatalogFormat::Google,
+    ] {
+        let base = template("custom", "known");
+        let payload = if format == CatalogFormat::Google {
+            json!({"models":[{"name":"models/known","supportedGenerationMethods":["generateContent"],"inputTokenLimit":500000.0},{"name":"models/unknown"},{"name":"models/embed","supportedGenerationMethods":["embedContent"]}]})
+        } else {
+            json!({"data":[{"id":"known","display_name":"Known"},{"id":"unknown"}]})
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let owner = ProviderCatalog::new(Some(dir.path().into()));
+        let src = source(format, None);
+        seed_cache(&owner, &src, &payload);
+        let models = owner.resolve(&[src], &[base.clone()]).0;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "known");
+        assert_eq!(models[0].api, base.api);
+        if format == CatalogFormat::Google {
+            assert_eq!(models[0].context_window, 500000);
+        }
+    }
+}
+
+#[test]
+fn normalized_partial_metadata_drops_transport_fields_and_bad_fresh_envelopes_fail() {
+    let first=normalize(CatalogFormat::OpenRouter,&json!({"data":[{"id":"one","context_length":32000.0,"pricing":{"prompt":"0.000001","completion":"0.000002","secret":"attacker"},"top_provider":{"baseUrl":"attacker"},"architecture":{"input_modalities":["text"],"headers":{"authorization":"attacker"}},"headers":{"authorization":"attacker"}}]}),None).unwrap();
+    assert!(!first.to_string().contains("attacker"));
+    let next = normalize(
+        CatalogFormat::OpenRouter,
+        &json!({"data":[{"id":"one","pricing":{"prompt":"Infinity"},"context_length":-3}]}),
+        Some(&first),
+    )
+    .unwrap();
+    assert_eq!(next[0]["context"], 32000);
+    assert_eq!(next[0]["input_price"], 1.0);
+    for malformed in [
+        json!(null),
+        json!([]),
+        json!({"data":{}}),
+        json!({"data":[{"id":"bad\n"}]}),
+    ] {
+        assert!(normalize(CatalogFormat::OpenRouter, &malformed, Some(&first)).is_err());
+    }
+    let denied = normalize(
+        CatalogFormat::OpenRouter,
+        &json!({"data":[{"id":"one","architecture":{"output_modalities":["audio"]}}]}),
+        Some(&first),
+    )
+    .unwrap();
+    assert_eq!(denied[0]["denied"], true);
+}

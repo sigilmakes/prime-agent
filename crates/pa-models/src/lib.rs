@@ -14,7 +14,6 @@ pub mod prime_inference;
 mod provider_catalogs;
 #[cfg(test)]
 mod provider_catalogs_tests;
-pub mod provider_discovery;
 pub mod schema;
 pub mod transports;
 

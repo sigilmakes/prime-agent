@@ -10,8 +10,8 @@ use std::sync::Arc;
 pub const PROVIDER_CATALOG_CACHE_FILE: &str = "provider-model-catalog.v1.json";
 
 pub struct ModelCatalog {
-    provider_cache: CatalogCache<Vec<Model>>,
-    default: Option<CatalogCache<String>>,
+    provider_cache: Arc<CatalogCache<Vec<Model>>>,
+    default: Option<Arc<CatalogCache<String>>>,
     bundled: BundledAssets,
     templates: PinnedTemplates,
     compiled: Arc<Vec<Model>>,
@@ -68,15 +68,15 @@ impl ModelCatalog {
         let templates = PinnedTemplates::from_compiled();
         let pin_templates = templates.clone();
         Self {
-            provider_cache: CatalogCache::new(
+            provider_cache: Arc::new(CatalogCache::new(
                 model_catalog_url,
                 models_dir
                     .as_ref()
                     .map(|dir| dir.join(PROVIDER_CATALOG_CACHE_FILE)),
                 Arc::new(CatalogFetcher::new()),
                 Arc::new(move |payload, _| parse_provider_model_catalog(payload, &pin_templates)),
-            ),
-            default: Some(CatalogCache::new(
+            )),
+            default: Some(Arc::new(CatalogCache::new(
                 discovery_urls
                     .get("default")
                     .map_or(crate::DEFAULT_MODEL_CATALOG_URL, String::as_str),
@@ -85,7 +85,7 @@ impl ModelCatalog {
                     .map(|dir| dir.join("default-model.v1.json")),
                 Arc::new(CatalogFetcher::new()),
                 Arc::new(|payload, _| crate::provider_catalogs::parse_default(payload)),
-            )),
+            ))),
             bundled: bundled_dir
                 .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
             compiled: Arc::new(transports::compiled_models().to_vec()),
@@ -168,13 +168,14 @@ impl ModelCatalog {
         let discovery = self
             .discovery
             .refresh(&inputs.sources, request.policy, selected);
-        let curated = async {
-            if !crate::provider_catalogs::selected(selected, "curated") {
+        let curated_cache = Arc::clone(&self.provider_cache);
+        let templates = self.templates.clone();
+        let refresh_curated = crate::provider_catalogs::selected(selected, "curated");
+        let curated = tokio::spawn(async move {
+            if !refresh_curated {
                 return None;
             }
-            let templates = self.templates.clone();
-            let report = self
-                .provider_cache
+            let report = curated_cache
                 .refresh_report(
                     PUBLIC_SCOPE,
                     RefreshOptions {
@@ -194,10 +195,12 @@ impl ModelCatalog {
                 &report,
                 report.models.as_ref().map(Vec::len),
             ))
-        };
-        let default = async {
-            let cache = self.default.as_ref()?;
-            if !crate::provider_catalogs::selected(selected, "default") {
+        });
+        let default_cache = self.default.clone();
+        let refresh_default = crate::provider_catalogs::selected(selected, "default");
+        let default = tokio::spawn(async move {
+            let cache = default_cache?;
+            if !refresh_default {
                 return None;
             }
             let report = cache
@@ -214,10 +217,10 @@ impl ModelCatalog {
                 &report,
                 report.models.as_ref().map(|_| 1),
             ))
-        };
+        });
         let (mut sources, curated, default) = tokio::join!(discovery, curated, default);
-        sources.extend(curated);
-        sources.extend(default);
+        sources.extend(curated.expect("curated refresh task panicked"));
+        sources.extend(default.expect("default refresh task panicked"));
         crate::RefreshPublication {
             snapshot: self.snapshot(inputs),
             sources,
