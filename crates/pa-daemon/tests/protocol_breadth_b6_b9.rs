@@ -687,7 +687,7 @@ fn wave_b9_session_navigation_wire_shapes() {
         concat!(
             r#"{"type":"session","id":"imported-1","timestamp":"2026-01-01T00:00:00Z","cwd":"","version":3}"#,
             "\n",
-            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"imported question"}]}}"#,
+            r#"{"type":"message","id":"m1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"imported question"}],"timestamp":1767225601000}}"#,
             "\n",
         ),
     );

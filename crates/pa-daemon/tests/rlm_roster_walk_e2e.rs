@@ -253,7 +253,7 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    write_synthetic_family(&agent_dir, CHILDREN);
+    let (root_path, _) = write_synthetic_family(&agent_dir, CHILDREN);
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
@@ -289,15 +289,7 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
     assert_eq!(child_row["messageCount"], 2);
     assert_eq!(
         child_row["parentSessionPath"].as_str(),
-        Some(
-            agent_dir
-                .join("sessions")
-                .join("root-session-1.jsonl")
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .as_ref()
-        )
+        Some(root_path.canonicalize().unwrap().to_string_lossy().as_ref())
     );
 }
 
