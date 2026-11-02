@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use pa_models::{CatalogFormat, CatalogInputs, ResolvedSource};
+use pa_models::{CatalogFormat, CatalogInputs, ResolvedSource, UnknownModelPolicy};
 use pa_types::ai::Model;
 
 use super::ModelRegistry;
@@ -167,15 +167,25 @@ impl ModelRegistry {
                         .get_api_key_with_source_token(&provider, false)
                         .api_key
                 };
-                stored.or_else(|| {
+                if stored.is_some() || self.auth.get_auth_status_local(&provider).source.is_some() {
+                    stored
+                } else {
                     config
                         .api_key
                         .as_deref()
                         .and_then(|key| resolve_value(key, local_only))
-                })
+                }
             } else {
                 None
             };
+            if inherit
+                && key_config.is_none()
+                && !explicit_auth_header
+                && key.is_none()
+                && self.auth.get_auth_status_local(&provider).source.is_some()
+            {
+                continue;
+            }
             let mut configured_headers = BTreeMap::new();
             let mut merge_headers = |values: &BTreeMap<String, String>| {
                 for (name, value) in values {
@@ -246,7 +256,7 @@ impl ModelRegistry {
                 continue;
             }
             let guard = self.source_publication_guard(&provider, &config);
-            let defaults = if let Some(defaults) =
+            let unknown_models = if let Some(defaults) =
                 discovery.and_then(|discovery| discovery.defaults.as_ref())
             {
                 custom::model_from_definition(
@@ -257,18 +267,22 @@ impl ModelRegistry {
                         .as_ref()
                         .map(|model| (model.api.clone(), model.base_url.clone())),
                 )
+                .map_or(UnknownModelPolicy::KnownOnly, |model| {
+                    UnknownModelPolicy::ConfiguredDefaults { model }
+                })
             } else if builtin_format(&provider) == Some(format)
-                && !matches!(
+                && matches!(
                     format,
-                    CatalogFormat::OpenAi
-                        | CatalogFormat::Anthropic
-                        | CatalogFormat::Google
-                        | CatalogFormat::Codex
+                    CatalogFormat::OpenRouter
+                        | CatalogFormat::Ollama
+                        | CatalogFormat::PrimeInference
                 )
             {
-                template
+                template.map_or(UnknownModelPolicy::KnownOnly, |template| {
+                    UnknownModelPolicy::ProviderMetadata { template }
+                })
             } else {
-                None
+                UnknownModelPolicy::KnownOnly
             };
             let source = ResolvedSource {
                 id: provider.clone(),
@@ -276,7 +290,7 @@ impl ModelRegistry {
                 format,
                 url,
                 headers: headers.into_iter().collect(),
-                defaults,
+                unknown_models,
                 is_current: guard,
             };
             if format == CatalogFormat::PrimeInference {

@@ -64,9 +64,7 @@ fn fixture_inputs(base: &str, configured: bool) -> CatalogInputs {
         } else {
             Vec::new()
         },
-        defaults: pa_models::transports::prime_inference_offline_entries()
-            .into_iter()
-            .next(),
+        unknown_models: pa_models::UnknownModelPolicy::KnownOnly,
         is_current: None,
     }];
     if configured {
@@ -84,7 +82,7 @@ fn fixture_inputs(base: &str, configured: bool) -> CatalogInputs {
                 format,
                 url: format!("{base}/{provider}"),
                 headers: vec![("authorization".into(), "Bearer fixture-key".into())],
-                defaults: None,
+                unknown_models: pa_models::UnknownModelPolicy::KnownOnly,
                 is_current: None,
             });
         }

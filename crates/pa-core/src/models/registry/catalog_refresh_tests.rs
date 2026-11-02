@@ -373,6 +373,42 @@ async fn local_apply_never_runs_command_keys_or_oauth_including_prime_credential
     );
 }
 
+#[tokio::test]
+async fn local_apply_does_not_replace_deferred_auth_with_models_json_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.json");
+    let marker = dir.path().join("command-ran");
+    write_config(
+        &path,
+        json!({"openai":{"apiKey":"fixture-lower-priority-key"},
+        "google":{"apiKey":"fixture-lower-priority-key"}}),
+    );
+    let command = format!("!printf ran > '{}'", marker.display());
+    let probe = Arc::new(OAuthProbe::default());
+    let data = AuthStorageData(
+        json!({
+            "openai":{"type":"api_key","key":command},
+            "google":{"type":"oauth","access":"expired","refresh":"fixture-refresh","expires":0}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let mut registry = ModelRegistry::create(
+        AuthStorage::in_memory_without_env(&data, probe.clone()),
+        &path,
+    );
+    let custom = registry.load_custom_models_file(&path);
+    let inputs = registry.catalog_inputs(&custom, true);
+    assert!(!inputs
+        .sources
+        .iter()
+        .any(|source| matches!(source.id.as_str(), "openai" | "google")));
+    assert!(!marker.exists());
+    assert_eq!(probe.keys.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.refreshes.load(Ordering::SeqCst), 0);
+}
+
 fn private_wire(model: &Model) -> Value {
     json!({"id":model.id, "display_name":model.name,
         "pricing":{"input_usd_per_mtok":0.0,"output_usd_per_mtok":0.0},

@@ -262,8 +262,12 @@ pub fn validate_config(
                 ));
             }
             if discovery.url.as_ref().is_some_and(|url| {
-                reqwest::Url::parse(url)
-                    .map_or(true, |url| !matches!(url.scheme(), "http" | "https"))
+                reqwest::Url::parse(url).map_or(true, |url| {
+                    !matches!(url.scheme(), "http" | "https")
+                        || !url.username().is_empty()
+                        || url.password().is_some()
+                        || url.fragment().is_some()
+                })
             }) {
                 return Err(format!("Provider {provider_name}: invalid discovery URL"));
             }
@@ -558,6 +562,26 @@ pub fn load_custom_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_urls_keep_credentials_out_of_the_authority_and_fragment() {
+        for url in [
+            "https://fixture-user:fixture-password@catalog.test/models",
+            "https://catalog.test/models#fixture-token",
+            "ftp://catalog.test/models",
+        ] {
+            let document = serde_json::json!({"providers":{"gateway":{
+                "baseUrl":"https://gateway.test/v1","api":"openai-completions",
+                "discovery":{"format":"openai","url":url}}}});
+            let config = parse_models_config(&document.to_string()).unwrap();
+            assert!(validate_config(&config, &|_| false).is_err());
+        }
+        let document = serde_json::json!({"providers":{"gateway":{
+            "baseUrl":"https://gateway.test/v1","api":"openai-completions",
+            "discovery":{"format":"openai","url":"https://catalog.test/models?tenant=a"}}}});
+        let config = parse_models_config(&document.to_string()).unwrap();
+        assert!(validate_config(&config, &|_| false).is_ok());
+    }
+
     #[test]
     fn discovery_defaults_reject_invented_modalities_and_incomplete_pricing() {
         let defaults = serde_json::json!({"contextWindow":32000,"maxTokens":4000,"reasoning":false,"input":["text"],
