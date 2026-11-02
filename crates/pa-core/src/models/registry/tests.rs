@@ -227,7 +227,10 @@ async fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models(
     entries.push(serde_json::json!({
         "id": "anthropic/live-only-model",
         "display_name": "Live Only Model",
-        "pricing": { "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0 },
+        "pricing": {
+            "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+            "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+        },
         "specs": {
             "context_window": 64000, "max_output_tokens": 8192,
             "supports_reasoning": false,
