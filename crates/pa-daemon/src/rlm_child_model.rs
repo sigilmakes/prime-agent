@@ -415,6 +415,8 @@ mod tests {
     /// entitled private `internal/*` model through the worker's same disk caches.
     #[tokio::test]
     async fn a_spawned_child_resolves_an_entitled_private_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         // The worker-path auth (auth.json): one Prime Inference key+team.
@@ -430,7 +432,6 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/models", listener.local_addr().unwrap());
         let response = tokio::spawn(async move {

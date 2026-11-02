@@ -257,7 +257,7 @@ impl ModelRegistry {
                         .or_insert(account);
                 }
             }
-            let guard = self.source_publication_guard(&provider, &config);
+            let guard = Some(self.source_publication_guard(&provider, &config));
             let unknown_models = if let Some(defaults) =
                 discovery.and_then(|discovery| discovery.defaults.as_ref())
             {
@@ -356,7 +356,7 @@ impl ModelRegistry {
         &self,
         provider: &str,
         config: &ProviderConfig,
-    ) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+    ) -> Arc<dyn Fn() -> bool + Send + Sync> {
         let paths: Vec<_> = self
             .models_json_path
             .iter()
@@ -400,7 +400,7 @@ impl ModelRegistry {
                 (name, value)
             })
             .collect();
-        Some(Arc::new(move || {
+        Arc::new(move || {
             if !paths
                 .iter()
                 .zip(&previous)
@@ -415,6 +415,6 @@ impl ModelRegistry {
                 return false;
             }
             auth_guard()
-        }))
+        })
     }
 }

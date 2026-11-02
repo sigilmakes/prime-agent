@@ -30,7 +30,7 @@ impl Worker {
         let models_json = agent_dir.join("models.json");
         let mut registry = pa_core::models::ModelRegistry::create(
             pa_core::auth::AuthStorage::create(&agent_dir),
-            models_json.clone(),
+            models_json,
         );
         // The on-disk private authorization (fingerprint-checked): the
         // validated current view of the account's private models, no network.

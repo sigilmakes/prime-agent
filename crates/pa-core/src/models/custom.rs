@@ -456,17 +456,18 @@ pub(super) fn model_from_definition(
     model_def: &ModelDefinition,
     defaults: Option<(String, String)>,
 ) -> Option<Model> {
+    let (default_api, default_url) = defaults.unzip();
     let api = model_def
         .api
         .clone()
         .or_else(|| provider_config.api.clone())
-        .or_else(|| defaults.as_ref().map(|(api, _)| api.clone()));
+        .or(default_api);
     let api = api?;
     let base_url = model_def
         .base_url
         .clone()
         .or_else(|| provider_config.base_url.clone())
-        .or_else(|| defaults.as_ref().map(|(_, url)| url.clone()));
+        .or(default_url);
     let base_url = base_url?;
     let compat = merge_compat(None, compat_from_value(provider_config.compat.as_ref()));
     Some(Model {

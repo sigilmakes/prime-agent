@@ -94,6 +94,11 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
 /// catalog's own guard coalesces repeated calls). The credentials closure
 /// re-reads auth from disk on every tick, so a login or logout between
 /// ticks changes the next refresh's scope.
+///
+/// # Panics
+///
+/// Panics if the scheduler lock is poisoned or there is no active Tokio runtime
+/// when a new hourly task is spawned.
 pub fn spawn_hourly_refresh(agent_dir: &Path) {
     static STARTED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     if !STARTED
