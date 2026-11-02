@@ -367,6 +367,8 @@ def main():
                         help="fail unless explicit TS binary and source reference are provisioned")
     parser.add_argument("--timeout", type=float, default=10800,
                         help="total deadline in seconds (default: 10800)")
+    parser.add_argument("--skip-lint", action="store_true",
+                        help="the caller already ran formatting, hook and Clippy gates")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -404,7 +406,8 @@ def main():
             "python3", "-B", "scripts/check_workspace_tests.py", "--state-root",
             str(state / "test-targets"), "--deadline", str(deadline),
         ])
-        run(["make", "workspace-check"], repo=repo, env=test_env, deadline=deadline)
+        gate = "workspace-tests" if args.skip_lint else "workspace-check"
+        run(["make", gate], repo=repo, env=test_env, deadline=deadline)
     print("Full workspace gate passed", flush=True)
     return 0
 

@@ -21,6 +21,7 @@ help:
 		'package         build the downstream Nix source package locally' \
 		'package-check   run the downstream Nix flake checks (may build)' \
 		'workspace-check alias of the required full Rust workspace gate' \
+		'workspace-tests test phase alone (the CI workspace job after lint)' \
 		'Optional: deny, windows-cross, windows-msvc-cross, audit-build, perf' \
 		'Install hooks manually: git config core.hooksPath .husky'
 
@@ -56,6 +57,11 @@ package-check:
 workspace-check: hooks-check
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings
+	$(MAKE) workspace-tests
+
+# The test phase alone: CI runs the formatting, hook and Clippy gates in its
+# own job first, so the workspace job never repeats them.
+workspace-tests:
 	$(WORKSPACE_TEST_RUNNER) $(WORKSPACE_TEST_COMMAND)
 
 # Optional gates fail when their tools or target toolchains are unavailable.
