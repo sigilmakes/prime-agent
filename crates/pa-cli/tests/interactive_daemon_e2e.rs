@@ -23,6 +23,14 @@ use std::time::{Duration, Instant};
 
 use pa_types::daemon::DaemonCommand;
 
+fn persisted_rows(path: &Path) -> Vec<serde_json::Value> {
+    pa_core::session::read::read_entries(path)
+        .expect("valid persisted session log")
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect()
+}
+
 /// A one-pixel PNG (the clipboard seam fixture image).
 const MINIMAL_PNG: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -2644,14 +2652,9 @@ async fn tui_renames_session_through_slash_command() {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        for line in content.lines() {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                if value["type"] == "session_info" && value["name"] == "my session" {
-                    saw_name = true;
-                }
-            }
-        }
+        saw_name |= persisted_rows(&path)
+            .iter()
+            .any(|row| row["type"] == "session_info" && row["name"] == "my session");
     }
     assert!(
         saw_name,
@@ -2734,7 +2737,7 @@ async fn tui_new_command_honors_name_and_prompt() {
     // The create arm persists each session's file eagerly, so one file per
     // created session: the startup session plus the three /new runs; the
     // parse error added none.
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut files = Vec::new();
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
         .flatten()
@@ -2743,67 +2746,54 @@ async fn tui_new_command_honors_name_and_prompt() {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let id = content
-            .lines()
-            .next()
-            .and_then(|header| serde_json::from_str::<serde_json::Value>(header).ok())
-            .and_then(|header| header["id"].as_str().map(str::to_string))
-            .unwrap_or_default();
-        files.push((id, content));
+        let rows = persisted_rows(&path);
+        assert_eq!(rows[0]["type"], "session");
+        let id = rows[0]["id"]
+            .as_str()
+            .expect("persisted session ID")
+            .to_string();
+        let content = serde_json::to_string(&rows).unwrap();
+        files.push((id, content, rows));
     }
     assert_eq!(files.len(), 4, "the parse error created no session");
-    // The name-and-prompt run: its file carries the initial prompt, the
-    // scripted reply, and the session_info rename.
-    let (named_id, named) = files
+    // The name-and-prompt run persists its prompt, reply and rename.
+    let (named_id, named, named_rows) = files
         .iter()
-        .find(|(_, content)| content.contains("do something"))
-        .map(|(id, content)| (id.clone(), content.as_str()))
+        .find(|(_, content, _)| content.contains("do something"))
         .expect("the named run persisted the initial prompt");
     assert!(
         named.contains("scripted reply"),
         "the scripted reply persisted alongside the prompt"
     );
     assert!(
-        named.lines().any(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .is_ok_and(|value| value["type"] == "session_info" && value["name"] == "my session")
-        }),
+        named_rows
+            .iter()
+            .any(|row| row["type"] == "session_info" && row["name"] == "my session"),
         "the session_info row named the new session"
     );
-    // The bare-suffix run: the prompt submitted, the session left unnamed.
-    let (_, bare) = files
+    // The bare-suffix run submits its prompt and stays unnamed.
+    let (_, bare, bare_rows) = files
         .iter()
-        .find(|(_, content)| content.contains("plain prompt"))
-        .map(|(id, content)| (id.clone(), content.as_str()))
+        .find(|(_, content, _)| content.contains("plain prompt"))
         .expect("the bare-suffix run persisted the initial prompt");
     assert!(
         bare.contains("scripted reply"),
         "the bare-suffix scripted reply persisted"
     );
     assert!(
-        bare.lines().all(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .map_or(true, |value| value["type"] != "session_info")
-        }),
+        bare_rows.iter().all(|row| row["type"] != "session_info"),
         "the bare-suffix session stayed unnamed"
     );
-    // The name-only run: named, and no prompt ever submitted.
-    let (_, solo) = files
+    // The name-only run persists the rename but never submits a prompt.
+    let (_, _, solo_rows) = files
         .iter()
-        .find(|(_, content)| {
-            content.lines().any(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .is_ok_and(|value| value["type"] == "session_info" && value["name"] == "solo")
-            })
+        .find(|(_, _, rows)| {
+            rows.iter()
+                .any(|row| row["type"] == "session_info" && row["name"] == "solo")
         })
-        .map(|(id, content)| (id.clone(), content.as_str()))
         .expect("the name-only run persisted the rename");
     assert!(
-        solo.lines().all(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .map_or(true, |value| value["type"] != "message")
-        }),
+        solo_rows.iter().all(|row| row["type"] != "message"),
         "the name-only run submitted no prompt"
     );
     // The daemon state reports the names (the roster summary's field).
@@ -2813,7 +2803,7 @@ async fn tui_new_command_honors_name_and_prompt() {
     let state = client
         .request_ok(DaemonCommand::GetState {
             id: None,
-            active_session_id: named_id,
+            active_session_id: named_id.clone(),
             rest: serde_json::Map::default(),
         })
         .await
