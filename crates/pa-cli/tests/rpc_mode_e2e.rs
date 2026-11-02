@@ -174,38 +174,10 @@ impl RpcChild {
         self.drain_stderr_on_drop = true;
     }
 
-    /// The agent dir the child runs with; the lease owner records live under `session-leases`.
+    /// The agent dir the child runs with.
     fn agent_dir(&self) -> std::path::PathBuf {
         self.home.path().join("agent")
     }
-}
-
-/// The session files holding a runtime lease right now.
-fn leased_session_files(agent_dir: &std::path::Path) -> Vec<String> {
-    let mut leased = Vec::new();
-    let Ok(entries) = std::fs::read_dir(agent_dir.join("session-leases")) else {
-        return leased;
-    };
-    for entry in entries.flatten() {
-        let Ok(text) = std::fs::read_to_string(entry.path().join("owner.json")) else {
-            continue;
-        };
-        let Ok(owner) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        if let Some(path) = owner.get("sessionPath").and_then(Value::as_str) {
-            leased.push(path.to_string());
-        }
-    }
-    leased
-}
-
-/// Canonical-path comparison: host symlinks must not mask the match.
-fn is_leased(leased: &[String], session_file: &str) -> bool {
-    let session_file = std::path::Path::new(session_file);
-    leased.iter().any(|leased| {
-        std::fs::canonicalize(leased).ok() == std::fs::canonicalize(session_file).ok()
-    })
 }
 
 impl Drop for RpcChild {
@@ -726,16 +698,25 @@ fn rpc_fresh_sessions_lease_their_files() {
         .as_str()
         .expect("the persisted session reports its file")
         .to_string();
-    let leased = leased_session_files(&client.agent_dir());
-    assert!(
-        is_leased(&leased, &session_file),
-        "the fresh session's file is runtime-leased while the engine is live (leased: {leased:?})"
-    );
+    let owner = pa_daemon::lease::live_lease_owner(
+        &client.agent_dir(),
+        std::path::Path::new(&session_file),
+    )
+    .expect("the live session holds its OS execution lock");
+    assert_eq!(owner.pid, client.child.id(), "the RPC child owns the lock");
     drop(client.stdin.take());
     let wait_status = client.child.wait().expect("exit");
     assert!(
         wait_status.success(),
         "eof settles the leased session: {wait_status}"
+    );
+    assert!(
+        pa_daemon::lease::live_lease_owner(
+            &client.agent_dir(),
+            std::path::Path::new(&session_file),
+        )
+        .is_none(),
+        "EOF releases the OS execution lock"
     );
     client.spawn_stderr = None;
 }
@@ -773,16 +754,23 @@ fn rpc_fork_leases_the_materialized_file() {
         .expect("the forked session reports its file")
         .to_string();
     assert_ne!(forked_file, source_file, "the fork materialized a new file");
-    let leased = leased_session_files(&forked.agent_dir());
-    assert!(
-        is_leased(&leased, &forked_file),
-        "the fork's materialized file is runtime-leased (leased: {leased:?})"
-    );
+    let owner =
+        pa_daemon::lease::live_lease_owner(&forked.agent_dir(), std::path::Path::new(&forked_file))
+            .expect("the live session holds its OS execution lock");
+    assert_eq!(owner.pid, forked.child.id(), "the RPC child owns the lock");
     drop(forked.stdin.take());
     let wait_status = forked.child.wait().expect("exit");
     assert!(
         wait_status.success(),
         "eof settles the forked session: {wait_status}"
+    );
+    assert!(
+        pa_daemon::lease::live_lease_owner(
+            &forked.agent_dir(),
+            std::path::Path::new(&forked_file),
+        )
+        .is_none(),
+        "EOF releases the OS execution lock"
     );
     forked.spawn_stderr = None;
 }
@@ -802,15 +790,25 @@ fn rpc_failed_replacement_restarts_the_queue_pump() {
     assert_eq!(steer["success"], true, "the steer queues: {steer}");
     // The crafted header stores a gone cwd, so the switch fails deterministically.
     let bad_file = client.agent_dir().join("bad-cwd-session.jsonl");
-    std::fs::write(
-        &bad_file,
-        concat!(
-            "{\"type\":\"session\",\"id\":\"bad-cwd\",",
-            "\"timestamp\":\"2026-09-26T00:00:00.000Z\",",
-            "\"cwd\":\"/definitely/missing/project\"}\n"
-        ),
+    let mut log = pa_core::session_log::SessionLog::open(
+        bad_file.parent().unwrap(),
+        bad_file.file_stem().unwrap().to_str().unwrap(),
+        Instant::now(),
     )
-    .expect("write the crafted session");
+    .expect("open the crafted session");
+    assert!(matches!(
+        log.append_first(
+            &json!({
+                "type": "session",
+                "version": 3,
+                "id": "bad-cwd",
+                "timestamp": "2026-09-26T00:00:00.000Z",
+                "cwd": "/definitely/missing/project"
+            }),
+            Instant::now(),
+        ),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
     let bad = client.command(&json!({
         "type": "switch_session",
         "sessionPath": bad_file.to_string_lossy()
@@ -1072,6 +1070,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         }),
     );
     rows.push(row);
+    std::fs::create_dir_all(path.parent().unwrap()).expect("create corpus session directory");
     let mut log = pa_core::session_log::SessionLog::open(
         path.parent().unwrap(),
         path.file_stem().unwrap().to_str().unwrap(),
