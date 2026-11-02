@@ -57,6 +57,50 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn environment_only_auth_restores_a_known_model_without_waiting() {
+        struct Environment;
+        impl crate::auth::manager::EnvCredentialSource for Environment {
+            fn key_names(&self, provider: &str) -> Option<Vec<String>> {
+                (provider == "openai").then(|| vec!["OPENAI_API_KEY".into()])
+            }
+            fn api_key(&self, provider: &str) -> Option<String> {
+                (provider == "openai").then(|| "fixture-env-key".into())
+            }
+            fn prime_team_id(&self) -> Option<String> {
+                None
+            }
+            fn ambient_identity_material(&self, provider: &str) -> String {
+                provider.into()
+            }
+        }
+
+        let auth = crate::auth::AuthStorage::in_memory_with_env(
+            &crate::auth::AuthStorageData::default(),
+            std::sync::Arc::new(crate::auth::NoOAuth),
+            std::sync::Arc::new(Environment),
+        );
+        let mut registry = ModelRegistry::in_memory(auth);
+        let model = registry
+            .get_all()
+            .iter()
+            .find(|model| model.provider == "openai")
+            .unwrap()
+            .clone();
+        let local_status = registry.auth.get_auth_status_local(&model.provider);
+        assert!(!local_status.configured);
+        let status = registry.get_provider_auth_status(&model.provider);
+        assert!(status.configured);
+        assert_eq!(status.source, local_status.source);
+        assert_eq!(status.label, local_status.label);
+        assert!(registry.get_available().contains(&&model));
+        assert_eq!(
+            find_session_model_with_readiness_wait(&mut registry, &model.provider, &model.id, 0)
+                .await,
+            Some(model),
+        );
+    }
+
+    #[tokio::test]
     async fn restore_requires_a_registered_model_with_configured_auth() {
         let auth = crate::auth::AuthStorage::in_memory_without_env(
             &crate::auth::AuthStorageData::default(),

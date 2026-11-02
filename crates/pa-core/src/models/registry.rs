@@ -251,8 +251,11 @@ impl ModelRegistry {
     pub fn get_provider_auth_status(&self, provider: &str) -> crate::auth::types::AuthStatus {
         use crate::auth::types::{AuthSource, AuthStatus};
         let status = self.auth.get_auth_status_local(provider);
-        if status.configured && status.source != Some(AuthSource::Stale) {
-            return status;
+        if status.source.is_some() && status.source != Some(AuthSource::Stale) {
+            return AuthStatus {
+                configured: true,
+                ..status
+            };
         }
         let Some(config) = self.provider_request_configs.get(provider) else {
             return status;
