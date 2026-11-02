@@ -30,6 +30,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    use pa_core::session_log::{Outcome, SessionLog};
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    assert!(!path.exists(), "fixture log must not exist");
+    let mut log = SessionLog::open(
+        path.parent().expect("session directory"),
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .expect("session ID"),
+        deadline(),
+    )
+    .expect("open fixture log");
+    for line in content.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture payload");
+        assert!(matches!(
+            log.append(&row, deadline()),
+            Outcome::Committed { .. }
+        ));
+    }
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -155,7 +176,7 @@ fn write_fixture(
             index as u64
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
+    write_session_rows(&path, &content);
     let file = std::fs::File::options()
         .write(true)
         .open(&path)

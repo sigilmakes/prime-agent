@@ -35,6 +35,27 @@ use serde_json::{json, Value};
 /// answers the same shape in 0.78s; the bound stays generous for CI noise.
 const LIST_ALL_BOUND: Duration = Duration::from_secs(10);
 
+fn write_session_rows(path: &std::path::Path, content: &str) {
+    use pa_core::session_log::{Outcome, SessionLog};
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    assert!(!path.exists(), "fixture log must not exist");
+    let mut log = SessionLog::open(
+        path.parent().expect("session directory"),
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .expect("session ID"),
+        deadline(),
+    )
+    .expect("open fixture log");
+    for line in content.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture payload");
+        assert!(matches!(
+            log.append(&row, deadline()),
+            Outcome::Committed { .. }
+        ));
+    }
+}
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -168,7 +189,7 @@ fn write_child_session(path: &Path, id: &str, name: &str, prompt: &str) {
          {{\"type\":\"message\",\"id\":\"m1\",\"timestamp\":\"2026-09-18T00:00:01.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{prompt}\",\"timestamp\":1}}}}\n\
          {{\"type\":\"message\",\"id\":\"m2\",\"timestamp\":\"2026-09-18T00:00:02.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":\"child answer\",\"timestamp\":2}}}}\n"
     );
-    std::fs::write(path, content).expect("write child session");
+    write_session_rows(path, &content);
 }
 
 fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize) {
@@ -176,14 +197,13 @@ fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize)
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     let root_id = "root-session-1";
     let root_path = sessions_dir.join(format!("{root_id}.jsonl"));
-    std::fs::write(
+    write_session_rows(
         &root_path,
-        format!(
+        &format!(
             "{{\"type\":\"session\",\"version\":3,\"id\":\"{root_id}\",\"timestamp\":\"2026-09-18T00:00:00.000Z\",\"cwd\":\"/tmp\"}}\n\
              {{\"type\":\"message\",\"id\":\"m1\",\"timestamp\":\"2026-09-18T00:00:01.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"root task\",\"timestamp\":1}}}}\n"
         ),
-    )
-    .expect("write root session");
+    );
 
     let mut records = String::new();
     let mut live = 0;
