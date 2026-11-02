@@ -3,7 +3,7 @@
 //! daemon has a private catalog layer per session in one process; the Rust
 //! daemon runs one worker per session, so the disk caches carry the state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -61,8 +61,8 @@ pub fn install_catalog(models_json_path: &Path, catalog: Arc<ModelCatalog>) {
 /// previous account's view).
 #[must_use]
 pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
-    let mut auth = AuthStorage::create(agent_dir);
-    let api_key = auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID)?;
+    let auth = AuthStorage::create(agent_dir);
+    let api_key = auth.get_api_key_local(PRIME_INFERENCE_PROVIDER_ID)?;
     let team_id = auth
         .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
         .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
@@ -94,13 +94,28 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
 /// re-reads auth from disk on every tick, so a login or logout between
 /// ticks changes the next refresh's scope.
 pub fn spawn_hourly_refresh(agent_dir: &Path) {
-    let catalog = catalog_for(Some(&agent_dir.join("models.json")));
+    static STARTED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    if !STARTED
+        .get_or_init(Default::default)
+        .lock()
+        .expect("catalog scheduler lock")
+        .insert(agent_dir.to_path_buf())
+    {
+        return;
+    }
     let dir = agent_dir.to_path_buf();
-    catalog.spawn_hourly_refresh_with_discovery(move || {
-        let mut registry = super::registry::ModelRegistry::create(
-            AuthStorage::create(&dir),
-            dir.join("models.json"),
-        );
-        registry.catalog_refresh_credentials()
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let mut registry = super::registry::ModelRegistry::create(
+                AuthStorage::create(&dir),
+                dir.join("models.json"),
+            );
+            registry
+                .refresh_available_models_with_trigger(pa_models::RefreshTrigger::Hourly)
+                .await;
+        }
     });
 }
