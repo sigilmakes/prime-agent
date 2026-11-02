@@ -37,7 +37,11 @@ impl CatalogFormat {
             Self::Anthropic if !base.ends_with("/v1") => format!("{base}/v1/models"),
             Self::Codex => {
                 let base = base.strip_suffix("/responses").unwrap_or(base);
-                let base = if base.ends_with("/codex") { base.to_string() } else { format!("{base}/codex") };
+                let base = if base.ends_with("/codex") {
+                    base.to_string()
+                } else {
+                    format!("{base}/codex")
+                };
                 format!("{base}/models?client_version=0.159.0")
             }
             Self::Google => format!("{base}/models?pageSize=1000"),
@@ -128,6 +132,10 @@ struct Metadata {
     #[serde(default)]
     denied: bool,
 }
+
+#[cfg(test)]
+#[path = "discovery_tests.rs"]
+mod tests;
 
 type MetadataCache = Arc<CatalogCache<Vec<Metadata>>>;
 

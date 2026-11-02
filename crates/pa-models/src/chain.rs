@@ -77,6 +77,7 @@ pub struct ModelCatalog {
     pi_scope_seen: Mutex<Option<Option<String>>>,
     provider_owned: Option<crate::provider_catalogs::ProviderCatalogs>,
     discovery: crate::discovery::ProviderCatalog,
+    discovery_urls: std::collections::HashMap<String, String>,
 }
 
 impl ModelCatalog {
@@ -142,6 +143,7 @@ impl ModelCatalog {
             .map(|dir| dir.join(PROVIDER_CATALOG_CACHE_FILE));
         Self {
             discovery: crate::discovery::ProviderCatalog::new(models_dir.clone()),
+            discovery_urls: discovery_urls.clone(),
             provider_cache: CatalogCache::new(
                 model_catalog_url,
                 cache_path,
@@ -162,6 +164,12 @@ impl ModelCatalog {
             hourly_loop: OnceLock::new(),
             pi_scope_seen: Mutex::new(None),
         }
+    }
+
+    /// Explicit constructor endpoint overrides, used by hermetic callers only.
+    #[must_use]
+    pub fn discovery_url_override(&self, provider: &str) -> Option<&str> {
+        self.discovery_urls.get(provider).map(String::as_str)
     }
 
     pub fn prime_inference_base_url(&self) -> &str {
