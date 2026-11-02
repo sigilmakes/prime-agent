@@ -226,7 +226,11 @@ async fn ollama_forwards_custom_authorization_only_on_the_configured_origin() {
         &path,
         json!({"ollama-cloud":{
             "baseUrl":format!("{}/v1",server.base),
-            "headers":{"Authorization":"Basic fixture-custom-authorization", "X-Do-Not-Forward":"private-header"}
+            "headers":{"Authorization":"Basic fixture-custom-authorization", "X-Do-Not-Forward":"private-header"},
+            "discovery":{"format":"ollama","defaults":{
+                "contextWindow":32_000,"maxTokens":4_000,"reasoning":false,"input":["text"],
+                "cost":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0}
+            }}
         }}),
     );
     let mut registry = ModelRegistry::create(auth(json!({})), &path);
@@ -493,7 +497,9 @@ async fn timed_out_restore_keeps_late_publication_and_zero_budget_cached_fast_pa
         ("/openrouter".into(), Reply { status:200, gate:Some(Arc::clone(&gate)), body:json!({"data":[{
             "id":id,"name":"Published dated model","context_length":200_000,
             "top_provider":{"max_completion_tokens":16_384},
-            "pricing":{"prompt":"0.000001","completion":"0.000002"},
+            "pricing":{"prompt":"0.000001","completion":"0.000002",
+                "input_cache_read":"0","input_cache_write":"0"},
+            "supported_parameters":[],
             "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}
         }]}) }),
         ("/default".into(), Reply::json(json!({"schemaVersion":1,"defaultModel":format!("openrouter/{id}")}))),
