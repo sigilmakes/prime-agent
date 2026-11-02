@@ -77,16 +77,20 @@ fn seed_saved_session(
     id: &str,
     cwd: &std::path::Path,
 ) -> std::path::PathBuf {
-    use std::io::Write;
     std::fs::create_dir_all(session_dir).expect("sessions dir");
     let path = session_dir.join(format!("{id}.jsonl"));
-    let mut file = std::fs::File::create(&path).expect("create session file");
     let header = serde_json::json!({
         "type": "session", "id": id,
         "cwd": cwd.display().to_string(),
         "timestamp": "2024-01-01T00:00:00.000Z", "version": 3,
     });
-    writeln!(file, "{header}").expect("write header");
+    let mut log =
+        pa_core::session_log::SessionLog::open(session_dir, id, std::time::Instant::now())
+            .expect("create session log");
+    assert!(matches!(
+        log.append(&header, std::time::Instant::now()),
+        pa_core::session_log::Outcome::Committed { .. }
+    ));
     path
 }
 
@@ -424,12 +428,11 @@ fn seed_session(
 }
 
 fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(path)
-        .expect("read session file")
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()
-        .expect("valid session entries")
+    pa_core::session::read::read_entries(path)
+        .expect("validated session log")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("session entry JSON"))
+        .collect()
 }
 
 #[test]
@@ -518,53 +521,26 @@ fn fork_startup_selection_reports_the_ts_contracts() {
     std::fs::create_dir_all(&cwd).expect("cwd");
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
 
-    // An empty source file: the `forkFrom` failure contract.
-    let empty = session_dir.join("empty.jsonl");
-    std::fs::write(&empty, "").expect("write empty file");
-    let error =
-        fork_startup_selection(empty.to_str().expect("utf8 path"), &cwd, Some(&session_dir))
-            .expect_err("an empty source cannot fork");
-    assert!(
-        error.to_string().contains(&format!(
-            "Cannot fork: source session file is empty or invalid: {}",
-            empty.display()
-        )),
-        "unexpected error: {error:#}"
-    );
-
-    // A source file with only an unreadable row: the loader finalizes
-    // it to zero entries (the `forkFrom` contract).
-    let torn = session_dir.join("torn.jsonl");
-    std::fs::write(&torn, "{\"type\":\"message\"}\n").expect("write torn file");
-    let error = fork_startup_selection(torn.to_str().expect("utf8 path"), &cwd, Some(&session_dir))
-        .expect_err("a source with no readable rows cannot fork");
-    assert!(
-        error
-            .to_string()
-            .contains("Cannot fork: source session file is empty or invalid: "),
-        "unexpected error: {error:#}"
-    );
-
-    // A parseable but headerless source file: the loader finalizes it to zero
-    // entries — never a half-copied fork.
-    let headerless = session_dir.join("headerless.jsonl");
-    std::fs::write(
-        &headerless,
-        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
-    )
-    .expect("write headerless file");
-    let error = fork_startup_selection(
-        headerless.to_str().expect("utf8 path"),
-        &cwd,
-        Some(&session_dir),
-    )
-    .expect_err("a headerless source cannot fork");
-    assert!(
-        error
-            .to_string()
-            .contains("Cannot fork: source session file is empty or invalid: "),
-        "unexpected error: {error:#}"
-    );
+    // Unsupported sources are rejected without repair or a partial fork.
+    for (name, content) in [
+        ("empty", ""),
+        ("torn", "{\"type\":\"message\"}\n"),
+        ("headerless", "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n"),
+    ] {
+        let source = session_dir.join(format!("{name}.jsonl"));
+        std::fs::write(&source, content).expect("write unsupported source");
+        let before = std::fs::read(&source).expect("source bytes");
+        let mut paths_before: Vec<_> = std::fs::read_dir(&session_dir)
+            .unwrap().map(|entry| entry.unwrap().path()).collect();
+        paths_before.sort();
+        fork_startup_selection(source.to_str().unwrap(), &cwd, Some(&session_dir))
+            .expect_err("an unsupported source cannot fork");
+        assert_eq!(std::fs::read(&source).unwrap(), before, "{name}: no repair");
+        let mut paths_after: Vec<_> = std::fs::read_dir(&session_dir)
+            .unwrap().map(|entry| entry.unwrap().path()).collect();
+        paths_after.sort();
+        assert_eq!(paths_after, paths_before, "{name}: no partial fork");
+    }
 
     let error = fork_startup_selection("does-not-exist", &cwd, Some(&session_dir))
         .expect_err("an unknown selector cannot fork");
