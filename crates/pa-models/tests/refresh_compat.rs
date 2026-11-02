@@ -666,7 +666,7 @@ async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
     // The hourly gate: an immediate second attempt serves the cached
     // snapshot with no fetch (the awaited call is the gate's own path, so
     // the count is settled at the assert, not raced).
-    let gated = catalog.refresh(false).await;
+    let gated = catalog.refresh_curated(false).await;
     assert!(gated.is_some_and(|models| { models.iter().any(|model| model.id == "hourly-model") }));
     assert_eq!(server.request_count(), 2, "one fetch per layer per window");
 }
