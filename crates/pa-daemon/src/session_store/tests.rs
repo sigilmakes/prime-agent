@@ -467,8 +467,9 @@ fn failed_persist_keeps_the_store_walkable() {
             json!({ "message": { "role": "user", "content": "hi" } }),
         )
         .unwrap();
+    let before = fs::read(&file).unwrap();
     let blocker = dir.join("blocked");
-    fs::create_dir_all(&blocker).unwrap();
+    fs::write(&blocker, "not a directory").unwrap();
     session.set_path(blocker.join(session_file_name(session.session_id())));
     assert!(session
         .persist_entry(
@@ -482,7 +483,9 @@ fn failed_persist_keeps_the_store_walkable() {
         "only the persisted entry stays indexed"
     );
     assert_eq!(session.leaf_id(), Some(first.as_str()));
-    session.set_path(file.clone());
+    assert_eq!(fs::read(&file).unwrap(), before);
+    // set_path denotes fresh publication; resuming existing history requires open.
+    session = SessionFile::open(&file).unwrap();
     let third = session
         .persist_entry(
             "message",
@@ -1141,9 +1144,11 @@ fn windowed_settings_projection_preserves_the_accepted_context_archive() {
             Some(pa_types::ai::ServiceTier::Flex)
         )
     );
-    assert!(
-        settings.archive.is_none() && settings.messages.is_empty(),
-        "this is a settings-only projection"
+    assert_eq!(settings.archive.as_ref(), Some(&archive));
+    assert_eq!(
+        serde_json::to_value(settings.messages).unwrap(),
+        serde_json::to_value(&context_before.messages).unwrap(),
+        "the full serving fold preserves accepted context alongside scalar settings"
     );
     assert_eq!(fs::read(&path).unwrap(), before_bytes);
     let retained = windowed
