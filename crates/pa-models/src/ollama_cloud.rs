@@ -11,6 +11,8 @@ use crate::Model;
 
 pub const PROVIDER_ID: &str = "ollama-cloud";
 pub const BASE_URL: &str = "https://ollama.com";
+/// Ollama Cloud publishes no per-model output ceiling; pinned models share this cap.
+pub const MAX_OUTPUT_TOKENS: u64 = 32_768;
 const MAX_LIST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SHOW_BYTES: usize = 512 * 1024;
 const MAX_CATALOG_BYTES: usize = 5 * 1024 * 1024;
@@ -93,7 +95,7 @@ pub fn parse_catalog(payload: &Value, base_url: &str) -> Result<Vec<Model>, Stri
             "reasoning": has("thinking"),
             "input": if has("vision") { vec!["text", "image"] } else { vec!["text"] },
             "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-            "contextWindow": context, "maxTokens":32_768,
+            "contextWindow": context, "maxTokens":MAX_OUTPUT_TOKENS,
             "compat": {
                 "supportsDeveloperRole":false, "supportsReasoningEffort":true,
                 "supportsStore":false, "maxTokensField":"max_tokens", "supportsUsageInStreaming":true,

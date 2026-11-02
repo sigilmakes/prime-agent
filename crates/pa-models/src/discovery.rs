@@ -817,6 +817,14 @@ fn normalize_ollama(
             } else {
                 vec![ModelInput::Text]
             });
+            // Ollama Cloud bills a flat subscription, not per token. Its rows
+            // therefore have known zero rates and the pinned output ceiling,
+            // satisfying admission for IDs absent from the curated baseline.
+            row.max_tokens = Some(crate::ollama_cloud::MAX_OUTPUT_TOKENS);
+            row.input_price = Some(0.0);
+            row.output_price = Some(0.0);
+            row.cache_read = Some(0.0);
+            row.cache_write = Some(0.0);
             row.context = raw
                 .get("model_info")
                 .and_then(serde_json::Value::as_object)

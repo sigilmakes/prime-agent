@@ -147,6 +147,41 @@ fn ollama_missing_optional_metadata_preserves_prior_but_tool_denial_is_explicit(
     assert_eq!(denied[0]["denied"], true);
 }
 
+#[test]
+fn ollama_rows_admit_discovered_models_absent_from_the_curated_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = ProviderCatalog::new(Some(dir.path().into()));
+    let mut src = source(CatalogFormat::Ollama, None);
+    src.provider = crate::ollama_cloud::PROVIDER_ID.into();
+    src.unknown_models = UnknownModelPolicy::ProviderMetadata {
+        template: crate::ollama_cloud::pinned_models(crate::ollama_cloud::BASE_URL)
+            .into_iter()
+            .next()
+            .unwrap(),
+    };
+    seed_cache(
+        &owner,
+        &src,
+        &json!({
+            "listedIds": ["discovered:model"],
+            "deniedIds": [],
+            "models": {"discovered:model": {
+                "capabilities": ["tools", "thinking", "vision"],
+                "model_info": {"family.context_length": 262_144}
+            }}
+        }),
+    );
+    let models = owner.resolve(std::slice::from_ref(&src), &[]).0;
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "discovered:model");
+    assert_eq!(models[0].context_window, 262_144);
+    assert_eq!(models[0].max_tokens, crate::ollama_cloud::MAX_OUTPUT_TOKENS);
+    assert_eq!(models[0].input, vec![ModelInput::Text, ModelInput::Image]);
+    assert_eq!(models[0].cost.input, JsNumber::from(0.0));
+    assert_eq!(models[0].cost.output, JsNumber::from(0.0));
+    assert!(models[0].thinking_level_map.is_some());
+}
+
 #[tokio::test]
 async fn scoped_refresh_retains_metadata_on_transient_failure_and_revokes_on_denial() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
