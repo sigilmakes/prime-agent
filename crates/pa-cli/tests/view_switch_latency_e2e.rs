@@ -166,6 +166,28 @@ async fn create_session_from_file_via_daemon(
         .to_string()
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// Seed one persisted child session file (a version-3 header plus a parent-chained message run).
 fn seed_child_session(dir: &Path, child_id: &str) {
     std::fs::create_dir_all(dir).expect("child dir");
@@ -203,7 +225,7 @@ fn seed_child_session(dir: &Path, child_id: &str) {
         content.push('\n');
         parent_id = Some(entry_id);
     }
-    std::fs::write(&file, content).expect("write seeded child session");
+    append_session_rows(&file, &content);
 }
 
 /// The test's interactive options: a headless chat attach to the live
@@ -253,7 +275,7 @@ fn chat_options(
 async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
+    let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
@@ -299,7 +321,7 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
             content.push('\n');
             parent_id = entry_id;
         }
-        std::fs::write(&transcript_path, content).expect("write seeded transcript");
+        append_session_rows(&transcript_path, &content);
     }
     let script = serde_json::json!({ "responses": [
         { "text": "hello from scripted", "delayMs": 20 },

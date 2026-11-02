@@ -11,9 +11,9 @@
 )]
 
 //! End-to-end verifier for the agents view's refusal panel: a session
-//! open refused by a live foreign lease holder (the operator's case)
-//! surfaces as the multi-line notice panel with both ways out (the
-//! continue path and the take-over kill) visible and wrapped.
+//! open refused by a live foreign execution-lock holder surfaces as the
+//! multi-line notice panel with holder details and take-over kill/retry
+//! instructions visible and wrapped.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -76,6 +76,28 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     panic!("supervisor socket never appeared");
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// A saved-session fixture: a version-3 header, a display name, and one exchange, so the agents
 /// view's catalog carries its row.
 fn write_fixture(dir: &Path, id: &str, name: &str) -> PathBuf {
@@ -86,7 +108,7 @@ fn write_fixture(dir: &Path, id: &str, name: &str) -> PathBuf {
 {{\"type\":\"message\",\"id\":\"{id}-m0u\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"hello\",\"timestamp\":0}}}}\n\
 {{\"type\":\"message\",\"id\":\"{id}-m0a\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"hi\"}}],\"timestamp\":1}}}}\n"
     );
-    std::fs::write(&path, content).expect("write fixture");
+    append_session_rows(&path, &content);
     path
 }
 
@@ -115,17 +137,17 @@ fn frame_text(frames: &[String]) -> String {
     frames.join("\n")
 }
 
-/// The refused open surfaces as the notice panel with both ways out (continue and
-/// take-over kill), dismissed by any key.
+/// A foreign process has no known daemon resume endpoint. Its execution-lock
+/// refusal names the actual holder and offers kill/retry, dismissed by any key.
 #[tokio::test]
-async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
+async fn the_refused_open_renders_the_foreign_holder_takeover_notice_panel() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions = agent_dir.join("sessions");
+    let sessions = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let session_path = write_fixture(&sessions, "held-session", "held session");
 
-    // The foreign holder: this test process takes the runtime lease, the role the
+    // The foreign holder: this test process takes the execution lock, the role the
     // other product's daemon worker plays on the shared session store.
     std::env::set_var(
         pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
@@ -192,8 +214,12 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
         "the headline: {notice}"
     );
     assert!(
-        notice.contains("Continue where you left off"),
-        "the continue way out: {notice}"
+        notice.contains(&format!("kill {}", std::process::id())),
+        "the live holder's kill command: {notice}"
+    );
+    assert!(
+        notice.contains("foreign01ab3c"),
+        "the holder identity: {notice}"
     );
     assert!(
         notice.contains("Take over on this daemon"),
@@ -218,13 +244,7 @@ async fn the_refused_open_renders_both_ways_out_as_the_notice_panel() {
     .expect("the notice view run")
     .outcome;
     let shown = frame_text(&view.frames);
-    for way_out in [
-        "Continue where you left off",
-        "--daemon-socket <socket> --resume 'foreign01ab3c'",
-        "Take over on this daemon",
-        "# the holder is",
-        "Then retry",
-    ] {
+    for way_out in ["Take over on this daemon", "# the holder is", "Then retry"] {
         assert!(
             shown.contains(way_out),
             "the panel shows {way_out:?} in full:\n{shown}"

@@ -120,6 +120,28 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
+fn append_session_rows(path: &Path, content: &str) {
+    let directory = path.parent().expect("session directory");
+    std::fs::create_dir_all(directory).expect("create session directory");
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .expect("session id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut log = pa_core::session_log::SessionLog::open(directory, id, deadline)
+        .expect("open fixture session log");
+    for line in content.lines().filter(|line| !line.is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        assert!(
+            matches!(
+                log.append(&row, deadline),
+                pa_core::session_log::Outcome::Committed { .. }
+            ),
+            "fixture row must be durable"
+        );
+    }
+}
+
 /// One saved-session fixture: a version-3 session header (the parent
 /// linkage for subagents), a display name, and a user/assistant exchange.
 fn write_fixture(
@@ -152,7 +174,7 @@ fn write_fixture(
             index * 1000 + 1
         );
     }
-    std::fs::write(&path, content).expect("write fixture");
+    append_session_rows(&path, &content);
     path
 }
 
@@ -333,7 +355,8 @@ const DEAD_CHILDREN: usize = 300;
 async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir =
+        pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&sessions_dir).expect("session dir");
 
     // The mock provider registers without any prompt ever running (the create and the stop are
@@ -544,7 +567,8 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
 async fn a_stopped_session_stays_visible_in_the_view() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
-    let sessions_dir = agent_dir.join("sessions");
+    let sessions_dir =
+        pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&sessions_dir).expect("session dir");
 
     std::fs::write(
