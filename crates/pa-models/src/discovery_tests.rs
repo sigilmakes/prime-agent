@@ -217,3 +217,53 @@ fn prime_optional_metadata_updates_independently_without_erasing_prices() {
     assert_eq!(next[0]["context"], 88888);
     assert_eq!(next[0]["input_price"], 9.0);
 }
+
+#[tokio::test]
+async fn independent_sources_start_together_and_reports_keep_input_order() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut sockets = Vec::new();
+        // Neither response is available until both independent requests arrive.
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            sockets.push(socket);
+        }
+        for mut socket in sockets.into_iter().rev() {
+            let body = r#"{"data":[{"id":"new"}]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let owner = ProviderCatalog::new(None);
+    let mut first = source(CatalogFormat::OpenAi, None);
+    first.id = "first".into();
+    first.url = format!("{endpoint}/first");
+    let mut second = first.clone();
+    second.id = "second".into();
+    second.url = format!("{endpoint}/second");
+    let reports = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        owner.refresh(&[first, second], RefreshPolicy::Force, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reports
+            .iter()
+            .map(|report| report.source.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+    server.await.unwrap();
+}

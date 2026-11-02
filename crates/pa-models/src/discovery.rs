@@ -257,58 +257,70 @@ impl ProviderCatalog {
         policy: RefreshPolicy,
         selected: Option<&[String]>,
     ) -> Vec<ModelRefreshSourceResult> {
-        let mut reports = Vec::new();
-        for source in sources
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, source) in sources
             .iter()
-            .filter(|source| crate::provider_catalogs::selected(selected, &source.id))
+            .enumerate()
+            .filter(|(_, source)| crate::provider_catalogs::selected(selected, &source.id))
         {
-            let format = source.format;
-            let fetch_payload = if format == CatalogFormat::Ollama {
-                let url = source.url.clone();
-                let headers = source.headers.clone();
-                Some(Arc::new(move || {
-                    let url = url.clone();
-                    let headers = headers.clone();
-                    Box::pin(async move {
-                        crate::ollama_cloud::fetch_catalog_with_headers(&url, &headers).await
-                    })
-                        as std::pin::Pin<
-                            Box<
-                                dyn std::future::Future<
-                                        Output = Result<
-                                            serde_json::Value,
-                                            crate::fetch::FetchError,
-                                        >,
-                                    > + Send,
-                            >,
-                        >
-                }) as crate::cache::CatalogFetchPayload)
-            } else {
-                None
-            };
-            let report = self
-                .cache(source)
-                .refresh_report(
-                    &source.scope(),
-                    RefreshOptions {
-                        force: policy == RefreshPolicy::Force,
-                        headers: source.headers.clone(),
-                        is_current: source.is_current.clone(),
-                        fetch_payload,
-                        merge_payload: Some(Arc::new(move |payload, previous| {
-                            normalize(format, payload, previous)
-                        })),
-                        ..Default::default()
-                    },
+            let cache = self.cache(source);
+            let source = source.clone();
+            tasks.spawn(async move {
+                let format = source.format;
+                let fetch_payload = if format == CatalogFormat::Ollama {
+                    let url = source.url.clone();
+                    let headers = source.headers.clone();
+                    Some(Arc::new(move || {
+                        let url = url.clone();
+                        let headers = headers.clone();
+                        Box::pin(async move {
+                            crate::ollama_cloud::fetch_catalog_with_headers(&url, &headers).await
+                        })
+                            as std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = Result<
+                                                serde_json::Value,
+                                                crate::fetch::FetchError,
+                                            >,
+                                        > + Send,
+                                >,
+                            >
+                    }) as crate::cache::CatalogFetchPayload)
+                } else {
+                    None
+                };
+                let report = cache
+                    .refresh_report(
+                        &source.scope(),
+                        RefreshOptions {
+                            force: policy == RefreshPolicy::Force,
+                            headers: source.headers.clone(),
+                            is_current: source.is_current.clone(),
+                            fetch_payload,
+                            merge_payload: Some(Arc::new(move |payload, previous| {
+                                normalize(format, payload, previous)
+                            })),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                (
+                    index,
+                    crate::provider_catalogs::source_result(
+                        &source.id,
+                        &report,
+                        report.models.as_ref().map(Vec::len),
+                    ),
                 )
-                .await;
-            reports.push(crate::provider_catalogs::source_result(
-                &source.id,
-                &report,
-                report.models.as_ref().map(Vec::len),
-            ));
+            });
         }
-        reports
+        let mut reports = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            reports.push(result.expect("discovery refresh task panicked"));
+        }
+        reports.sort_by_key(|(index, _)| *index);
+        reports.into_iter().map(|(_, report)| report).collect()
     }
 
     pub(crate) fn adopt(
