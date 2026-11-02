@@ -512,24 +512,39 @@ impl AgentSessionEngine {
                 self.flush_pending_max_depth(&handles.session).await?;
             }
         }
+        let canonical_mirror = self
+            .row_sink_ready
+            .load(std::sync::atomic::Ordering::Acquire);
         let pending_branch = self
             .pending_branch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .take()
+            .filter(|_| !canonical_mirror);
         // Rehydrate the goal driver from the durable store (a moved
         // branch's latest entry wins), seeding the published baseline so
         // it never announces itself.
         let seed;
         let mut shared_window = None;
         let mut shared_branch = None;
+        let mut mirror_leaf = None;
         {
             let path = self
                 .session_file
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if let Some(entries) = &pending_branch {
+            if canonical_mirror {
+                // Startup already bound the canonical rows and their read cursor.
+                // Replacing them with an older navigation snapshot would lose
+                // committed ancestors without rewinding that cursor.
+                let persistence = built.session.shared_persistence();
+                let mut manager = persistence.lock().await;
+                manager.refresh_committed_entries()?;
+                seed = manager.active_goal_state();
+                mirror_leaf = manager.get_leaf_id().map(str::to_owned);
+                shared_branch = Some(manager.retained_entries().to_vec());
+            } else if let Some(entries) = &pending_branch {
                 seed = crate::goal_state_persist::goal_state_in_branch(entries);
             } else {
                 let (goal, window, branch) = tokio::task::spawn_blocking(move || {
@@ -653,17 +668,21 @@ impl AgentSessionEngine {
                 pa_core::session_engine::ContextStartupBoundary::Leaf(leaf.clone())
             }
         };
-        let canonical_leaf = shared_window
-            .as_ref()
-            .map(pa_core::session::window::WindowedSessionStore::leaf_id)
-            .or_else(|| {
-                entries.and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .find_map(pa_types::session::FileEntry::id)
+        let canonical_leaf = if canonical_mirror {
+            mirror_leaf.as_deref()
+        } else {
+            shared_window
+                .as_ref()
+                .map(pa_core::session::window::WindowedSessionStore::leaf_id)
+                .or_else(|| {
+                    entries.and_then(|entries| {
+                        entries
+                            .iter()
+                            .rev()
+                            .find_map(pa_types::session::FileEntry::id)
+                    })
                 })
-            });
+        };
         admitted_input_ids = match entries {
             Some(entries) => super::context_selection::admitted_input_ids(
                 entries,
@@ -764,11 +783,17 @@ impl AgentSessionEngine {
                 .await
                 .set_append_ownership(pa_core::session::window::AppendOwnership::SessionLeaseHeld);
             self.flush_pending_stale_goal_terminal().await;
-        } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
+        } else if let Some(entries) = shared_branch
+            .take()
+            .filter(|entries| !canonical_mirror && !entries.is_empty())
+        {
             built
                 .session
                 .rebuild_branch_context_at(entries, &startup_boundary, &admitted_input_ids)
                 .await?;
+            self.flush_pending_stale_goal_terminal().await;
+        }
+        if canonical_mirror {
             self.flush_pending_stale_goal_terminal().await;
         }
         built

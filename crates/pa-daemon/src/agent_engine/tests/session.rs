@@ -2,6 +2,78 @@
 use super::*;
 use crate::engine::PromptBatchRow;
 
+#[test]
+fn lazy_replacement_keeps_canonical_rows_committed_after_the_pending_branch() {
+    use crate::engine::SessionEngine as _;
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(
+        &json!({"responses":["summary"], "contextWindow":128_000}),
+        100,
+    );
+    let path = dir.path().join("replacement.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.append_message(&json!({"role":"user", "content":"imported prefix", "timestamp":1}));
+    store.rewrite().unwrap();
+    let pending = store.branch_file_entries();
+    engine.set_session_file(path);
+    let owner = own_log_store(&engine, store);
+    engine
+        .rebuild_session_context(
+            pending,
+            pa_core::session_engine::goal_driver::GoalBranchReload::FaithfulBranch,
+        )
+        .unwrap();
+    // Admission occurs after replacement, before the lazy SDK is constructed.
+    let late = persist_accepted_user(
+        &engine,
+        &owner,
+        &json!({"role":"user", "content":"accepted after replacement", "timestamp":2}),
+    );
+    let model = engine.resolve_model().unwrap();
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    let built = engine.session.blocking_lock().clone().unwrap();
+    let persistence = built.session.shared_persistence();
+    let (actual, leaf) = engine.runtime.block_on(async {
+        let manager = persistence.lock().await;
+        (
+            manager.retained_entries().to_vec(),
+            manager.get_leaf_id().map(str::to_owned),
+        )
+    });
+    let core = owner.lock().unwrap();
+    let store = core.store.as_ref().unwrap();
+    let expected = crate::session_tree::file_entries(store);
+    let actual: Vec<_> = actual
+        .into_iter()
+        .filter(|entry| !matches!(entry, pa_types::session::FileEntry::Header { .. }))
+        .collect();
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "the mirror must retain every committed row and exact parent link"
+    );
+    assert_eq!(leaf.as_deref(), store.leaf_id());
+    assert!(actual.iter().any(|entry| entry.id() == Some(late.as_str())));
+    let by_id: std::collections::HashMap<_, _> = actual
+        .iter()
+        .filter_map(|entry| entry.id().map(|id| (id, entry)))
+        .collect();
+    let mut current = leaf.as_deref();
+    while let Some(id) = current {
+        let entry = by_id
+            .get(id)
+            .expect("every active ancestor remains in the mirror");
+        current = entry.parent_id();
+    }
+}
+
 /// `get_commands` enumerates the session's skills as `skill:<name>`
 /// commands, including before the first prompt (the read seam demand-builds
 /// the core session). The faux provider registers under `FAUX_TEST_LOCK`
