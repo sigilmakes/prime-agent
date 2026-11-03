@@ -116,8 +116,6 @@ pub enum ChatEntry {
     BashExecution(Box<crate::bash_card::BashExecutionCard>),
     /// One background-shell completion row.
     ShellCompletion(Box<crate::custom_message::ShellCompletionRow>),
-    /// One refinement outcome row.
-    RefinementOutcome(Box<crate::custom_message::RefinementOutcomeRow>),
     /// One generic custom row.
     CustomPanel(Box<crate::custom_message::CustomPanelRow>),
 }

@@ -15,6 +15,7 @@ pub(crate) const BRANCH_CONTINUATION: &str = "   ";
 
 /// The full continuation prefix: four plain spaces a continuation row
 /// (or a full-width diff block) starts its content at.
+#[cfg(test)]
 pub(crate) const BRANCH_INDENT: &str = "    ";
 
 /// The content width under the branch: the full width minus the one-column

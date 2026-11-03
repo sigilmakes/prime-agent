@@ -129,7 +129,7 @@ pub fn render_compaction_stream(
     if !expanded || state.summary.trim().is_empty() {
         return Vec::new();
     }
-    let body = theme.fg_style(ThemeColor::RefinementSummary);
+    let body = theme.fg_style(ThemeColor::MdBody);
     let content_width = crate::branch::branch_content_width(width);
     // Re-wrapping the whole growing summary on every delta would be quadratic work;
     // wrapping a tail window is exact — a clamped window wraps to at least cap + 1
@@ -270,8 +270,8 @@ fn visit_summary(
     width: usize,
     rows: &mut SummaryRows,
 ) {
-    let header = theme.fg_style(ThemeColor::RefinementHeader);
-    let body = theme.fg_style(ThemeColor::RefinementSummary);
+    let header = theme.fg_style(ThemeColor::MdHeading);
+    let body = theme.fg_style(ThemeColor::MdBody);
     let dim = theme.fg_style(ThemeColor::Dim);
     let summary = if summary.trim().is_empty() {
         "No summary was recorded for this compaction."
@@ -608,7 +608,7 @@ mod tests {
             rows[0],
             vec![
                 Span::raw(" "),
-                Span::styled(header, theme().fg_style(ThemeColor::RefinementHeader)),
+                Span::styled(header, theme().fg_style(ThemeColor::MdHeading)),
                 Span::styled(meta, theme().fg_style(ThemeColor::Dim)),
                 Span::raw(" ".repeat(80 - used)),
             ],

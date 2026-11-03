@@ -511,7 +511,7 @@ pub(crate) enum ChildLane {
 }
 
 /// The assembled headless engine, so host transports can drive session-command
-/// executors (compact/refine) with the session's own model.
+/// executors (compact) with the session's own model.
 pub(crate) struct HeadlessEngine {
     pub(crate) engine: pa_core::session_engine::engine::SessionEngine,
     pub(crate) model: Model,

@@ -99,18 +99,12 @@ fn custom_optional_slots_use_the_documented_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let mut value = custom_json();
     let colors = value["colors"].as_object_mut().unwrap();
-    for name in ["mdBody", "refinementHeader", "refinementSummary"] {
-        colors.remove(name);
-    }
+    colors.remove("mdBody");
     let path = write_theme(dir.path(), "optional", &value);
     let theme = load_theme_from_path(&path, ColorMode::TrueColor).unwrap();
     assert_eq!(
         theme.fg_style(ThemeColor::MdBody),
         theme.fg_style(ThemeColor::Text)
-    );
-    assert_eq!(
-        theme.fg_style(ThemeColor::RefinementHeader),
-        Theme::builtin("prime", ColorMode::TrueColor).fg_style(ThemeColor::RefinementHeader)
     );
 }
 

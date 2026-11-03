@@ -23,8 +23,6 @@ pub enum ThemeColor {
     UserMessageText,
     CustomMessageText,
     CustomMessageLabel,
-    RefinementHeader,
-    RefinementSummary,
     ToolTitle,
     ToolOutput,
     MdBody,
@@ -77,8 +75,6 @@ impl ThemeColor {
             ThemeColor::UserMessageText => "userMessageText",
             ThemeColor::CustomMessageText => "customMessageText",
             ThemeColor::CustomMessageLabel => "customMessageLabel",
-            ThemeColor::RefinementHeader => "refinementHeader",
-            ThemeColor::RefinementSummary => "refinementSummary",
             ThemeColor::ToolTitle => "toolTitle",
             ThemeColor::ToolOutput => "toolOutput",
             ThemeColor::MdBody => "mdBody",
@@ -734,8 +730,6 @@ fn fg_name_lookup(name: &str) -> Option<&'static str> {
         "userMessageText" => "userMessageText",
         "customMessageText" => "customMessageText",
         "customMessageLabel" => "customMessageLabel",
-        "refinementHeader" => "refinementHeader",
-        "refinementSummary" => "refinementSummary",
         "toolTitle" => "toolTitle",
         "toolOutput" => "toolOutput",
         "mdBody" => "mdBody",
@@ -929,16 +923,13 @@ pub fn load_theme_from_path(path: &std::path::Path, mode: ColorMode) -> Result<T
             );
         }
     }
-    // Match the TS schema: mdBody and refinement slots are optional. All
-    // other renderer slots are required so an incomplete file never silently
-    // paints unstyled text. The canvas and export metadata are not required.
+    // Match the TS schema: mdBody is optional. All other renderer slots are
+    // required so an incomplete file never silently paints unstyled text. The
+    // canvas and export metadata are not required.
     let defaults = builtin_theme_json("prime");
     for name in defaults.colors.keys() {
         if (fg_name_lookup(name).is_some() || bg_name_lookup(name).is_some())
-            && !matches!(
-                name.as_str(),
-                "mdBody" | "refinementHeader" | "refinementSummary"
-            )
+            && name.as_str() != "mdBody"
         {
             anyhow::ensure!(
                 json.colors.contains_key(name),
@@ -949,16 +940,6 @@ pub fn load_theme_from_path(path: &std::path::Path, mode: ColorMode) -> Result<T
     }
     let text = json.colors["text"].clone();
     json.colors.entry("mdBody".to_string()).or_insert(text);
-    let refinement_defaults = builtin_theme_json(if json.name == "light" {
-        "light"
-    } else {
-        "prime"
-    });
-    for name in ["refinementHeader", "refinementSummary"] {
-        json.colors
-            .entry(name.to_string())
-            .or_insert_with(|| refinement_defaults.colors[name].clone());
-    }
     Ok(Theme::from_json(&json, mode))
 }
 

@@ -76,7 +76,6 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "set_auto_compaction"
         | "set_auto_retry"
         | "compact"
-        | "refine"
         | "abort_compaction"
         | "abort_branch_summary"
         | "abort_retry"

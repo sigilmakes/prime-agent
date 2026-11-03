@@ -325,54 +325,6 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
                 }),
             }]
         }
-        "refine_complete" => {
-            let result = event.get("result");
-            let changes = result
-                .and_then(|result| result.get("appliedEdits"))
-                .and_then(Value::as_array)
-                .map(|edits| {
-                    edits
-                        .iter()
-                        .filter(|edit| edit.get("applied") == Some(&json!(true)))
-                        .filter_map(|edit| {
-                            let action = edit.get("action").and_then(Value::as_str)?;
-                            let kind = edit.get("kind").and_then(Value::as_str)?;
-                            let id = edit.get("id").and_then(Value::as_str)?;
-                            Some(format!("{action} {kind}:{id}"))
-                        })
-                        .collect::<Vec<String>>()
-                });
-            vec![AcpSessionUpdate::SessionInfoUpdate {
-                meta: prime_agent_meta(&PrimeAgentSessionMeta {
-                    refinement: Some(super::meta::PrimeAgentRefinementMeta {
-                        status: "complete".to_string(),
-                        summary: result
-                            .and_then(|result| result.get("summary"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        changes,
-                        error: None,
-                    }),
-                    ..Default::default()
-                }),
-            }]
-        }
-        "refine_failed" => {
-            vec![AcpSessionUpdate::SessionInfoUpdate {
-                meta: prime_agent_meta(&PrimeAgentSessionMeta {
-                    refinement: Some(super::meta::PrimeAgentRefinementMeta {
-                        status: "failed".to_string(),
-                        summary: None,
-                        changes: None,
-                        error: event
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                    }),
-                    ..Default::default()
-                }),
-            }]
-        }
         "ipython_sent_agent_message" => {
             let message = event.get("message");
             vec![AcpSessionUpdate::SessionInfoUpdate {
@@ -744,58 +696,6 @@ mod tests {
                 "status": "cancelled",
                 "error": "Deleted by parent orchestrator",
             }])
-        );
-    }
-
-    #[test]
-    fn refine_complete_maps_the_applied_edits_changes() {
-        let mut state = WireMappingState::default();
-        let updates = wire_updates(
-            &json!({
-                "type": "refine_complete",
-                "result": {
-                    "id": "ref-1",
-                    "summary": "applied 2 edits",
-                    "appliedEdits": [
-                        { "action": "create", "kind": "memory", "id": "x", "applied": true },
-                        { "action": "update", "kind": "skill", "id": "y", "applied": true },
-                        { "action": "delete", "kind": "prompt", "id": "z", "applied": false },
-                    ],
-                },
-            }),
-            &mut state,
-        );
-        assert_eq!(
-            namespaced(&updates[0])["refinement"],
-            json!({
-                "status": "complete",
-                "summary": "applied 2 edits",
-                "changes": ["create memory:x", "update skill:y"],
-            })
-        );
-        let updates = wire_updates(
-            &json!({
-                "type": "refine_complete",
-                "result": { "id": "ref-2", "summary": "no edits" },
-            }),
-            &mut state,
-        );
-        assert_eq!(
-            namespaced(&updates[0])["refinement"],
-            json!({ "status": "complete", "summary": "no edits" })
-        );
-    }
-
-    #[test]
-    fn refine_failed_maps_the_error_meta() {
-        let mut state = WireMappingState::default();
-        let updates = wire_updates(
-            &json!({ "type": "refine_failed", "error": "Summarization failed: no responses" }),
-            &mut state,
-        );
-        assert_eq!(
-            namespaced(&updates[0])["refinement"],
-            json!({ "status": "failed", "error": "Summarization failed: no responses" })
         );
     }
 

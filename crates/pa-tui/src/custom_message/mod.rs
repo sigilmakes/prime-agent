@@ -1,7 +1,7 @@
 //! Custom-message chat rows: the decorated transcript surfaces for
 //! `role: "custom"` wire messages (TS `agent-message.ts`,
 //! `injected-prompt-message.ts`, `compaction-outcome-message.ts`,
-//! `refinement-outcome-message.ts`, `shell-completion.ts`, and the generic
+//! `shell-completion.ts`, and the generic
 //! `custom-message.ts` panel) plus the user-message skill-invocation card
 //! (TS `skill-invocation-message.ts`, parsed out of a user message's
 //! `<skill>` block). Decode maps every custom type to the component
@@ -10,8 +10,7 @@
 //! row geometry and theme colors.
 //!
 //! Rendering lives in the sibling modules (`render` for most components,
-//! `injected_prompt` for the injected-prompt rows, `refinement` for the
-//! refinement-outcome component).
+//! `injected_prompt` for the injected-prompt rows).
 //!
 //! The dispatch follows the TS live path
 //! (`createDisplayedCustomMessageComponent`): non-display rows render
@@ -33,7 +32,6 @@
 pub(crate) mod geometry;
 pub(crate) use geometry::agent_message_body_count;
 pub(crate) mod injected_prompt;
-pub(crate) mod refinement;
 pub(crate) mod render;
 pub mod skill_invocation;
 
@@ -43,7 +41,6 @@ use injected_prompt::injected_prompt_row;
 pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow};
 
 use crate::chat::{ChatEntry, StatusKind};
-use crate::theme::ThemeColor;
 use serde_json::Value;
 
 /// Custom types with a dedicated component (pa-core owns the engine-side
@@ -57,7 +54,6 @@ pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
 pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
-pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 /// The durable single-line outcome of one provider-retry episode (SANCTIONED DIVERGENCE,
 /// operator ruling 2026-09-23: one terminal row per episode instead of TS's per-attempt error
 /// rows). Wire twin of `pa_core::session_engine::messages::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`.
@@ -109,43 +105,6 @@ pub struct ShellCompletionRow {
     pub content: String,
 }
 
-/// One refinement outcome row (TS `RefinementOutcomeMessageComponent`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RefinementOutcomeRow {
-    /// `◆ <header>` (`Harness refined` or the full outcome line).
-    pub header: String,
-    /// Summary text (collapsed: two-line clamp).
-    pub summary: String,
-    /// `<outcome> · Refinement <id> · <scope>[ · rollback of <id>]` (dim).
-    pub meta: String,
-    pub edits: Vec<RefinementEditRow>,
-}
-
-/// One applied-edit section of a refinement outcome.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RefinementEditRow {
-    /// Label spans: the verb (or the whole failed line) carries its color.
-    pub label: Vec<LabelPart>,
-    pub reason: Option<String>,
-    /// Expanded detail fields (label + plain value or removed/added change).
-    pub fields: Vec<EditField>,
-}
-
-/// One label span: text plus an optional theme color.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LabelPart {
-    pub text: String,
-    pub color: Option<ThemeColor>,
-}
-
-/// One edit field (TS `EditFieldRows`): plain value rows or a -/+ change.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EditField {
-    pub label: String,
-    pub value: Vec<String>,
-    pub change: Option<(Vec<String>, Vec<String>)>,
-}
-
 /// One generic custom row: the bold `[<customType>]` label header with
 /// the guttered markdown body in `customMessageText` — every display-true
 /// custom type without a dedicated component renders this way.
@@ -156,10 +115,10 @@ pub struct CustomPanelRow {
 }
 
 /// The transcript entries for one `custom`-role message, mirroring the TS
-/// dispatch order: slash rows, compaction and refinement outcomes, agent
-/// messages (the received agent-message rows and the RLM child status
-/// notices, the same class), shell completions, injected prompts, then the
-/// generic panel. Non-display rows render nothing.
+/// dispatch order: slash rows, compaction outcomes, agent messages (the
+/// received agent-message rows and the RLM child status notices, the same
+/// class), shell completions, injected prompts, then the generic panel.
+/// Non-display rows render nothing.
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     use pa_types::slash_commands::{
         SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -198,7 +157,6 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
             text: content,
             kind: crate::chat::StatusKind::Warning,
         }],
-        REFINEMENT_OUTCOME_CUSTOM_TYPE => refinement::refinement_outcome_entries(message, details),
         AGENT_MESSAGE_CUSTOM_TYPE => agent_message_entry(details).map_or_else(
             || vec![generic_panel_entry(custom_type, message)],
             |entry| vec![entry],
@@ -229,10 +187,10 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
                 message, details,
             )))]
         }
-        // Everything else - engine bookkeeping (`harness_digest`,
-        // `refinement_notice`, worker recovery) and unknown types - renders
-        // the generic panel, exactly like the TS live dispatch fallthrough
-        // (those types persist with `display: false` and render nothing).
+        // Everything else - engine bookkeeping (`harness_digest`, worker
+        // recovery), old transcript types, and unknown types - renders the
+        // generic panel, exactly like the TS live dispatch fallthrough (the
+        // bookkeeping types persist with `display: false` and render nothing).
         _ => vec![generic_panel_entry(custom_type, message)],
     }
 }
@@ -441,6 +399,7 @@ pub(crate) fn custom_content_text(message: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeColor;
     use crate::{Line, Span};
     use serde_json::json;
 
@@ -450,11 +409,10 @@ mod tests {
 
     #[test]
     fn non_display_rows_render_nothing() {
-        // TS skips display=false rows everywhere (harness digests,
-        // refinement notices, worker recovery are bookkeeping).
+        // TS skips display=false rows everywhere (harness digests and
+        // worker recovery are bookkeeping).
         for custom_type in [
             "harness_digest",
-            "refinement_notice",
             "prime-agent.worker_recovery",
             AGENT_MESSAGE_CUSTOM_TYPE,
         ] {
@@ -475,7 +433,6 @@ mod tests {
         // generic box (in practice these persist with display=false).
         for custom_type in [
             "harness_digest",
-            "refinement_notice",
             "prime-agent.worker_recovery",
             "ipython_state",
             "thread_goal_state",

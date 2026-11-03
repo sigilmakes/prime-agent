@@ -28,7 +28,7 @@ impl AgentSessionEngine {
         // The engine's turn scope spans this loop, not one model attempt: the
         // overflow arm compacts and re-issues the turn inside it, so the engine
         // activity state stays busy across retry gaps and compaction (the
-        // deferred plugin jobs gate and the auto-refine seam both read it).
+        // deferred plugin jobs gate reads it).
         let _turn = self
             .session
             .blocking_lock()

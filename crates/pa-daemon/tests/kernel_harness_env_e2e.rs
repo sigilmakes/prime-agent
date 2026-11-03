@@ -243,7 +243,7 @@ fn persistent_session_kernel_writes_the_session_local_harness_store() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},"autoRefine":{"enabled":false},"plugins":{"harness":{"enabled":true}}}).to_string(),
+        json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},"plugins":{"harness":{"enabled":true}}}).to_string(),
     ).expect("explicitly enable native harness plugin");
     let socket = dir.path().join("supervisor.sock");
     let receipts_dir = dir.path().join("receipts");

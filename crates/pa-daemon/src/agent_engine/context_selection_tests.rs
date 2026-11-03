@@ -248,7 +248,7 @@ fn branch_summary_ack_failure_reaches_no_model() {
     std::fs::write(
         agent_dir.join("settings.json"),
         serde_json::json!({
-            "harnessRefinements": false, "enableBuiltinSkills": false,
+            "enableBuiltinSkills": false,
             "prewarmIpythonKernel": false, "contextStrategy": "default_context/rolling"
         })
         .to_string(),

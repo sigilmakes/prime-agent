@@ -85,7 +85,6 @@ pub struct RuntimeConfig {
     pub no_themes: bool,
     pub no_context_files: bool,
     pub autonomous: Option<AutonomousConfig>,
-    pub serialized_refine: bool,
     pub initial_goal: Option<InitialGoal>,
 }
 
@@ -194,7 +193,6 @@ pub fn runtime_config_from_args(
     cwd: PathBuf,
     agent_dir: PathBuf,
     session_dir: Option<PathBuf>,
-    app_mode: AppMode,
 ) -> RuntimeConfig {
     // Only npm:/git:/github:/http(s):/ssh: sources are not local;
     // everything else resolves against the session cwd.
@@ -245,8 +243,6 @@ pub fn runtime_config_from_args(
         no_themes: parsed.no_themes,
         no_context_files: parsed.no_context_files,
         autonomous: AutonomousConfig::from_args(parsed),
-        // Serialized refine is only used by print/json/rpc clients.
-        serialized_refine: !matches!(app_mode, AppMode::Interactive | AppMode::Daemon),
         initial_goal: parsed.goal.as_ref().map(|objective| InitialGoal {
             objective: objective.clone(),
             token_budget: parsed.goal_token_budget,

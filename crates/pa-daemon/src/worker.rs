@@ -456,8 +456,7 @@ impl Worker {
                 concrete.set_initial_context_selection_store(std::sync::Arc::new(
                     context_selection::CoreInitialContextSelectionStore(Arc::clone(&core)),
                 ));
-                // Deferred plugin jobs (the harness refinement review) wait for
-                // the turn boundary: `busy` spans the whole turn, provider
+                // Deferred plugin jobs wait for the turn boundary: `busy` spans the whole turn, provider
                 // retries included, so a retry gap never reads as idle. This is
                 // the same snapshot `scheduled_jobs` reads for cron deferral.
                 let turn_core = Arc::clone(&core);

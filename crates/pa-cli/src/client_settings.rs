@@ -49,14 +49,6 @@ macro_rules! str_setting {
 }
 
 impl ClientSettings for CliClientSettings {
-    fn harness_refinements(&self) -> bool {
-        self.manager().get_harness_refinements()
-    }
-
-    fn set_harness_refinements(&self, enabled: bool) -> Result<()> {
-        self.manager().set_harness_refinements(enabled)
-    }
-
     fn compaction_threshold_percent(&self) -> f64 {
         self.manager().get_compaction_threshold_percent()
     }
