@@ -739,6 +739,7 @@ fn exported_css_vars(html: &str) -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|line| line.starts_with("--") && line.ends_with(';'))
+        .filter(|line| !line.starts_with("--refinement"))
         .map(str::to_string)
         .collect();
     vars.sort();
