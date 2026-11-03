@@ -4,9 +4,9 @@ use super::{
     active_session_id_of, anyhow, app_version, bind_transport, broadcast,
     create_daemon_replay_info, current_protocol_info, default_client_capabilities, json,
     normalize_client_capabilities, peer_command_allowed, response_failure, response_success,
-    worker_peer_command_allowed, worker_server_capabilities, write_frame, write_frame_segments,
-    Arc, AtomicU64, ConnectionRole, Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
-    Map, Ordering, Result, TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_SCHEMA_ID,
+    worker_peer_command_allowed, write_frame, write_frame_segments, Arc, AtomicU64, ConnectionRole,
+    Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor, Map, Ordering, Result,
+    TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_SCHEMA_ID,
     DAEMON_SCHEMA_REVISION, DEFAULT_PRIVATE_FRAME_LIMITS, PEER_COMMAND_NOT_ALLOWED,
 };
 
@@ -316,17 +316,8 @@ impl Worker {
         let subscription = self.events.subscribe();
         let entry_seq = self.events.current_seq() + 1;
         let sink = Arc::new(ConnectionSink::new(Arc::clone(&writer), entry_seq));
-        // daemon_hello goes out immediately on every connection. The
-        // factory lane's advertisement gate reads the settings file
-        // (metadata plus a locked read on a cache miss) — off the
-        // executor thread, the same spawn_blocking posture as the
-        // daemon's other settings reads, and the same fresh-per-connection
-        // read the supervisor's hello does.
-        let agent_dir = self.config.agent_dir.clone();
-        let factory_capabilities =
-            tokio::task::spawn_blocking(move || worker_server_capabilities(&agent_dir))
-                .await
-                .map_err(|error| anyhow::anyhow!("the factory settings read failed: {error:#}"))?;
+        // daemon_hello goes out immediately on every connection.
+        let server_capabilities = crate::protocol::default_server_capabilities();
         let hello = DaemonOutbound::DaemonHello {
             socket_path: self.config.socket_path.to_string_lossy().to_string(),
             protocol: current_protocol_info(),
@@ -343,7 +334,7 @@ impl Worker {
             // supervisor owns the boot restore pass).
             update_resume: None,
             client_id: crate::util::new_display_id(),
-            server_capabilities: factory_capabilities,
+            server_capabilities,
             rest: Map::default(),
         };
         let hello_bytes = serde_json::to_vec(&hello)?;

@@ -36,7 +36,7 @@ pub(crate) use queue::{
 mod create;
 mod turn;
 
-use create::{active_session_id_of, worker_server_capabilities};
+use create::active_session_id_of;
 // session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
 #[allow(unused_imports)]
 pub(crate) use summary::{

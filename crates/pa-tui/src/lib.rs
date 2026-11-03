@@ -63,7 +63,6 @@ pub mod exit_guard;
 pub(crate) mod exit_restore;
 pub mod export_share;
 mod external_editor;
-pub mod factory_view;
 pub mod fuzzy;
 pub mod goal_surface;
 pub mod heartbeats_picker;

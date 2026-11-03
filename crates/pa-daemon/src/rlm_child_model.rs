@@ -16,7 +16,7 @@ pub const LABEL_MAX_CHARS: usize = 200;
 /// Cap on the FULL final-answer text the collect envelope carries (the
 /// settle-binding data plane): the roster preview stays
 /// [`ANSWER_PREVIEW_MAX_CHARS`], while a consumer that binds outputs from
-/// the answer (the factory's output ports) needs the whole fenced JSON,
+/// the answer needs the whole fenced JSON,
 /// so the lane is bounded instead of unbounded, never ballooning the
 /// collect reply for a runaway answer.
 pub const ANSWER_TEXT_MAX_CHARS: usize = 65_536;

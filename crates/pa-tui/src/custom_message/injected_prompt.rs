@@ -4,8 +4,8 @@
 //! the render ports each header shape and the expand contract.
 //!
 //! The RLM child status notices left this class (the operator's 2026-10-01
-//! directive: "the factory child status notices should be like subagent
-//! messages not user messages" — a spawned child's exit status is
+//! directive: "the child status notices should be like subagent messages
+//! not user messages" — a spawned child's exit status is
 //! child-originated mail, so those rows render in the `agent_message`
 //! class now, superseding the 2026-09-23 diamond-row divergence): the
 //! kinds here are the engine-injected turn prompts only — the heartbeat

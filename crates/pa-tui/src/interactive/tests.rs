@@ -429,9 +429,7 @@ fn queued_background_notes_must_be_consumed_and_rendered_before_headless_exit() 
 /// The pre-attach placeholder (painted for a NEW chat before the attach
 /// lands) carries the zero dock the fresh session mounts: the landed
 /// frame keeps the placeholder's geometry, so the splash never reflows
-/// two rows when the session attaches. The factory group stays off the
-/// placeholder (the opt-in gate: the group mounts only after the
-/// daemon's hello advertises the `factory_activity` lane).
+/// two rows when the session attaches.
 #[test]
 fn the_startup_placeholder_carries_the_dock_a_fresh_session_mounts() {
     let mut view = AgentView::new(crate::theme::Theme::builtin(

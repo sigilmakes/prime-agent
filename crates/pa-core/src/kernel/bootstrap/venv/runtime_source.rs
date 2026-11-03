@@ -63,8 +63,8 @@ pub(in crate::kernel::bootstrap) fn require_runtime_source_dir() -> anyhow::Resu
     )
 }
 
-/// Hash the manifest, Python sources, and packaged machine library so any
-/// runtime change invalidates an existing venv.
+/// Hash the manifest and Python sources so any runtime change invalidates an
+/// existing venv.
 pub(in crate::kernel::bootstrap) fn hash_runtime_source(
     source_dir: &Path,
 ) -> anyhow::Result<String> {
@@ -74,7 +74,6 @@ pub(in crate::kernel::bootstrap) fn hash_runtime_source(
         source_dir.join("uv.lock"),
     ];
     collect_python_files(&rlm_dir, &mut files)?;
-    collect_package_data_files(&rlm_dir.join("machines"), &mut files)?;
     files.sort();
     let mut hasher = sha2::Sha256::new();
     for file in &files {
@@ -100,42 +99,15 @@ pub(super) fn collect_python_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyh
     Ok(())
 }
 
-/// Collect every file under the packaged machine library (`src/rlm/machines`,
-/// any extension: the wheel ships the MACHINE.md files as package data), so
-/// machine changes invalidate an existing venv exactly like a `.py` change.
-fn collect_package_data_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    if !dir.is_dir() {
-        return Ok(()); // a runtime payload without a machine library is legal
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_package_data_files(&path, files)?;
-        } else {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn runtime_fixture(temp: &std::path::Path, machine_body: &str) -> anyhow::Result<()> {
+    fn runtime_fixture(temp: &std::path::Path) -> anyhow::Result<()> {
         let rlm = temp.join("src").join("rlm");
         std::fs::create_dir_all(&rlm)?;
-        std::fs::write(
-            rlm.join("factory.py"),
-            "X = 1
-",
-        )?;
         std::fs::write(rlm.join("__init__.py"), "")?;
         std::fs::write(rlm.join("repl.py"), "")?;
-        let machines = rlm.join("machines").join("review-sweep");
-        std::fs::create_dir_all(&machines)?;
-        std::fs::write(machines.join("MACHINE.md"), machine_body)?;
         std::fs::write(
             temp.join("pyproject.toml"),
             "[project]\nname = 'prime-agent-runtime'\n",
@@ -147,7 +119,7 @@ mod tests {
     #[test]
     fn lockfile_changes_invalidate_identity_and_missing_lock_fails() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
-        runtime_fixture(temp.path(), "machine")?;
+        runtime_fixture(temp.path())?;
         std::fs::write(temp.path().join("uv.lock"), "version = 1\n")?;
         let before = hash_runtime_source(temp.path())?;
         std::fs::write(temp.path().join("uv.lock"), "version = 2\n")?;
@@ -163,7 +135,7 @@ mod tests {
         let package = temp.path();
         assert_eq!(resolve_runtime_source_dir(package, None), None);
         let runtime = package.join("prime-agent-runtime");
-        runtime_fixture(&runtime, "machine")?;
+        runtime_fixture(&runtime)?;
         for file in [
             "pyproject.toml",
             "uv.lock",
@@ -196,7 +168,7 @@ mod tests {
         let dist = package.join("dist/prime-agent-runtime");
         let source = checkout.join("prime-agent-runtime");
         for runtime in [&source, &dist, &direct] {
-            runtime_fixture(runtime, "machine")?;
+            runtime_fixture(runtime)?;
             assert_eq!(
                 resolve_runtime_source_dir(&package, Some(&checkout)),
                 Some(runtime.canonicalize()?)
@@ -220,7 +192,7 @@ mod tests {
             anyhow::ensure!(cwd == PathBuf::from(root).canonicalize()?);
             let temp = tempfile::tempdir_in(&cwd)?;
             let runtime = temp.path().join("prime-agent-runtime");
-            runtime_fixture(&runtime, "machine")?;
+            runtime_fixture(&runtime)?;
             let relative = temp.path().strip_prefix(&cwd)?;
             assert!(!relative.is_absolute());
             assert_eq!(
@@ -248,33 +220,6 @@ mod tests {
             root.path().join(CHECKED).is_file(),
             "relative fixture did not run"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn machine_library_changes_invalidate_the_runtime_identity() -> anyhow::Result<()> {
-        let temp = tempfile::tempdir()?;
-        runtime_fixture(
-            temp.path(),
-            "---
-name: review-sweep
-",
-        )?;
-        let before = hash_runtime_source(temp.path())?;
-        runtime_fixture(
-            temp.path(),
-            "---
-name: review-sweep
-version: 2
-",
-        )?;
-        let after = hash_runtime_source(temp.path())?;
-        assert_ne!(before, after, "a machine file change is a runtime change");
-
-        // A runtime without the machine library still hashes cleanly.
-        std::fs::remove_dir_all(temp.path().join("src").join("rlm").join("machines"))?;
-        let bare = hash_runtime_source(temp.path())?;
-        assert_ne!(bare, after);
         Ok(())
     }
 }
