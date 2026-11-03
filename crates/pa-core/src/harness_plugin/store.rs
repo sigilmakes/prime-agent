@@ -180,43 +180,6 @@ impl Document {
         let mut replay = std::collections::BTreeMap::new();
         for event in &self.history {
             event.identity.validate()?;
-            if event.operation == "rollback_legacy" {
-                let rollback_id = event
-                    .metadata
-                    .get("rollbackOf")
-                    .and_then(Value::as_str)
-                    .context("legacy rollback history is missing rollbackOf")?;
-                ensure!(!rollback_id.is_empty(), "invalid legacy rollback result ID");
-                ensure!(
-                    event.metadata.get("scope").and_then(Value::as_str)
-                        == Some(event.identity.scope.as_str()),
-                    "legacy rollback history scope mismatch"
-                );
-                let sources = event
-                    .metadata
-                    .get("legacySources")
-                    .and_then(Value::as_array)
-                    .context("legacy rollback history is missing source identities")?;
-                ensure!(
-                    !sources.is_empty(),
-                    "legacy rollback history has no sources"
-                );
-                for source in sources {
-                    let source_id = source
-                        .as_str()
-                        .context("invalid legacy rollback source identity")?;
-                    ensure!(
-                        self.migrations.iter().any(|receipt| {
-                            receipt.get("source").is_some_and(|source| {
-                                source.get("identity").and_then(Value::as_str) == Some(source_id)
-                                    && source.get("scope").and_then(Value::as_str)
-                                        == Some(event.identity.scope.as_str())
-                            })
-                        }),
-                        "legacy rollback history references unknown source"
-                    );
-                }
-            }
             ensure!(
                 Some(event.revision) == revision.checked_add(1) && event.revision <= self.revision,
                 "invalid history revision"
@@ -321,26 +284,6 @@ impl Store {
     ) -> Result<Change> {
         self.transact(|document| {
             document.change(identity, RecordValue::Present(value), expected, "put")
-        })
-    }
-
-    /// Apply a complete change set in one locked transaction.
-    /// A `None` payload means deletion; `Some(Value::Null)` stores JSON null.
-    ///
-    /// # Errors
-    /// Any invalid identity, failed precondition or persistence error aborts all changes.
-    pub fn batch(
-        &self,
-        changes: Vec<(RecordIdentity, Option<Value>, ExpectedRevision)>,
-    ) -> Result<Vec<Change>> {
-        self.transact(|document| {
-            changes
-                .into_iter()
-                .map(|(identity, value, expected)| {
-                    let value = value.map_or(RecordValue::Deleted, RecordValue::Present);
-                    document.change(&identity, value, expected, "batch")
-                })
-                .collect()
         })
     }
 
@@ -561,39 +504,6 @@ mod tests {
                 .is_err());
             assert_eq!(fs::read(&path)?, bytes);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn batch_aborts_every_change_on_late_cas_conflict() -> Result<()> {
-        let private = tempfile::tempdir()?;
-        let path = private.path().join("native.json");
-        let store = Store::new(&path);
-        let first = identity("s", "memory");
-        let second = identity("s", "factory");
-        store.put(&first, json!({"old":null}), ExpectedRevision::Absent)?;
-        let before = fs::read(&path)?;
-        assert!(store
-            .batch(vec![
-                (first.clone(), Some(Value::Null), ExpectedRevision::Any),
-                (
-                    second.clone(),
-                    Some(json!({"future":null})),
-                    ExpectedRevision::Revision(99)
-                ),
-            ])
-            .is_err());
-        assert_eq!(fs::read(&path)?, before);
-        assert_eq!(store.read(&second)?, None);
-        store.batch(vec![
-            (first.clone(), None, ExpectedRevision::Any),
-            (second.clone(), Some(Value::Null), ExpectedRevision::Absent),
-        ])?;
-        assert_eq!(store.read(&first)?, None);
-        assert_eq!(
-            store.read(&second)?.map(|record| record.value),
-            Some(Value::Null)
-        );
         Ok(())
     }
 

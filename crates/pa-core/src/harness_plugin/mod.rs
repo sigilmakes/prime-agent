@@ -14,8 +14,7 @@ pub(crate) fn source(settings: &crate::settings::Settings) -> crate::plugins::Pl
     crate::plugins::PluginSource {
         name: "harness".into(),
         source: SOURCE.into(),
-        config: serde_json::json!({"auxiliaryModel":settings.auxiliary_model,
-            "scopes":default_scopes(settings)}),
+        config: serde_json::json!({"scopes":default_scopes(settings)}),
     }
 }
 /// Resolve `harnessScopes`: unset means [`DEFAULT_SCOPES`]; an explicit list is
