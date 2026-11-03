@@ -644,7 +644,7 @@ fn token_count_formats() {
 }
 
 #[test]
-fn splash_renders_logo_version_model_and_cwd() {
+fn splash_renders_version_model_and_cwd() {
     let state = ChromeState {
         version: "0.0.0".to_string(),
         cwd: "/tmp/project".to_string(),
@@ -657,9 +657,6 @@ fn splash_renders_logo_version_model_and_cwd() {
     assert!(lines.iter().any(|l| text(l).contains("prime agent v0.0.0")));
     assert!(lines.iter().any(|l| text(l).contains("model faux-1")));
     assert!(lines.iter().any(|l| text(l).contains("cwd /tmp/project")));
-    assert!(lines
-        .iter()
-        .any(|l| text(l).contains("\u{2597}\u{2584}\u{2584}")));
 }
 
 #[test]
