@@ -945,15 +945,15 @@ impl AgentSessionEngine {
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        *self.goal_runtime.lock().expect("goal runtime lock") = None;
-        *self
-            .background_bash_probe
-            .lock()
-            .expect("background bash probe lock") = None;
-        *self
-            .kernel_release_probe
-            .lock()
-            .expect("kernel release probe lock") = None;
+        if let Ok(mut goal) = self.goal_runtime.lock() {
+            *goal = None;
+        }
+        if let Ok(mut probe) = self.background_bash_probe.lock() {
+            *probe = None;
+        }
+        if let Ok(mut probe) = self.kernel_release_probe.lock() {
+            *probe = None;
+        }
     }
 
     /// The create path's live reset: a fresh (or replaced) session starts live.
