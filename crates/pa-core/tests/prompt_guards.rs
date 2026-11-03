@@ -380,9 +380,6 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
     let gated = auth_gated_bundled_skills();
     sorted_bundled_skills()
         .into_iter()
-        // The resolver force-disables this obsolete host-request skill even on explicit opt-in.
-        // Raw packaged-set parity below still includes its historical source asset.
-        .filter(|skill| skill.name != "refine")
         .filter(|skill| {
             skill
                 .python
@@ -563,9 +560,9 @@ fn factory_public_namespace_matches_documented_methods() {
 
 // Packaged-set parity (TS packages/coding-agent/skills)
 
-/// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): 12 skills — the
-/// generic `mcp` doc skill in, the per-service linear/notion pair out (TS removed theirs when the
-/// generic MCP surface landed).
+/// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): the generic
+/// `mcp` doc skill in, the per-service linear/notion pair out (TS removed theirs when the generic
+/// MCP surface landed), and the retired refine skill removed with the refinement subsystem.
 const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "agent-message",
     "agent-observe",
@@ -575,7 +572,6 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "goal",
     "mcp",
     "prime-intellect",
-    "refine",
     "rlm-heartbeat",
     "skill-creator",
     "websearch",
@@ -595,7 +591,7 @@ fn bundled_skills_match_the_ts_packaged_set() {
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "the loadable skill set must be exactly TS12 union the reviewed native-only factory skill"
+        "the loadable skill set must be exactly the packaged set union the reviewed native-only factory skill"
     );
     assert!(
         !names.contains(&"linear") && !names.contains(&"notion"),

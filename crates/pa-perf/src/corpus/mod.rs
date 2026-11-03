@@ -324,7 +324,7 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
 
         if options.artifacts {
             let artifacts_root = agent_dir.join("session-artifacts");
-            artifacts::write_artifact_dir(&artifacts_root.join(&id), &id, &id, &mut rng)?;
+            artifacts::write_artifact_dir(&artifacts_root.join(&id), &id, &mut rng)?;
         }
 
         // Subagent trees: the first `tree_parents` sessions grow one; the

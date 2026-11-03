@@ -5,9 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-use pa_core::refinement::{
-    HarnessEntry, HarnessRefinementEvent, HarnessScope, HarnessState, RefinementKind,
-};
 use pa_daemon::rlm_ledger::{RlmSpawnInput, RlmSpawnLedger};
 use serde_json::json;
 
@@ -52,7 +49,6 @@ const EMPTY_PICKLE: &[u8] = b"\x80\x04}\x94.";
 pub(crate) fn write_artifact_dir(
     dir: &Path,
     session_id: &str,
-    seed_text: &str,
     rng: &mut Rng,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -61,67 +57,6 @@ pub(crate) fn write_artifact_dir(
         json!({ "version": 1, "savedNames": [], "skipped": [] }).to_string(),
     )?;
     std::fs::write(dir.join("kernel-state.dill"), EMPTY_PICKLE)?;
-
-    if rng.chance(30) {
-        let harness_dir = dir.join("harness");
-        std::fs::create_dir_all(&harness_dir)?;
-        let entries = (1..=1 + rng.below(3))
-            .map(|index| {
-                (
-                    format!("{seed_text}-memory-{index}"),
-                    format!("corpus memory entry {index}: {}", seed_text),
-                )
-            })
-            .collect::<Vec<_>>();
-        let at = iso_from_millis(1_700_000_000_000 + rng.below(10_000_000));
-        let state = HarnessState {
-            schema: 1,
-            entries: [(
-                RefinementKind::Memory,
-                entries
-                    .iter()
-                    .map(|(id, content)| {
-                        (
-                            id.clone(),
-                            HarnessEntry {
-                                id: id.clone(),
-                                kind: RefinementKind::Memory,
-                                title: format!("corpus memory {}", id),
-                                content: content.clone(),
-                                path: "general".to_string(),
-                                scope: Some(HarnessScope::Local),
-                                reference: serde_json::Map::new(),
-                                arguments: serde_json::Map::new(),
-                                metadata: serde_json::Map::new(),
-                                source: "agent".to_string(),
-                                created_at: at.clone(),
-                                updated_at: at.clone(),
-                                version: 1,
-                            },
-                        )
-                    })
-                    .collect(),
-            )]
-            .into_iter()
-            .collect(),
-            refinements: vec![HarnessRefinementEvent {
-                id: format!("{seed_text}-event-1"),
-                trigger: "test".to_string(),
-                changes: vec![format!("create memory:{seed_text}-memory-1")],
-                evidence: String::new(),
-                outcome: String::new(),
-                created_at: at,
-            }],
-        };
-        std::fs::write(
-            harness_dir.join("harness_state.json"),
-            serde_json::to_string(&state)?,
-        )?;
-        std::fs::write(
-            harness_dir.join("refinement_history.jsonl"),
-            serde_json::to_string(&state.refinements[0])? + "\n",
-        )?;
-    }
 
     if rng.chance(10) {
         std::fs::write(
@@ -206,7 +141,6 @@ pub(crate) fn spawn_child(
                     .join("session-artifacts")
                     .join(&child_session_id),
                 &child_session_id,
-                &child_session_id,
                 rng,
             )?;
         }
@@ -242,7 +176,6 @@ mod tests {
         super::write_artifact_dir(
             directory.path(),
             "session",
-            "seed",
             &mut crate::rng::Rng::new(7),
         )
         .expect("write real artifact partition");

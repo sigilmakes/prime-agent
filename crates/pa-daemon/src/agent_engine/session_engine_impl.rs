@@ -880,7 +880,7 @@ impl SessionEngine for AgentSessionEngine {
                 .session_file
                 .as_deref()
                 .map(std::path::Path::new)
-                .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
+                .and_then(pa_core::session_engine::session_artifact_dir_for_log);
             pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
                 session_id,
                 ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(

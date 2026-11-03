@@ -34,9 +34,6 @@ fn sessions_load_through_the_product_store() {
             .extension()
             .is_none_or(|extension| extension != "jsonl")
             || path.starts_with(manifest.paths.agent_dir.join("rlm-ledger"))
-            || path
-                .file_name()
-                .is_some_and(|name| name == "refinement_history.jsonl")
         {
             continue;
         }
@@ -218,9 +215,6 @@ fn the_same_seed_rebuilds_the_identical_tree() {
             let bytes = if path
                 .extension()
                 .is_some_and(|extension| extension == "jsonl")
-                && path
-                    .file_name()
-                    .is_none_or(|name| name != "refinement_history.jsonl")
             {
                 assert!(!bytes.is_empty(), "the native log is nonempty");
                 let mut decoded = Vec::with_capacity(bytes.len());
