@@ -421,7 +421,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
 }
 
 #[test]
-fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
+fn cold_real_owner_preserves_legacy_custom_rows_as_generic_custom_rows() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let dir = tempfile::tempdir().unwrap();
@@ -474,13 +474,13 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
     ] {
         producer.persist_entry(kind, payload).unwrap();
     }
-    let kind = "harness_digest";
+    let kind = "legacy.custom";
     producer
         .persist_entry(
             "custom_message",
             json!({
                 "customType":kind, "content":"shared controlled text", "display":false,
-                "details":{"digest":"controlled", "stateFingerprint":"controlled"},
+                "details":{"note":"controlled"},
                 "opaque":{"preserve":[null,true,3]},
             }),
         )
@@ -490,7 +490,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
         json!({"role":"assistant", "content":[{"type":"toolCall", "id":"fixture-tool-call", "name":"python_repl", "arguments":{"code":"pass"}}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"toolUse", "timestamp":12, "responseId":"fixture-tool-response"}),
         json!({"role":"toolResult", "toolCallId":"fixture-tool-call", "toolName":"python_repl", "content":[{"type":"text", "text":"controlled result"}], "details":{"opaque":[null,true]}, "isError":false, "timestamp":13}),
         json!({"role":"assistant", "content":[{"type":"text", "text":"source assistant"}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"stop", "timestamp":14, "responseId":"fixture-final-response"}),
-        json!({"role":"user", "content":[{"type":"text", "text":"[harness-digest] shared controlled text"}], "timestamp":15}),
+        json!({"role":"user", "content":[{"type":"text", "text":"[legacy-note] shared controlled text"}], "timestamp":15}),
     ];
     for message in &ordinary {
         producer
@@ -501,7 +501,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
             .unwrap();
     }
     producer.persist_entry("custom_message", json!({
-        "customType":"plugin.harness.context", "content":"shared controlled text", "display":false,
+        "customType":"plugin.notice.context", "content":"shared controlled text", "display":false,
         "details":{"explicit":true}, "opaque":{"preserve":"plugin"},
     })).unwrap();
     let source_leaf = producer.leaf_id().unwrap().to_owned();
@@ -639,7 +639,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
             json!({"role":"assistant", "content":null, "tool_calls":[{"id":"fixture-tool-call","type":"function","function":{"name":"python_repl","arguments":"{\"code\":\"pass\"}"}}]}),
             json!({"role":"tool","tool_call_id":"fixture-tool-call","content":"controlled result"}),
             json!({"role":"assistant","content":"source assistant"}),
-            json!({"role":"user","content":[{"type":"text","text":"[harness-digest] shared controlled text"}]}),
+            json!({"role":"user","content":[{"type":"text","text":"[legacy-note] shared controlled text"}]}),
             json!({"role":"user","content":[{"type":"text","text":"shared controlled text"}]}),
             json!({"role":"user","content":[{"type":"text","text":"continue controlled history"}]}),
         ]
@@ -712,7 +712,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
             .iter()
             .filter_map(|message| match message {
                 pa_types::session::AgentMessage::Custom(custom)
-                    if matches!(custom.custom_type.as_str(), "harness_digest") =>
+                    if matches!(custom.custom_type.as_str(), "legacy.custom") =>
                 {
                     Some(custom.custom_type.as_str())
                 }
@@ -721,8 +721,8 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
             .collect::<Vec<_>>();
         assert_eq!(
             legacy,
-            vec!["harness_digest"],
-            "legacy harness rows remain ordinary custom rows in canonical context and physical history"
+            vec!["legacy.custom"],
+            "legacy custom rows remain ordinary custom rows in canonical context and physical history"
         );
     });
     assert_eq!(std::fs::read(&path).unwrap(), physical);
@@ -730,7 +730,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
 
 #[test]
 fn opaque_legacy_payload_is_preserved_without_becoming_a_model_message() {
-    let kind = "harness_digest";
+    let kind = "legacy.custom";
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut store =

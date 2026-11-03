@@ -342,12 +342,6 @@ fn settled_turn_emits_the_run_agent_end_payload() {
         ["user", "assistant"],
         "the run carries its accepted user and terminal assistant"
     );
-    assert!(
-        !messages
-            .iter()
-            .any(|message| message["customType"] == "harness_digest"),
-        "the optional harness contributes instructions, not a legacy digest row"
-    );
     assert_eq!(
         messages[0]["content"],
         json!([{ "type": "text", "text": "plain turn" }]),
@@ -433,12 +427,6 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         roles,
         ["user", "assistant"],
         "the failed run carries its accepted user and terminal assistant"
-    );
-    assert!(
-        !first
-            .iter()
-            .any(|message| message["customType"] == "harness_digest"),
-        "the optional harness must not inject a legacy digest row"
     );
     assert_eq!(
         first[0]["content"],

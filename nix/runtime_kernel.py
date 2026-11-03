@@ -58,8 +58,6 @@ def main():
         "PRIME_AGENT_KERNEL_VENV": str(root / "kernel"),
         "PRIME_AGENT_DAEMON_SOCKET": str(root / "run/daemon.sock"),
         "RLM_SESSION_DIR": str(root / "artifacts"),
-        "RLM_HARNESS_STATE_DIR": str(root / "harness-local"),
-        "RLM_GLOBAL_HARNESS_STATE_DIR": str(root / "harness-global"),
         "UV_CACHE_DIR": str(root / "uv-cache"),
         "UV_PYTHON_INSTALL_DIR": str(root / "uv-python"),
         "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "DO_NOT_TRACK": "1",

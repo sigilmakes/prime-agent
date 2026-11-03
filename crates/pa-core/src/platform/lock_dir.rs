@@ -298,7 +298,7 @@ impl LockDir {
             .is_some_and(|owner| !Self::owner_matches(&self.path, owner))
         {
             return Err(io::Error::other(format!(
-                "harness state lock lost: {}",
+                "state lock lost: {}",
                 self.path.display()
             )));
         }
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn live_owned_lock_cannot_be_stolen_after_stale_age() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("harness_state.json");
+        let file = dir.path().join("state.json");
         let guard =
             LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         set_mtime(&guard.path, 1, 0).unwrap();
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn dead_owned_lock_is_reclaimed_and_old_guard_cannot_remove_successor() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("harness_state.json");
+        let file = dir.path().join("state.json");
         let old =
             LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
         let mut child = std::process::Command::new("true").spawn().unwrap();
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn unparseable_owned_lock_is_reclaimed_by_age() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("harness_state.json");
+        let file = dir.path().join("state.json");
         let path = LockDir::path_for(&file);
         fs::create_dir(&path).unwrap();
         fs::write(path.join("owner"), [0xff]).unwrap();

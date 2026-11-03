@@ -132,13 +132,6 @@ pub struct CompactionSummaryMessage {
     /// User instructions that guided the summary (`/compact <instructions>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_instructions: Option<String>,
-    /// Harness digest snapshot attached mechanically at compaction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_digest: Option<String>,
-    /// Fingerprint of the harness state behind `harness_digest`; lets cold
-    /// boundaries skip re-delivery (TS #2400).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_state_fingerprint: Option<String>,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
     /// Unrecognized wire metadata preserved through session rewrites.
@@ -265,13 +258,6 @@ pub struct CompactionEntry {
     pub custom_instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Harness digest snapshot taken at compaction time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_digest: Option<String>,
-    /// Fingerprint of the harness state behind `harness_digest`; lets cold
-    /// boundaries skip re-delivery (TS #2400).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_state_fingerprint: Option<String>,
 }
 
 /// `type: "branch_summary"`.

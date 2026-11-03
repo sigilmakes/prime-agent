@@ -59,7 +59,6 @@ pub mod autonomous;
 pub mod cron;
 pub mod export_html;
 pub mod goals;
-mod harness_plugin;
 pub mod kernel;
 pub mod mcp;
 pub mod models;

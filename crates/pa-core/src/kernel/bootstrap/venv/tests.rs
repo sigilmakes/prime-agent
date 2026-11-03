@@ -832,7 +832,7 @@ def path_of(module, root):
     return None
 
 root = sys.argv[1]
-seed = ["rlm", "rlm.mcp", "rlm.harness", "rlm.bash", "rlm.repl"]
+seed = ["rlm", "rlm.mcp", "rlm.bash", "rlm.repl"]
 closure = []
 pending = list(seed)
 violations = []
@@ -875,7 +875,6 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
     // changes, this test is the tripwire.
     assert!(
         report.closure.contains(&"rlm.mcp".to_string())
-            && report.closure.contains(&"rlm.harness".to_string())
             && report.closure.contains(&"rlm.bash".to_string())
             && report.closure.contains(&"rlm.repl".to_string()),
         "the frozen closure seed is wrong: {report:?}"

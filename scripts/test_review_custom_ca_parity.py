@@ -23,7 +23,7 @@ class ReceiptParsingTests(unittest.TestCase):
                                          {'role': 'user', 'content': PROMPT}]}}
         with self.assertRaises(AssertionError):
             request_contract(request)
-        request['body']['messages'][1]['content'] = '[harness-digest] actual runtime digest'
+        request['body']['messages'][1]['content'] = '[bookkeeping] unrelated runtime row'
         self.assertEqual(request_contract(request)['current_prompt_count'], 1)
 
     def test_shutdown_failure_remains_red(self):

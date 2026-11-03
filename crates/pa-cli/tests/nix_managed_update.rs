@@ -71,8 +71,6 @@ async fn nix_ownership_blocks_cli_and_both_direct_installer_boundaries() {
             .env("PRIME_AGENT_CODING_AGENT_DIR", root.join("agent"))
             .env("PRIME_AGENT_SESSION_DIR", root.join("sessions"))
             .env("PRIME_AGENT_KERNEL_VENV", root.join("kernel"))
-            .env("RLM_GLOBAL_HARNESS_STATE_DIR", root.join("global-harness"))
-            .env("RLM_HARNESS_STATE_DIR", root.join("local-harness"))
             .env("RLM_SESSION_DIR", root.join("artifacts"))
             .env("PRIME_AGENT_INSTALL_MANAGED_BY", "nix")
             .env(

@@ -304,12 +304,6 @@ pub struct Settings {
     pub follow_up_mode: Option<QueueModeSetting>,
     pub theme: Option<String>,
     pub compaction: Option<CompactionSettings>,
-    /// Scopes loaded into every session's harness context in addition to the
-    /// session's own scope. Unset means `["global"]`: cross-session memory then
-    /// participates without an explicit `plugin.harness.enroll`. An empty array
-    /// loads only the session scope, and a session's saved enrollment still
-    /// overrides these defaults.
-    pub harness_scopes: Option<Vec<String>>,
     pub factory: Option<FactorySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,

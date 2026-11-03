@@ -130,7 +130,7 @@ def loopback_server():
 
 
 def isolated_environment(home, collector_url):
-    """Allowlist, never copy ambient API keys, proxy auth, harness or package overrides."""
+    """Allowlist, never copy ambient API keys, proxy auth, or package overrides."""
     env = {
         "PATH": os.environ.get("PATH", os.defpath),
         "HOME": str(home), "USER": "privacy-fixture", "LOGNAME": "privacy-fixture",
@@ -146,8 +146,6 @@ def isolated_environment(home, collector_url):
         # The real RPC engine prewarms by default. An explicit missing override
         # rejects before auto-bootstrap, without masking reporter installation.
         "PRIME_AGENT_KERNEL_PYTHON": str(home / "no-kernel-python"),
-        "RLM_GLOBAL_HARNESS_STATE_DIR": str(home / "global-harness"),
-        "RLM_HARNESS_STATE_DIR": str(home / "local-harness"),
         "RLM_SESSION_DIR": str(home / "artifacts"),
         "PRIME_AGENT_TRACES_API_KEY": "dummy-trace-key-not-a-credential",
         "PRIME_AGENT_TRACES_BASE_URL": collector_url,

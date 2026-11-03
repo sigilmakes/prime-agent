@@ -62,8 +62,7 @@ the prompt dump does not preview them.
 Print mode joins admitted plugin jobs before the next input or process exit,
 without waiting for future timers. New command-job failures reject that command;
 automatic-job failures are diagnostics. JSON reports terminal jobs with
-`plugin_job_update` rows. The optional harness supplies model-only context;
-there is no canonical `harness_digest` pair or hardwired event.
+`plugin_job_update` rows.
 The stream retains the session header (version 3), slim `message_update`
 deltas, `tool_execution_update`, compaction events and outcome rows, and goal
 session-action frames. Verifiers: `print_runtime_e2e` and `plugin_headless_e2e`.

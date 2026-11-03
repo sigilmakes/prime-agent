@@ -140,7 +140,7 @@ impl SessionManager {
     }
 
     /// Create an in-memory manager pinned to a session's own directory: the
-    /// session's identity (its directory, the local harness state's home) stays its own.
+    /// session's identity and its session-owned artifact home stay its own.
     #[must_use]
     pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
         let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), false);
@@ -175,7 +175,7 @@ impl SessionManager {
     }
 
     /// Whether the manager carries a session directory of its own:
-    /// session-owned artifacts (the local harness state) need it.
+    /// session-owned artifacts need it.
     #[must_use]
     pub fn has_session_dir(&self) -> bool {
         self.session_dir_backed

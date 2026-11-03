@@ -406,8 +406,6 @@ pub fn compaction_entry_for(
         from_hook: Some(false),
         custom_instructions: custom_instructions.map(str::to_string),
         usage: result.usage.clone(),
-        harness_digest: None,
-        harness_state_fingerprint: None,
     }
 }
 
@@ -520,8 +518,6 @@ mod tests {
                 from_hook: Some(false),
                 custom_instructions: Some("focus".to_string()),
                 usage: Some(usage),
-                harness_digest: None,
-                harness_state_fingerprint: None,
             }
         );
     }

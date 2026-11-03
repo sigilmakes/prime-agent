@@ -15,7 +15,7 @@
 //! The dispatch follows the TS live path
 //! (`createDisplayedCustomMessageComponent`): non-display rows render
 //! nothing, every displayed type without a dedicated component (engine
-//! bookkeeping like `harness_digest`, unknown types) renders the generic
+//! bookkeeping and unknown types) renders the generic
 //! `[<customType>]` panel. (The TS replay path `buildConversationComponents`
 //! drops unknown types instead; the live interactive path is the TUI ground
 //! truth, and the Rust engine persists those types with `display: false`.)
@@ -187,8 +187,8 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
                 message, details,
             )))]
         }
-        // Everything else - engine bookkeeping (`harness_digest`, worker
-        // recovery), old transcript types, and unknown types - renders the
+        // Everything else - engine bookkeeping (worker recovery), old
+        // transcript types, and unknown types - renders the
         // generic panel, exactly like the TS live dispatch fallthrough (the
         // bookkeeping types persist with `display: false` and render nothing).
         _ => vec![generic_panel_entry(custom_type, message)],
@@ -409,13 +409,9 @@ mod tests {
 
     #[test]
     fn non_display_rows_render_nothing() {
-        // TS skips display=false rows everywhere (harness digests and
-        // worker recovery are bookkeeping).
-        for custom_type in [
-            "harness_digest",
-            "prime-agent.worker_recovery",
-            AGENT_MESSAGE_CUSTOM_TYPE,
-        ] {
+        // TS skips display=false rows everywhere (worker recovery is
+        // bookkeeping).
+        for custom_type in ["prime-agent.worker_recovery", AGENT_MESSAGE_CUSTOM_TYPE] {
             let entries = decoded(&json!({
                 "role": "custom",
                 "customType": custom_type,
@@ -432,7 +428,6 @@ mod tests {
         // A stray display=true bookkeeping row falls through to the
         // generic box (in practice these persist with display=false).
         for custom_type in [
-            "harness_digest",
             "prime-agent.worker_recovery",
             "ipython_state",
             "thread_goal_state",

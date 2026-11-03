@@ -44,7 +44,7 @@ tags, packages, or deployment changes.
 `make check` is the full workspace merge gate. The active Forgejo workflow runs
 it after the Nix checks, using the repository's pinned development environment.
 The workspace job starts with no inherited credentials and uses private home,
-agent, session, harness, daemon socket, and kernel paths. The stdlib driver
+agent, session, daemon socket, and kernel paths. The stdlib driver
 `scripts/check_workspace.py` reuses one Cargo target and dependency cache;
 compilation uses two jobs, no incremental cache, and no dev/test debug
 information. It prepares workspace binaries and a real locked Python kernel

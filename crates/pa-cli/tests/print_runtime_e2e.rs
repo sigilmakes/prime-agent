@@ -518,8 +518,6 @@ fn print_mode_thinking_clamps_to_off_for_non_reasoning_models() {
 fn write_compaction_settings(home: &std::path::Path, settings: &serde_json::Value) {
     let agent = home.join(".prime/agent");
     std::fs::create_dir_all(&agent).unwrap();
-    let mut settings = settings.clone();
-    settings["plugins"] = serde_json::json!({"harness":{"enabled":false}});
     std::fs::write(agent.join("settings.json"), settings.to_string()).unwrap();
 }
 
@@ -806,9 +804,6 @@ fn print_mode_stale_overflow_recovers_before_the_next_prompt_after_a_resume() {
 }
 
 // The json event stream's TS parity surface (verified against the TS binary).
-
-// Optional harness context is model-only, not a canonical message pair. Its persisted-session
-// regression lives in plugin_headless_e2e::harness with a private plugin fixture.
 
 /// The streaming deltas (TS `message_update`): the wire carries the slim
 /// deltas (`partial` never rides the wire).

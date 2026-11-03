@@ -5,8 +5,6 @@ use serde_json::{json, Value};
 
 #[path = "plugin_headless/daemon.rs"]
 mod daemon;
-#[path = "plugin_headless/harness.rs"]
-mod harness;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -80,8 +78,6 @@ impl Fixture {
             "TMPDIR",
             "PRIME_AGENT_KERNEL_VENV",
             "RLM_SESSION_DIR",
-            "RLM_HARNESS_STATE_DIR",
-            "RLM_GLOBAL_HARNESS_STATE_DIR",
             "UV_CACHE_DIR",
         ] {
             let path = self.runtime.join(name);
@@ -456,28 +452,4 @@ fn prompt_inspection_keeps_model_rules_and_append_layers_consistent() {
         .as_str()
         .unwrap()
         .contains("Appended fixture instructions."));
-}
-
-#[test]
-fn prompt_inspection_uses_first_party_harness_activation_settings() {
-    let fixture = Fixture::new();
-    fixture.settings(&json!({"plugins":{"fixture":{"enabled":false},"harness":{
-        "enabled":true
-    }}}));
-    let active = fixture.run(&["prompt", "--json"], &json!({"responses":[]}));
-    success(&active);
-    let active: Value = serde_json::from_str(&stdout(&active)).unwrap();
-    assert!(active["prompt"]
-        .as_str()
-        .unwrap()
-        .contains("plugin.harness."));
-    fixture.settings(&json!({"plugins":{"fixture":{"enabled":false},"harness":{"enabled":false}}}));
-    let disabled = fixture.run(&["prompt", "--json"], &json!({"responses":[]}));
-    success(&disabled);
-    let disabled: Value = serde_json::from_str(&stdout(&disabled)).unwrap();
-    assert!(!disabled["prompt"]
-        .as_str()
-        .unwrap()
-        .contains("plugin.harness."));
-    assert!(fixture.entries().is_empty());
 }

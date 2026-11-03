@@ -1,5 +1,5 @@
 //! Host request handling: execute-side requests answered by the host
-//! (harness/goal/etc.) and their settle/exit waits.
+//! (goal and similar host state) and their settle/exit waits.
 
 #[cfg(all(test, unix))]
 mod fixture_executable {

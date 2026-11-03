@@ -1,5 +1,5 @@
 //! The session-artifact trees: per-session artifact dirs (kernel-state
-//! stubs, harness state, retired heartbeat jobs), the subagent session
+//! stubs, retired heartbeat jobs), the subagent session
 //! files, and the ledger edges that make them roster-visible — all through
 //! the product's own writers where they exist.
 
@@ -41,7 +41,7 @@ const WORKER_NAMES: [&str; 12] = [
 const EMPTY_PICKLE: &[u8] = b"\x80\x04}\x94.";
 
 /// Write one session's artifact partition: the kernel-state manifest and
-/// payload, plus (per `rng`) a local harness store and a retired heartbeat.
+/// payload, plus (per `rng`) a retired heartbeat.
 ///
 /// # Errors
 ///

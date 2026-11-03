@@ -196,10 +196,6 @@ _Avoid_: Summary text, disposable preview
 A representation of selected conversation text as image frames intended for a vision-capable model. Bitmap encoding alone does not imply that every part of the original history was retained.
 _Avoid_: Lossless memory, text summary
 
-**Memory scope**:
-An explicitly selected collection of remembered information available to one or more conversations. A fresh session does not implicitly join another session's memory scope.
-_Avoid_: Global memory, current context
-
 **Summary tree**:
 A hierarchical memory representation whose leaves refer to original material and whose higher nodes summarize larger spans. A bounded tree view can represent more history than fits verbatim in one context.
 _Avoid_: Flat rolling summary, canonical history
@@ -207,17 +203,3 @@ _Avoid_: Flat rolling summary, canonical history
 **Recall**:
 The retrieval of finer-grained or original material represented by a memory view. Recall is distinct from automatically including all stored material in a model call.
 _Avoid_: Context assembly, summarization
-
-## Continual harness
-
-**Continual harness**:
-An optional source of persistent supplemental knowledge and reusable agent behavior, including memories, prompt notes, skill descriptions, and subagent specifications. It is distinct from the agent's mandatory execution machinery.
-_Avoid_: Entire agent runtime, immutable base prompt
-
-**Harness record**:
-A durable item of supplemental knowledge or reusable behavior owned by the continual harness within a declared scope.
-_Avoid_: Session message, plugin registration
-
-**Refinement**:
-An operation that proposes or applies evidence-backed changes to harness records. It is distinct from conversation compaction and from changing the immutable base instructions.
-_Avoid_: Compaction, self-rewriting core

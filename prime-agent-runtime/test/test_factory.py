@@ -1,4 +1,4 @@
-"""Factory harness entry kind: spec validation, dag compilation, and executor.
+"""Factory stored entries: spec validation, dag compilation, and executor.
 
 Consolidated port of TS-era PRs #2397 (factory entry kind, validator, dag
 compiler) and #2401 (the executor: run/status/stop/resume, guarded
@@ -2464,8 +2464,7 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn("`/factory on` (`/factory off` disables it again, `/factory status` reports it;", flat)
         self.assertIn("the persisted setting is `factory.enabled` in the agent dir's settings.json", flat)
         self.assertIn("every `rlm.factory` call except `help()`", flat)
-        self.assertIn("The default executor uses the machine library, not a persistent harness store", flat)
-        self.assertIn("FactoryExecutor(harness=entry_store)", doc)
+        self.assertIn("The machine library is the only store", flat)
         self.assertIn(factory_module.FACTORY_DISABLED_MESSAGE, flat)
         self.assertIn("`help()` answers while disabled", flat)
         # Guards: the op set evaluated over the from-state's latest settle.
@@ -2532,7 +2531,7 @@ class FactoryHelpTest(unittest.TestCase):
         )
         self.assertIn(
             "`rlm.factory.run('<name>')` runs a library machine directly without "
-            "creating a harness entry; a machine that exists but is broken names "
+            "creating a stored entry; a machine that exists but is broken names "
             "its errors instead of pretending the name is unknown",
             flat,
         )
@@ -3039,12 +3038,12 @@ class _ExecutorTestCase(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.harness = _EntryStore()
-        self.harness.create_subagent("Worker", "Do the work carefully.", id="worker")
+        self.entries = _EntryStore()
+        self.entries.create_subagent("Worker", "Do the work carefully.", id="worker")
         self.clock = FakeClock()
         self.host = FakeHost(clock=self.clock)
         self.sleeps = ClockSleep(self.clock)
-        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, entry_store=self.entries)
         previous_executor = factory_module._DEFAULT_EXECUTOR
         factory_module._DEFAULT_EXECUTOR = self.executor
         self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
@@ -3082,10 +3081,10 @@ class _ExecutorTestCase(unittest.TestCase):
     # -- helpers shared with the opt-in gate tests ----------------------------
 
     def store_factory(self, dag: dict[str, Any], spec_id: str = "sw") -> None:
-        self.harness.create_factory("Factory", "Factory content", id=spec_id, dag=dag)
+        self.entries.create_factory("Factory", "Factory content", id=spec_id, dag=dag)
 
     def store_machine(self, machine: dict[str, Any], spec_id: str = "sw") -> None:
-        self.harness.create_factory("Factory", "Factory content", id=spec_id, machine=machine)
+        self.entries.create_factory("Factory", "Factory content", id=spec_id, machine=machine)
 
     def node(self, node_id: str, **overrides: Any) -> dict[str, Any]:
         base: dict[str, Any] = {"id": node_id, "subagent": "worker"}
@@ -3198,7 +3197,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
     def corrupt_stored_spec(self, spec_id: str, spec: Any, *, key: str = "dag") -> None:
         """Bypass write-time validation the way a hand-edited or foreign
         store would: mutate the stored entry's spec in memory."""
-        entry = self.harness.get("factory", spec_id)
+        entry = self.entries.get("factory", spec_id)
         entry.arguments = {key: spec}
 
     def state_report(self, status: dict[str, Any], state_id: str) -> dict[str, Any]:
@@ -3279,7 +3278,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
 
     @async_test
     async def test_resolves_subagent_by_id_and_title_with_model_settings(self) -> None:
-        self.harness.create_subagent(
+        self.entries.create_subagent(
             "The Worker",
             "Template by title.",
             id="worker-md",
@@ -4914,7 +4913,7 @@ class FactoryExecutorTest(_ExecutorTestCase):
         # deadline: waking must not retry the spawn; the instance is
         # cancelled instead.
         self.sleeps = GatedSleep()
-        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, entry_store=self.entries)
         factory_module._DEFAULT_EXECUTOR = self.executor
         self.host.rate_limit_first["a"] = 2
         self.store_factory({"nodes": [{"id": "a", "subagent": "worker"}]})
@@ -6731,8 +6730,8 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.harness.create_subagent("Researcher", "Collect the findings.", id="researcher")
-        self.harness.create_factory("Factory", "Factory content", id="sw", machine=valid_machine())
+        self.entries.create_subagent("Researcher", "Collect the findings.", id="researcher")
+        self.entries.create_factory("Factory", "Factory content", id="sw", machine=valid_machine())
 
     # -- helpers -------------------------------------------------------------
 
@@ -6837,7 +6836,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.assertEqual(wire_nodes["collect"]["queued"], 0)
         # A saturated run leaves prepared instances queued: two entry
         # states under a one-slot cap admit one and queue the other.
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Saturated",
             "Two entry states under a one-slot cap.",
             id="sat",
@@ -6875,7 +6874,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         # made the join wait for a state that never settles, so the
         # transition never fired. The snapshot owns its ``from``, exactly
         # like the already-copied ``when`` guard.
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Join",
             "Join content",
             id="join",
@@ -7002,13 +7001,13 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.assertEqual(graph["active_nodes"], [])
         self.assertEqual(graph["budget"], {"limit_ms": 600_000, "consumed_ms": 0})
         # a dag spec compiles to machine form for the graph too
-        self.harness.create_factory("Dag factory", "content", id="dag", dag=valid_dag())
+        self.entries.create_factory("Dag factory", "content", id="dag", dag=valid_dag())
         dag_graph = await rlm_module.rlm.factory.graph("dag")
         self.assertEqual(dag_graph["machine"]["order"], ["collect", "fan-out", "review"])
         # unknown refs fail loudly; a corrupt spec names itself
         with self.assertRaisesRegex(ValueError, "unknown factory run or spec 'missing'"):
             await rlm_module.rlm.factory.graph("missing")
-        self.harness.create_factory("Broken", "content", id="broken", dag={"nodes": [node("a")]})
+        self.entries.create_factory("Broken", "content", id="broken", dag={"nodes": [node("a")]})
         self.corrupt_spec("broken", {"nodes": []})
         with self.assertRaisesRegex(ValueError, "does not validate"):
             await rlm_module.rlm.factory.graph("broken")
@@ -7100,8 +7099,8 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         `running`), so the machine stays in flight until the test acts. The
         state id carries no dash: the fake host routes outcomes by the
         dash-split spawn name."""
-        self.harness.create_subagent("Sleeper", "Never settles.", id="sleeper")
-        self.harness.create_factory(
+        self.entries.create_subagent("Sleeper", "Never settles.", id="sleeper")
+        self.entries.create_factory(
             "Held",
             "content",
             id="held",
@@ -7239,10 +7238,10 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         # exceed the transport bound — the cap's fallback names the wire
         # cap (the mutation check: an uncapped error frame would carry
         # the multi-hundred-kilobyte reason raw).
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Good", "content", id="big-spec", machine=valid_machine()
         )
-        entry = self.harness.get("factory", "big-spec")
+        entry = self.entries.get("factory", "big-spec")
         entry.arguments["machine"] = {
             "run": {"failure_policy": "continue"},
             "states": [{"id": "a", "entry": True, "subagent": "worker"}],
@@ -7272,7 +7271,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         # {"snake_key": 1}}` came back as `{"snakeKey": 1}`, displaying a
         # condition that no longer matches the executor's declared one. A
         # guard dict (``output`` + ``op``) rides the wire verbatim.
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Guarded",
             "Guarded content",
             id="guarded",
@@ -7320,7 +7319,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         # reports; the terminal history keeps the newest
         # GRAPH_RUNS_WINDOW runs (by-ref snapshots stay available for
         # all of them).
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Solo",
             "Solo content",
             id="solo",
@@ -7357,7 +7356,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         # child kept running. A run with a child in flight is live: it
         # reports regardless of the window, and the window holds only
         # runs with no child in flight.
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Resident",
             "One resident entry state.",
             id="resident",
@@ -7377,7 +7376,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.assertEqual(nodes["watcher"]["running"], 1, "the resident child is still in flight")
         # GRAPH_RUNS_WINDOW newer drained runs push the done run outside
         # the terminal-history window; the in-flight child keeps it live.
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Solo",
             "Solo content",
             id="solo",
@@ -7422,7 +7421,7 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
                 await factory_module.default_factory_executor().activity(bad)
 
     def corrupt_spec(self, spec_id: str, spec: Any) -> None:
-        entry = self.harness.get("factory", spec_id)
+        entry = self.entries.get("factory", spec_id)
         entry.arguments = {"dag": spec}
 
 
@@ -8413,11 +8412,11 @@ class MachineCliDispatchTest(unittest.TestCase):
         (self.agent_home / "settings.json").write_text(
             json.dumps({"factory": {"enabled": True}}), encoding="utf-8"
         )
-        harness = _EntryStore()
+        entries = _EntryStore()
         previous_executor = factory_module._DEFAULT_EXECUTOR
-        factory_module._DEFAULT_EXECUTOR = FactoryExecutor(harness=harness)
+        factory_module._DEFAULT_EXECUTOR = FactoryExecutor(entry_store=entries)
         self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
-        harness.create_factory(
+        entries.create_factory(
             "sweep", "Stored.",
             machine={"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
         )
@@ -8467,9 +8466,9 @@ class ExportMachineTest(unittest.TestCase):
         self.library = root / "machines"
         self.out_dir = root / "out"
         self.out_dir.mkdir(parents=True)
-        self.harness = _EntryStore()
+        self.entries = _EntryStore()
         self.previous_executor = factory_module._DEFAULT_EXECUTOR
-        self.executor = FactoryExecutor(harness=self.harness)
+        self.executor = FactoryExecutor(entry_store=self.entries)
         factory_module._DEFAULT_EXECUTOR = self.executor
         self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", self.previous_executor))
         # Keep settings resolution isolated, using the same document shape
@@ -8545,7 +8544,7 @@ class ExportMachineTest(unittest.TestCase):
         # A stored entry's content is free prose; a machine description
         # must be a single line, so the export collapses it instead of
         # refusing a perfectly ordinary entry.
-        self.harness.create_factory(
+        self.entries.create_factory(
             "multiline", "First line of prose.\nSecond line of prose.\n\nThird paragraph.",
             machine={"states": [{"id": "a", "entry": True, "subagent": {"prompt": "P."}}]},
         )
@@ -8585,7 +8584,7 @@ class ExportMachineTest(unittest.TestCase):
         )
 
     def test_exports_a_stored_entry_spec_byte_pretty(self) -> None:
-        self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
+        self.entries.create_factory("Sweep", "A machine that sweeps.", id="sweep", dag=valid_dag())
         out = self.out_dir / "sweep.MACHINE.md"
         result = export_machine("sweep", out, repo_dir=None, user_dir=self.library)
         self.assertEqual(result["source"], "spec")
@@ -8597,13 +8596,13 @@ class ExportMachineTest(unittest.TestCase):
         self.assertEqual(canonicalize_factory_spec(machine.spec), canonicalize_factory_spec(valid_dag()))
 
     def test_entry_ids_that_are_not_machine_names_are_rejected(self) -> None:
-        self.harness.create_factory("Sweep", "A machine that sweeps.", id="Sweep Entry", dag=valid_dag())
+        self.entries.create_factory("Sweep", "A machine that sweeps.", id="Sweep Entry", dag=valid_dag())
         with self.assertRaises(ValueError) as ctx:
             export_machine("Sweep Entry", self.out_dir / "x.MACHINE.md", repo_dir=None, user_dir=self.library)
         self.assertIn("invalid characters", str(ctx.exception))
 
     def test_exports_a_runs_canonical_machine(self) -> None:
-        self.harness.create_factory("Sweep", "A machine that sweeps.", id="sweep", machine=valid_machine())
+        self.entries.create_factory("Sweep", "A machine that sweeps.", id="sweep", machine=valid_machine())
         run = self.executor._create_run(
             "sweep", canonicalize_factory_spec(valid_machine()), {}, name="the run"
         )
@@ -8652,12 +8651,12 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name).resolve()
         self.library = root / "machines"
-        self.harness = _EntryStore()
-        self.harness.create_subagent("Worker", "Do the work carefully.", id="worker")
+        self.entries = _EntryStore()
+        self.entries.create_subagent("Worker", "Do the work carefully.", id="worker")
         self.clock = FakeClock()
         self.host = FakeHost(clock=self.clock)
         self.sleeps = ClockSleep(self.clock)
-        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, entry_store=self.entries)
         previous_executor = factory_module._DEFAULT_EXECUTOR
         factory_module._DEFAULT_EXECUTOR = self.executor
         self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
@@ -8749,7 +8748,7 @@ class FactoryRunFromLibraryTest(unittest.TestCase):
             "sweep",
             {"nodes": [{"id": "only-a", "subagent": "worker"}]},
         )
-        self.harness.create_factory(
+        self.entries.create_factory(
             "Sweep", "A stored instance.", id="sweep", dag={"nodes": [
                 {"id": "entry-a", "subagent": "worker"},
                 {"id": "entry-b", "subagent": "worker"},

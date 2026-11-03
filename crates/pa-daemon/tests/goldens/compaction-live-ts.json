@@ -87,7 +87,6 @@
   "details",
   "fromHook",
   "customInstructions",
-  "usage",
-  "harnessDigest"
+  "usage"
  ]
 }

@@ -661,9 +661,10 @@ mod tests {
                 assert_eq!(payloads, 2 * (options.sessions + 9));
             } else {
                 assert_eq!(payloads, 0);
-                assert!(!manifest.files.iter().any(|file| {
-                    file.contains("/harness/") || file.ends_with("scheduled-jobs.json")
-                }));
+                assert!(!manifest
+                    .files
+                    .iter()
+                    .any(|file| { file.ends_with("scheduled-jobs.json") }));
             }
         }
     }

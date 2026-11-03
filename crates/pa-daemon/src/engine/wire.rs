@@ -101,8 +101,8 @@ pub enum EngineEvent {
     /// forwards only the later runs' (the worker's frame opens the first run).
     AgentStart,
     /// An agent run ended (TS wire `agent_end`): the run's whole message
-    /// set in the session wire shapes — the prompt rows (the harness digest
-    /// and the user row), every assistant row, the tool results, and every
+    /// set in the session wire shapes — the prompt rows (the user row),
+    /// every assistant row, the tool results, and every
     /// steering/follow-up/continuation row drained within the run. Emitted
     /// per agent run, aborts and provider errors included (the messages
     /// carry the aborted/error row), like the TS session's loop-event

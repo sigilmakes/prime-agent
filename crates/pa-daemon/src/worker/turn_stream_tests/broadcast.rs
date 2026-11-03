@@ -425,14 +425,6 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
         ["user", "assistant"],
         "the failed run carries its accepted user and terminal assistant: {events:?}"
     );
-    assert!(
-        !first["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["customType"] == "harness_digest"),
-        "the optional harness must not inject a legacy digest row"
-    );
     assert_eq!(
         first["messages"][0]["content"],
         json!([{ "type": "text", "text": "retried turn for the agent end probe" }]),

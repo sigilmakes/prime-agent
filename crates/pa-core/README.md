@@ -127,8 +127,8 @@ and releases upload capacity during retry waits; exhaustion retains durable inte
 `reconcile(Vec<PluginSource>)`, `snapshot()`, and
 `invoke(&Contribution, JSON, CancellationToken)`. This is a new public core interface
 and embedded-VM dependency. It is not engine, kernel, prompt, settings, or TUI integration,
-and it does not make the continual harness optional by itself. A native test consumer
-is provisional until those integration slices replace their current policies.
+and it does not by itself activate any optional first-party plugin. A native test
+consumer is provisional until those integration slices replace their current policies.
 
 Each enabled source returns a declaration table with optional dense `exports`,
 `commands`, and `hooks` arrays. Each entry has `name`, optional `description`, optional

@@ -40,7 +40,7 @@ DIR/
     sessions/<uuid>.jsonl          # current-format session files (flat)
     sessions-archive/<uuid>.jsonl
     rlm-ledger/<hash16>.jsonl      # written through pa-daemon's RlmSpawnLedger
-    session-artifacts/...          # kernel-state stubs, harness/, sub-<id>/ trees
+    session-artifacts/...          # kernel-state stubs, sub-<id>/ trees
 ```
 
 Row payloads are serialized from the product's own types (pa-types message
