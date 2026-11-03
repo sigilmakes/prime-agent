@@ -43,7 +43,6 @@ SKILL_APIS = {
     "compact": ("status", "run"),
     "edit": ("run",),
     "goal": ("get", "create", "complete"),
-    "refine": ("status", "run"),
     "rlm_heartbeat": ("list", "create", "update", "delete"),
     "websearch": ("run",),
 }

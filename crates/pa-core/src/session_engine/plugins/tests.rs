@@ -55,8 +55,9 @@ impl Fixture {
         std::fs::write(cwd.join("alpha.lua"), alpha).unwrap();
         std::fs::write(cwd.join("beta.lua"), BETA).unwrap();
         std::fs::write(agent.join("settings.json"), json!({
-            "harnessRefinements":false,"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
+            "enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
             "plugins":{
+                "harness":{"enabled":false},
                 "alpha":{"enabled":true,"path":"alpha.lua","config":{"value":"global","nested":{"kept":true}}},
                 "beta":{"enabled":true,"path":"beta.lua","config":{"value":"second"}}
             }
@@ -261,11 +262,6 @@ async fn configured_plugins_cross_engine_kernel_and_slash_surfaces() {
     assert!(listed
         .iter()
         .any(|entry| entry.name == "alpha_command" && entry.plugin.is_some()));
-    assert!(
-        listed.iter().all(|entry| entry.name != "refine"),
-        "an inactive harness contributes no command and core reserves no refine command"
-    );
-    assert_eq!(engine.session.classify_session_command("/refine"), None);
     let result = command(engine, "/alpha_command some arguments").await;
     assert_eq!(result.error, None);
     assert!(result

@@ -585,7 +585,7 @@ mod tests {
         std::fs::write(
             agent.join("settings.json"),
             serde_json::json!({
-                "enableBuiltinSkills": false, "harnessRefinements":false,
+                "enableBuiltinSkills": false,
                 "plugins":{"test":{"enabled":true,"path":"test.lua"}}
             })
             .to_string(),

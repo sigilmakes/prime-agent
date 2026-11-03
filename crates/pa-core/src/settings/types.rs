@@ -115,15 +115,6 @@ pub struct BranchSummarySettings {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AutoRefineSettings {
-    pub enabled: Option<bool>,
-    pub turn_interval: Option<u64>,
-    pub compact: Option<bool>,
-    pub cooldown_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProviderWaitSettings {
     pub enabled: Option<bool>,
     pub base_delay_ms: Option<u64>,
@@ -313,9 +304,12 @@ pub struct Settings {
     pub follow_up_mode: Option<QueueModeSetting>,
     pub theme: Option<String>,
     pub compaction: Option<CompactionSettings>,
-    pub auto_refine: Option<AutoRefineSettings>,
-    /// Master switch for harness creation and context loading; unset preserves enabled behavior.
-    pub harness_refinements: Option<bool>,
+    /// Scopes loaded into every session's harness context in addition to the
+    /// session's own scope. Unset means `["global"]`: cross-session memory then
+    /// participates without an explicit `plugin.harness.enroll`. An empty array
+    /// loads only the session scope, and a session's saved enrollment still
+    /// overrides these defaults.
+    pub harness_scopes: Option<Vec<String>>,
     pub factory: Option<FactorySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,

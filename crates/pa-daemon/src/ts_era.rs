@@ -50,7 +50,6 @@ mod tests {
             ("agent-traces-outbox.json", "legacy inert outbox marker"),
             ("agent-traces-outbox/hash.json", "legacy inert outbox entry"),
             ("cron-jobs.json", "schedule"),
-            ("harness/refinements.jsonl", "retained local history"),
         ] {
             let path = agent_dir.join(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

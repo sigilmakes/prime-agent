@@ -314,9 +314,9 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Install the worker's turn-activity probe: deferred plugin jobs (the
-    /// continual-harness refinement review) then wait for the turn boundary
-    /// instead of treating a provider retry gap as idle.
+    /// Install the worker's turn-activity probe: deferred plugin jobs then
+    /// wait for the turn boundary instead of treating a provider retry gap as
+    /// idle.
     ///
     /// The probe reads the worker's turn-scoped flags, the same snapshot
     /// `scheduled_jobs` uses for cron deferral: `busy` spans the whole turn

@@ -77,7 +77,7 @@ pub struct SessionEngineConfig {
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
     /// The session's depth in the RLM recursion tree (0 for top-level
-    /// sessions); gates the `refine.*` host requests.
+    /// sessions).
     pub rlm_depth: Option<u32>,
     /// Whether the session runs without a daemon: nothing outside the
     /// session itself (no scheduler, no bash-completion wake) starts a
@@ -433,7 +433,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
             config
                 .conversation_log_path
                 .as_deref()
-                .and_then(super::harness_digest::session_artifact_dir_for_log)
+                .and_then(super::session_artifact_dir_for_log)
         });
     // A snapshot in the artifact dir revives the namespace on the next boot
     // of the same session; `has_snapshot` drives the resume prewarm below.
@@ -624,7 +624,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         _ => unreachable!("one initial context snapshot"),
     };
     let context_archive = context.archive;
-    let existing_messages = super::refinement_gate::without_refinements(context.messages);
+    let existing_messages = context.messages;
     let full_model: Option<pa_types::ai::Model> = config
         .model_info
         .clone()
@@ -716,11 +716,11 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         },
         stream_fn: Some(agent_stream_fn),
         // The session conversion rules apply at the loop's LLM boundary
-        // (TS `convertToLlm`): bookkeeping and legacy harness rows drop.
-        // Active plugin context arrives through explicit contributions.
+        // (TS `convertToLlm`): bookkeeping rows drop. Active plugin context
+        // arrives through explicit contributions.
         convert_to_llm: Some(super::request_timing::instrument_convert_to_llm(
             std::sync::Arc::clone(&request_timing_wiring),
-            super::refinement_gate::convert_to_llm(),
+            super::messages::engine_convert_to_llm(),
         )),
         // Refresh the durable projection before the model-phase strategy callback.
         transform_context: Some(super::request_timing::instrument_transform_context(
@@ -864,7 +864,6 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     session.context_archive = Arc::clone(&context_archive_state);
     session.context_model = std::sync::RwLock::new(full_model);
     super::plugins::observe_turns(&agent, Arc::clone(&plugins)).await;
-    super::plugin_observers::observe_runs(&agent, plugins, Arc::clone(&wiring.session)).await;
     session.ollama_cloud = ollama_cloud;
     session.set_agent_dir(config.agent_dir.clone());
     // Every compaction path reads the session's resolved compaction

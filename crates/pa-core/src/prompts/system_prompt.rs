@@ -413,7 +413,7 @@ mod tests {
             messages_path: Some("/log.jsonl".to_string()),
             skills: vec![
                 skill("web-search", Some("websearch")),
-                skill("refine", Some("refine")),
+                skill("report", Some("report")),
                 skill("agent-message", Some("agent_message")),
             ],
             ..Default::default()

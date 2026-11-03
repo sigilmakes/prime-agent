@@ -66,9 +66,6 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
             _ => Some(message.clone()),
         },
         FileEntry::CustomMessage { payload, .. } => {
-            if payload.custom_type == "harness_digest" {
-                return None;
-            }
             Some(AgentMessage::Custom(pa_types::session::CustomMessage {
                 custom_type: payload.custom_type.clone(),
                 content: payload.content.clone(),
@@ -453,13 +450,7 @@ pub(crate) async fn summarize_attempt(
         tokens_before: attempt.tokens_before,
         usage: summed_usage(&slices),
     };
-    let entry = compaction_entry_for(
-        &result,
-        &attempt.details,
-        options.custom_instructions,
-        None,
-        None,
-    );
+    let entry = compaction_entry_for(&result, &attempt.details, options.custom_instructions);
     Ok(PreparedCompaction { result, entry })
 }
 

@@ -3,10 +3,7 @@
 //! A deferred plugin job may only run at a genuine turn boundary. The agent's
 //! run slot is per attempt, so a provider retry gap looks idle there, and a
 //! compaction-driven retry (an overflow settle that compacts and re-issues the
-//! turn) is idle for even longer. TS draws the same line: its auto-refine seam
-//! returns before scheduling from an `agent_end` that initiated a retry
-//! (`agent-session.ts:4740`) and never reviews while `isStreaming || isCompacting`
-//! (`agent-session.ts:9318-9319`).
+//! turn) is idle for even longer.
 //!
 //! The state is the ENGINE's, not a host's: [`TurnActivityState`] is owned by the
 //! session and set from the session's own turn, compaction and retry scopes, so a

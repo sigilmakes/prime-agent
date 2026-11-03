@@ -89,7 +89,6 @@ const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
     "set_auto_compaction",
     "set_auto_retry",
     "compact",
-    "refine",
     "abort_compaction",
     "abort_branch_summary",
     "abort_retry",
@@ -392,7 +391,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "compact",
         r#"{"type": "compact", "activeSessionId": "sess"}"#,
     ),
-    ("refine", r#"{"type": "refine", "activeSessionId": "sess"}"#),
     (
         "abort_compaction",
         r#"{"type": "abort_compaction", "activeSessionId": "sess"}"#,

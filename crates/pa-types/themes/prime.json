@@ -45,8 +45,6 @@
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "",
 		"customMessageLabel": "warning",
-		"refinementHeader": "#9575cd",
-		"refinementSummary": "#b7a1d6",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",

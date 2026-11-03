@@ -50,7 +50,7 @@ Session slash commands (`print_session_command.rs`): `/compact`, `/goal`,
 includes `session_action_update` phase frames around the durable echo row,
 `compaction_start`/`compaction_end` for `/compact`, the unconditional
 `goal_update` for `/goal`, result rows, and the settled queue frame.
-`/refine` is not a builtin; it exists only when an active plugin registers it. A `/goal` start (or resume) drains its scheduled
+A `/goal` start (or resume) drains its scheduled
 continuation inside the same prompt wait; a failed command rejects the
 prompt wait (the raw error to stderr, exit 1, no later prompts). Client
 commands (`/model`, `/tree`, ...) and unknown slash input are rejected in headless
@@ -63,7 +63,7 @@ Print mode joins admitted plugin jobs before the next input or process exit,
 without waiting for future timers. New command-job failures reject that command;
 automatic-job failures are diagnostics. JSON reports terminal jobs with
 `plugin_job_update` rows. The optional harness supplies model-only context;
-there is no canonical `harness_digest` pair or hardwired refinement event.
+there is no canonical `harness_digest` pair or hardwired event.
 The stream retains the session header (version 3), slim `message_update`
 deltas, `tool_execution_update`, compaction events and outcome rows, and goal
 session-action frames. Verifiers: `print_runtime_e2e` and `plugin_headless_e2e`.

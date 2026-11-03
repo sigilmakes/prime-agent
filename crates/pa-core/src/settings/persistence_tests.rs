@@ -130,57 +130,6 @@ fn resource_save_survives_an_unrelated_later_save() {
 }
 
 #[test]
-fn harness_refinements_persist_without_clobbering_other_settings() {
-    let (storage, mut manager) =
-        fixture(r#"{"theme":"light","autoRefine":{"turnInterval":3},"future":{"keep":true}}"#);
-    assert!(manager.get_harness_refinements());
-    manager.set_harness_refinements(false).unwrap();
-    assert!(!manager.reopen().get_harness_refinements());
-    assert_eq!(
-        document(storage.as_ref()),
-        json!({
-            "theme":"light", "autoRefine":{"turnInterval":3}, "future":{"keep":true}, "harnessRefinements":false
-        })
-    );
-    manager.set_harness_refinements(true).unwrap();
-    assert!(manager.reopen().get_harness_refinements());
-}
-
-#[test]
-fn harness_refinements_ignore_project_overrides_and_resolve_global_wrong_types() {
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let project_dir = dir.path().join(".prime/agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::create_dir_all(&project_dir).unwrap();
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        r#"{"harnessRefinements":false}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        project_dir.join("settings.json"),
-        r#"{"harnessRefinements":true}"#,
-    )
-    .unwrap();
-    let mut manager = SettingsManager::create(dir.path(), &agent_dir);
-    assert!(!manager.get_harness_refinements());
-    manager.set_harness_refinements(true).unwrap();
-    std::fs::write(
-        project_dir.join("settings.json"),
-        r#"{"harnessRefinements":false}"#,
-    )
-    .unwrap();
-    assert!(manager.reopen().get_harness_refinements());
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        r#"{"harnessRefinements":"false"}"#,
-    )
-    .unwrap();
-    assert!(manager.reopen().get_harness_refinements());
-}
-
-#[test]
 fn compaction_percentage_preserves_siblings_and_survives_reload() {
     let (storage, mut manager) =
         fixture(r#"{"compaction":{"enabled":false,"reserveTokens":1234,"future":"keep"}}"#);

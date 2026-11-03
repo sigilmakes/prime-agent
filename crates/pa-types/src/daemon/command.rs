@@ -951,19 +951,6 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    Refine {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        instructions: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rollback_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        global: Option<bool>,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
     AbortCompaction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

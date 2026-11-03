@@ -16,7 +16,6 @@ pub use context_strategy::ContextStartupBoundary;
 pub mod factory_host;
 pub mod goal_boundary;
 pub mod goal_driver;
-pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
 pub mod image_model_routing;
@@ -28,14 +27,12 @@ pub mod ollama_cloud;
 pub(crate) mod optchat;
 mod plugin_context;
 mod plugin_jobs;
-mod plugin_observers;
 mod plugin_services;
 pub mod plugins;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_park;
 pub mod provider_retry;
-mod refinement_gate;
 pub mod request_timing;
 pub mod rlm_host;
 pub mod rlm_notices;
@@ -812,13 +809,18 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
     ))
 }
 
-/// Preserve typed provenance while suppressing legacy host-owned harness context.
-/// Canonical history and user-authored text are never changed.
+/// Custom rows persist as session custom messages.
 pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<AgentMessage> {
-    let message = refinement_gate::without_refinements(vec![message.clone()])
-        .into_iter()
-        .next()?;
     serde_json::from_value(serde_json::to_value(message).ok()?).ok()
+}
+
+/// Session artifact directory implied by a conversation-log path
+/// (`dirname(dirname(file))/session-artifacts/<id>`).
+#[must_use]
+pub fn session_artifact_dir_for_log(log: &std::path::Path) -> Option<std::path::PathBuf> {
+    let id = log.file_stem()?.to_string_lossy().to_string();
+    let artifacts_root = log.parent()?.parent()?.join("session-artifacts");
+    Some(artifacts_root.join(id))
 }
 
 /// Rows that fail the conversion drop.

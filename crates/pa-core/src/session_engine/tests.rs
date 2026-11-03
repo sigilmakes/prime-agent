@@ -141,7 +141,7 @@ async fn provider_session(provider: Arc<ScriptedProvider>) -> (AgentSession, tem
             model: Some(test_model()),
             ..Default::default()
         },
-        convert_to_llm: Some(crate::session_engine::refinement_gate::convert_to_llm()),
+        convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
         stream_fn: Some(provider.stream_fn()),
         ..Default::default()
     });

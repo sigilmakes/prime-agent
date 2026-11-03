@@ -8,13 +8,7 @@ Client Protocol clients, served over a daemon session (initialize, session/new, 
 session/cancel, and the outgoing session/update notification with
 namespaced `_meta` correlation), owned by this crate because
 wire-protocol serving is its area; the worker turn loop owns compaction
-arms, auto-refine, and goal continuation. The compact-trigger
-auto-refine scheduling owns its surface here (`compact_autorefine.rs`
-for the daemon worker: every compaction arm plus the manual `compact`
-command arm the pa-core trigger, and the quiescent turn boundaries /
-the command path consume the gated review - TS
-`_scheduleAutoRefineAfterCompaction` plus the background
-`_maybeAutoRefine("compact")`).
+arms and goal continuation.
 Explicit model refresh (`supervisor/model_refresh.rs`): a coalesced, bounded
 ready-resident leader sweep with local snapshot fan-out; never launches saved
 or disconnected workers. `model_refresh_worker.rs` owns the session commands;
@@ -170,8 +164,7 @@ the engine (`SessionEngine::mint_post_compaction_goal_continuation`, the
 with the durable goal-context row), emits the mint's `goal_update`, then
 resumes: the parked continuation crosses the suspension gate through the
 resume site and the turn runner drives it (the `_schedulePostCompactionContinue`
-schedule). The compact-trigger auto-refine defers behind that continuation
-(TS `_compactAutoRefinePending`), servicing at its turn boundary.
+schedule).
 Thread-goal durability (TS one-store parity): every `goal_update`
 announcement mirrors the new state as a `thread_goal_state` custom row in
 the worker session file (the turn emit closure; the compact mint persists

@@ -279,7 +279,7 @@ fn real_supervisor_worker_discovers_invokes_reloads_and_retires_lua_commands() {
     let value: Value = serde_json::from_str(invoked["text"].as_str().unwrap()).unwrap();
     assert_eq!(value["value"], "replacement");
     assert_eq!(value["source"], "replacement");
-    fixture.settings(&json!({"plugins":{"fixture":{"enabled":false}}}));
+    fixture.settings(&json!({"plugins":{"fixture":{"enabled":false},"harness":{"enabled":false}}}));
     checked(
         &mut wire,
         "disable",

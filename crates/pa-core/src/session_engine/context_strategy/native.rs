@@ -234,7 +234,6 @@ pub(super) async fn run(
     output: &Value,
     transaction: &mut CompactionAttempt,
     options: &CompactOptions<'_>,
-    refinements: bool,
 ) -> anyhow::Result<Option<PreparedCompaction>> {
     let tokens =
         crate::session_engine::compaction::estimate_context_tokens(&preparation.messages).tokens;
@@ -261,14 +260,6 @@ pub(super) async fn run(
         ) else {
             return Ok(None);
         };
-        if !refinements {
-            attempt.history =
-                crate::session_engine::refinement_gate::without_refinements(attempt.history);
-            attempt.turn_prefix_messages =
-                crate::session_engine::refinement_gate::without_refinements(
-                    attempt.turn_prefix_messages,
-                );
-        }
         attempt.semantic_compaction = transaction.semantic_compaction.take();
         let result = compact_session::summarize_attempt(&attempt, options).await;
         transaction.semantic_compaction = attempt.semantic_compaction.take();
@@ -448,8 +439,6 @@ pub(super) async fn run(
         &result,
         &CompactionDetails::default(),
         options.custom_instructions,
-        None,
-        None,
     );
     entry.context_archive = Some(ContextArchive {
         version: 1,

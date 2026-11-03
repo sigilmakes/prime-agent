@@ -46,7 +46,7 @@ const MODELS: [(&str, &str); 5] = [
     ("google", "gemini-4-pro"),
 ];
 /// The user-message word bank: plain lowercase words, joined into sentences.
-const WORDS: [&str; 49] = [
+const WORDS: [&str; 48] = [
     "the",
     "quick",
     "bench",
@@ -78,7 +78,6 @@ const WORDS: [&str; 49] = [
     "context",
     "compaction",
     "summary",
-    "refine",
     "harness",
     "memory",
     "skill",

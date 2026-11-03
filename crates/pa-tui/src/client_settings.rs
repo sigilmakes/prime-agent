@@ -6,18 +6,6 @@
 use anyhow::Result;
 
 pub trait ClientSettings: Send + Sync {
-    /// Master harness refinement switch, enabled by default.
-    fn harness_refinements(&self) -> bool {
-        true
-    }
-    /// Persist the master harness refinement switch.
-    ///
-    /// # Errors
-    /// Returns an error if the settings store fails or is unavailable.
-    fn set_harness_refinements(&self, _enabled: bool) -> Result<()> {
-        anyhow::bail!("Harness refinement settings are unavailable")
-    }
-
     /// Automatic compaction percentage ceiling; output headroom may trigger earlier.
     fn compaction_threshold_percent(&self) -> f64;
     /// Persist the percentage globally.

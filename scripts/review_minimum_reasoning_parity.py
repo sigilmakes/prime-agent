@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture mandatory-thinking summary/refiner requests from real TS/Rust binaries.
+"""Capture mandatory-thinking summary requests from real TS/Rust binaries.
 
 The pinned TS v0.9.8 release and the current Rust binary run identical Python
 cells through their offered REPL tool. Only auxiliary request thinking controls
@@ -55,10 +55,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(422, self.server.error)
             return
         if auxiliary:
-            content = ('{"summary":"No durable change justified","rationale":"Fixture only",'
-                       '"expectedOutcome":"No change","edits":[]}'
-                       if self.server.scenario == 'refine' else
-                       '## Goal\nVerify auxiliary thinking controls.\n## Progress\nSeed fixture complete.')
+            content = '## Goal\nVerify auxiliary thinking controls.\n## Progress\nSeed fixture complete.' 
             delta, finish = {'content': content}, 'stop'
         else:
             self.server.main_requests += 1
@@ -159,7 +156,7 @@ def run_case(binary, label, scenario, root, observation):
            'PRIME_AGENT_KERNEL_PYTHON', 'PA_E2E_KERNEL_PYTHON') if key in os.environ}
     library = Path(os.environ['PI_PACKAGE_DIR']) / 'skills'
     paths = sorted(str(path) for path in library.glob('*/src') if path.is_dir())
-    for skill in ('compact', 'refine'):
+    for skill in ('compact',):
         assert (library / skill / 'src' / skill / '__init__.py').is_file(), skill + ' skill missing'
     env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent),
@@ -211,14 +208,13 @@ def run_case(binary, label, scenario, root, observation):
         assert auxiliary, 'scheduled operation made no auxiliary provider request'
         controls = [{key: body[key] for key in ('enable_thinking', 'thinking', 'reasoning_effort',
                     'reasoning', 'chat_template_kwargs') if key in body} for body in auxiliary]
-        expected = {'enable_thinking': label == 'rust' or scenario == 'refine'}
+        expected = {'enable_thinking': label == 'rust'}
         assert all(control == expected for control in controls), {'expected': expected, 'actual': controls}
         # A scheduled cell alone is insufficient: check the persisted operation result.
         entries = [json.loads(line) for path in sessions.rglob('*.jsonl')
                    for line in path.read_text().splitlines() if line.strip()]
         outcomes = [entry for entry in entries if
                     (scenario == 'compact' and entry.get('type') == 'compaction') or
-                    (scenario == 'refine' and entry.get('customType') == 'refinement_outcome') or
                     (scenario == 'branch' and entry.get('type') == 'branch_summary')]
         assert outcomes, 'no durable completed ' + scenario + ' outcome'
         observation.update(controls=controls, outcome_count=len(outcomes), tool_name=server.tool_name)
@@ -235,8 +231,8 @@ def main():
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     result = {'verified': False, 'runs': {},
-              'scope': 'Compaction, branch summary, and refinement auxiliary thinking controls; no frame parity claim.',
-              'intended_difference': 'TS v0.9.8 compaction and branch summary requests disable zai thinking; Rust enables mandatory thinking. Refinement enables thinking in both.',
+              'scope': 'Compaction and branch summary auxiliary thinking controls; no frame parity claim.',
+              'intended_difference': 'TS v0.9.8 compaction and branch summary requests disable zai thinking; Rust enables mandatory thinking.',
               'fixture_compat_scope': 'Provider-level zai compat used identically by both custom-model loaders; model-level compat is not relied on.',
               'comparison': 'Both schedule and persist completed outcomes. Every captured auxiliary request must match the exact expected control; request counts and full bodies remain in runs.'}
     try:
@@ -249,7 +245,7 @@ def main():
         result['binaries'] = {label: {'path': str(path), 'sha256': sha256(path)}
                               for label, path in binaries.items()}
         with tempfile.TemporaryDirectory(prefix='minimum-reasoning-parity-') as temp:
-            for scenario in ('compact', 'branch', 'refine'):
+            for scenario in ('compact', 'branch'):
                 results = {}
                 for label, binary in binaries.items():
                     observation = {}

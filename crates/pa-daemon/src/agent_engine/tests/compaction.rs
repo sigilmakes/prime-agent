@@ -29,7 +29,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
     )
     .unwrap();
     std::fs::write(agent_dir.join("settings.json"), json!({
-        "harnessRefinements":false, "enableBuiltinSkills":false, "prewarmIpythonKernel":false,
+        "enableBuiltinSkills":false, "prewarmIpythonKernel":false,
         "contextStrategy":"default_context/rolling", "plugins":{
             "default_context":{"config":{"policy":"full", "compactors":["server_compaction/server"]}},
             "server_compaction":{"config":{"route":{

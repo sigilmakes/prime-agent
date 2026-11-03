@@ -1533,7 +1533,7 @@ fn session_command_rows_respect_display_and_shape() {
     let hidden = json!({
         "role": "custom",
         "customType": "session_slash_command_result",
-        "content": "Refined continual harness state: 1 edit applied.",
+        "content": "Command output: 1 edit applied.",
         "display": false,
     });
     assert!(custom_message_entries(&hidden).is_empty());

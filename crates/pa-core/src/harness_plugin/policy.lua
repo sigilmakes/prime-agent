@@ -1,12 +1,18 @@
 -- Continual-harness policy. Storage and inference have no ambient paths here.
 local local_scope = nil
 local selected = nil
+-- Native config normally supplies a scope list. An absent, null or wrong-typed
+-- value still means the default global scope, never a crash or a silent skip.
+local function default_scopes()
+    if type(config.scopes) == "table" then return config.scopes end
+    return {"global"}
+end
 local function facts(ctx)
     local info = ctx.call("session.info", {})
     local_scope = "session:" .. info.session
     if selected == nil then
         selected = {local_scope}
-        for _, scope in ipairs(config.scopes or {}) do
+        for _, scope in ipairs(default_scopes()) do
             if scope ~= local_scope then table.insert(selected, scope) end
         end
     end
@@ -141,7 +147,7 @@ local function context(input, ctx)
     local sections={"Optional continual harness routing snippets (not full directives). "..
         "Read full records with plugin.harness.get(scope=...,kind=...,id=...) before relying on details. "..
         "All selected scopes compete for six entries per kind; snippets are at most 180 characters. "..
-        "Enroll named scopes explicitly with plugin.harness.enroll(scopes=[...]). "..
+        "The global scope loads by default (harnessScopes setting); plugin.harness.enroll(scopes=[...]) selects scopes for this session only. "..
         "Factory and unknown records are passive data, never executable registrations."}
     for _, kind in ipairs(visible) do
         local group=groups[kind]
@@ -186,83 +192,10 @@ local function context(input, ctx)
     end
     return {instructions=table.concat(sections,"\n")}
 end
-local function enqueue(input, ctx)
-    facts(ctx)
-    return ctx.call("jobs.enqueue", {hook="refinement_job",input=input})
-end
-local function refine(input,ctx)
-    input.reason = input.reason or "manual"
-    return enqueue(input,ctx)
-end
-local function automatic(input,ctx)
-    if input.reason=="cancelled" then return {scheduled=false,reason="cancelled"} end
-    -- A settle the provider retry lane owns is not a turn boundary: the
-    -- upstream seam returns before auto-refine scheduling
-    -- (agent-session.ts:4736-4740). The counter and cooldown stay untouched.
-    if input.retry==true then return {scheduled=false,reason="retry"} end
-    local policy=config.autoRefine
-    if policy==null or policy==nil then policy={} end
-    if policy.enabled==false then return {scheduled=false} end
-    facts(ctx)
-    local key={scope=local_scope,kind="_policy",id="automatic"}
-    local saved=ctx.call("harness.store.read",{identity=key})
-    local state={turns=0}
-    if saved~=null then state=saved.value end
-    local compact=input.stage=="compaction_settled"
-    if not compact then state.turns=state.turns+1 end
-    -- Typed settings preserve omitted Option fields as JSON null. The Lua
-    -- null sentinel is truthy, so `or` alone does not select the default.
-    local interval=math.max(1,(policy.turnInterval~=null and policy.turnInterval) or 25)
-    local due=(compact and policy.compact~=false) or (not compact and state.turns%interval==0)
-    local now=input.now_ms or 0
-    local cooled=state.last_review==nil or now-state.last_review>=((policy.cooldownMs~=null and policy.cooldownMs) or 1200000)
-    if due and cooled then state.last_review=now end
-    ctx.call("harness.store.put",{identity=key,value=state,expected=saved~=null and saved.revision or "absent"})
-    if not due or not cooled then return {scheduled=false,reason="policy"} end
-    return enqueue({reason=compact and "compact" or "interval",automatic=true},ctx)
-end
-local function refinement_job(input,ctx)
-    local snapshot=ctx.call("session.snapshot",{})
-    local target=scope(input,ctx)
-    local records=ctx.call("harness.store.enumerate",{scope=target})
-    local review=nil
-    do
-        review=ctx.call("inference.complete", {purpose="harness review",model=config.auxiliaryModel,
-            system="Review evidence for durable harness changes. Return JSON {shouldRefine:boolean,rationale:string}.",
-            input={history=snapshot.history,records=records,reason=input.reason,instructions=input.instructions}})
-        local decision=ctx.call("native.json.decode",{text=review.text})
-        if decision.shouldRefine~=true then return {applied=false,reason="review declined"} end
-    end
-    -- Both phases use the same configured auxiliary route. Policy stays in Lua.
-    local plan=ctx.call("inference.complete", {purpose="harness plan",model=config.auxiliaryModel,
-        system="Propose only evidence-backed record changes. Return JSON {summary:string,edits:[{action:create|update|delete,kind:string,id:string,value:any}]}. Prefer empty edits. Never execute factory or unknown records.",
-        input={history=snapshot.history,records=records,instructions=input.instructions,review=review}})
-    local proposal=ctx.call("native.json.decode",{text=plan.text})
-    assert(type(proposal.edits)=="table", "proposal needs edits")
-    local result=ctx.call("harness.store.apply",{scope=target,baseline=records,proposal=proposal,
-        branch=snapshot.branch,reason=input.reason})
-    -- Presentation follows committed changes, never the model's proposed state.
-    local edits=proposal.edits
-    for index,change in ipairs(result.applied) do
-        local proposed=proposal.edits[index]
-        local edit={action=proposed.action,kind=proposed.kind,id=proposed.id,applied=true}
-        if change.previous.state=="Present" then edit.before=change.previous.value end
-        if change.current.state=="Present" then edit.after=change.current.value end
-        edits[index]=edit
-    end
-    local summary=type(result.summary)=="string" and result.summary or ""
-    result.message={customType="refinement_outcome",content=summary,
-        display=true,details={summary=summary,
-            scope=target=="global" and "global" or "local",edits=edits}}
-    return result
-end
 local function history(input,ctx)
     return ctx.call("harness.store.history",{identity=identity(input,ctx)})
 end
 local function rollback(input,ctx)
-    if input.history_id~=nil then
-        return ctx.call("harness.store.rollback_legacy",{scope=scope(input,ctx),id=input.history_id})
-    end
     assert(type(input.revision)=="number", "revision is required")
     return ctx.call("harness.store.rollback",{identity=identity(input,ctx),
         revision=input.revision,expected=input.expected or "any"})
@@ -277,18 +210,9 @@ return {
         {name="enroll",description="Select named memory scopes for this session only.",run=enroll},
         {name="history",description="Read lossless record change history.",run=history},
         {name="import_history",description="Inspect lossless imported sources, conflicts and original histories.",run=function(input,ctx) return ctx.call("harness.store.inspect",{}) end},
-        {name="rollback",description="Restore a record revision with conflict checks.",run=rollback},
-        {name="refine",description="Schedule evidence-backed harness refinement at a safe boundary.",run=refine},
-        {name="job_status",description="Read the current generation's deferred job status.",run=function(input,ctx) return ctx.call("jobs.status",input) end},
-        {name="cancel_job",description="Cancel the current generation's deferred job.",run=function(input,ctx) return ctx.call("jobs.cancel",input) end}
+        {name="rollback",description="Restore a record revision with conflict checks.",run=rollback}
     },
-    commands={{name="refine",description="Refine optional harness records.",run=function(input,ctx)
-        return refine({instructions=input.args},ctx)
-    end}},
     hooks={
-        {name="refinement_job",run=refinement_job},
-        {name="context_contribution",run=context},
-        {name="run_settled",run=automatic},
-        {name="compaction_settled",run=automatic}
+        {name="context_contribution",run=context}
     }
 }

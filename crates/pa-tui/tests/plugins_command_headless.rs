@@ -34,7 +34,6 @@ enum WorkerMode {
     DelayedCatalog,
     StartupCatalog,
     CatalogFailure,
-    HarnessDisabled,
     PartialReload,
 }
 
@@ -153,9 +152,6 @@ impl MockSupervisor {
                             (true, "Disabled harness; saved data preserved")
                         }
                         "/reload" => (true, "Reloaded native Lua plugins"),
-                        "/refine request" if !matches!(self.mode, WorkerMode::HarnessDisabled) => {
-                            (true, "Harness command scheduled")
-                        }
                         "/native-check status" if !catalog_pruned => {
                             (true, "Native invocation completed")
                         }
@@ -377,15 +373,7 @@ fn command_rows(mode: WorkerMode, pruned: bool) -> Vec<Value> {
     if pruned {
         commands.retain(|command| command["name"] != "native-check");
     }
-    if !matches!(mode, WorkerMode::HarnessDisabled) {
-        commands.push(json!({"name":"refine", "source":"plugin", "description":"Maintain local harness", "target": harness_target()}));
-    }
     commands
-}
-
-fn harness_target() -> Value {
-    json!({"plugin":"harness", "generation":"harness-generation", "kind":"command",
-        "name":"refine", "description":"Maintain local harness", "mode":"unary"})
 }
 
 fn target() -> Value {
@@ -641,63 +629,6 @@ fn failed_catalog_does_not_fall_back_to_a_paid_prompt() {
             .any(|c| matches!(c["type"].as_str(), Some("prompt" | "plugin_command"))),
         "{requests:?}"
     );
-}
-
-#[test]
-fn refine_completion_uses_the_optional_plugin_target_not_the_legacy_builtin() {
-    let enter = || {
-        HeadlessStep::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ))
-    };
-    let (frames, requests) = run_plan(
-        WorkerMode::Native,
-        vec![
-            HeadlessStep::Submit("/plugins".into()),
-            wait("Native Lua plugins"),
-            HeadlessStep::Type("/refin".into()),
-            HeadlessStep::SettleIdle,
-            wait("Maintain local harness"),
-            enter(),
-            HeadlessStep::Type(" request".into()),
-            enter(),
-            wait("Harness command scheduled"),
-        ],
-    );
-    assert!(frames.iter().any(|frame| frame.contains("#plugin")));
-    let command = requests
-        .iter()
-        .find(|command| command["type"] == "plugin_command" && command["text"] == "/refine request")
-        .unwrap_or_else(|| panic!("generic plugin invocation missing: {requests:?}"));
-    assert_eq!(command["target"], harness_target());
-    assert!(!requests
-        .iter()
-        .any(|command| matches!(command["type"].as_str(), Some("prompt" | "refine"))));
-}
-
-#[test]
-fn disabled_harness_is_not_a_builtin_and_never_falls_back_to_a_model_prompt() {
-    let (frames, requests) = run_plan(
-        WorkerMode::HarnessDisabled,
-        vec![
-            HeadlessStep::Type("/ref".into()),
-            HeadlessStep::SettleIdle,
-            HeadlessStep::Submit("/refine request".into()),
-            wait("Unknown plugin command"),
-        ],
-    );
-    assert!(!frames
-        .iter()
-        .any(|frame| frame.contains("Maintain local harness")));
-    let command = requests
-        .iter()
-        .find(|command| command["type"] == "plugin_command" && command["text"] == "/refine request")
-        .expect("safe optional command refusal");
-    assert!(command.get("target").is_none());
-    assert!(!requests
-        .iter()
-        .any(|command| matches!(command["type"].as_str(), Some("prompt" | "refine"))));
 }
 
 #[test]

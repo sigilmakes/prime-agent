@@ -38,8 +38,7 @@ impl Fixture {
         std::fs::write(cwd.join("provider.lua"), source).unwrap();
         std::fs::write(
             agent_dir.join("settings.json"),
-            json!({"harnessRefinements":false,
-              "enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
+            json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
               "plugins":{"route":{"enabled":true,"path":"provider.lua","config":{"tag":tag}}}
             })
             .to_string(),
@@ -321,7 +320,10 @@ async fn emitted(engine: &super::super::engine::SessionEngine) -> u64 {
     })
     .await
     .unwrap();
-    let export = &catalog["exports"][0];
+    let export = catalog["exports"]
+        .as_array()
+        .and_then(|exports| exports.iter().find(|entry| entry["name"] == "emitted"))
+        .expect("the provider plugin contributes the emitted export");
     let result = handlers.get("plugin.invoke").unwrap()(HostRequestPayload {
         data: json!({"type":"plugin.invoke","session":session,"plugin":export["plugin"],
           "generation":export["generation"],"export":"emitted","input":{}}),

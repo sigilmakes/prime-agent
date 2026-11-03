@@ -20,9 +20,11 @@ use pa_core::session::manager::SessionManager;
 use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
 use serde_json::json;
 
-/// The kernel Python with prime-agent-runtime installed (the interpreter the
-/// TS product's kernel venv bootstraps). Skipped (with a note) on machines
-/// without a live install; `PA_CORE_KERNEL_PYTHON` points at an explicit one.
+/// The kernel Python with a current prime-agent-runtime. The Rust port
+/// bootstraps its own venv (`kernel-venv-rust`); the TS product's older
+/// `kernel-venv` serves as a fallback for environments that only have it.
+/// Skipped (with a note) on machines without a live install;
+/// `PA_CORE_KERNEL_PYTHON` points at an explicit one.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_CORE_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -31,19 +33,28 @@ fn kernel_python() -> Option<PathBuf> {
             "PA_CORE_KERNEL_PYTHON {} not found",
             explicit.display()
         );
+        assert!(
+            pa_core::kernel::kernel_python_has_runtime(&explicit.to_string_lossy()),
+            "PA_CORE_KERNEL_PYTHON {} lacks a current prime-agent-runtime",
+            explicit.display()
+        );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+    let ts_candidate = PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
         |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
     ));
-    if candidate.exists() {
-        return Some(candidate);
+    for candidate in [
+        pa_core::kernel::kernel_venv_python(&pa_core::kernel::kernel_venv_dir()),
+        ts_candidate,
+    ] {
+        if candidate.exists()
+            && pa_core::kernel::kernel_python_has_runtime(&candidate.to_string_lossy())
+        {
+            return Some(candidate);
+        }
     }
-    eprintln!(
-        "kernel python {} not found; skipping live kernel test",
-        candidate.display()
-    );
+    eprintln!("no kernel python with a current prime-agent-runtime; skipping live kernel test");
     None
 }
 
@@ -210,12 +221,14 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     );
     if !std::path::Path::new(&started).exists() {
         let watch = tokio::time::timeout(boot_budget, async {
-            while !started.exists() {
+            // A failed kernel startup settles the prompt without ever writing
+            // the marker; stop waiting and report that failure at once.
+            while !started.exists() && !prompt.is_finished() {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })
         .await;
-        if watch.is_err() {
+        if !started.exists() {
             // Dump the persisted session rows so the failure is readable.
             if let Ok(entries) = std::fs::read_dir(dir.path()) {
                 for entry in entries.flatten() {
@@ -238,7 +251,11 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
                     }
                 }
             }
-            panic!("marker {} never appeared", started.display());
+            panic!(
+                "marker {} never appeared (boot budget elapsed: {})",
+                started.display(),
+                watch.is_err()
+            );
         }
     }
     // Abort strictly mid-cell.

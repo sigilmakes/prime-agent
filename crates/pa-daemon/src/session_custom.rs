@@ -1,6 +1,6 @@
 //! The custom-message & session-command surface: the worker arms for
-//! `append_custom_message`, `restore_next_turn`, `restore_actions`, `refine`,
-//! and `reload`. Wire contracts are TS-verbatim; the durable rows and
+//! `append_custom_message`, `restore_next_turn`, `restore_actions`, and
+//! `reload`. Wire contracts are TS-verbatim; the durable rows and
 //! broadcasts go through the same paths the turn runner uses.
 
 use serde_json::{json, Value};
@@ -237,27 +237,6 @@ impl Worker {
             "restore_actions",
             Some(json!({ "restored": restored })),
         )
-    }
-
-    /// Preserve legacy worker decoding, but route execution through the active
-    /// plugin command handler. Disabled or unsupported hosts reject explicitly.
-    pub(crate) async fn handle_refine(&self, payload: &Value) -> DaemonResponse {
-        let mut text = String::from("/refine");
-        if payload.get("global").and_then(Value::as_bool) == Some(true) {
-            text.push_str(" --global");
-        }
-        if let Some(rollback_id) = payload.get("rollbackId").and_then(Value::as_str) {
-            if rollback_id.is_empty() || rollback_id.chars().any(char::is_whitespace) {
-                return response_failure(None, "refine", "Invalid rollback id", None);
-            }
-            text.push_str(" rollback ");
-            text.push_str(rollback_id);
-        } else if let Some(instructions) = payload.get("instructions").and_then(Value::as_str) {
-            text.push(' ');
-            text.push_str(instructions);
-        }
-        self.run_native_plugin_command("refine", &json!({ "text": text }))
-            .await
     }
 
     /// Legacy reload also reconciles the active core plugin host. The optional
@@ -887,25 +866,6 @@ mod tests {
             assert_eq!(item.preview, None);
             assert_eq!(item.message, plain_text);
         }
-    }
-
-    /// Legacy clients get an explicit unsupported response from engines with no
-    /// plugin host, never a model prompt or a success with no handler.
-    #[tokio::test]
-    async fn legacy_refine_rejects_an_engine_without_plugin_commands() {
-        let worker = created_worker().await;
-        let response = worker
-            .dispatch(
-                "refine",
-                &json!({ "activeSessionId": "custom-session", "instructions": "tidy up" }),
-            )
-            .await;
-        assert!(!response.success);
-        assert_eq!(response.command, "refine");
-        assert_eq!(
-            response.error.as_deref(),
-            Some("This session does not support plugin commands")
-        );
     }
 
     #[tokio::test]

@@ -212,7 +212,6 @@ impl Worker {
             "append_custom_message" => self.handle_append_custom_message(payload),
             "restore_next_turn" => self.handle_restore_next_turn(payload),
             "restore_actions" => self.handle_restore_actions(payload),
-            "refine" => self.handle_refine(payload).await,
             "reload" => self.handle_reload().await,
             "plugin_command" => self.handle_plugin_command(payload).await,
             "cancel_rlm_child" => self.handle_cancel_rlm_child(payload).await,

@@ -243,7 +243,6 @@ impl AgentSession {
                 "notice": notice_landed,
             }),
         );
-        self.notify_compaction_settled(&outcome).await;
         Ok(outcome)
     }
 
@@ -273,15 +272,6 @@ impl AgentSession {
                     return Ok(CompactOutcome::Skipped(skip.user_message()));
                 }
             };
-            // The digest ranks the branch THIS attempt summarizes: a
-            // conflict retry prepares a new tree, and inputs captured
-            // once before the loop would rank the abandoned branch's
-            // terms. The capture takes the session lock itself, so it
-            // runs off the prepare hold.
-            attempt.history = super::refinement_gate::without_refinements(attempt.history);
-            attempt.turn_prefix_messages =
-                super::refinement_gate::without_refinements(attempt.turn_prefix_messages);
-            compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
             let attempt_options = crate::session_engine::compact_session::CompactOptions {
                 inference: options.inference.clone(),
                 model: options.model.clone(),
@@ -298,10 +288,7 @@ impl AgentSession {
                 &attempt_options,
             );
             let summarized = summarize.await;
-            let mut prepared = summarized?;
-            // A toggle during the summarizer request must not re-inject the captured digest.
-            prepared.entry.harness_digest = None;
-            prepared.entry.harness_state_fingerprint = None;
+            let prepared = summarized?;
             let committed = {
                 let mut session = self.session.lock().await;
                 crate::session_engine::compact_session::commit_attempt(
