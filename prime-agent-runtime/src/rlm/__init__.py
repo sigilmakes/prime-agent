@@ -9,16 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
-from .factory import (
-    FACTORY_HELP,
-    graph_factory,
-    resume_factory,
-    run_factory,
-    status_factory,
-    stop_factory,
-    watch_factory,
-)
-
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 _RENAMED_RUN_MESSAGE = "rlm.run was renamed; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 
@@ -516,70 +506,6 @@ async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagen
     return name
 
 
-class _RLMFactoryNamespace:
-    """Run library state-machine factories: rlm.factory.run/status/stop/resume,
-    plus graph/watch for live monitoring.
-
-    ``run('<machine_name>')`` validates a library machine (machine form, or
-    dag sugar that compiles to one), enters the entry states up to the
-    spec's max_parallel, and returns immediately; a kernel asyncio task
-    continues the run (nonblocking control loop). Runs live in kernel
-    memory only; children stay supervisor-owned. The six operations
-    run/status/stop/resume/graph/watch are async; await each call.
-    ``help()`` returns a string synchronously.
-
-    The default runtime resolves names from the machine library: bundled
-    seeds ship inside the runtime, and the personal library lives under
-    the agent dir. An embedding may explicitly inject an entry store;
-    only then can a matching stored spec take precedence over the library.
-    A library template runs without creating a persistent entry:
-    ``await rlm.factory.run('review-sweep')``.
-    ``prime-agent factory list | import | export`` manages the library (a
-    broken machine names its exact errors; a missing one lists what the
-    library has).
-
-    ``graph()`` returns the machine structure fused with live runtime state
-    (``status()``'s data plus the static graph): pass a live run id for one
-    run's snapshot, or nothing for the run collection. A stored spec id
-    resolves a static structure only with an explicitly injected entry store. ``watch('<run_id>', timeout)`` blocks until the
-    run's state/instance shape changes or the timeout elapses (bounded),
-    then returns the same snapshot with ``changed`` — an agent can stream
-    progress and drive orchestration programmatically, and the emitted
-    graph model renders as ASCII or genuine Mermaid from one shape.
-
-    The factory is opt-in: while the ``factory.enabled`` setting is off (the
-    default; the user turns it on with ``/factory on``), the six async calls
-    refuse with one clean message and only ``help()`` answers, so the
-    guide stays readable before opting in.
-
-    ``help()`` returns the full embedded authoring reference and API guide
-    (states, ports, guards, joins, foreach, budgets, the machine library,
-    and the API with worked examples): ``rlm.factory.help()``.
-    """
-
-    async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
-        return await run_factory(spec_id, name=name)
-
-    async def status(self, run_id: str) -> dict[str, Any]:
-        return await status_factory(run_id)
-
-    async def stop(self, run_id: str) -> dict[str, Any]:
-        return await stop_factory(run_id)
-
-    async def resume(self, run_id: str) -> dict[str, Any]:
-        return await resume_factory(run_id)
-
-    async def graph(self, ref: str | None = None) -> dict[str, Any]:
-        return graph_factory(ref)
-
-    async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
-        return await watch_factory(run_id, timeout)
-
-    def help(self) -> str:
-        """Return the embedded factory authoring reference and API guide."""
-        return FACTORY_HELP
-
-
 class _RLMNamespace:
     async def spawn(
         self,
@@ -623,8 +549,6 @@ class _RLMNamespace:
 
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
-
-    factory = _RLMFactoryNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)

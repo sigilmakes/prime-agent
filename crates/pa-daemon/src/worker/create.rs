@@ -743,12 +743,6 @@ pub(super) fn active_session_id_of(payload: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn worker_server_capabilities(agent_dir: &std::path::Path) -> Vec<String> {
-    // The factory lane advertises only while its opt-in gate reads
-    // enabled (`factory.enabled`, default off).
-    crate::factory_activity::advertised_server_capabilities(agent_dir)
-}
-
 /// RLM depth fields of a create payload: `(depth, max_depth)`. Values must
 /// fit a u32; anything else fails the create instead of silently truncating.
 fn create_payload_rlm_depth(payload: &Value) -> Result<(Option<u32>, Option<u32>), String> {

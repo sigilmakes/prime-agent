@@ -215,16 +215,6 @@ pub struct WarningSettings {
     pub anthropic_extra_usage: Option<bool>,
 }
 
-/// `factory` (the agent factory's opt-in gate): `factory.enabled` is
-/// unset/false by default, and the `/factory on` client command persists
-/// it. Both the daemon's `factory_activity` lane advertisement and the
-/// kernel's factory gate read the same shared settings key.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FactorySettings {
-    pub enabled: Option<bool>,
-}
-
 /// User-declared MCP server (settings `mcpServers` entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -310,7 +300,6 @@ pub struct Settings {
     /// loads only the session scope, and a session's saved enrollment still
     /// overrides these defaults.
     pub harness_scopes: Option<Vec<String>>,
-    pub factory: Option<FactorySettings>,
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,
     pub provider_backup_model: Option<String>,

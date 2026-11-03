@@ -453,7 +453,7 @@ mod tests {
     fn public_crud_preserves_raw_values_and_cas_rollback() -> Result<()> {
         let private = tempfile::tempdir()?;
         let store = Store::new(private.path().join("native.json"));
-        let key = identity("session:one", "factory");
+        let key = identity("session:one", "opaque");
         let raw = json!({"reference":null,"arguments":{},"future":{"x":[null,1]},"scope":null});
         let created = store.put(&key, raw.clone(), ExpectedRevision::Absent)?;
         assert!(store
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(store.read(&key)?.map(|row| row.value), Some(raw));
         assert_eq!(store.history(&key)?.len(), 5);
         store.put(
-            &identity("session:two", "factory"),
+            &identity("session:two", "opaque"),
             json!(2),
             ExpectedRevision::Absent,
         )?;

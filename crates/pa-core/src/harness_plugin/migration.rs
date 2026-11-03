@@ -358,9 +358,9 @@ mod tests {
         let private = tempfile::tempdir()?;
         let global_path = private.path().join("global.json");
         let local_path = private.path().join("local.json");
-        let raw_entry = json!({"id":"different_inner_id","scope":null,"kind":"factory","reference":null,
+        let raw_entry = json!({"id":"different_inner_id","scope":null,"kind":"opaque","reference":null,
             "arguments":{"null":null},"metadata":null,"version":7,"future":{"opaque":[1,null]}});
-        let state = json!({"schema":99,"future_top":null,"entries":{"factory":{"same":raw_entry},"future_kind":{"same":null}}});
+        let state = json!({"schema":99,"future_top":null,"entries":{"opaque":{"same":raw_entry},"future_kind":{"same":null}}});
         let global_bytes = format!("  {}\n", serde_json::to_string(&state)?);
         let local_bytes = serde_json::to_string(&state)?;
         fs::write(&global_path, &global_bytes)?;
@@ -388,7 +388,7 @@ mod tests {
         }
         let global = RecordIdentity {
             scope: "legacy_global".into(),
-            kind: "factory".into(),
+            kind: "opaque".into(),
             id: "same".into(),
         };
         assert_eq!(store.read(&global)?.map(|row| row.value), Some(raw_entry));
@@ -409,7 +409,7 @@ mod tests {
         )?;
         assert_eq!(
             store.read(&global)?.map(|row| row.value),
-            Some(state["entries"]["factory"]["same"].clone())
+            Some(state["entries"]["opaque"]["same"].clone())
         );
         assert_eq!(store.inspect()?["migrations"], inspection["migrations"]);
         Ok(())
@@ -461,7 +461,7 @@ mod tests {
     fn corrupt_archived_receipt_fails_all_native_reads_closed() -> Result<()> {
         let private = tempfile::tempdir()?;
         let path = private.path().join("legacy.json");
-        fs::write(&path, b"{\"entries\":{\"factory\":{\"id\":null}}}")?;
+        fs::write(&path, b"{\"entries\":{\"opaque\":{\"id\":null}}}")?;
         let target = private.path().join("native.json");
         let store = Store::new(&target);
         migrate(&store, &[LegacySource::global(Some(path))])?;

@@ -61,7 +61,7 @@ impl Fixture {
         handlers.get("plugin.invoke").unwrap()(HostRequestPayload{data:json!({"type":"plugin.invoke","session":session,"plugin":plugin,"generation":descriptor["generation"],"export":name,"input":input})}).await
     }
 }
-const LEGACY:&[u8]=br#"{"schema":1,"entries":{"memory":{"same":{"id":"same","kind":"memory","content":"legacy secret","unknown":null}},"factory":{"raw":{"opaque":null}},"future":{"nil":null}}}"#;
+const LEGACY:&[u8]=br#"{"schema":1,"entries":{"memory":{"same":{"id":"same","kind":"memory","content":"legacy secret","unknown":null}},"opaque":{"raw":{"opaque":null}},"future":{"nil":null}}}"#;
 fn settings(enabled: bool) -> Value {
     json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
         "plugins":{"harness":{"enabled":enabled}}})

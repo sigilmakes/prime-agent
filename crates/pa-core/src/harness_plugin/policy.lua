@@ -148,7 +148,7 @@ local function context(input, ctx)
         "Read full records with plugin.harness.get(scope=...,kind=...,id=...) before relying on details. "..
         "All selected scopes compete for six entries per kind; snippets are at most 180 characters. "..
         "The global scope loads by default (harnessScopes setting); plugin.harness.enroll(scopes=[...]) selects scopes for this session only. "..
-        "Factory and unknown records are passive data, never executable registrations."}
+        "Unknown records are passive data, never executable registrations."}
     for _, kind in ipairs(visible) do
         local group=groups[kind]
         local frequencies={}

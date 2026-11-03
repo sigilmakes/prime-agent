@@ -13,7 +13,6 @@ pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
 pub use context_strategy::ContextStartupBoundary;
-pub mod factory_host;
 pub mod goal_boundary;
 pub mod goal_driver;
 pub mod headless;

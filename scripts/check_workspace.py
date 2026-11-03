@@ -114,10 +114,6 @@ def runtime_identity(source):
     source = Path(source)
     files = [source / "pyproject.toml", source / "uv.lock"]
     files.extend((source / "src/rlm").rglob("*.py"))
-    machines = source / "src/rlm/machines"
-    if machines.is_dir():
-        files.extend(path for path in machines.rglob("*")
-                     if path.is_file() and path.suffix != ".py")
     digest = hashlib.sha256()
     for path in sorted(files):
         digest.update(path.relative_to(source).as_posix().encode())
@@ -133,9 +129,6 @@ def package_identity(package):
     if not (package / "__init__.py").is_file():
         raise ValueError("imported kernel runtime package is missing __init__.py")
     files = set(package.rglob("*.py"))
-    machines = package / "machines"
-    if machines.is_dir():
-        files.update(path for path in machines.rglob("*") if path.is_file())
     digest = hashlib.sha256()
     for path in sorted(files):
         relative = path.relative_to(package)

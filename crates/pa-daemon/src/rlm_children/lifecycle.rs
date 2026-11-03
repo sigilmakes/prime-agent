@@ -664,8 +664,8 @@ impl SupervisorChildSessionsInner {
         // session file's last assistant row. It lands on the record only
         // when no answer was captured, so a positive verdict's capture
         // stands and the round trip never runs when one does; the
-        // parent-side reader (the factory's provisional answer) sees
-        // what the child last said instead of a bare failure row.
+        // parent-side reader sees what the child last said instead of a
+        // bare failure row.
         let live_or_file = {
             let record = record.lock().await;
             if record.answer_captured && record.answer_preview.is_some() {

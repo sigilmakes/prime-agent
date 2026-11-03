@@ -23,11 +23,10 @@ class WorkspaceGateTests(unittest.TestCase):
         self.addCleanup(verification.stop)
 
     def runtime(self, root, text="runtime"):
-        (root / "src/rlm/machines/demo").mkdir(parents=True)
+        (root / "src/rlm").mkdir(parents=True)
         (root / "pyproject.toml").write_text("manifest")
         (root / "uv.lock").write_text("lock")
         (root / "src/rlm/__init__.py").write_text(text)
-        (root / "src/rlm/machines/demo/MACHINE.md").write_text("machine")
 
     def observation(self, source, package=None):
         return json.dumps({"direct_url": {"url": source.as_uri()},
@@ -177,14 +176,14 @@ class WorkspaceGateTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[0], ["make", "workspace-check"])
         self.assertEqual(launch.call_args.kwargs["env"], {"HOME": "/private"})
 
-    def test_runtime_identity_tracks_lock_sources_and_machine_data_not_cache(self):
+    def test_runtime_identity_tracks_lock_sources_not_cache(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.runtime(root)
             before = gate.runtime_identity(root)
             (root / "src/rlm/cache.pyc").write_bytes(b"cache")
             self.assertEqual(gate.runtime_identity(root), before)
-            for name in ("uv.lock", "src/rlm/__init__.py", "src/rlm/machines/demo/MACHINE.md"):
+            for name in ("uv.lock", "src/rlm/__init__.py"):
                 path = root / name
                 previous = path.read_text()
                 path.write_text(previous + "changed")
@@ -233,7 +232,7 @@ class WorkspaceGateTests(unittest.TestCase):
             self.runtime(source)
             copied = root / "site-packages/rlm"
             shutil.copytree(source / "src/rlm", copied)
-            for changed in ("__init__.py", "machines/demo/MACHINE.md"):
+            for changed in ("__init__.py",):
                 path = copied / changed
                 previous = path.read_text()
                 path.write_text(previous + "stale installed bytes")

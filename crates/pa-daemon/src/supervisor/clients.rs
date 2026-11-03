@@ -105,17 +105,7 @@ impl Supervisor {
         effective_client_id: Arc<std::sync::Mutex<String>>,
     ) -> Result<()> {
         let (reader, mut writer) = stream.split();
-        // The factory lane's advertisement gate reads the settings file
-        // (metadata plus a locked read on a cache miss) — off the
-        // executor thread, the same spawn_blocking posture as the daemon's
-        // other settings reads. The read stays fresh per connection, so a
-        // `/factory on` toggle surfaces on the next client start.
-        let agent_dir = self.options.agent_dir.clone();
-        let factory_capabilities = tokio::task::spawn_blocking(move || {
-            crate::factory_activity::advertised_server_capabilities(&agent_dir)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("the factory settings read failed: {error:#}"))?;
+        let server_capabilities = crate::protocol::default_server_capabilities();
         let hello = DaemonOutbound::DaemonHello {
             socket_path: self.options.socket_path.to_string_lossy().to_string(),
             protocol: current_protocol_info(),
@@ -137,7 +127,7 @@ impl Supervisor {
             supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
             update_resume: Some(self.restore.hello_resume()),
             client_id: connection_id.clone(),
-            server_capabilities: factory_capabilities,
+            server_capabilities,
             rest: Map::default(),
         };
         write_line(&mut writer, &serde_json::to_value(&hello)?).await?;

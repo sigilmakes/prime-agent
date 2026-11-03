@@ -384,8 +384,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     // Retirement is idempotent (the M5 class): a selector
                     // whose delete receipt already returned answers from
                     // the tombstone instead of erroring, so a re-delete of
-                    // a settled child (an operator retire, the factory's
-                    // cancel pass) never reports the slot as still held.
+                    // a settled child (an operator retire or a cancelled
+                    // run) never reports the slot as still held.
                     let matches = this
                         .deleted_children
                         .lock()

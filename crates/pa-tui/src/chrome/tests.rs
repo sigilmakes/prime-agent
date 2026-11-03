@@ -7,7 +7,6 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
-        factory_group: true,
         ..ActivityDock::default()
     };
     let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120);
@@ -17,7 +16,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell"
     );
     let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
     assert_eq!(
@@ -26,7 +25,6 @@ fn the_dock_segments_cover_each_groups_own_cells() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
-            ActivityGroup::Factory,
         ],
         "the segments follow the row's group order"
     );
@@ -124,7 +122,6 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
-        factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
     };
@@ -144,7 +141,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
     );
     // The operator's 2026-09-24 color-coding directive.
     let success = theme.fg_style(ThemeColor::Success).fg;
@@ -161,7 +158,6 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     // the warning color — every live goal state keeps a surface.
     let dock = ActivityDock {
         goal_label: Some("Goal paused (0s)".to_string()),
-        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 100);
@@ -184,7 +180,6 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     // as quiet, not as uniformly busy.
     let dock = ActivityDock {
         heartbeats: 1,
-        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 100);
@@ -192,26 +187,17 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(
-        text,
-        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory"
-    );
+    assert_eq!(text, " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
     // The all-zero dock renders its own empty state — the zero
-    // readout — and the zero segments stay neutral, never green. The
-    // factory lane is advertised here (the unadvertised lane's row is
-    // the pin of its own).
-    let advertised = ActivityDock {
-        factory_group: true,
-        ..ActivityDock::default()
-    };
-    let frame = render_activity_dock(&advertised, &theme, 100);
+    // readout — and the zero segments stay neutral, never green.
+    let frame = render_activity_dock(&ActivityDock::default(), &theme, 100);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
     assert_eq!(
         text,
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
     );
     assert!(frame[1]
         .iter()
@@ -266,7 +252,6 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 2,
         subagents_running_nested: 0,
-        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 80);
@@ -274,17 +259,13 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(
-        text,
-        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
-    );
+    assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     // Two running children plus seven running descendants: ONE
     // number — the summed total, never the pair, never the
     // descendant total, and no category breakdown.
     let dock = ActivityDock {
         subagents_running_direct: 2,
         subagents_running_nested: 7,
-        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 80);
@@ -292,10 +273,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(
-        text,
-        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
-    );
+    assert_eq!(text, " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     assert!(!text.contains("2,"), "no direct/nested pair: {text}");
     assert!(!text.contains("idle"), "no category breakdown: {text}");
     assert!(
@@ -305,7 +283,6 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 0,
         subagents_running_nested: 1,
-        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 80);
@@ -313,10 +290,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(
-        text,
-        " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
-    );
+    assert_eq!(text, " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
 }
 
 /// The hover band's own light color — the same ONE color every activity surface paints,
@@ -330,8 +304,6 @@ fn activity_dock_selection_is_the_hover_colored_band() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
-        factory_runs: 1,
-        factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         selected: ActivityGroup::Heartbeats,
         focused: true,
@@ -383,20 +355,15 @@ fn activity_dock_selection_is_the_hover_colored_band() {
 /// One press steps to the neighboring rendered group and wraps; N groups take exactly N presses.
 #[test]
 fn dock_arrows_visit_every_group_even_when_empty() {
-    // The all-zero dock with the factory lane advertised: the
-    // heartbeats, shells, and factory groups are empty and stay in
-    // the cycle.
-    let dock = ActivityDock {
-        factory_group: true,
-        ..ActivityDock::default()
-    };
+    // The all-zero dock: the heartbeats and shells groups are empty
+    // and stay in the cycle.
+    let dock = ActivityDock::default();
     assert_eq!(
         dock.groups(),
         vec![
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
-            ActivityGroup::Factory,
         ]
     );
     assert_eq!(
@@ -409,22 +376,14 @@ fn dock_arrows_visit_every_group_even_when_empty() {
     );
     assert_eq!(
         dock.step(ActivityGroup::Bash, ActivityDirection::Next),
-        ActivityGroup::Factory
-    );
-    assert_eq!(
-        dock.step(ActivityGroup::Factory, ActivityDirection::Next),
         ActivityGroup::Subagents,
         "the cycle wraps past the last group"
     );
     // Left: the same groups in reverse, wrapping past the first.
     assert_eq!(
         dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
-        ActivityGroup::Factory,
+        ActivityGroup::Bash,
         "the cycle wraps past the first group"
-    );
-    assert_eq!(
-        dock.step(ActivityGroup::Factory, ActivityDirection::Prev),
-        ActivityGroup::Bash
     );
     assert_eq!(
         dock.step(ActivityGroup::Bash, ActivityDirection::Prev),
@@ -460,7 +419,6 @@ fn dock_arrows_visit_the_same_groups_with_items() {
         heartbeats: 2,
         heartbeats_paused: 1,
         bash_running: 1,
-        factory_group: true,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
     };
@@ -470,17 +428,15 @@ fn dock_arrows_visit_the_same_groups_with_items() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
-            ActivityGroup::Factory,
             ActivityGroup::Goal,
         ]
     );
     // The full cycle right: every group in order, the goal group
-    // included, back to the start in five presses.
+    // included, back to the start in four presses.
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Heartbeats,
         ActivityGroup::Bash,
-        ActivityGroup::Factory,
         ActivityGroup::Goal,
         ActivityGroup::Subagents,
     ] {
@@ -490,7 +446,6 @@ fn dock_arrows_visit_the_same_groups_with_items() {
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Goal,
-        ActivityGroup::Factory,
         ActivityGroup::Bash,
         ActivityGroup::Heartbeats,
         ActivityGroup::Subagents,
@@ -505,70 +460,23 @@ fn dock_arrows_visit_the_same_groups_with_items() {
 fn dock_goal_group_unmounts_with_its_row() {
     let with_goal = ActivityDock {
         goal_label: Some("Goal paused (0s)".to_string()),
-        factory_group: true,
         ..ActivityDock::default()
     };
     assert!(with_goal.groups().contains(&ActivityGroup::Goal));
-    let ended = ActivityDock {
-        factory_group: true,
-        ..ActivityDock::default()
-    };
+    let ended = ActivityDock::default();
     assert!(
         !ended.groups().contains(&ActivityGroup::Goal),
         "the goal group leaves the cycle when its row unmounts"
     );
     assert_eq!(
         ended.step(ActivityGroup::Goal, ActivityDirection::Prev),
-        ActivityGroup::Factory,
+        ActivityGroup::Bash,
         "a stale goal selection lands on the row's last group"
     );
     assert_eq!(
         ended.step(ActivityGroup::Goal, ActivityDirection::Next),
         ActivityGroup::Heartbeats,
         "a stale goal selection steps from the row's first group"
-    );
-}
-
-/// The factory group is the lane's opt-in surface: an unadvertised
-/// `factory_activity` lane mounts no factory group anywhere — no row
-/// segment, no traversal, no click region (the factory's default-off
-/// gate; the dock's factory group renders exactly while the daemon
-/// advertises the lane).
-#[test]
-fn an_unadvertised_factory_lane_mounts_no_factory_group() {
-    let theme = Theme::builtin("prime", ColorMode::TrueColor);
-    // The default dock is the unadvertised lane (the opt-in default).
-    let dock = ActivityDock::default();
-    assert!(
-        !dock.groups().contains(&ActivityGroup::Factory),
-        "the unadvertised lane stays out of the traversal cycle"
-    );
-    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120);
-    let text = frame[1]
-        .iter()
-        .map(|span| span.content.as_str())
-        .collect::<String>();
-    assert_eq!(
-        text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells",
-        "no factory segment renders: {text}"
-    );
-    assert!(
-        segments
-            .iter()
-            .all(|segment| segment.group != ActivityGroup::Factory),
-        "no factory click region records"
-    );
-    // The arrows wrap the remaining groups exactly: a stale Factory
-    // selection steps to the row's real ends, never a hidden group.
-    assert_eq!(
-        dock.step(ActivityGroup::Bash, ActivityDirection::Next),
-        ActivityGroup::Subagents,
-        "the cycle wraps past the shells group"
-    );
-    assert_eq!(
-        dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
-        ActivityGroup::Bash,
-        "the reverse cycle wraps past the subagents group"
     );
 }
 
@@ -583,7 +491,6 @@ fn dock_renders_the_focused_empty_group() {
     let dock = ActivityDock {
         selected: ActivityGroup::Heartbeats,
         focused: true,
-        factory_group: true,
         ..ActivityDock::default()
     };
     let frame = render_activity_dock(&dock, &theme, 100);
@@ -591,10 +498,7 @@ fn dock_renders_the_focused_empty_group() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(
-        text,
-        " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
-    );
+    assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     // The selection's band rides exactly the entered empty group's
     // zero readout, which keeps its own muted color (the selection
     // never repaints the text).

@@ -26,7 +26,6 @@ const KNOWN_FIELDS: &[&str] = &[
     "theme",
     "compaction",
     "harnessScopes",
-    "factory",
     "branchSummary",
     "retry",
     "providerBackupModel",
