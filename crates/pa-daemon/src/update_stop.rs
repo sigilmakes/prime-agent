@@ -159,7 +159,6 @@ mod tests {
             root_session_id: None,
             session_file: None,
             session_dir: None,
-            telemetry_disabled: None,
             created_at: String::new(),
             updated_at: String::new(),
             lifecycle: pa_types::daemon::DaemonWorkerLifecycle::Ready,

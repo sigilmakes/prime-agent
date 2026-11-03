@@ -137,8 +137,6 @@ impl SupervisorChildSessionsInner {
             no_session: None,
             name: name.map(str::to_string),
             config: Some(config),
-            // Preserve the legacy create payload shape; no reporter is installed.
-            telemetry_disabled: None,
             runtime_metadata,
             lifecycle: Some(DaemonSessionLifecycle::Resident),
             env: None,

@@ -582,7 +582,6 @@ async fn interleave_worker() -> (Arc<Worker>, tempfile::TempDir) {
         active_session_id: "interleave-worker".to_string(),
         agent_dir: dir.path().join("agent"),
         recovery_journal_path: dir.path().join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "responses": [] })),
     };
     let worker = Arc::new(Worker::new(config, None));

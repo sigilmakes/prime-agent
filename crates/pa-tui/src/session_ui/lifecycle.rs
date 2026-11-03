@@ -342,7 +342,6 @@ impl SessionUi {
             // an image-heavy session's attach stops transferring megabytes.
             capabilities: Some(attach_capabilities()),
             resume_cursor: None,
-            telemetry_disabled: Some(true),
             recovery_config: None,
             env: client_env.clone(),
             launch_env: None,

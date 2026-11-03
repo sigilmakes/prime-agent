@@ -105,7 +105,6 @@ async fn worker_over(dir: &std::path::Path, path: &std::path::Path) -> std::sync
         active_session_id: "windowed-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));

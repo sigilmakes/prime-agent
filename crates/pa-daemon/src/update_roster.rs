@@ -444,7 +444,6 @@ mod tests {
             root_session_id: Some(session_id.into()),
             session_file: Some(sessions_file(sessions_dir, session_id)),
             session_dir: None,
-            telemetry_disabled: None,
             created_at: String::new(),
             updated_at: String::new(),
             lifecycle: pa_types::daemon::DaemonWorkerLifecycle::Ready,

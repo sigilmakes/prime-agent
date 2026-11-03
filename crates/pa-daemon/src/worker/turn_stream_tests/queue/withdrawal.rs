@@ -23,7 +23,6 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                     active_session_id: "withdraw-note".to_string(),
                     agent_dir: dir.path().join("agent"),
                     recovery_journal_path: dir.path().join("recovery.jsonl"),
-                    telemetry_disabled: Some(true),
                     script: Some(json!({ "responses": ["unused"] })),
                 },
                 None,

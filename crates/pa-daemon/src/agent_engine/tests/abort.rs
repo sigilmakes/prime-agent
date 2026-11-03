@@ -57,7 +57,6 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -404,7 +403,6 @@ fn retried_run_restarts_with_its_own_agent_frames() {
             .to_string(),
         ),
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -663,7 +661,6 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })

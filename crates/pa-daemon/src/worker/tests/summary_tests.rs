@@ -293,7 +293,6 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
         active_session_id: "note-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": ["first reply", "second reply"],
@@ -367,7 +366,6 @@ async fn state_and_prompt_admission_wait_for_existing_build_gate() {
         active_session_id: "build-gate-session".to_owned(),
         agent_dir: dir.path().join("agent"),
         recovery_journal_path: dir.path().join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));

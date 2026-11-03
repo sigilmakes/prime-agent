@@ -196,7 +196,6 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         active_session_id: "abort-send-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [
@@ -471,7 +470,6 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
         active_session_id: "abort-fu-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [
@@ -709,7 +707,6 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         active_session_id: "cancel-owned-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "responses": [{ "text": "held reply", "delayMs": 60000 }] })),
     };
     let worker = Arc::new(Worker::new(config, None));
@@ -944,7 +941,6 @@ async fn held_turn_worker(
         active_session_id: active_session_id.to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [

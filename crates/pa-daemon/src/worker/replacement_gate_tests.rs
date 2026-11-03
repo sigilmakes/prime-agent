@@ -85,7 +85,6 @@ fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<Stri
         active_session_id: "replacement-gate".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: Some(true),
         script: Some(json!({ "responses": ["ack"] })),
     };
     let mut worker = Worker::new(config, None);

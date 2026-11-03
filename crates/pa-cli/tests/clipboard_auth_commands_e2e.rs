@@ -450,7 +450,6 @@ async fn create_session_via_daemon(
                 "sessionDir": session_dir.display().to_string(),
                 "script": script_path.display().to_string(),
             })),
-            telemetry_disabled: Some(true),
             runtime_metadata: None,
             lifecycle: None,
             env: None,

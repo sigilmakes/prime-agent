@@ -42,7 +42,6 @@ fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
             session_file: Some(session_path),
             faux_script: Some(r#"{"responses": [{"text": "recovery reply"}]}"#.to_string()),
             supervisor_link: None,
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -117,7 +116,6 @@ fn goal_start_keeps_the_prompt_images_on_the_context_row() {
             session_file: None,
             faux_script: Some(r#"{"responses": [{"text": "goal reply"}]}"#.to_string()),
             supervisor_link: None,
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -242,7 +240,6 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
             .to_string(),
         ),
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -492,7 +489,6 @@ fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
                 .to_string(),
             ),
             supervisor_link: None,
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -740,7 +736,6 @@ fn running_children_owe_the_continuation_and_settle_delivers_it() {
                 active_session_id: "parent-session".to_string(),
                 worker_token: "token".to_string(),
             }),
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -1013,7 +1008,6 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
             .to_string(),
         ),
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })

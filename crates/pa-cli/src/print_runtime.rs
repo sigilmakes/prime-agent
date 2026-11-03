@@ -211,8 +211,6 @@ fn daemon_acp_create(
         no_session: options.session.no_session.then_some(true),
         name: None,
         config: Some(create_config),
-        // Older daemons must also keep reporting disabled.
-        telemetry_disabled: Some(true),
         runtime_metadata: None,
         lifecycle: Some(lifecycle),
         env: None,

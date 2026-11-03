@@ -453,7 +453,6 @@ mod tests {
             session_file: None,
             faux_script: Some(script.to_string()),
             supervisor_link: None,
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })

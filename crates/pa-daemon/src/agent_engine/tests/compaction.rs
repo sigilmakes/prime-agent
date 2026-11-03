@@ -54,7 +54,6 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
         session_file: Some(path.clone()),
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     };
@@ -496,7 +495,6 @@ fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift()
             session_file: None,
             faux_script: None,
             supervisor_link: None,
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -658,7 +656,6 @@ fn retire_clears_the_provider_target_for_the_replacement_build() {
             session_file: None,
             faux_script: None,
             supervisor_link: None,
-            telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -838,7 +835,6 @@ fn requested_compaction_skip_records_the_durable_outcome_row() {
                 .to_string(),
         ),
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -1047,7 +1043,6 @@ fn threshold_below_the_headroom_stays_silent() {
             serde_json::json!({ "responses": [{"text": "plain reply"}] }).to_string(),
         ),
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })

@@ -584,7 +584,6 @@ async fn direct_upgrade_routes_attach_and_streams_events(
             active_session_id: "s1".to_string(),
             client_id: None,
             capabilities: None,
-            telemetry_disabled: None,
             resume_cursor: None,
             recovery_config: None,
             env: None,

@@ -426,7 +426,6 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         active_session_id: "abort-send-family".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [
@@ -618,7 +617,6 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
         active_session_id: "abort-ack-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [
@@ -965,7 +963,6 @@ async fn clearing_an_idle_queue_drops_the_retained_note() {
             active_session_id: "note-session".to_string(),
             agent_dir: dir.path().join("agent"),
             recovery_journal_path: dir.path().join("recovery.jsonl"),
-            telemetry_disabled: Some(true),
             script: Some(json!({ "responses": ["unused"] })),
         },
         None,

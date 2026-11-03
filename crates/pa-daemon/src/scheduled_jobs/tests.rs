@@ -13,7 +13,6 @@ fn persisted_worker_config(dir: &std::path::Path) -> crate::worker::WorkerConfig
         active_session_id: "hb-fire-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(serde_json::json!({ "responses": ["ack", "ack", "ack", "ack"] })),
     }
 }

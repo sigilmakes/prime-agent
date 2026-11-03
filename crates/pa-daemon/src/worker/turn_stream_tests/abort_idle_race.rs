@@ -122,7 +122,6 @@ async fn abort_and_send_idle_race_rate_harness() {
             active_session_id: format!("abort-race-{rep}"),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({
                 "engine": "faux",
                 "responses": [

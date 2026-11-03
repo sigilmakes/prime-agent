@@ -13,7 +13,6 @@ async fn goal_dispatch_worker(goal: serde_json::Value) -> std::sync::Arc<Worker>
         active_session_id: "goal-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "responses": ["ack"],
             "goal": goal,
@@ -208,7 +207,6 @@ async fn goal_turn_end_loop_runs_to_completion() {
         active_session_id: "goal-loop-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [
@@ -338,7 +336,6 @@ async fn goal_pause_withdraws_the_queued_continuation() {
         active_session_id: "goal-pause-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "engine": "faux",
             "responses": [
@@ -400,7 +397,6 @@ async fn goal_dispatch_worker_with_store(
         active_session_id: "goal-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "responses": ["ack"],
             "goal": goal,

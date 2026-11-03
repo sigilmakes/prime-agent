@@ -12,7 +12,6 @@ fn test_worker() -> Arc<Worker> {
         active_session_id: "target-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
     };
     Arc::new(Worker::new(config, None))
@@ -464,7 +463,6 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         active_session_id: "target-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
     };
     let worker = Arc::new(Worker::new(config, None));

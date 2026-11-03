@@ -270,7 +270,6 @@ async fn create_session_with(socket: &Path, dir: &Path, script: &Path) -> String
                 "sessionDir": dir.join("agent").join("sessions").display().to_string(),
                 "script": script.display().to_string(),
             })),
-            telemetry_disabled: Some(true),
             runtime_metadata: None,
             lifecycle: None,
             env: None,

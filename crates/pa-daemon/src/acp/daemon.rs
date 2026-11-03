@@ -595,7 +595,6 @@ async fn bind_daemon_session(
             client_id: None,
             capabilities: None,
             resume_cursor: None,
-            telemetry_disabled: None,
             recovery_config: None,
             env: None,
             launch_env: None,

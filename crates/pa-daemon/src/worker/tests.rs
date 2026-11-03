@@ -13,7 +13,6 @@ async fn created_dispatch_worker() -> std::sync::Arc<Worker> {
         active_session_id: "suspension-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));

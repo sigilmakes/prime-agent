@@ -193,7 +193,6 @@ async fn streamed_turn_pipeline_benchmark() {
             session_file: None,
             faux_script: Some(script.to_string()),
             supervisor_link: None,
-            telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
         })
@@ -236,7 +235,6 @@ async fn the_last_parked_update_carries_the_final_content() {
         session_file: None,
         faux_script: Some(script.to_string()),
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })

@@ -311,7 +311,6 @@ async fn create_session_via_daemon(
         "cwd": cwd.display().to_string(),
         "sessionDir": session_dir.display().to_string(),
         "script": script_path.display().to_string(),
-        "telemetryDisabled": true,
     });
     if let Some(parent) = parent_session_path {
         config["parentSessionPath"] = json!(parent.display().to_string());
@@ -325,7 +324,6 @@ async fn create_session_via_daemon(
             no_session: None,
             name: name.map(str::to_string),
             config: Some(config),
-            telemetry_disabled: Some(true),
             runtime_metadata: None,
             lifecycle: None,
             env: None,

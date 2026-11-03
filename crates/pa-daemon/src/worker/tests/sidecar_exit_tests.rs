@@ -32,7 +32,6 @@ fn faux_worker(dir: &Path, reply: &str) -> std::sync::Arc<Worker> {
         active_session_id: "sidecar-exit-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({ "engine": "faux", "responses": [reply] })),
     };
     std::sync::Arc::new(Worker::new(config, None))

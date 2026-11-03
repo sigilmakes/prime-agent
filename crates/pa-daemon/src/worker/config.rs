@@ -2,8 +2,7 @@
 //! supervisor-provided environment.
 use super::{
     WORKER_ACTIVE_SESSION_ID_ENV, WORKER_INSTANCE_ID_ENV, WORKER_RECOVERY_JOURNAL_ENV,
-    WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
-    WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
+    WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV, WORKER_SUPERVISOR_SOCKET_ENV, WORKER_TOKEN_ENV,
 };
 
 use std::path::PathBuf;
@@ -23,9 +22,6 @@ pub struct WorkerConfig {
     pub agent_dir: PathBuf,
     pub recovery_journal_path: PathBuf,
     pub script: Option<Value>,
-    /// Inert legacy opt-out inherited from the create command.
-    /// This build has no telemetry reporters.
-    pub telemetry_disabled: Option<bool>,
 }
 
 impl WorkerConfig {
@@ -64,8 +60,6 @@ impl WorkerConfig {
                 let content = std::fs::read_to_string(path).ok()?;
                 serde_json::from_str::<Value>(&content).ok()
             });
-        let telemetry_disabled =
-            std::env::var_os(WORKER_TELEMETRY_DISABLED_ENV).map(|value| value == "1");
         Ok(WorkerConfig {
             socket_path,
             supervisor_socket_path,
@@ -75,7 +69,6 @@ impl WorkerConfig {
             agent_dir,
             recovery_journal_path,
             script,
-            telemetry_disabled,
         })
     }
 }

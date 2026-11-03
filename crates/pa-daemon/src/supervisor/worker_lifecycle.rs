@@ -346,9 +346,6 @@ impl Supervisor {
             root_session_id: None,
             session_file: session_path.clone(),
             session_dir: session_dir.clone(),
-            // Every new worker is reporter-free. Keep the legacy opt-out
-            // marker so older supervisors and clients can recognize it.
-            telemetry_disabled: Some(true),
             created_at: now.clone(),
             updated_at: now,
             lifecycle: DaemonWorkerLifecycle::Starting,

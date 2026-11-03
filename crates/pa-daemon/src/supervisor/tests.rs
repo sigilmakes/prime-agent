@@ -975,7 +975,6 @@ async fn adoption_settles_then_seeds_the_roster_once() {
         root_session_id: None,
         session_file: Some(root_file.to_string_lossy().to_string()),
         session_dir: Some(sessions_dir.to_string_lossy().to_string()),
-        telemetry_disabled: Some(true),
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
         lifecycle: DaemonWorkerLifecycle::Ready,
@@ -1039,7 +1038,6 @@ async fn a_create_while_shutting_down_is_refused() {
         no_session: None,
         name: None,
         config: None,
-        telemetry_disabled: None,
         runtime_metadata: None,
         lifecycle: None,
         env: None,
@@ -1120,7 +1118,6 @@ async fn a_failed_stop_persist_gates_the_kill_stop_belt() {
         root_session_id: Some("live-1".to_string()),
         session_file: Some(session_file.to_string_lossy().to_string()),
         session_dir: Some(sessions_dir.to_string_lossy().to_string()),
-        telemetry_disabled: None,
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
         lifecycle: DaemonWorkerLifecycle::Ready,
@@ -1193,7 +1190,6 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
         root_session_id: Some("live-1".to_string()),
         session_file: None,
         session_dir: Some(sessions_dir.to_string_lossy().to_string()),
-        telemetry_disabled: None,
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
         lifecycle: DaemonWorkerLifecycle::Ready,
@@ -1301,7 +1297,6 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         no_session: None,
         name: None,
         config: None,
-        telemetry_disabled: None,
         runtime_metadata: None,
         lifecycle: None,
         env: None,
@@ -1624,7 +1619,6 @@ async fn idle_passivation_refuses_a_client_owned_worker() {
         root_session_id: Some("root-1".to_string()),
         session_file: None,
         session_dir: None,
-        telemetry_disabled: None,
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
         lifecycle: DaemonWorkerLifecycle::Ready,
@@ -1741,7 +1735,6 @@ async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
         root_session_id: Some("child-1".to_string()),
         session_file: Some(session_file.to_string_lossy().into_owned()),
         session_dir: Some(artifacts.to_string_lossy().into_owned()),
-        telemetry_disabled: None,
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
         lifecycle: DaemonWorkerLifecycle::Ready,
@@ -2226,7 +2219,6 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
         root_session_id: Some("kid-1".to_string()),
         session_file: Some(session_file.to_string_lossy().into_owned()),
         session_dir: Some(artifacts.to_string_lossy().into_owned()),
-        telemetry_disabled: None,
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
         lifecycle: DaemonWorkerLifecycle::Ready,
@@ -2267,121 +2259,6 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
         before,
         "the ledger wake's reuse arm must not launch a second worker"
     );
-}
-
-/// Boot-loaded legacy descriptors keep their original reporting posture. An
-/// opted-out attach must stop before either forwarding or subscribing, even
-/// when the adopted worker is connected and ready to answer.
-#[tokio::test]
-async fn legacy_resident_opt_out_attach_guard_preserves_adopted_posture() {
-    for worker_disabled in [None, Some(false), Some(true)] {
-        for kind in ["attach", "reattach"] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let supervisor = Arc::new(
-                Supervisor::new(SupervisorOptions {
-                    socket_path: dir.path().join("daemon.sock"),
-                    agent_dir: dir.path().join("agent"),
-                })
-                .expect("supervisor"),
-            );
-            let descriptor_path = supervisor.descriptor_dir.join("legacy-worker.json");
-            let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
-                "version": 2,
-                "workerId": "legacy-worker",
-                "pid": 4242,
-                "socketPath": dir.path().join("legacy-worker.sock"),
-                "recoveryJournalPath": dir.path().join("recovery.jsonl"),
-                "supervisorSocketPath": supervisor.options.socket_path,
-                "authenticationToken": "test-token",
-                "rootActiveSessionId": "legacy-worker",
-                "telemetryDisabled": worker_disabled,
-                "createdAt": "2026-10-01T00:00:00Z",
-                "updatedAt": "2026-10-01T00:00:00Z",
-                "lifecycle": "ready",
-                "createCommand": {},
-                "consecutiveFailures": 0,
-            }))
-            .expect("descriptor");
-            persist_worker(&descriptor_path, &descriptor).expect("persist legacy descriptor");
-            let before = std::fs::read(&descriptor_path).expect("descriptor bytes");
-            let (loaded_path, loaded) =
-                load_descriptors(&supervisor.descriptor_dir, &supervisor.options.socket_path)
-                    .into_iter()
-                    .next()
-                    .expect("boot loads the legacy descriptor");
-            assert_eq!(loaded.telemetry_disabled, worker_disabled);
-            let resident = ResidentWorker::new("legacy-worker".into(), loaded, loaded_path);
-            let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
-            *resident.cmd_tx.lock().await = Some(cmd_tx);
-            resident.note_connection_live();
-            resident.note_session_ready();
-            supervisor.registry.insert(Arc::clone(&resident)).await;
-            let forwarded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let pump_forwarded = Arc::clone(&forwarded);
-            let pump_resident = Arc::clone(&resident);
-            let pump = tokio::spawn(async move {
-                while let Some(request) = cmd_rx.recv().await {
-                    pump_forwarded.fetch_add(1, Ordering::SeqCst);
-                    let reply = pump_resident
-                        .pending
-                        .lock()
-                        .await
-                        .remove(&request.request_id)
-                        .expect("pending attach reply");
-                    let _ = reply.send(WorkerReply::Typed(response_success(
-                        None,
-                        kind,
-                        Some(json!({ "activeSessionId": "legacy-worker" })),
-                    )));
-                }
-            });
-            let (targeted_tx, mut targeted_rx) = mpsc::channel(4);
-            let attached = subscribers::ClientSubscriptions::new("client".into(), targeted_tx);
-            let command: DaemonCommand = serde_json::from_value(json!({
-                "type": kind,
-                "activeSessionId": "legacy-worker",
-                "targetActiveSessionId": "legacy-worker",
-                "telemetryDisabled": true,
-            }))
-            .expect("attach command");
-            let (lines, stop) = supervisor
-                .route_client_command(
-                    &command,
-                    "client",
-                    &attached,
-                    "a1".into(),
-                    kind.into(),
-                    None,
-                )
-                .await;
-            assert!(!stop);
-            let allowed = worker_disabled == Some(true);
-            assert_eq!(lines[0]["success"], json!(allowed));
-            assert_eq!(forwarded.load(Ordering::SeqCst), usize::from(allowed));
-            assert_eq!(attached.contains("legacy-worker"), allowed);
-            if !allowed {
-                assert_eq!(lines[0]["error"], json!(
-                    "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry."
-                ));
-                supervisor
-                    .publish_session_event("legacy-worker", &Arc::new(json!({ "type": "test" })));
-                assert!(
-                    targeted_rx.try_recv().is_err(),
-                    "a refused legacy attach never subscribes"
-                );
-            }
-            assert_eq!(
-                resident.descriptor.lock().await.telemetry_disabled,
-                worker_disabled
-            );
-            assert_eq!(
-                std::fs::read(&descriptor_path).unwrap(),
-                before,
-                "loading and routing must not relabel a live legacy descriptor"
-            );
-            pump.abort();
-        }
-    }
 }
 
 proptest! {

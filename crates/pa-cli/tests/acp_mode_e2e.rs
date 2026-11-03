@@ -1134,7 +1134,6 @@ fn acp_daemon_attached_default_session_persists_and_resumes() {
         .unwrap()
         .contains("Name a river."));
     let descriptor = worker_descriptor(&home_path);
-    assert_eq!(descriptor["telemetryDisabled"], json!(true), "{descriptor}");
     assert!(
         descriptor.get("ownerClientId").is_none(),
         "a resident session has no owner: {descriptor}"

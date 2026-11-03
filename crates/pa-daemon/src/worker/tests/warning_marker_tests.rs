@@ -61,7 +61,6 @@ fn worker_in(dir: &std::path::Path, session_id: &str) -> Worker {
             active_session_id: session_id.into(),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: Some(true),
             script: Some(json!({"responses":[]})),
         },
         None,

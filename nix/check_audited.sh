@@ -16,7 +16,7 @@ export PRIME_AGENT_KERNEL_VENV="$HOME/kernel"
 export RLM_GLOBAL_HARNESS_STATE_DIR="$HOME/global-harness"
 export RLM_HARNESS_STATE_DIR="$HOME/local-harness"
 export RLM_SESSION_DIR="$HOME/artifacts"
-export DO_NOT_TRACK=1 PRIME_AGENT_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1
+export DO_NOT_TRACK=1 PI_SKIP_VERSION_CHECK=1
 export CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_DEBUG=0
 cargo test --offline --locked -p pa-core --lib settings::
 cargo test --offline --locked -p pa-core --lib session::
