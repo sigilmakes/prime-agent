@@ -421,7 +421,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
 }
 
 #[test]
-fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_view() {
+fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let dir = tempfile::tempdir().unwrap();
@@ -628,13 +628,14 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
     let model_messages = request["messages"].as_array().unwrap();
     assert_eq!(
         model_messages.len(),
-        8,
-        "one system row plus the exact seven ordinary/plugin/continuation model rows"
+        9,
+        "one system row plus every ordinary, plugin and legacy custom model row"
     );
     assert_eq!(model_messages[0]["role"], "system");
     assert_eq!(
         &model_messages[1..],
         &[
+            json!({"role":"user", "content":[{"type":"text","text":"shared controlled text"}]}),
             json!({"role":"user", "content":[{"type":"text","text":"source user"}]}),
             json!({"role":"assistant", "content":null, "tool_calls":[{"id":"fixture-tool-call","type":"function","function":{"name":"python_repl","arguments":"{\"code\":\"pass\"}"}}]}),
             json!({"role":"tool","tool_call_id":"fixture-tool-call","content":"controlled result"}),
@@ -722,7 +723,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
         assert_eq!(
             legacy,
             vec!["harness_digest"],
-            "only the model view excludes legacy rows, never canonical context or physical history"
+            "legacy harness rows remain ordinary custom rows in canonical context and physical history"
         );
     });
     assert_eq!(std::fs::read(&path).unwrap(), physical);
