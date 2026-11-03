@@ -159,8 +159,8 @@ def request_contract(request):
              if row.get('role') == 'user']
     count = users.count(PROMPT)
     assert count == 1, 'expected current fixture prompt exactly once'
-    # Harness digests and unrelated prompt layers are outside the TLS contract.
-    # Every raw message remains in the receipt's captured provider request.
+    # Unrelated prompt layers are outside the TLS contract. Every raw message
+    # remains in the receipt's captured provider request.
     return {'path': request['path'], 'authorization': request['authorization'],
             'model': body.get('model'), 'stream': body.get('stream'),
             'current_prompt': PROMPT, 'current_prompt_count': count}
@@ -280,7 +280,7 @@ def main():
               'retry_scope': 'Set documented retry.enabled=false identically in both real runtimes; compare certificate outcome, not retry policy.',
               'dependency_scope': 'Warm ordinary startup get_commands before admission in both binaries. Cold lazy-first-prompt duplicate remains an unresolved dependency on #3560; no prompt deduplication or production repair in this TLS PR.',
               'execution_scope': 'Explicit owned daemon, ordinary create/attach/get_commands/prompt_and_wait/get_messages, graceful shutdown acknowledgement then close socket before waiting.',
-              'prompt_scope': 'Compare current fixture prompt once, auth, model, stream and outcome. Harness digests/unrelated layers excluded; raw messages retained.',
+              'prompt_scope': 'Compare current fixture prompt once, auth, model, stream and outcome. Unrelated layers excluded; raw messages retained.',
               'cache_scope': 'Each case starts a fresh actual process. No assertion about in-process native-store refresh or TS native-root caching.'}
     try:
         assert sys.platform == 'linux', 'requires hosted Linux CI'

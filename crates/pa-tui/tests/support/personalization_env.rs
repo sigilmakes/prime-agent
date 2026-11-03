@@ -25,8 +25,6 @@ impl IsolatedEnv {
             ("XDG_RUNTIME_DIR", "runtime"),
             ("TMPDIR", "tmp"),
             ("PRIME_AGENT_CODING_AGENT_DIR", "agent"),
-            ("RLM_GLOBAL_HARNESS_STATE_DIR", "harness-global"),
-            ("RLM_HARNESS_STATE_DIR", "harness"),
             ("RLM_SESSION_DIR", "session"),
         ] {
             let dir = root.join(relative);

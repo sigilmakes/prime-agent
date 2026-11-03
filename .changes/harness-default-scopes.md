@@ -1,1 +1,0 @@
-- The continual harness loads the `global` scope for every session by default, so cross-session memories, skills, and subagent specs reach the context without an explicit `plugin.harness.enroll`. The new `harnessScopes` setting overrides that list; an empty array keeps only the session scope, and a session's saved enrollment still takes precedence.

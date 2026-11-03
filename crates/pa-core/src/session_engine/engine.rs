@@ -777,19 +777,6 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         Arc::clone(&turn_activity),
     ));
     plugins.set_capability_delegate("jobs.", jobs.clone());
-    plugins.set_capability_delegate(
-        "harness.store.",
-        Arc::new(crate::harness_plugin::HarnessStorage::new(
-            &config.agent_dir,
-            session_artifact_dir
-                .as_ref()
-                .map(|path| path.join("harness")),
-            wiring.session.lock().await.get_session_id().to_owned(),
-            wiring.session.clone(),
-            &plugins.host(),
-            &agent,
-        )),
-    );
     // Install native/auxiliary services that need AgentWeak here. This Agent
     // remains private until its selected strategy has built a valid live view.
     let startup_leaf = if matches!(
@@ -1050,7 +1037,7 @@ impl SessionEngine {
     ///
     /// # Errors
     /// Returns an error for invalid arguments, an unavailable kernel, or a failed
-    /// kernel request. Legacy harness records are never loaded by this path.
+    /// kernel request. Legacy state files are never loaded by this path.
     pub async fn factory_activity(
         &self,
         action: &str,

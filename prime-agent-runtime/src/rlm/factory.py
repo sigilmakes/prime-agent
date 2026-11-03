@@ -284,7 +284,7 @@ def _validate_state_fields(
 
     subagent = state.get("subagent")
     if _is_nonempty_str(subagent):
-        pass  # Harness subagent entry id or title; resolved at run time.
+        pass  # Stored subagent entry id or title; resolved at run time.
     elif isinstance(subagent, dict):
         # Runtime resolution strips these fields (_resolve_subagents /
         # _validate_spawn_settings), so whitespace-only values are rejected
@@ -303,7 +303,7 @@ def _validate_state_fields(
             )
     else:
         errors.append(
-            f"{noun} {ref} requires a subagent: a harness subagent id/title string "
+            f"{noun} {ref} requires a subagent: a stored subagent id/title string "
             "or an inline object with a prompt"
         )
 
@@ -1541,7 +1541,7 @@ class FactoryExecutor:
         *,
         now: "Callable[[], float] | None" = None,
         sleep: "Callable[[float], Any] | None" = None,
-        harness: Any = None,
+        entry_store: Any = None,
     ) -> None:
         import asyncio
 
@@ -1549,7 +1549,7 @@ class FactoryExecutor:
         self._sleep_fn: Callable[[float], Any] = sleep or asyncio.sleep
         # Optional entry storage must be supplied explicitly. The default
         # executor runs library machines without activating a memory plugin.
-        self._harness = harness
+        self._entry_store = entry_store
         self._runs: dict[str, FactoryRun] = {}
 
     # -- public API ---------------------------------------------------------
@@ -1568,8 +1568,8 @@ class FactoryExecutor:
         background asyncio task continues the run, so the calling model turn
         ends immediately (nonblocking).
         """
-        harness = self._harness
-        entry = harness.get("factory", spec_id) if harness is not None else None
+        entry_store = self._entry_store
+        entry = entry_store.get("factory", spec_id) if entry_store is not None else None
         if entry is None:
             raise ValueError(f"unknown factory spec {spec_id!r}")
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
@@ -1577,7 +1577,7 @@ class FactoryExecutor:
         if spec is None:
             spec = arguments.get("dag")
         canonical = canonicalize_factory_spec(spec)
-        resolved, reference_errors = self._resolve_subagents(harness, canonical)
+        resolved, reference_errors = self._resolve_subagents(entry_store, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
         run = self._create_run(entry.id, canonical, resolved, name=name)
@@ -1588,7 +1588,7 @@ class FactoryExecutor:
     ) -> dict[str, Any]:
         """Validate a library machine and start a run of it.
 
-        Harness entries remain runtime instances; machines in the library
+        Stored entries remain runtime instances; machines in the library
         are templates, so a library run never creates one. The machine's
         spec goes through the same validation and canonicalization as a
         stored entry's (``canonicalize_factory_spec``), the run records the
@@ -1596,8 +1596,8 @@ class FactoryExecutor:
         fields so a caller can trace the run back to the library file.
         """
         canonical = canonicalize_factory_spec(machine.spec)
-        harness = self._harness
-        resolved, reference_errors = self._resolve_subagents(harness, canonical)
+        entry_store = self._entry_store
+        resolved, reference_errors = self._resolve_subagents(entry_store, canonical)
         if reference_errors:
             raise ValueError("; ".join(reference_errors))
         run = self._create_run(machine.name, canonical, resolved, name=name)
@@ -2064,8 +2064,8 @@ class FactoryExecutor:
         run = self._runs.get(ref)
         if run is not None:
             return self._graph_snapshot(run, compact=compact)
-        harness = self._harness
-        entry = harness.get("factory", ref) if harness is not None else None
+        entry_store = self._entry_store
+        entry = entry_store.get("factory", ref) if entry_store is not None else None
         if entry is None:
             raise ValueError(f"unknown factory run or spec {ref!r}")
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
@@ -2221,11 +2221,11 @@ class FactoryExecutor:
         return run
 
     def _resolve_subagents(
-        self, harness: Any, canonical: dict[str, Any]
+        self, entry_store: Any, canonical: dict[str, Any]
     ) -> tuple[dict[str, tuple[str, str | None, str | None, str | None]], list[str]]:
         """Resolve every state's subagent reference; collect ALL failures.
 
-        A string reference is a harness subagent entry id or title: its
+        A string reference names a stored subagent entry by id or title: its
         content is the prompt template and ``metadata.model``/``metadata.thinking``
         carry optional spawn settings. An inline object uses its own fields;
         its ``name`` (stripped the way the host strips spawn names) labels
@@ -2243,9 +2243,9 @@ class FactoryExecutor:
                 model = reference.get("model")
                 thinking = reference.get("thinking")
             else:
-                entry = harness.get("subagent", reference) if harness is not None else None
-                if entry is None and harness is not None:
-                    entry = next((row for row in harness.list("subagent") if row.title == reference), None)
+                entry = entry_store.get("subagent", reference) if entry_store is not None else None
+                if entry is None and entry_store is not None:
+                    entry = next((row for row in entry_store.list("subagent") if row.title == reference), None)
                 if entry is None:
                     errors.append(f"state {state_id!r} references unknown subagent {reference!r}")
                     continue
@@ -3804,13 +3804,13 @@ async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any
     when no entry carries that id, it resolves a machine from the library
     (repo directory first, user second) and runs the template directly:
     ``await rlm.factory.run("review-sweep")`` starts the library machine
-    without creating a harness entry. Harness entries remain runtime
+    without creating a stored entry. Stored entries remain runtime
     instances; machines are templates.
     """
     require_factory_enabled()
     executor = default_factory_executor()
-    harness = executor._harness
-    if harness is None or harness.get("factory", spec_id) is None:
+    entry_store = executor._entry_store
+    if entry_store is None or entry_store.get("factory", spec_id) is None:
         try:
             machine, path = resolve_machine(spec_id)
         except MachineResolutionError as error:
@@ -4109,7 +4109,7 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
 # writes the file verbatim into the user library so its documentation
 # travels with the spec. ``export_machine`` serializes a library machine, a
 # stored factory entry's spec, or a run's canonical machine back to
-# MACHINE.md (byte-pretty, stable formatting for diffs). Harness entries
+# MACHINE.md (byte-pretty, stable formatting for diffs). Stored entries
 # remain runtime instances; machines in the library are templates, so
 # ``run_factory`` falls back to the library when its argument names no
 # stored entry: ``await rlm.factory.run("review-sweep")``.
@@ -4453,7 +4453,7 @@ def render_machine_file(machine: MachineFile) -> str:
 
 
 def _machine_env_dir(name: str) -> str | None:
-    # Set-but-empty env values behave as unset (mirrors harness._env_dir).
+    # Set-but-empty env values behave as unset.
     value = (os.environ.get(name) or "").strip()
     return value or None
 
@@ -4798,8 +4798,8 @@ def export_machine(
     run specs render byte-pretty.
     """
     executor = default_factory_executor()
-    harness = executor._harness
-    entry = harness.get("factory", target) if harness is not None else None
+    entry_store = executor._entry_store
+    entry = entry_store.get("factory", target) if entry_store is not None else None
     if entry is not None:
         arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
         spec = arguments.get("machine")
@@ -4898,12 +4898,8 @@ while disabled, so this guide stays readable before opting in.
 
 ## Store the spec
 
-The default executor uses the machine library, not a persistent harness
-store. Use inline subagent prompts so a machine needs no external entry
-lookup. Existing harness data stays passive; running or importing a machine
-does not activate a memory plugin. An embedding can explicitly supply
-`FactoryExecutor(harness=entry_store)` when it owns an entry store with
-`get(kind, id)` and `list(kind)` methods.
+The machine library is the only store. Use inline subagent prompts so a
+machine needs no external entry lookup.
 
 Build a machine specification (the native form) or a DAG specification
 (sugar that compiles to machine form). Export and import it explicitly;
@@ -5238,7 +5234,7 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   write-time validation as a stored spec so an invalid machine never
   persists, and export copies a library machine verbatim to a fresh path
   (an existing target is refused, never overwritten). `rlm.factory.run('<name>')`
-  runs a library machine directly without creating a harness entry; a
+  runs a library machine directly without creating a stored entry; a
   machine that exists but is broken names its errors
   instead of pretending the name is unknown. The bundled seeds are
   `builder`, `pr-manager`, and `review-sweep`; the worked examples above

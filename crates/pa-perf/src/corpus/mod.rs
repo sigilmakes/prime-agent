@@ -662,7 +662,7 @@ mod tests {
             } else {
                 assert_eq!(payloads, 0);
                 assert!(!manifest.files.iter().any(|file| {
-                    file.contains("/harness/") || file.ends_with("scheduled-jobs.json")
+                    file.ends_with("scheduled-jobs.json")
                 }));
             }
         }

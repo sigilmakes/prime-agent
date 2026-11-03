@@ -57,8 +57,7 @@ class WorkspaceGateTests(unittest.TestCase):
         self.assertNotIn("PI_OFFLINE", env)
         self.assertNotIn("PI_SKIP_VERSION_CHECK", env)
         for variable in ("PI_PACKAGE_DIR", "PRIME_AGENT_SESSION_DIR",
-                         "PRIME_AGENT_CODING_AGENT_SESSION_DIR", "RLM_SESSION_DIR",
-                         "RLM_HARNESS_STATE_DIR", "RLM_GLOBAL_HARNESS_STATE_DIR"):
+                         "PRIME_AGENT_CODING_AGENT_SESSION_DIR", "RLM_SESSION_DIR"):
             self.assertNotIn(variable, env)
         self.assertEqual(env["PRIME_AGENT_CODING_AGENT_DIR"], "/private/state/agent")
         self.assertEqual(env["PRIME_AGENT_DAEMON_SOCKET"], "/private/state/run/daemon.sock")

@@ -24,8 +24,8 @@ Every contributor (human or agent) must read this before working on this repo.
   reference material, not this fork's publication procedure.
 - Routine validated commits and pushes are authorized for this fork. Releases and
   installation changes need explicit authorization for the change being deployed.
-- Test with isolated home, agent, session, kernel-venv, harness, temporary, and daemon
-  socket paths. Use local fake providers and MCP servers, never live user credentials.
+- Test with isolated home, agent, session, kernel-venv, temporary, and daemon socket
+  paths. Use local fake providers and MCP servers, never live user credentials.
 - TypeScript parity reference for downstream behavior is the preserved fork checkpoint
   `archive/typescript-2026-10-18` (`239dbe344fcaf671af9898906ff952be73995614`), not
   upstream `v0.9.8`. Set `PA_TS_REFERENCE` to a read-only checkout of that checkpoint.
@@ -112,7 +112,7 @@ do not establish it.
   (2) interactive behavior — the same input handled identically (keys, mouse, timing); 
   (3) wire parity — byte-compare the TS daemon's traffic for protocol changes; (4) user-visible
   invariants — every user action produces the same visible reaction as TS (`/compact` shows
-  started+completed; `/model` shows the selector; a refinement shows its decoration). A feature
+  started+completed; `/model` shows the selector). A feature
   that "works" but was never diffed against the TS binary does not pass review. If TS shows it,
   Rust shows it identically; if Rust shows something TS does not, that is also a parity bug.
 - PRs must state ownership compliance (crate README scope/non-goals/public API, dependency
@@ -129,7 +129,7 @@ do not establish it.
 
 This fork removes vendor analytics, installation identity generation, trace-only
 credentials, and transcript uploaders from source and shipped artifacts. An opt-out
-setting is not equivalent. Preserve local sessions, ledgers, harness data, diagnostics,
+setting is not equivalent. Preserve local sessions, ledgers, diagnostics,
 and actual model-provider and MCP authentication.
 
 Validate release artifacts as well as lifecycle behavior with old opt-in settings
@@ -145,20 +145,19 @@ Prime Agent. Audit with a repo-wide grep and classify every hit (user-visible
 vs wire-internal vs comment) before scrubbing, and list the preserved wire
 identifiers in the PR body so the reviewer can verify none were wrongly scrubbed.
 
-EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible with the TS product (e.g. the PI_PACKAGE_DIR env var, settings keys, provider IDs like prime-inference, harness _meta namespaces like ai.primeintellect.prime-agent, lockfile names) stay until/unless the TS side renames them — PARITY BEATS BRANDING ON THE WIRE.
+EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible with the TS product (e.g. the PI_PACKAGE_DIR env var, settings keys, provider IDs like prime-inference, lockfile names) stay until/unless the TS side renames them — PARITY BEATS BRANDING ON THE WIRE.
 
 
 
 ## Surface contract
 
-- Read `GLOSSARY.md` when changing session, plugin, provider, context, compaction, or continual-harness behavior. Keep domain definitions there and implementation decisions in the authorized vault plan.
+- Read `GLOSSARY.md` when changing session, plugin, provider, context, or compaction behavior. Keep domain definitions there and implementation decisions in the authorized vault plan.
 - Tools exposed to the model: `bash`, `edit`, `python_repl` (internal helpers: `rename`, `stdout`).
 - Preserve core RLM execution and messaging: `rlm.spawn/find_models/collect/list_subagents/delete_subagent/create_session/progress_note`, `agent_message.send`, `agent_observe`, `compact`, `goal`, `attach_image`, and the markdown/Python skill contract.
-- Willow explicitly authorized replacing the harness interface with plugin-owned `plugin.<name>.*` exports and plugin slash commands. Preserve accumulated data, not obsolete function names. A disabled plugin contributes no callable namespace, commands, instructions, hooks, jobs, or context; its saved data remains intact.
-- The continual harness is an optional first-party plugin. Core supplies generic execution, storage, scheduling, and context contribution capabilities; harness policy must not remain unconditionally active behind Lua glue.
+- Plugin-owned `plugin.<name>.*` exports and plugin slash commands replace former hardwired interfaces. Preserve accumulated data, not obsolete function names. A disabled plugin contributes no callable namespace, commands, instructions, hooks, jobs, or context; its saved data remains intact.
 - Keep canonical history independent of the model-facing context view. A session selects one context strategy. That strategy may use an explicit ordered compaction chain; server-side compaction, Snapcompact, and standard summarization can be fallback strategies. OptChat-style summary-tree context is a separate context strategy, not a compaction fallback.
-- Keep cache-stable mandatory prompt layers followed by a dynamic tail. Plugin instructions, callable inventories, and digest contributions reflect active plugins. `prime-agent prompt` exposes the assembled prompt and its layer breakdown without requiring the continual harness.
-- Preserve existing CLI/headless behavior except for the explicitly authorized plugin/harness changes. Negotiate optional daemon command/metadata changes; keep startup usable with older peers.
+- Keep cache-stable mandatory prompt layers followed by a dynamic tail. Plugin instructions, callable inventories, and digest contributions reflect active plugins. `prime-agent prompt` exposes the assembled prompt and its layer breakdown without requiring any optional plugin.
+- Preserve existing CLI/headless behavior except for the explicitly authorized plugin changes. Negotiate optional daemon command/metadata changes; keep startup usable with older peers.
 
 ## Crates
 
@@ -190,7 +189,3 @@ Layering rules:
 
 - The daemon is a supervisor: it spawns one worker process per active session instead of hosting sessions in-process. Workers are supervised, restarted with backoff, and sessions persist on disk (append-only JSONL, same layout as `~/.prime/agent/sessions`) so reattach works even if the supervisor restarts.
 - No stubs, no `todo!()`, no swallowed errors (`anyhow` bubbling to UI is fine).
-
-## References
-
-- Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.

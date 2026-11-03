@@ -25,8 +25,6 @@ fn message_extraction_skips_compaction_and_tool_results() {
             from_hook: None,
             custom_instructions: None,
             usage: None,
-            harness_digest: None,
-            harness_state_fingerprint: None,
         },
         base: EntryBase {
             id: Some("c".to_string()),

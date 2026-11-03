@@ -488,8 +488,6 @@ async fn killed_skill_sync_refuses_reacquisition_requires_offline_recovery() {
             .env("XDG_STATE_HOME", root.path().join("state")).env("XDG_CACHE_HOME", root.path().join("cache"))
             .env("PRIME_AGENT_CODING_AGENT_DIR", root.path().join("agent"))
             .env("RLM_SESSION_DIR", root.path().join("sessions"))
-            .env("RLM_HARNESS_STATE_DIR", root.path().join("harness"))
-            .env("RLM_GLOBAL_HARNESS_STATE_DIR", root.path().join("global-harness"))
             .env("PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET", root.path().join("daemon.sock"))
             .env("PRIME_AGENT_KERNEL_VENV", &venv).env("PA_BOOTSTRAP_CRASH_FIXTURE", root.path())
             .args(["--exact", "kernel::bootstrap::venv::recovery::tests::killed_skill_sync_refuses_reacquisition_requires_offline_recovery", "--nocapture"])

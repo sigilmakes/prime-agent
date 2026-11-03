@@ -347,8 +347,6 @@ async fn run_child(action: &str, root: &Path, url: &str, endpoint: &str) -> std:
         .env("PRIME_AGENT_CODING_AGENT_DIR", root.join("agent"))
         .env("PRIME_AGENT_KERNEL_VENV", root.join("kernel"))
         .env("RLM_SESSION_DIR", root.join("sessions"))
-        .env("RLM_HARNESS_STATE_DIR", root.join("harness"))
-        .env("RLM_GLOBAL_HARNESS_STATE_DIR", root.join("global-harness"))
         .env(
             "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET",
             root.join("supervisor.sock"),

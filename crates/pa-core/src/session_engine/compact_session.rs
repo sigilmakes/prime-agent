@@ -481,9 +481,8 @@ pub(crate) fn commit_attempt(
         compaction.commit();
     }
     // TS `appendCompaction` persists the full record: `details`,
-    // `fromHook`, `customInstructions`, `usage`, and the `harnessDigest`
-    // snapshot ride on the durable row alongside the summary, boundary,
-    // and token count. The row's parent is the CURRENT leaf, so the
+    // `fromHook`, `customInstructions`, and `usage` ride on the durable row
+    // alongside the summary, boundary, and token count. The row's parent is the CURRENT leaf, so the
     // mid-window tail sits between `first_kept_entry` and the compaction
     // row and rides the retained tail.
     session.append_compaction(prepared.entry.clone())?;

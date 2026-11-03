@@ -135,8 +135,6 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
                 tokens_before: payload.tokens_before,
                 retained_message_count: None,
                 custom_instructions: payload.custom_instructions.clone(),
-                harness_digest: None,
-                harness_state_fingerprint: None,
                 timestamp: super::super::session::timestamp_to_millis(entry.timestamp()),
             }))
         }
@@ -551,8 +549,6 @@ mod tests {
                 from_hook: None,
                 custom_instructions: None,
                 usage: None,
-                harness_digest: None,
-                harness_state_fingerprint: None,
             },
             base: EntryBase {
                 id: Some("c0".to_string()),

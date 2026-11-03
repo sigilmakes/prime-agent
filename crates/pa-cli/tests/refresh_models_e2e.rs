@@ -19,8 +19,6 @@ fn cli_command(dir: &Path, args: &[&str]) -> Command {
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("PRIME_AGENT_KERNEL_VENV", dir.join("kernel-venv"))
         .env("RLM_SESSION_DIR", dir.join("session"))
-        .env("RLM_HARNESS_STATE_DIR", dir.join("harness"))
-        .env("RLM_GLOBAL_HARNESS_STATE_DIR", dir.join("harness-global"))
         .env(
             "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET",
             dir.join("run/daemon.sock"),

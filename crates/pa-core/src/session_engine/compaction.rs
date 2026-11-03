@@ -602,8 +602,6 @@ mod tests {
             tokens_before: 100,
             retained_message_count: None,
             custom_instructions: None,
-            harness_digest: None,
-            harness_state_fingerprint: None,
             timestamp,
         })
     }

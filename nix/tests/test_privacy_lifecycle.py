@@ -45,8 +45,7 @@ assert os.environ["PRIME_AGENT_TRACES_API_KEY"].startswith("dummy-")
 assert json.loads((agent / "auth.json").read_text())["prime-agent-traces"]["key"].startswith("dummy-")
 for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
              "XDG_RUNTIME_DIR", "TMPDIR", "PRIME_AGENT_DAEMON_SOCKET", "PRIME_AGENT_KERNEL_PYTHON",
-             "PRIME_AGENT_KERNEL_VENV", "PRIME_AGENT_SESSION_DIR", "RLM_SESSION_DIR",
-             "RLM_HARNESS_STATE_DIR", "RLM_GLOBAL_HARNESS_STATE_DIR"):
+             "PRIME_AGENT_KERNEL_VENV", "PRIME_AGENT_SESSION_DIR", "RLM_SESSION_DIR"):
     assert Path(os.environ[name]).is_relative_to(home)
 assert "AMBIENT_SECRET_API_KEY" not in os.environ
 session = Path(os.environ["PRIME_AGENT_SESSION_DIR"]) / "fixture.jsonl"

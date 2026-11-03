@@ -1377,16 +1377,6 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
         ["user", "assistant"],
         "the initial run carries only the prompt and failed assistant: {agent_ends:?}"
     );
-    assert!(
-        agent_ends.iter().all(|frame| {
-            frame["messages"].as_array().is_some_and(|messages| {
-                messages.iter().all(|message| {
-                    message.get("customType").and_then(Value::as_str) != Some("harness_digest")
-                })
-            })
-        }),
-        "no run reintroduces a legacy host-owned harness digest: {agent_ends:?}"
-    );
     assert_eq!(
         agent_ends[0]["messages"][1]["stopReason"],
         json!("error"),

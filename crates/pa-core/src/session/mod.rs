@@ -430,8 +430,6 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
                 tokens_before: payload.tokens_before,
                 retained_message_count: Some(retained.len() as u64),
                 custom_instructions: payload.custom_instructions,
-                harness_digest: None,
-                harness_state_fingerprint: None,
                 timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
             }));
         }

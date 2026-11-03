@@ -80,7 +80,7 @@ pub struct SessionManager {
     persist: bool,
     /// Whether the manager carries a session directory of its own (any
     /// persisted manager, and the daemon's mirrored engine session): the
-    /// session-owned artifacts (local harness state) resolve under it.
+    /// session-owned artifacts resolve under it.
     session_dir_backed: bool,
     flushed: bool,
     append_ownership: super::window::AppendOwnership,

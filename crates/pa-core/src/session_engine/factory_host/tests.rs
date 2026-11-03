@@ -1,5 +1,5 @@
 //! Factory request validation and explicit model-selector policy.
-//! Legacy harness files are passive data and are never a factory lookup source.
+//! Legacy state files are passive data and are never a factory lookup source.
 
 use std::path::Path;
 
@@ -132,27 +132,6 @@ fn session_model_fallback_and_request_auth_remain_enforced() {
     assert!(bridge
         .preflight_selectors(&["testprov/declared-model".to_string()])
         .is_err());
-}
-
-#[test]
-fn corrupt_legacy_stores_remain_passive_beside_explicit_selector_preflight() {
-    let dir = tempfile::tempdir().unwrap();
-    write_catalog(dir.path());
-    let bridge = host(dir.path(), None, Some(vec!["testprov/*".to_string()]));
-    let selectors = vec!["testprov/declared-model".to_string()];
-    bridge.preflight_selectors(&selectors).unwrap();
-    let old_global = dir.path().join("harness/harness_state.json");
-    let old_local = dir.path().join("local-harness/harness_state.json");
-    let poison = b"not-json: legacy factory selectors must never become active policy";
-    for path in [&old_global, &old_local] {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, poison).unwrap();
-    }
-    bridge.preflight_selectors(&selectors).unwrap();
-    bridge.preflight_selectors(&[]).unwrap();
-    for path in [&old_global, &old_local] {
-        assert_eq!(std::fs::read(path).unwrap(), poison);
-    }
 }
 
 /// The request validation: known actions, required targets per action, and

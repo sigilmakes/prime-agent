@@ -392,7 +392,7 @@ def isolated_env(root):
     # Construct, never filter inherited env: no credentials, PRIME_AGENT_*, RLM_*,
     # PI_*, proxy, SSH agent, project hooks, user config, Python path or loader env.
     paths = {name: root / name for name in ["home", "config", "cache", "data", "state",
-        "runtime", "tmp", "agent", "sessions", "kernel-venv", "harness", "global-harness", "cwd"]}
+        "runtime", "tmp", "agent", "sessions", "kernel-venv", "cwd"]}
     for path in paths.values():
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return {"PATH": "/run/current-system/sw/bin:/usr/bin:/bin", "TERM": "xterm-256color",
@@ -405,8 +405,7 @@ def isolated_env(root):
         "PRIME_AGENT_SESSION_DIR": str(paths["sessions"]),
         "PRIME_AGENT_CODING_AGENT_SESSION_DIR": str(paths["sessions"]),
         "PRIME_AGENT_KERNEL_VENV": str(paths["kernel-venv"]),
-        "RLM_SESSION_DIR": str(paths["sessions"]), "RLM_HARNESS_STATE_DIR": str(paths["harness"]),
-        "RLM_GLOBAL_HARNESS_STATE_DIR": str(paths["global-harness"]),
+        "RLM_SESSION_DIR": str(paths["sessions"]),
         "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR": str(paths["runtime"]),
         "PRIME_AGENT_DAEMON_SOCKET": str(root / "d.sock")}
 

@@ -30,8 +30,6 @@ def smoke(binary: Path, version: str) -> None:
             "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
             "PRIME_AGENT_SESSION_DIR": str(home / "sessions"),
             "PRIME_AGENT_KERNEL_VENV": str(home / "kernel"),
-            "RLM_GLOBAL_HARNESS_STATE_DIR": str(home / "global-harness"),
-            "RLM_HARNESS_STATE_DIR": str(home / "local-harness"),
             "RLM_SESSION_DIR": str(home / "artifacts"),
             "DO_NOT_TRACK": "1", "PRIME_AGENT_TELEMETRY": "0", "PI_SKIP_VERSION_CHECK": "1",
             "PRIME_AGENT_RUST_INSTALLER_URL": "http://127.0.0.1:9/installer",

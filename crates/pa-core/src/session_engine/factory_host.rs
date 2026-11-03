@@ -1,7 +1,7 @@
 //! Factory activity request validation and explicit model-selector preflight.
 //! Named factory specs and subagents resolve in the Python library. Their
 //! children still pass through the `rlm.spawn` host model and allowlist checks.
-//! This module never reads legacy harness stores.
+//! This module never reads legacy state stores.
 
 use std::path::PathBuf;
 
@@ -45,7 +45,7 @@ impl FactoryHost {
 
     /// Preflight explicit model selectors supplied by a factory caller.
     /// Named library specs and subagents stay kernel-owned and are checked per spawn.
-    /// This never reads stored harness specs or resolves scoped harness references.
+    /// This never reads stored specs or resolves scoped references.
     ///
     /// # Errors
     ///

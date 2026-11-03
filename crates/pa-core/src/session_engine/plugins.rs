@@ -181,10 +181,6 @@ impl SessionPlugins {
                     .into_iter()
                     .map(|source| (source.name.clone(), source))
                     .collect();
-            // Harness records are the session's memory surface: load them by
-            // default. An explicit `plugins.harness.enabled=false` still retires
-            // the source below.
-            desired.insert("harness".into(), crate::harness_plugin::source(settings));
             // Retirement is a mandatory control operation, not an enabled-source
             // replacement. Resolve intent before reading or evaluating any source.
             let mut wanted: std::collections::BTreeSet<_> = desired.keys().cloned().collect();
@@ -238,9 +234,7 @@ impl SessionPlugins {
                     crate::plugins::validate_plugin_name(name)?;
                     let entry: ConfiguredPlugin = serde_json::from_value(entry.clone())
                         .with_context(|| format!("invalid plugin configuration: {name}"))?;
-                    let builtin = desired.remove(name).or_else(|| {
-                        (name == "harness").then(|| crate::harness_plugin::source(settings))
-                    });
+                    let builtin = desired.remove(name);
                     if !entry.enabled.unwrap_or(builtin.is_some()) {
                         disabled.insert(name.clone());
                         continue;
@@ -268,11 +262,7 @@ impl SessionPlugins {
                             })
                             .with_context(|| format!("plugin {name} needs an explicit path"))?,
                     };
-                    let mut plugin_config = if name == "harness" {
-                        crate::harness_plugin::source(settings).config
-                    } else {
-                        json!({})
-                    };
+                    let mut plugin_config = json!({});
                     if let Some(config) = plugin_config.as_object_mut() {
                         config.extend(
                             entry
@@ -974,9 +964,9 @@ mod context_selection_tests {
             requests: sent.clone(),
         }));
         f.manager.set_capability_delegate(
-            "harness.",
+            "records.",
             Arc::new(Capture {
-                name: "harness",
+                name: "records",
                 requests: sent.clone(),
             }),
         );
@@ -997,7 +987,7 @@ mod context_selection_tests {
         };
         for (operation, expected) in [
             ("native.call", "native"),
-            ("harness.read", "harness"),
+            ("records.read", "records"),
             ("native.specific.call", "specific"),
         ] {
             let request = CapabilityRequest {
@@ -1018,12 +1008,12 @@ mod context_selection_tests {
             cancel.cancel();
             assert!(delegated_cancel.is_cancelled());
         }
-        // Replacing the native namespace cannot replace the independent harness adapter.
+        // Replacing the native namespace cannot replace the independent records adapter.
         f.manager.set_native_capabilities(Arc::new(Capture {
             name: "replacement",
             requests: sent,
         }));
-        for (operation, expected) in [("native.call", "replacement"), ("harness.read", "harness")] {
+        for (operation, expected) in [("native.call", "replacement"), ("records.read", "records")] {
             let request = CapabilityRequest {
                 operation: operation.into(),
                 ..request.clone()

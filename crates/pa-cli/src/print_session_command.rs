@@ -274,11 +274,10 @@ mod tests {
         bed_with_settings(script, json!({})).await
     }
 
-    async fn bed_with_settings(script: Value, mut settings: Value) -> Bed {
+    async fn bed_with_settings(script: Value, settings: Value) -> Bed {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        settings["plugins"] = json!({"harness":{"enabled":false}});
         std::fs::write(agent_dir.join("settings.json"), settings.to_string()).unwrap();
         let parsed = pa_ai::faux::script::parse_faux_script(&script).unwrap();
         let registration =
