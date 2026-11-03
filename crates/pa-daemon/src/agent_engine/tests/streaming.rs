@@ -474,18 +474,17 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
     ] {
         producer.persist_entry(kind, payload).unwrap();
     }
-    for kind in ["harness_digest"] {
-        producer
-            .persist_entry(
-                "custom_message",
-                json!({
-                    "customType":kind, "content":"shared controlled text", "display":false,
-                    "details":{"digest":"controlled", "stateFingerprint":"controlled"},
-                    "opaque":{"preserve":[null,true,3]},
-                }),
-            )
-            .unwrap();
-    }
+    let kind = "harness_digest";
+    producer
+        .persist_entry(
+            "custom_message",
+            json!({
+                "customType":kind, "content":"shared controlled text", "display":false,
+                "details":{"digest":"controlled", "stateFingerprint":"controlled"},
+                "opaque":{"preserve":[null,true,3]},
+            }),
+        )
+        .unwrap();
     let ordinary = [
         json!({"role":"user", "content":[{"type":"text", "text":"source user"}], "timestamp":11}),
         json!({"role":"assistant", "content":[{"type":"toolCall", "id":"fixture-tool-call", "name":"python_repl", "arguments":{"code":"pass"}}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"toolUse", "timestamp":12, "responseId":"fixture-tool-response"}),
@@ -731,38 +730,36 @@ fn cold_real_owner_preserves_legacy_harness_rows_as_generic_custom_rows() {
 
 #[test]
 fn opaque_legacy_payload_is_preserved_without_becoming_a_model_message() {
-    for kind in ["harness_digest"] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        let mut store =
-            crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
-        store.set_path(path.clone());
-        store.rewrite().unwrap();
-        store
-            .persist_entry(
-                "custom_message",
-                json!({"customType":kind,"content":17,"display":false}),
-            )
-            .unwrap();
-        let original = std::fs::read(&path).unwrap();
-        let engine = bare_engine(dir.path());
-        let owner = own_log_store(&engine, store);
-        let adapter = crate::worker::context_selection_store_for_tests(Arc::clone(&owner));
-        let seed = adapter.mirror_seed().unwrap().unwrap();
-        assert!(seed.entries.iter().any(|entry| matches!(entry, pa_types::session::FileEntry::Unknown { rest } if rest.get("content") == Some(&json!(17)) && rest.get("customType") == Some(&json!(kind)))));
-        let context =
-            pa_core::session::build_session_context(&seed.entries, seed.leaf_id.as_deref());
-        assert!(
-            context.messages.is_empty(),
-            "opaque invalid payloads are not model messages"
-        );
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            original,
-            "typed model-view policy cannot forgive malformed physical payloads"
-        );
-        assert!(engine.session.blocking_lock().is_none());
-    }
+    let kind = "harness_digest";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    store
+        .persist_entry(
+            "custom_message",
+            json!({"customType":kind,"content":17,"display":false}),
+        )
+        .unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let engine = bare_engine(dir.path());
+    let owner = own_log_store(&engine, store);
+    let adapter = crate::worker::context_selection_store_for_tests(Arc::clone(&owner));
+    let seed = adapter.mirror_seed().unwrap().unwrap();
+    assert!(seed.entries.iter().any(|entry| matches!(entry, pa_types::session::FileEntry::Unknown { rest } if rest.get("content") == Some(&json!(17)) && rest.get("customType") == Some(&json!(kind)))));
+    let context = pa_core::session::build_session_context(&seed.entries, seed.leaf_id.as_deref());
+    assert!(
+        context.messages.is_empty(),
+        "opaque invalid payloads are not model messages"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "typed model-view policy cannot forgive malformed physical payloads"
+    );
+    assert!(engine.session.blocking_lock().is_none());
 }
 
 /// The helper poll proves the existing gate contract even with a cached SDK.
