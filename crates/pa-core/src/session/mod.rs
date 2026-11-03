@@ -307,8 +307,7 @@ pub struct SessionContext {
     pub model: Option<(String, String)>,
 }
 
-/// Walk the parent chain from the leaf, reconstructing the model context
-/// (summary-first when a compaction is on the path).
+#[must_use]
 pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> SessionContext {
     let by_id: HashMap<String, usize> = entries
         .iter()
