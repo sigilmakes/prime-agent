@@ -411,10 +411,7 @@ mod tests {
     fn non_display_rows_render_nothing() {
         // TS skips display=false rows everywhere (worker recovery is
         // bookkeeping).
-        for custom_type in [
-            "prime-agent.worker_recovery",
-            AGENT_MESSAGE_CUSTOM_TYPE,
-        ] {
+        for custom_type in ["prime-agent.worker_recovery", AGENT_MESSAGE_CUSTOM_TYPE] {
             let entries = decoded(&json!({
                 "role": "custom",
                 "customType": custom_type,

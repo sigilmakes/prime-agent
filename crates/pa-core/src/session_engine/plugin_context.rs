@@ -4,8 +4,8 @@ use crate::plugins::{ContributionKind, InvocationEvent, InvocationOutcome, Plugi
 use pa_agent::types::{AssistantContent, Message, UserContent, UserPart};
 use serde_json::json;
 use std::sync::Arc;
-use tracing::warn;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 // New host safety ceilings, independent of plugin policy. An over-budget or
 // failing plugin contributes nothing to this call; it never fails the model
@@ -249,7 +249,10 @@ mod tests {
             tools: Vec::new(),
         };
         let result = wrapped(model, context, StreamRequestOptions::default()).await;
-        assert!(result.is_ok(), "a plugin failure must not fail the model call");
+        assert!(
+            result.is_ok(),
+            "a plugin failure must not fail the model call"
+        );
         let prompt = captured.lock().unwrap().clone().unwrap();
         assert!(prompt.contains("BASE-PROMPT"));
         assert_eq!(prompt.matches("GOOD-INSTRUCTIONS").count(), 1);
