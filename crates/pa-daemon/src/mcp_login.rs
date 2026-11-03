@@ -244,10 +244,6 @@ mod tests {
             ),
             get_user_servers: Box::new(move || Some(user_servers.clone())),
             begin_login: None,
-            agent_dir: None,
-            get_catalog_sources: None,
-            remote_source: None,
-            probe_override: None,
         });
         let manager = Arc::new(std::sync::Mutex::new(manager));
         // Gating snapshots take the auth-store's blocking lock (the
@@ -392,10 +388,6 @@ mod tests {
             ),
             get_user_servers: Box::new(|| None),
             begin_login: None,
-            agent_dir: None,
-            get_catalog_sources: None,
-            remote_source: None,
-            probe_override: None,
         });
         let manager = Arc::new(std::sync::Mutex::new(manager));
         wire_worker_mcp_login(

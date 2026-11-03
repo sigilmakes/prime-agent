@@ -555,8 +555,6 @@ fn known_command_types_match_the_ts_list() {
                     | "commit_update_restart"
                     | "update_restore_status"
                     | "get_mcp_connections"
-                    | "set_mcp_static_token"
-                    | "remove_mcp_connection"
                     | "list_kernel_bash"
                     | "tail_kernel_bash"
                     | "kill_kernel_bash"

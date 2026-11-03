@@ -280,18 +280,6 @@ fn startup_child() {
                     pa_models::transports::compiled_models()
                 );
             }
-            "mcp" => {
-                let dir = tempfile::tempdir().unwrap();
-                pa_core::mcp::startup_plugins_refresh(dir.path());
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while runtime.metrics().num_alive_tasks() != 0 {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("MCP startup refresh settled");
-                assert!(files(dir.path()).is_empty());
-            }
             "online" => {
                 let base = std::env::var("PA_OFFLINE_LOOPBACK_URL").unwrap();
                 let dir = tempfile::tempdir().unwrap();
@@ -483,11 +471,6 @@ async fn fenced_children(actions: &[&str]) {
 #[tokio::test]
 async fn production_default_catalog_makes_zero_offline_requests() {
     fenced_children(&["models"]).await;
-}
-
-#[tokio::test]
-async fn production_mcp_startup_makes_zero_offline_requests() {
-    fenced_children(&["mcp"]).await;
 }
 
 #[tokio::test]

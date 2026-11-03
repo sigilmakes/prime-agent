@@ -409,7 +409,7 @@ impl SessionUi {
         Ok(())
     }
 
-    /// One key press while the `/mcp` connections view is open: Enter (or the paste flow) parks
+    /// One key press while the `/mcp` connections view is open: Enter parks
     /// `pending_mcp_auth`, which the input loop mounts the auth panel for once the key handler
     /// returns.
     pub(crate) fn handle_mcp_view_key(
@@ -451,37 +451,6 @@ impl SessionUi {
                 self.pending_mcp_auth = Some(McpAuthIntent {
                     args: format!("login {server}"),
                     title: format!("Login to {label}"),
-                });
-            }
-            Some(crate::mcp_view::McpViewAction::Paste { server, label }) => {
-                view.mcp_view = None;
-                self.dirty = true;
-                if self.picker_restored_draft {
-                    self.picker_restored_draft = false;
-                } else {
-                    view.editor.set_text("");
-                }
-                // The inline paste panel's client surface: prompt for the
-                // token, store it bound to the service endpoint, verify.
-                self.pending_mcp_auth = Some(McpAuthIntent {
-                    args: format!("paste {server}"),
-                    title: format!("Connect {label}"),
-                });
-            }
-            Some(crate::mcp_view::McpViewAction::Key { id, label }) => {
-                view.mcp_view = None;
-                self.dirty = true;
-                if self.picker_restored_draft {
-                    self.picker_restored_draft = false;
-                } else {
-                    view.editor.set_text("");
-                }
-                // The api-key credential's client surface: prompt for the
-                // key (masked), store it in the credential's auth slot —
-                // the exact contract the runtime reads.
-                self.pending_mcp_auth = Some(McpAuthIntent {
-                    args: format!("key {id}"),
-                    title: format!("Connect {label}"),
                 });
             }
         }
@@ -613,20 +582,6 @@ mod cancellation_tests {
                 std::future::pending().await
             })
         }
-        fn paste_token(
-            &self,
-            server: &str,
-            panel: crate::auth_panel::AuthPanelHandle,
-        ) -> AuthFuture {
-            self.login(server, panel)
-        }
-        fn api_key(
-            &self,
-            credential: &str,
-            panel: crate::auth_panel::AuthPanelHandle,
-        ) -> AuthFuture {
-            self.login(credential, panel)
-        }
         fn logout(&self, _server: &str) -> AuthFuture {
             Box::pin(std::future::pending())
         }
@@ -634,7 +589,7 @@ mod cancellation_tests {
 
     #[tokio::test]
     async fn escape_drops_pending_mcp_command_without_a_stale_settle() {
-        for args in ["login fixture", "paste fixture", "key fixture"] {
+        for args in ["login fixture"] {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let panel = crate::auth_panel::AuthPanelHandle::new(tx);
             let mut dialog = crate::auth_panel::AuthPanel::new("MCP login");
