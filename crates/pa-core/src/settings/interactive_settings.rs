@@ -7,22 +7,6 @@ use anyhow::{anyhow, Result};
 use super::manager::SettingsManager;
 
 impl SettingsManager {
-    /// Global preference controlling refinement creation and context loading (default on).
-    /// Project settings cannot override the user's master switch.
-    #[must_use]
-    pub fn get_harness_refinements(&self) -> bool {
-        self.global_settings().harness_refinements.unwrap_or(true)
-    }
-
-    /// Persist the master harness switch to the global settings scope.
-    ///
-    /// # Errors
-    /// Returns an error when the global scope cannot be saved.
-    pub fn set_harness_refinements(&mut self, enabled: bool) -> Result<()> {
-        self.global_mut().harness_refinements = Some(enabled);
-        self.save_global_scope(&["harnessRefinements"])
-    }
-
     /// The percentage ceiling for automatic compaction (default 95%).
     #[must_use]
     pub fn get_compaction_threshold_percent(&self) -> f64 {

@@ -59,7 +59,7 @@ impl Fixture {
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(cwd.join("summarizer.lua"), SUMMARIZER).unwrap();
-        let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
+        let settings = json!({"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
           "contextStrategy":"optchat/tree","auxiliaryModel":"tree-summarizer/default",
           "plugins":{"optchat":{"enabled":true,"config":{"budget_bytes":4096,"summary_bytes":128,"model":"tree-summarizer/chosen"}},
           "summary":{"enabled":true,"path":"summarizer.lua"}}});

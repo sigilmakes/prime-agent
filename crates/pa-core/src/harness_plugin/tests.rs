@@ -64,7 +64,8 @@ impl Fixture {
 }
 const LEGACY:&[u8]=br#"{"schema":1,"entries":{"memory":{"same":{"id":"same","kind":"memory","content":"legacy secret","unknown":null}},"factory":{"raw":{"opaque":null}},"future":{"nil":null}},"refinements":[{"id":"old","unknown":true}]}"#;
 fn settings(enabled: bool) -> Value {
-    json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},"harnessRefinements":enabled,"autoRefine":{"enabled":false}})
+    json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
+        "plugins":{"harness":{"enabled":enabled}}})
 }
 
 #[tokio::test]
@@ -197,75 +198,6 @@ async fn active_migration_refuses_corruption_without_authoritative_empty_target(
     assert!(!f.agent.join("plugins/harness/store.json").exists());
 }
 
-#[tokio::test]
-async fn sparse_automatic_settings_review_plan_apply_and_publish_completion() {
-    let mut config = settings(true);
-    config["autoRefine"] = json!({"enabled":true});
-    config["auxiliaryModel"] = json!("aux/selected");
-    config["testProvider"] = json!(AUX_PROVIDER);
-    config["plugins"] = json!({"route":{"enabled":true,"path":"provider.lua"}});
-    let f = Fixture::new(config, LEGACY).await;
-    for turn in 1..=25 {
-        f.provider.push_text_turn("complete");
-        f.engine
-            .prompt(
-                "settled evidence",
-                crate::session_engine::PromptOptions::default(),
-            )
-            .await
-            .unwrap();
-        let state = f
-            .call("get", json!({"kind":"_policy","id":"automatic"}))
-            .await
-            .unwrap();
-        assert_eq!(
-            state["value"]["turns"],
-            json!(turn),
-            "automatic observer failed: {state}"
-        );
-    }
-    let terminal = f.engine.drain_plugin_jobs().await;
-    assert_eq!(terminal.len(), 1, "{terminal:?}");
-    assert_eq!(terminal[0]["state"]["status"], "completed", "{terminal:?}");
-    assert_eq!(
-        terminal[0]["state"]["result"]["message"],
-        json!({
-            "customType":"refinement_outcome", "content":"fixture learned", "display":true,
-            "details":{"summary":"fixture learned","scope":"local","edits":[{
-                "action":"create","kind":"memory","id":"learned","applied":true,
-                "after":{"content":"auxiliary route"}
-            }]}
-        })
-    );
-    assert_eq!(
-        terminal[0]["state"]["result"]["applied"][0]["current"],
-        json!({"state":"Present","value":{"content":"auxiliary route"}})
-    );
-    assert_eq!(
-        f.call("get", json!({"kind":"memory","id":"learned"}))
-            .await
-            .unwrap()["value"]["content"],
-        "auxiliary route"
-    );
-    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
-    assert_eq!(requests.as_array().unwrap().len(), 2, "review and plan");
-    // The default cooldown suppresses the next otherwise-due interval.
-    for _ in 0..25 {
-        f.provider.push_text_turn("complete");
-        f.engine
-            .prompt(
-                "more evidence",
-                crate::session_engine::PromptOptions::default(),
-            )
-            .await
-            .unwrap();
-    }
-    assert_eq!(
-        f.call_plugin("route", "requests", json!({})).await.unwrap(),
-        requests
-    );
-}
-
 const AUX_PROVIDER: &str = r#"
 local requests={}
 return {providers={{name='aux',mode='streaming',run=function(input,ctx)
@@ -308,7 +240,7 @@ async fn refinement_presentation_uses_committed_update_delete_and_empty_changes(
         let mut config = settings(true);
         config["auxiliaryModel"] = json!("aux/selected");
         config["testProvider"] = json!(AUX_PROVIDER.replace(original, &proposal.to_string()));
-        config["plugins"] = json!({"route":{"enabled":true,"path":"provider.lua"}});
+        config["plugins"]["route"] = json!({"enabled":true,"path":"provider.lua"});
         let f = Fixture::new(config, LEGACY).await;
         f.call(
             "create",
@@ -342,10 +274,11 @@ async fn refinement_presentation_uses_committed_update_delete_and_empty_changes(
 }
 
 #[tokio::test]
-async fn manual_and_interval_refinement_use_scoped_explicit_auxiliary_review_and_plan() {
+async fn manual_refinement_uses_scoped_explicit_auxiliary_review_and_plan() {
     let mut settings = settings(true);
     settings["auxiliaryModel"] = json!("aux/default");
-    settings["plugins"] = json!({"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":true,"turnInterval":1,"cooldownMs":1_200_000}}},"route":{"enabled":true,"path":"provider.lua"}});
+    settings["plugins"]["harness"]["config"] = json!({"auxiliaryModel":"aux/selected"});
+    settings["plugins"]["route"] = json!({"enabled":true,"path":"provider.lua"});
     settings["testProvider"] = json!(AUX_PROVIDER);
     let f = Fixture::new(settings, LEGACY).await;
     let job = f
@@ -360,69 +293,22 @@ async fn manual_and_interval_refinement_use_scoped_explicit_auxiliary_review_and
             .unwrap()["value"]["content"],
         "auxiliary route"
     );
-    f.call("delete", json!({"kind":"memory","id":"learned"}))
-        .await
-        .unwrap();
-    // Actual settled user run schedules interval policy in Lua, not the host.
-    f.provider.push_text_turn("complete");
-    f.engine
-        .prompt(
-            "one settled user run",
-            crate::session_engine::PromptOptions::default(),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if f.call("get", json!({"kind":"memory","id":"learned"}))
-                .await
-                .unwrap()
-                != Value::Null
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("interval job applied");
     let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
     assert_eq!(
         requests.as_array().unwrap().len(),
-        4,
-        "manual and interval each review and plan"
+        2,
+        "manual review and plan"
     );
     assert!(requests
         .as_array()
         .unwrap()
         .iter()
         .all(|request| request["model"] == "selected"));
-    f.call("delete", json!({"kind":"memory","id":"learned"}))
-        .await
-        .unwrap();
-    f.provider.push_text_turn("complete");
-    f.engine
-        .prompt(
-            "cooldown prevents another job",
-            crate::session_engine::PromptOptions::default(),
-        )
-        .await
-        .unwrap();
-    // The observer returns only after it evaluated cooldown; no deferred job was admitted.
-    assert_eq!(
-        f.call("get", json!({"kind":"memory","id":"learned"}))
-            .await
-            .unwrap(),
-        Value::Null
-    );
-    let after = f.call_plugin("route", "requests", json!({})).await.unwrap();
-    assert_eq!(after, requests);
 }
 
 #[tokio::test]
-async fn malformed_reload_preserves_harness_data_and_explicit_activation_overrides_legacy_false() {
-    let mut config = settings(false);
-    config["plugins"] = json!({"harness":{"enabled":true}});
+async fn malformed_reload_preserves_harness_data() {
+    let config = settings(true);
     let f = Fixture::new(config, LEGACY).await;
     f.call(
         "create",
@@ -461,7 +347,8 @@ end}},exports={{name='calls',run=function() return calls end},{name='release',ru
 async fn held_fixture() -> Fixture {
     let mut config = settings(true);
     config["testProvider"] = json!(HELD_PROVIDER);
-    config["plugins"] = json!({"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":false}}},"route":{"enabled":true,"path":"provider.lua"}});
+    config["plugins"]["harness"]["config"] = json!({"auxiliaryModel":"aux/selected"});
+    config["plugins"]["route"] = json!({"enabled":true,"path":"provider.lua"});
     Fixture::new(config, LEGACY).await
 }
 async fn started(f: &Fixture) {
@@ -580,7 +467,8 @@ async fn retired_job_outcomes_remain_drainable_without_publishing_into_new_gener
 async fn dynamic_refine_command_schedules_after_public_command_persistence() {
     let mut config = settings(true);
     config["testProvider"] = json!(AUX_PROVIDER);
-    config["plugins"] = json!({"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":false}}},"route":{"enabled":true,"path":"provider.lua"}});
+    config["plugins"]["harness"]["config"] = json!({"auxiliaryModel":"aux/selected"});
+    config["plugins"]["route"] = json!({"enabled":true,"path":"provider.lua"});
     let f = Fixture::new(config, LEGACY).await;
     let crate::session_engine::PromptOutcome::SessionCommand(command) = f
         .engine
@@ -610,65 +498,6 @@ async fn dynamic_refine_command_schedules_after_public_command_persistence() {
     assert!(
         f.provider.calls().is_empty(),
         "command did not enter paid main inference"
-    );
-}
-
-#[tokio::test]
-async fn accepted_compaction_schedules_exactly_one_automatic_auxiliary_review_and_plan() {
-    let mut config = settings(true);
-    config["testProvider"] = json!(AUX_PROVIDER);
-    config["auxiliaryModel"] = json!("aux/default");
-    config["autoRefine"] = json!({"enabled":true});
-    config["plugins"] = json!({"default_context":{"config":{"policy":"full","compactors":["standard_compaction/standard"]}},"harness":{"config":{"auxiliaryModel":"aux/selected"}},"route":{"enabled":true,"path":"provider.lua"}});
-    let f = Fixture::new(config, LEGACY).await;
-    {
-        let mut session = f.engine.session.session_handle().lock().await;
-        for n in 0..8 {
-            let message:pa_types::session::AgentMessage=serde_json::from_value(json!({"role":"user","content":format!("canonical evidence {n}: {}","durable fact ".repeat(300)),"timestamp":0})).unwrap();
-            session.append_message(message).unwrap();
-        }
-    }
-    let model:pa_types::ai::Model=serde_json::from_value(json!({"id":"test","name":"Test","api":"openai-completions","provider":"test","baseUrl":"http://127.0.0.1:9","input":["text"],"reasoning":false,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":10000,"maxTokens":100})).unwrap();
-    let checkpoint = f.engine.plugin_job_checkpoint();
-    let outcome = f
-        .engine
-        .session
-        .compact(None, &model, None, None)
-        .await
-        .unwrap();
-    assert!(
-        matches!(
-            outcome,
-            crate::session_engine::compact_session::CompactOutcome::Ran(_)
-        ),
-        "{outcome:?}"
-    );
-    let jobs = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        f.engine.drain_plugin_jobs_since(&checkpoint),
-    )
-    .await
-    .expect("compact observer's job drained");
-    assert_eq!(jobs.len(), 1, "{jobs:?}");
-    assert_eq!(jobs[0]["state"]["status"], "completed", "{jobs:?}");
-    assert_eq!(
-        f.call("get", json!({"kind":"memory","id":"learned"}))
-            .await
-            .unwrap()["value"]["content"],
-        "auxiliary route"
-    );
-    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
-    assert_eq!(
-        requests.as_array().unwrap().len(),
-        3,
-        "one summarizer + one review + one plan"
-    );
-    assert_eq!(requests[0]["model"], "default");
-    assert_eq!(requests[1]["model"], "selected");
-    assert_eq!(requests[2]["model"], "selected");
-    assert!(
-        f.provider.calls().is_empty(),
-        "auxiliary phases bypass the main stream"
     );
 }
 
@@ -728,161 +557,19 @@ async fn shared_vm_cancellation_does_not_poison_concurrent_auxiliary_jobs_50_tri
     }
 }
 
-#[tokio::test]
-async fn aborted_admitted_main_run_reports_cancelled_and_never_starts_automatic_inference() {
-    let source=AUX_PROVIDER.replace("local requests={}","local requests={} local observed={}")
-        .replace("return {providers=","return {hooks={{name='run_settled',run=function(input) table.insert(observed,input.reason) return {} end}},providers=")
-        .replace("exports={{name='requests',run=function() return requests end}}}","exports={{name='requests',run=function() return requests end},{name='settled_reasons',run=function() return observed end},{name='request_count',run=function() return #requests end}}}");
-    let mut config = settings(true);
-    config["testProvider"] = json!(source);
-    config["plugins"] = json!({"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":true,"turnInterval":1,"cooldownMs":0}}},"route":{"enabled":true,"path":"provider.lua"}});
-    let f = Fixture::new(config, LEGACY).await;
-    let checkpoint = f.engine.plugin_job_checkpoint();
-    f.provider
-        .push_stalled_turn("the admitted main run is streaming");
-    let prompt = f.engine.prompt(
-        "start then cancel this run",
-        crate::session_engine::PromptOptions::default(),
-    );
-    let cancel = async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if f.provider.calls().len() == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("main provider invocation admitted");
-        f.engine.session.agent().abort();
-    };
-    let (result, ()) = tokio::join!(prompt, cancel);
-    result.unwrap();
-    let jobs = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        f.engine.drain_plugin_jobs_since(&checkpoint),
-    )
-    .await
-    .expect("cancelled main run settles all observers");
-    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
-    assert!(
-        jobs.is_empty(),
-        "cancelled main run scheduled automatic work: {jobs:?}, requests={requests}"
-    );
-    assert_eq!(
-        f.call_plugin("route", "request_count", json!({}))
-            .await
-            .unwrap(),
-        json!(0),
-        "cancelled main run must not review or plan"
-    );
-    assert_eq!(
-        f.call_plugin("route", "settled_reasons", json!({}))
-            .await
-            .unwrap(),
-        json!(["cancelled"])
-    );
-    assert_eq!(
-        f.provider.calls().len(),
-        1,
-        "only the explicitly admitted main call is allowed"
-    );
-    assert_eq!(
-        f.call("get", json!({"kind":"memory","id":"learned"}))
-            .await
-            .unwrap(),
-        Value::Null
-    );
-    assert_eq!(
-        f.call("get", json!({"kind":"_policy","id":"automatic"}))
-            .await
-            .unwrap(),
-        Value::Null,
-        "cancelled run must not advance the interval or cooldown"
-    );
-}
-
-/// A scripted provider failure that the retry lane owns: the terminal message
-/// carries the classified `provider_stream_failure` diagnostic the policy
-/// reads, unlike the plain scripted failure.
-fn retryable_failure_turn(model: &pa_agent::types::Model) -> pa_agent::scripted::ScriptedTurn {
-    use pa_agent::scripted::{stream_failure_steps, ScriptStep, ScriptedTurn};
-    let mut steps = stream_failure_steps(model, "partial", "provider rate limited");
-    if let Some(ScriptStep::Event(event)) = steps.last_mut() {
-        if let pa_agent::stream::AssistantMessageEvent::Error { error, .. } = event.as_mut() {
-            error.diagnostics = Some(vec![pa_agent::types::AssistantMessageDiagnostic {
-                kind: "provider_stream_failure".to_string(),
-                timestamp: 0,
-                error: None,
-                details: Some(json!({"kind":"rate_limit","status":429})),
-            }]);
-        }
-    }
-    ScriptedTurn::Events(steps)
-}
-
-/// The recorded auxiliary requests; an empty Lua table crosses the bridge as
-/// an object, so count both shapes.
-fn aux_request_count(value: &Value) -> usize {
-    value.as_array().map_or(0, Vec::len)
-}
-
-fn interval_settings() -> Value {
+fn manual_settings() -> Value {
     let mut config = settings(true);
     config["auxiliaryModel"] = json!("aux/default");
     config["testProvider"] = json!(AUX_PROVIDER);
-    config["plugins"] = json!({"harness":{"config":{"auxiliaryModel":"aux/selected","autoRefine":{"enabled":true,"turnInterval":1,"cooldownMs":0}}},"route":{"enabled":true,"path":"provider.lua"}});
+    config["plugins"]["harness"]["config"] = json!({"auxiliaryModel":"aux/selected"});
+    config["plugins"]["route"] = json!({"enabled":true,"path":"provider.lua"});
     config
-}
-
-#[tokio::test]
-async fn retryable_provider_failure_settle_does_not_schedule_review() {
-    let f = Fixture::new(interval_settings(), LEGACY).await;
-    let model: pa_agent::types::Model=serde_json::from_value(json!({"id":"test","name":"Test","api":"openai-completions","provider":"test","baseUrl":"http://localhost:9","reasoning":false,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":10000,"maxTokens":100})).unwrap();
-    // A settle the retry lane will re-issue is not a turn boundary: no review.
-    f.provider.push_turn(retryable_failure_turn(&model));
-    let _ = f
-        .engine
-        .prompt(
-            "failing turn",
-            crate::session_engine::PromptOptions::default(),
-        )
-        .await;
-    assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
-    assert_eq!(
-        f.call_plugin("route", "requests", json!({})).await.unwrap(),
-        json!({}),
-        "no auxiliary request reached the provider"
-    );
-    // Control: a settle with no retry behind it schedules exactly one review.
-    f.provider.push_text_turn("done");
-    f.engine
-        .prompt(
-            "settled turn",
-            crate::session_engine::PromptOptions::default(),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if aux_request_count(&f.call_plugin("route", "requests", json!({})).await.unwrap()) >= 2
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the settled turn's review and plan ran");
-    let requests = f.call_plugin("route", "requests", json!({})).await.unwrap();
-    assert_eq!(aux_request_count(&requests), 2, "one review + one plan");
 }
 
 #[tokio::test]
 async fn deferred_review_waits_for_the_turn_to_settle() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let f = Fixture::new(interval_settings(), LEGACY).await;
+    let f = Fixture::new(manual_settings(), LEGACY).await;
     let busy = Arc::new(AtomicBool::new(true));
     let probe_busy = Arc::clone(&busy);
     f.engine.session.set_turn_activity_probe(Arc::new(move || {
@@ -917,7 +604,7 @@ async fn deferred_review_waits_for_the_turn_to_settle() {
 
 #[tokio::test]
 async fn review_request_carries_the_session_id() {
-    let f = Fixture::new(interval_settings(), LEGACY).await;
+    let f = Fixture::new(manual_settings(), LEGACY).await;
     let session_id = f.engine.session.session_id().await;
     let job = f
         .call("refine", json!({"instructions":"identified evidence"}))
@@ -931,73 +618,6 @@ async fn review_request_carries_the_session_id() {
     for request in requests {
         assert_eq!(request["session"], json!(session_id), "{request}");
     }
-}
-
-#[tokio::test]
-async fn disabled_plugin_settle_enqueues_no_job() {
-    let f = Fixture::new(settings(false), LEGACY).await;
-    f.provider.push_text_turn("done");
-    f.engine
-        .prompt(
-            "ordinary turn",
-            crate::session_engine::PromptOptions::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
-    assert!(!f.agent.join("plugins/harness").exists());
-}
-
-/// A context-overflow settle is the compaction arm's, not the review's: the
-/// arm compacts and re-issues the same turn, so this `agent_end` is not a turn
-/// boundary (TS `agent-session.ts:4736-4740` hands the overflow to
-/// `_handleRetryableError` too).
-fn overflow_failure_turn(model: &pa_agent::types::Model) -> pa_agent::scripted::ScriptedTurn {
-    use pa_agent::scripted::{stream_failure_steps, ScriptStep, ScriptedTurn};
-    let mut steps = stream_failure_steps(
-        model,
-        "",
-        "prompt is too long: 213462 tokens > 200000 maximum",
-    );
-    if let Some(ScriptStep::Event(event)) = steps.last_mut() {
-        if let pa_agent::stream::AssistantMessageEvent::Error { error, .. } = event.as_mut() {
-            error.error_message =
-                Some("prompt is too long: 213462 tokens > 200000 maximum".to_string());
-            error.diagnostics = Some(vec![pa_agent::types::AssistantMessageDiagnostic {
-                kind: "provider_stream_failure".to_string(),
-                timestamp: 0,
-                error: None,
-                details: Some(json!({"kind":"context_length","status":400})),
-            }]);
-        }
-    }
-    ScriptedTurn::Events(steps)
-}
-
-fn stream_model() -> pa_agent::types::Model {
-    serde_json::from_value(json!({"id":"test","name":"Test","api":"openai-completions","provider":"test","baseUrl":"http://localhost:9","reasoning":false,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":10000,"maxTokens":100})).unwrap()
-}
-
-#[tokio::test]
-async fn overflow_settle_never_schedules_a_review() {
-    let mut config = interval_settings();
-    config["compaction"] = json!({"enabled": true});
-    let f = Fixture::new(config, LEGACY).await;
-    let model = stream_model();
-    f.provider.push_turn(overflow_failure_turn(&model));
-    let _ = f
-        .engine
-        .prompt(
-            "overflow turn",
-            crate::session_engine::PromptOptions::default(),
-        )
-        .await;
-    assert_eq!(f.engine.plugin_job_checkpoint(), Vec::<String>::new());
-    assert_eq!(
-        f.call_plugin("route", "requests", json!({})).await.unwrap(),
-        json!({}),
-        "the compaction arm owns the settle, so no auxiliary request ran"
-    );
 }
 
 #[tokio::test]
@@ -1099,6 +719,7 @@ async fn generic_context_byte_limits_are_exact_and_aggregate_before_provider() {
     ] {
         let mut config = settings(false);
         let mut entries = serde_json::Map::new();
+        entries.insert("harness".into(), json!({"enabled":false}));
         for index in 0..plugins {
             entries.insert(
                 format!("budget{index}"),

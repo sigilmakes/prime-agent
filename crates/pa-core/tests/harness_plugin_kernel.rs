@@ -22,7 +22,7 @@ async fn harness_kwargs_round_trip_through_real_engine_kernel_without_python_dis
     let legacy =
         br#"{"schema":1,"entries":{"memory":{"old":{"content":"legacy"}}},"refinements":[]}"#;
     std::fs::write(agent.join("harness/harness_state.json"), legacy).unwrap();
-    std::fs::write(agent.join("settings.json"),json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},"autoRefine":{"enabled":false},"plugins":{"harness":{"enabled":true}}}).to_string()).unwrap();
+    std::fs::write(agent.join("settings.json"),json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},"plugins":{"harness":{"enabled":true}}}).to_string()).unwrap();
     let receipt = private.path().join("receipt.json");
     let code = format!(
         r"import json, rlm

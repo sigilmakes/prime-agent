@@ -251,7 +251,7 @@ impl SessionManager {
         self.append_custom_entry(custom_type, data)
     }
 
-    /// Append a custom message entry (compaction/refine notices, prompts).
+    /// Append a custom message entry (compaction notices, prompts).
     ///
     /// # Errors
     ///

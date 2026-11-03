@@ -324,7 +324,7 @@ impl Store {
         })
     }
 
-    /// Apply a complete refinement in one locked transaction.
+    /// Apply a complete change set in one locked transaction.
     /// A `None` payload means deletion; `Some(Value::Null)` stores JSON null.
     ///
     /// # Errors

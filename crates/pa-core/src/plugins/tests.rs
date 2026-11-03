@@ -598,21 +598,21 @@ async fn host_drop_retires_invocations_and_drops_the_pending_capability_future()
 #[tokio::test]
 async fn optional_plugin_commands_are_reserved_only_by_the_consuming_host() {
     let host = host();
-    let refine = "return {commands={{name='refine',run=function(input) return input end}}}";
-    let snapshot = host.reconcile(vec![source("harness", refine)]).unwrap();
+    let sample = "return {commands={{name='sample',run=function(input) return input end}}}";
+    let snapshot = host.reconcile(vec![source("harness", sample)]).unwrap();
     assert_eq!(
         result(
             &host,
             "harness",
             ContributionKind::Command,
-            "refine",
+            "sample",
             json!({"data": "retained"})
         )
         .await,
         Ok(InvocationOutcome::Unary(json!({"data": "retained"})))
     );
     assert!(host
-        .reconcile(vec![source("harness", refine), source("other", refine)])
+        .reconcile(vec![source("harness", sample), source("other", sample)])
         .is_err());
     assert!(Arc::ptr_eq(&snapshot, &host.snapshot()));
 }

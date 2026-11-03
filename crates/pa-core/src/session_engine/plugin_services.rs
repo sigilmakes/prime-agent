@@ -108,10 +108,8 @@ impl HostCapabilities for PluginServices {
                         tools: None,
                     };
                     let inference = inference.upgrade().ok_or("session ended")?;
-                    // The auxiliary request carries its session, exactly like the
-                    // upstream auto-refine review (`agent-session.ts:9570`). Without
-                    // it the wire request is anonymous and a provider queue cannot
-                    // attribute the call to this session.
+                    // The auxiliary request carries its session so a provider
+                    // queue can attribute the call to this session.
                     let session_id = {
                         let session = session.lock().await;
                         let id = session.get_session_id().to_owned();

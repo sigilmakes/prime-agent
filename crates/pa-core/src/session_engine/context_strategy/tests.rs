@@ -35,7 +35,7 @@ impl Fixture {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(cwd.join("policy.lua"), source).unwrap();
-        std::fs::write(agent.join("settings.json"),json!({"harnessRefinements":false,"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
+        std::fs::write(agent.join("settings.json"),json!({"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
             "contextStrategy":strategy,"plugins":{"policy":{"enabled":true,"path":"policy.lua"}},"compaction":{"keepRecentTokens":0}}).to_string()).unwrap();
         let model:pa_types::ai::Model=serde_json::from_value(json!({"id":"test","name":"Test","api":"test","provider":"test","baseUrl":"http://127.0.0.1:9/v1","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":100_000,"maxTokens":100})).unwrap();
         let wire = super::super::provider_adapter::json_round_trip(&model).unwrap();
@@ -586,7 +586,7 @@ async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuat
         ("authorization".into(), "Bearer stale-model-key".into()),
     ]));
     // No compaction settings: the resolved route drives the default chain.
-    let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false});
+    let settings = json!({"enableBuiltinSkills":false});
     std::fs::write(f.agent.join("settings.json"), settings.to_string()).unwrap();
     f.engine.reload_plugins().await.unwrap();
     f.engine
@@ -705,7 +705,7 @@ async fn native_archive_restores_raw_prefix_and_appends_only_uncovered_continuat
 #[tokio::test]
 async fn snap_archive_expands_on_compaction_restore_and_branch_without_duplicate_tail() {
     let f = Fixture::new(ORDERED, "default_context/rolling", true).await;
-    let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false,"contextStrategy":"default_context/rolling","plugins":{
+    let settings = json!({"enableBuiltinSkills":false,"contextStrategy":"default_context/rolling","plugins":{
         "default_context":{"config":{"policy":"full","compactors":["snapcompact/snapcompact"]}},
         "snapcompact":{"config":{"profile":"explicit","frame_size":128,"frame_tokens":1,"max_frames":4,"max_source_bytes":10000}}
     }});
@@ -795,7 +795,7 @@ async fn snap_archive_expands_on_compaction_restore_and_branch_without_duplicate
 #[tokio::test]
 async fn snap_archive_switches_to_a_nonvision_model_as_text_and_keeps_the_archive() {
     let f = Fixture::new(ORDERED, "default_context/rolling", true).await;
-    let settings = json!({"harnessRefinements":false,"enableBuiltinSkills":false,"contextStrategy":"default_context/rolling","plugins":{
+    let settings = json!({"enableBuiltinSkills":false,"contextStrategy":"default_context/rolling","plugins":{
         "default_context":{"config":{"policy":"full","compactors":["snapcompact/snapcompact"]}},
         "snapcompact":{"config":{"profile":"explicit","frame_size":128,"frame_tokens":1,"max_frames":4,"max_source_bytes":10000}}
     }});

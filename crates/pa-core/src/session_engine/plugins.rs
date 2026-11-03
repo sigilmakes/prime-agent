@@ -111,12 +111,6 @@ fn empty_config() -> Value {
 }
 
 impl SessionPlugins {
-    /// The settings scopes the plugin host resolves against; the lifecycle
-    /// observers read the retry policy from the same pair.
-    pub(crate) fn settings_dirs(&self) -> (&std::path::Path, &std::path::Path) {
-        (&self.cwd, &self.agent_dir)
-    }
-
     pub(crate) fn new(session: String, cwd: PathBuf, agent_dir: PathBuf, depth: u32) -> Self {
         // Command reservations belong to session composition, not the Lua runtime.
         let registry = super::slash_commands::SlashCommandRegistry::builtin();
@@ -167,7 +161,6 @@ impl SessionPlugins {
             if let Some(error) = settings.errors().first() {
                 bail!("plugin settings read failed: {}", error.message);
             }
-            let legacy_enabled = settings.get_harness_refinements();
             let settings = settings.settings();
             let pinned = manager
                 .pinned_context_strategy
@@ -188,11 +181,10 @@ impl SessionPlugins {
                     .into_iter()
                     .map(|source| (source.name.clone(), source))
                     .collect();
-            // Legacy compatibility affects default activation, never scope enrollment.
-            // Explicit plugin configuration takes precedence.
-            if legacy_enabled {
-                desired.insert("harness".into(), crate::harness_plugin::source(settings));
-            }
+            // Harness records are the session's memory surface: load them by
+            // default. An explicit `plugins.harness.enabled=false` still retires
+            // the source below.
+            desired.insert("harness".into(), crate::harness_plugin::source(settings));
             // Retirement is a mandatory control operation, not an enabled-source
             // replacement. Resolve intent before reading or evaluating any source.
             let mut wanted: std::collections::BTreeSet<_> = desired.keys().cloned().collect();

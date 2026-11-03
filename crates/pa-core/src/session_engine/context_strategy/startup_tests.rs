@@ -82,7 +82,6 @@ impl StartupFixture {
         std::fs::write(
             agent.join("settings.json"),
             json!({
-                "harnessRefinements":false,
                 "enableBuiltinSkills":false,
                 "prewarmIpythonKernel":false,
                 "contextStrategy":global,
@@ -864,7 +863,7 @@ async fn startup_native_optchat_sources_only_prefix_then_includes_admitted_user_
     std::fs::write(
         f.agent.join("settings.json"),
         json!({
-            "harnessRefinements":false,"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
+            "enableBuiltinSkills":false,"prewarmIpythonKernel":false,
             "contextStrategy":"optchat/tree","auxiliaryModel":"tree-summarizer/default",
             "plugins":{
                 "optchat":{"enabled":true,"config":{

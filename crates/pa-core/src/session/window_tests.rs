@@ -211,35 +211,6 @@ fn warm_cache_reads_only_header_and_suffix_and_append_stays_warm() {
     );
 }
 
-#[tokio::test]
-async fn historical_refinement_is_read_only_on_trigger_not_in_hot_cache() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("audit.jsonl");
-    let marker = "historical-audit-payload-".to_owned() + &"z".repeat(32_000);
-    let mut rows: Vec<serde_json::Value> = fixture()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let position = rows.iter().position(|row| row["id"] == "u0").unwrap();
-    let parent = rows[position]["parentId"].clone();
-    rows.insert(position, json!({"type":"custom","id":"audit","parentId":parent,"customType":"prime-agent.refinement","data":{"summary":marker}}));
-    rows[position + 1]["parentId"] = json!("audit");
-    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-    write_fixture(&path, &body).unwrap();
-    let cold = WindowedSessionStore::open(&path).unwrap().unwrap();
-    let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(warm.read_stats().cache_hit);
-    let sidecar = std::fs::read(path.with_extension("window-cache.json")).unwrap();
-    assert!(!String::from_utf8_lossy(&sidecar).contains(&marker));
-    let manager =
-        super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
-            .await
-            .unwrap();
-    let historical = manager.history_snapshot().await.unwrap();
-    assert!(historical.iter().any(|entry| matches!(entry, FileEntry::Custom { payload, .. } if payload.custom_type == "prime-agent.refinement" && payload.data.as_ref().is_some_and(|data| data["summary"] == marker))));
-    assert_eq!(cold.context().messages, warm.context().messages);
-}
-
 #[test]
 fn blank_rows_and_uncompacted_context_are_warm() {
     let dir = tempfile::tempdir().unwrap();
@@ -907,8 +878,7 @@ fn full_history_fixture() -> String {
         rows.push(json!({"type":"message","id":id.clone(),"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
         parent = Some(id);
     }
-    // One refinement audit row (the class the refine transcript's audit scan reads).
-    rows.push(json!({"type":"custom","id":"audit","parentId":parent,"customType":"prime-agent.refinement","data":{"id":"refine_0","summary":"seed","rationale":"r","expectedOutcome":"o","appliedEdits":[]}}));
+    rows.push(json!({"type":"custom","id":"note","parentId":parent,"customType":"note","data":{"text":"ordinary audit row"}}));
     rows.into_iter().map(|row| row.to_string() + "\n").collect()
 }
 

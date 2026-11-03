@@ -428,7 +428,6 @@ impl AgentSession {
                 Some(&options.model),
             );
             let messages = guarded(plugins, &strategy, None, options.abort, assembly).await?;
-            let messages = super::refinement_gate::without_refinements(messages);
             let preparation = Preparation {
                 branch,
                 leaf,
@@ -564,7 +563,6 @@ impl AgentSession {
                     &output,
                     attempt,
                     options,
-                    false,
                 );
                 let result = guarded(plugins, &strategy, Some(&target), options.abort, work).await;
                 let mut candidate = match result {
@@ -582,8 +580,6 @@ impl AgentSession {
                         continue;
                     }
                 };
-                candidate.entry.harness_digest = None;
-                candidate.entry.harness_state_fingerprint = None;
                 let coverage = match native::coverage(&preparation, &candidate) {
                     Ok(coverage) => coverage,
                     Err(error) => {

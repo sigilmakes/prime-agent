@@ -14,8 +14,7 @@ pub(crate) fn source(settings: &crate::settings::Settings) -> crate::plugins::Pl
     crate::plugins::PluginSource {
         name: "harness".into(),
         source: SOURCE.into(),
-        config: serde_json::json!({"autoRefine":settings.auto_refine,
-            "auxiliaryModel":settings.auxiliary_model,
+        config: serde_json::json!({"auxiliaryModel":settings.auxiliary_model,
             "scopes":default_scopes(settings)}),
     }
 }

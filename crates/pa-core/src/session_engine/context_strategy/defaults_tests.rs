@@ -4,7 +4,7 @@ use super::*;
 async fn configure(f: &Fixture, model: &pa_types::ai::Model, plugins: Value) {
     std::fs::write(
         f.agent.join("settings.json"),
-        json!({"harnessRefinements":false,"enableBuiltinSkills":false,
+        json!({"enableBuiltinSkills":false,
             "compaction":{"keepRecentTokens":0},"plugins":plugins})
         .to_string(),
     )
@@ -209,7 +209,7 @@ async fn default_server_cancellation_and_retirement_close_pending_request_withou
             std::fs::write(
                 f.agent.join("settings.json"),
                 json!({
-                    "harnessRefinements":false, "enableBuiltinSkills":false,
+                    "enableBuiltinSkills":false,
                     "plugins":{"server_compaction":{"enabled":false}}
                 })
                 .to_string(),

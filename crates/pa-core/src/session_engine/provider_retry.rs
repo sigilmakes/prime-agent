@@ -274,59 +274,6 @@ fn with_stop_reason_aborted(mut message: AssistantMessage) -> AssistantMessage {
     message
 }
 
-/// Whether the retry lane will re-issue this settled failure.
-///
-/// TS draws the auto-refine seam at exactly this question: an `agent_end` that
-/// initiated a retry returns before `_scheduleAutoRefineAfterAgentEnd`
-/// (`agent-session.ts:4736-4740`), so no refinement review is scheduled from a
-/// settle the retry lane owns. `retries_performed` is the count already made by
-/// this episode (the loop's own counter), so the same exhaustion rule applies.
-#[must_use]
-pub fn retry_will_follow(
-    message: &AssistantMessage,
-    context_window: u64,
-    policy: &ProviderRetryPolicy,
-    retries_performed: u32,
-) -> bool {
-    if !policy.enabled || message.stop_reason != StopReason::Error {
-        return false;
-    }
-    let non_retryable = is_agent_lifecycle_failure(message)
-        || is_faux_provider_queue_exhausted(message)
-        || is_context_overflow_failure(message, context_window)
-        || is_unsupported_tool_failure(message)
-        || is_permanent_provider_failure_kind(
-            provider_stream_failure_kind(message).as_deref(),
-            retries_performed,
-            provider_stream_failure_status(message),
-        );
-    !non_retryable && retries_performed < policy.max_retries
-}
-
-/// Whether the compaction arm will re-issue this settle.
-///
-/// A context-overflow settle does not belong to the provider retry lane; TS
-/// hands it to the compaction arm, which compacts and re-issues the same turn
-/// (`_handleRetryableError`), so that `agent_end` returns before
-/// `_scheduleAutoRefineAfterAgentEnd` (`agent-session.ts:4736-4740`) exactly
-/// like a provider retry. `compaction_enabled` is the `compaction.enabled`
-/// toggle the arm itself gates on.
-///
-/// The engine cannot see whether the arm's one-attempt guard has already
-/// spent itself (the guard lives with the turn loop and is evaluated after the
-/// run returns), so a spent guard reads as retry-pending here: over-suppression
-/// only, never an extra request.
-#[must_use]
-pub fn compaction_retry_will_follow(
-    message: &AssistantMessage,
-    context_window: u64,
-    compaction_enabled: bool,
-) -> bool {
-    compaction_enabled
-        && message.stop_reason == StopReason::Error
-        && is_context_overflow_failure(message, context_window)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,80 +350,6 @@ mod tests {
             let sample = retry_jitter_rand01();
             assert!((0.0..=1.0).contains(&sample), "sample {sample}");
         }
-    }
-
-    /// The auto-refine seam's question: which settles the retry lane owns.
-    #[test]
-    fn retry_will_follow_owns_only_the_retryable_failures() {
-        let policy = DEFAULT_PROVIDER_RETRY_POLICY;
-        // A retryable provider failure with budget left: the retry lane owns it.
-        assert!(retry_will_follow(
-            &error_message(Some("rate_limit"), Some(429), None),
-            0,
-            &policy,
-            0
-        ));
-        // A clean settle never retries.
-        assert!(!retry_will_follow(&ok_message(), 0, &policy, 0));
-        // A permanent kind settles on the spot (the disclosure still fires).
-        assert!(!retry_will_follow(
-            &error_message(Some("payment_required"), Some(402), None),
-            0,
-            &policy,
-            0
-        ));
-        // An exhausted episode has no retry left to own.
-        assert!(!retry_will_follow(
-            &error_message(Some("rate_limit"), Some(429), None),
-            0,
-            &policy,
-            policy.max_retries
-        ));
-        // A disabled policy never retries, so the settle is a turn boundary.
-        let disabled = ProviderRetryPolicy {
-            enabled: false,
-            ..policy
-        };
-        assert!(!retry_will_follow(
-            &error_message(Some("rate_limit"), Some(429), None),
-            0,
-            &disabled,
-            0
-        ));
-        // A local lifecycle crash is not a provider failure to retry.
-        let mut lifecycle = error_message(None, None, None);
-        lifecycle.diagnostics = Some(vec![AssistantMessageDiagnostic {
-            kind: "agent_lifecycle_failure".to_string(),
-            timestamp: 0,
-            error: None,
-            details: None,
-        }]);
-        assert!(!retry_will_follow(&lifecycle, 0, &policy, 0));
-        // The faux queue running dry is deterministic.
-        let mut faux = error_message(None, None, None);
-        faux.provider = "faux".to_string();
-        faux.error_message = Some("No more faux responses queued".to_string());
-        assert!(!retry_will_follow(&faux, 0, &policy, 0));
-    }
-
-    /// The compaction-driven retry is the second seam the review must not
-    /// cross.
-    #[test]
-    fn compaction_retry_owns_overflow_settles_only_when_compaction_is_on() {
-        let mut overflow = error_message(None, None, None);
-        overflow.error_message =
-            Some("prompt is too long: 213462 tokens > 200000 maximum".to_string());
-        assert!(compaction_retry_will_follow(&overflow, 200_000, true));
-        // A disabled toggle never re-issues the turn.
-        assert!(!compaction_retry_will_follow(&overflow, 200_000, false));
-        // A clean settle is nobody's retry.
-        assert!(!compaction_retry_will_follow(&ok_message(), 200_000, true));
-        // A non-overflow provider failure belongs to the provider lane.
-        assert!(!compaction_retry_will_follow(
-            &error_message(Some("rate_limit"), Some(429), None),
-            200_000,
-            true
-        ));
     }
 
     #[test]
@@ -676,10 +549,9 @@ mod tests {
         assert_eq!(text.text, "Recovered on the retry.");
     }
 
-    /// The one-shot completion arms (side questions, compaction,
-    /// refinement) take the `stream_drop` class through the same retry
-    /// ladder: a dropped stream retries and the completion settles on the
-    /// retry.
+    /// The one-shot completion arms (side questions, compaction) take the
+    /// `stream_drop` class through the same retry ladder: a dropped stream
+    /// retries and the completion settles on the retry.
     #[tokio::test]
     async fn stream_drop_failures_retry_in_the_one_shot_arms() {
         let policy = ProviderRetryPolicy {

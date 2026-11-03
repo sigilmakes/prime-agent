@@ -13,15 +13,11 @@ pub const COMPACTION_SUMMARY_PREFIX: &str = "[compaction-summary]\n\nThe convers
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 pub const BRANCH_SUMMARY_PREFIX: &str = "[branch-summary]\n\nThe following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 pub const BRANCH_SUMMARY_SUFFIX: &str = "\n</summary>";
-pub const HARNESS_DIGEST_PREFIX: &str = "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n";
-pub const HARNESS_DIGEST_SUFFIX: &str = "\n</harness_state>";
 
 pub use pa_types::slash_commands::{
     SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 };
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
-pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
-pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
 /// The durable single-row disclosure of one provider-retry episode (SANCTIONED
 /// DIVERGENCE, operator ruling 2026-09-23): a user-facing disclosure, never
 /// model context — `convert_to_llm` drops it.
@@ -323,9 +319,6 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                     SESSION_SLASH_COMMAND_CUSTOM_TYPE
                         | SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
-                        | REFINEMENT_OUTCOME_CUSTOM_TYPE
-                        | REFINEMENT_NOTICE_CUSTOM_TYPE
-                        | "harness_digest"
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                         | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
                 ) {
@@ -375,7 +368,7 @@ pub type LlmToolResultMessage = ToolResultMessage;
 
 /// The loop-boundary LLM conversion wired into the agent's seam: standard rows pass
 /// through; custom rows cross through the session wire shape so the session conversion
-/// rules apply, including unconditional suppression of legacy harness metadata.
+/// rules apply.
 #[must_use]
 pub fn loop_convert_to_llm(
     messages: Vec<pa_agent::types::AgentMessage>,
@@ -525,7 +518,7 @@ mod tests {
                 tokens_before: 1,
                 retained_message_count: None,
                 custom_instructions: None,
-                harness_digest: Some("digest".to_string()),
+                harness_digest: None,
                 harness_state_fingerprint: None,
                 timestamp: 0,
             }),
@@ -556,16 +549,12 @@ mod tests {
 
     #[test]
     fn loop_conversion_applies_session_rules_to_custom_rows() {
-        let digest_row: pa_agent::types::AgentMessage = serde_json::from_value(serde_json::json!({
+        let note_row: pa_agent::types::AgentMessage = serde_json::from_value(serde_json::json!({
             "role": "custom",
-            "customType": "harness_digest",
-            "content": "[harness-digest]
-
-<harness_state>
-state
-</harness_state>",
-            "display": false,
-            "details": { "digest": "state" },
+            "customType": "note",
+            "content": "a note",
+            "display": true,
+            "details": null,
             "timestamp": 5
         }))
         .unwrap();
@@ -582,13 +571,20 @@ state
         let unknown_row: pa_agent::types::AgentMessage =
             serde_json::from_value(serde_json::json!({ "role": "arbitrary", "payload": "x" }))
                 .unwrap();
-        // Even byte-for-byte framing in a real user row remains ordinary text.
-        let quote = format!("{HARNESS_DIGEST_PREFIX}state{HARNESS_DIGEST_SUFFIX}");
-        let user = pa_agent::types::AgentMessage::user(&quote);
-        let expected = loop_convert_to_llm(vec![user.clone()]);
-        let converted = loop_convert_to_llm(vec![digest_row, user, outcome_row, unknown_row]);
-        assert_eq!(converted, expected);
-        assert_eq!(converted.len(), 1);
+        let user = pa_agent::types::AgentMessage::user("kept");
+        let converted = loop_convert_to_llm(vec![user.clone(), note_row, outcome_row, unknown_row]);
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0], loop_convert_to_llm(vec![user])[0]);
+        let pa_agent::types::Message::User(note) = &converted[1] else {
+            panic!("expected user");
+        };
+        let pa_agent::types::UserContent::Parts(parts) = &note.content else {
+            panic!("expected parts");
+        };
+        let pa_agent::types::UserPart::Text(text) = &parts[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text.text, "a note");
     }
 
     #[test]

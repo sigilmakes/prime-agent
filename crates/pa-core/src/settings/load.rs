@@ -25,8 +25,6 @@ const KNOWN_FIELDS: &[&str] = &[
     "followUpMode",
     "theme",
     "compaction",
-    "autoRefine",
-    "harnessRefinements",
     "harnessScopes",
     "factory",
     "branchSummary",

@@ -44,22 +44,6 @@ struct ExportThemeJson {
     export_info_bg: Option<Value>,
 }
 
-/// The refinement row colors every theme carries implicitly (TS
-/// `refinementColors`); the light theme gets the darker pair.
-fn refinement_colors(light: bool) -> [(&'static str, &'static str); 2] {
-    if light {
-        [
-            ("refinementHeader", "#7146ab"),
-            ("refinementSummary", "#8a70ad"),
-        ]
-    } else {
-        [
-            ("refinementHeader", "#9575cd"),
-            ("refinementSummary", "#b7a1d6"),
-        ]
-    }
-}
-
 /// A color value after variable-reference resolution: a CSS color string
 /// (possibly empty, meaning the terminal default) or an ANSI-256 index.
 #[derive(Debug, Clone, PartialEq)]
@@ -305,8 +289,8 @@ fn derive_export_colors(base_color: &str) -> ExportBackgrounds {
     }
 }
 
-/// Resolve the export theme: every theme color plus the refinement colors as `--key: value;` lines,
-/// then the export backgrounds.
+/// Resolve the export theme: every theme color as `--key: value;` lines, then
+/// the export backgrounds.
 pub(crate) fn resolve_export_theme(
     theme_name: Option<&str>,
     agent_dir: &Path,
@@ -315,11 +299,7 @@ pub(crate) fn resolve_export_theme(
     let theme = load_theme_json(&name, agent_dir)?;
     let light = theme.name == "light";
 
-    // Refinement colors are the implicit base the file's colors override.
-    let mut css_colors: BTreeMap<String, String> = refinement_colors(light)
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
+    let mut css_colors: BTreeMap<String, String> = BTreeMap::new();
     for (key, value) in &theme.colors {
         css_colors.insert(
             key.clone(),
@@ -467,7 +447,6 @@ mod tests {
         assert_eq!(theme.container_bg, "#eeeeee");
         assert_eq!(theme.info_bg, "rgb(248, 243, 218)");
         assert!(theme.theme_vars.contains("--text: #000000;"));
-        assert!(theme.theme_vars.contains("--refinementHeader: #7146ab;"));
     }
 
     #[test]
