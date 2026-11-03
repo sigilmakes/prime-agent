@@ -1,5 +1,4 @@
-//! First-run onboarding surface: the brand mark over its animated lab field, the welcome line, and
-//! the provider-auth panels mounted inside the block. [`OnboardingChoice`] renders the account
+//! First-run onboarding surface: the welcome line and the provider-auth panels mounted inside the block. [`OnboardingChoice`] renders the account
 //! question. A startup model that is ready skips the flow; no usable model runs the full flow.
 
 use crate::keybindings::KeybindingsManager;
@@ -44,33 +43,7 @@ pub(crate) fn team_question_config() -> OnboardingChoiceOptions {
     }
 }
 
-const LOGO_LINES: [&str; 7] = [
-    "                 ▗▄▄█▀",
-    "   ███▄       ▗▄███▀",
-    "  ▗█▛▐█▙   ▗▄█▀▗█▀",
-    " ▗█▛ ▟██▙▄██▛ ▟▛",
-    " ▗▟▌ ▐███▛▘▗▄█▖",
-    "▟███▄  ▄▄▟███▀",
-    "▜█▛▀▘  ▜█▛▀▘",
-];
-const LOGO_WIDTH: usize = 22;
-const LOGO_INDENT: usize = 5;
 const HIGHLIGHT_LIFT: f64 = 0.08;
-
-#[derive(Clone)]
-struct SplashCell {
-    character: char,
-    tone: ThemeColor,
-    priority: u8,
-}
-
-fn cell(character: char, tone: ThemeColor, priority: u8) -> SplashCell {
-    SplashCell {
-        character,
-        tone,
-        priority,
-    }
-}
 
 /// The outcome of one onboarding key press.
 pub enum OnboardingDecision {
@@ -82,11 +55,10 @@ pub enum OnboardingDecision {
     Pick(crate::onboarding_flow::ProviderPick),
 }
 
-/// The onboarding pane state: the animation frame, the started flag (the welcome text never returns
+/// The onboarding pane state: the started flag (the welcome text never returns
 /// once a flow owns the block), and the mounted flow panel.
 #[derive(Debug, Default)]
 pub struct OnboardingScreen {
-    frame: u64,
     flow_started: bool,
     /// The mounted flow panel (the flow never nests its panels, so one slot
     /// covers the sequence).
@@ -111,10 +83,6 @@ impl OnboardingScreen {
     pub fn mount_panel(&mut self, panel: OnboardingPanel) {
         self.flow_started = true;
         self.panel = Some(panel);
-    }
-
-    pub fn tick(&mut self) {
-        self.frame = self.frame.wrapping_add(1);
     }
 
     /// Handle one key id. `None` keeps the pane waiting. `osc_sink` carries a
@@ -224,8 +192,6 @@ impl OnboardingScreen {
         let width = width.max(1);
         let auth_panel_open = matches!(self.panel.as_ref(), Some(OnboardingPanel::Auth { .. }));
         let mut lines: Vec<Line> = vec![Vec::new()];
-        lines.extend(self.mark_rows(theme, width));
-        lines.push(Vec::new());
         lines.push(self.heading_line(theme));
         // The welcome text and action render only before the flow starts; once a panel owns the
         // block, its rows mount directly under the heading.
@@ -242,10 +208,7 @@ impl OnboardingScreen {
         // first so the full auth block fits whenever the pane can hold it. On a shorter terminal,
         // keep the block's final input and action rows visible like the session dock does.
         if auth_panel_open && lines.len() > height {
-            lines.drain(..(LOGO_LINES.len() + 2));
-            if lines.len() > height {
-                lines.drain(..lines.len() - height);
-            }
+            lines.drain(..lines.len() - height);
         }
         while lines.len() < height {
             lines.push(Vec::new());
@@ -284,153 +247,6 @@ impl OnboardingScreen {
         ));
         row
     }
-
-    fn mark_rows(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let rows = LOGO_LINES.len();
-        let mut canvas = vec![vec![cell(' ', ThemeColor::Dim, 0); width]; rows];
-        // The mark keeps a quiet zone on the field: ambient dots and contours still drift across
-        // the full width, scan columns only trail to the right of the zone.
-        let quiet = (LOGO_INDENT, LOGO_INDENT + LOGO_WIDTH - 1, 0, rows - 1);
-        self.draw_field(&mut canvas, width, rows, quiet);
-        for (y, line) in LOGO_LINES.iter().enumerate() {
-            for (x, character) in line.chars().enumerate() {
-                if character != ' ' {
-                    put(
-                        &mut canvas,
-                        LOGO_INDENT + x,
-                        y,
-                        character,
-                        ThemeColor::Text,
-                        8,
-                    );
-                }
-            }
-        }
-        canvas
-            .into_iter()
-            .map(|row| render_cells(theme, row))
-            .collect()
-    }
-
-    /// The lab field of the old full-screen splash, scaled to the mark's band: drifting ambient
-    /// dots, a contour wave, a horizon of dashes, scan columns, and three particle traces.
-    fn draw_field(
-        &self,
-        canvas: &mut [Vec<SplashCell>],
-        width: usize,
-        height: usize,
-        quiet: (usize, usize, usize, usize),
-    ) {
-        let frame = self.frame;
-        for y in 0..height {
-            for x in 0..width {
-                let hash = (x * 37 + y * 53 + (frame as usize) * 11 + x * y * 3) % 101;
-                if hash < 3 {
-                    put(canvas, x, y, '·', ThemeColor::Dim, 1);
-                }
-                let center_x = width * 36 / 100;
-                let center_y = height * 54 / 100;
-                let contour = (x as i64 - center_x as i64).abs()
-                    + (y as i64 - center_y as i64).abs() * 4
-                    + (x / 6) as i64
-                    - frame as i64;
-                if x < width * 82 / 100 && contour.rem_euclid(24) == 12 {
-                    let character = if (x + y) % 5 == 0 { '╌' } else { '·' };
-                    put(canvas, x, y, character, ThemeColor::BorderMuted, 2);
-                }
-                let horizon_y = height * 58 / 100;
-                if y == horizon_y && x % 2 == 0 && (x + frame as usize) % 13 < 2 {
-                    let tone = if (x + frame as usize).is_multiple_of(3) {
-                        ThemeColor::Accent
-                    } else {
-                        ThemeColor::Dim
-                    };
-                    put(canvas, x, y, '─', tone, 3);
-                }
-                if x >= quiet.0 && !inside_quiet(x, y, quiet) && x % 4 == 0 {
-                    let scan_index = x / 4;
-                    let segment = (y + scan_index * 2 + (frame as usize / 2)) % 6;
-                    if y > 0 && y < height - 1 && segment < 2 {
-                        let character = if (scan_index + y) % 4 == 0 {
-                            '┃'
-                        } else {
-                            '▎'
-                        };
-                        put(canvas, x, y, character, ThemeColor::MdLink, 4);
-                    }
-                }
-            }
-        }
-        for trace_index in 0..3usize {
-            let base = match trace_index {
-                0 => height * 30 / 100,
-                1 => height * 49 / 100,
-                _ => height * 72 / 100,
-            };
-            for x in 0..width {
-                let mut wave = (x * 2 + frame as usize + trace_index * 7) % 16;
-                if wave > 7 {
-                    wave = 15 - wave;
-                }
-                // `Math.trunc((wave - 3) / 2)`: negative waves pull the trace one
-                // row up, so keep the signed division.
-                let trace_y = (base as i64 + (wave as i64 - 3) / 2).max(0) as usize;
-                if (x + frame as usize + trace_index * 13).is_multiple_of(41) {
-                    put(canvas, x, trace_y, '◆', ThemeColor::Warning, 6);
-                } else if (x + frame as usize).is_multiple_of(12) {
-                    put(canvas, x, trace_y, '•', ThemeColor::Accent, 6);
-                } else {
-                    put(canvas, x, trace_y, '·', ThemeColor::Accent, 3);
-                }
-            }
-        }
-    }
-}
-
-/// Overwrite one cell when the new priority is at least the current one.
-fn put(
-    canvas: &mut [Vec<SplashCell>],
-    x: usize,
-    y: usize,
-    character: char,
-    tone: ThemeColor,
-    priority: u8,
-) {
-    if y >= canvas.len() || x >= canvas[y].len() {
-        return;
-    }
-    if canvas[y][x].priority > priority {
-        return;
-    }
-    canvas[y][x] = cell(character, tone, priority);
-}
-
-fn inside_quiet(x: usize, y: usize, zone: (usize, usize, usize, usize)) -> bool {
-    x >= zone.0 && x <= zone.1 && y >= zone.2 && y <= zone.3
-}
-
-fn render_cells(theme: &Theme, cells: Vec<SplashCell>) -> Line {
-    let mut row: Line = Vec::new();
-    let mut current: Option<ThemeColor> = None;
-    let mut segment = String::new();
-    for cell in cells {
-        if current != Some(cell.tone) {
-            if let Some(tone) = current.replace(cell.tone) {
-                if !segment.is_empty() {
-                    row.push(Span::styled(
-                        std::mem::take(&mut segment),
-                        theme.fg_style(tone),
-                    ));
-                }
-            }
-        }
-        segment.push(cell.character);
-    }
-    if !segment.is_empty() {
-        let tone = current.unwrap_or(ThemeColor::Dim);
-        row.push(Span::styled(segment, theme.fg_style(tone)));
-    }
-    row
 }
 
 /// The selected-row wash: the canvas lifted a few percent toward the text colour — the theme
@@ -803,61 +619,6 @@ mod tests {
         match answer.blocking_recv().expect("the pick answered") {
             PrimeTeamPick::Team(team) => assert_eq!(team.team_id, "team-beta"),
             other => panic!("the seeded team answered, got {other:?}"),
-        }
-    }
-
-    /// The installer's banner (install-rust.sh's awk port of this splash)
-    /// draws the same canvas as `mark_rows` — every character and tone —
-    /// for the same frame and width, so the two cannot drift.
-    #[test]
-    #[cfg(unix)]
-    fn the_installer_banner_matches_the_splash() {
-        let script = include_str!("../../../install-rust.sh");
-        let program = script
-            .split("# BANNER_AWK_BEGIN\n")
-            .nth(1)
-            .and_then(|rest| rest.split("# BANNER_AWK_END").next())
-            .expect("the installer carries the banner program");
-        let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let tone = |color: Option<Color>| match color {
-            Some(Color::Rgb(113, 113, 122)) => 'D',
-            Some(Color::Rgb(82, 82, 91)) => 'B',
-            Some(Color::Rgb(124, 111, 175)) => 'A',
-            Some(Color::Rgb(56, 189, 248)) => 'L',
-            Some(Color::Rgb(245, 158, 11)) => 'W',
-            Some(Color::Reset) | None => 'T',
-            other => panic!("unexpected splash tone {other:?}"),
-        };
-        for (frame, width) in [(0_u64, 80_usize), (1, 80), (7, 40), (113, 61), (250, 119)] {
-            let mut screen = OnboardingScreen::new();
-            screen.frame = frame;
-            let expected: Vec<String> = screen
-                .mark_rows(&theme, width)
-                .iter()
-                .map(|row| {
-                    let chars: String = row.iter().map(|span| span.content.as_str()).collect();
-                    let tones: String = row
-                        .iter()
-                        .flat_map(|span| {
-                            std::iter::repeat_n(tone(span.style.fg), span.content.chars().count())
-                        })
-                        .collect();
-                    format!("{chars}\t{tones}")
-                })
-                .collect();
-            let output = std::process::Command::new("awk")
-                .args(["-v", "parity=1"])
-                .args(["-v", &format!("frame={frame}")])
-                .args(["-v", &format!("width={width}")])
-                .arg(program)
-                .output()
-                .expect("run awk");
-            assert!(output.status.success(), "awk failed: {output:?}");
-            let actual: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::to_string)
-                .collect();
-            assert_eq!(actual, expected, "frame {frame} at width {width}");
         }
     }
 }

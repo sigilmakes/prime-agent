@@ -8,17 +8,6 @@ use serde_json::Value;
 
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 
-/// The compact 7-row brand butterfly.
-pub const PRIME_COMPACT_BUTTERFLY_LOGO: &str = concat!(
-    "                 \u{2597}\u{2584}\u{2584}\u{2588}\u{2580}\n",
-    "   \u{2588}\u{2588}\u{2588}\u{2584}       \u{2597}\u{2584}\u{2588}\u{2588}\u{2588}\u{2580}\n",
-    "  \u{2597}\u{2588}\u{259b}\u{2590}\u{2588}\u{2599}   \u{2597}\u{2584}\u{2588}\u{2580}\u{2597}\u{2588}\u{2580}\n",
-    " \u{2597}\u{2588}\u{259b} \u{259f}\u{2588}\u{2588}\u{2599}\u{2584}\u{2588}\u{2588}\u{259b} \u{259f}\u{259b}\n",
-    " \u{2597}\u{259f}\u{258c} \u{2590}\u{2588}\u{2588}\u{2588}\u{259b}\u{2598}\u{2597}\u{2584}\u{2588}\u{2596}\n",
-    "\u{259f}\u{2588}\u{2588}\u{2588}\u{2584}  \u{2584}\u{2584}\u{259f}\u{2588}\u{2588}\u{2588}\u{2580}\n",
-    "\u{259c}\u{2588}\u{259b}\u{2580}\u{2598}  \u{259c}\u{2588}\u{259b}\u{2580}\u{2598}",
-);
-
 /// Truncate a plain string to a visible width (cut on grapheme
 /// boundaries, appending the ellipsis).
 fn truncate_to_width(value: &str, max_width: usize, ellipsis: &str) -> String {
@@ -334,27 +323,11 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
     line
 }
 
-/// The brand splash: butterfly logo beside the version/model/cwd metadata
-/// (TS `BrandSplashHeader`, `topPadding` always on).
 #[must_use]
 pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Line> {
     let safe_width = width.max(1);
     let padding_x = usize::from(safe_width > 1);
     let content_width = safe_width.saturating_sub(padding_x * 2).max(1);
-    let logo_raw: Vec<&str> = PRIME_COMPACT_BUTTERFLY_LOGO.split('\n').collect();
-    let logo_canvas_width = logo_raw
-        .iter()
-        .map(|line| str_width(line))
-        .max()
-        .unwrap_or(0);
-    let gutter = 3usize;
-    let show_logo =
-        logo_canvas_width > 0 && content_width.saturating_sub(logo_canvas_width + gutter) >= 24;
-    let meta_width = if show_logo {
-        content_width.saturating_sub(logo_canvas_width + gutter)
-    } else {
-        content_width
-    };
 
     let text = theme.fg_style(ThemeColor::Text);
     let muted = theme.fg_style(ThemeColor::Muted);
@@ -362,7 +335,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
     let title = "prime agent";
     let version = format!("v{}", state.version);
     let mut meta_lines: Vec<Line> = Vec::new();
-    if str_width(&format!("{title} {version}")) <= meta_width {
+    if str_width(&format!("{title} {version}")) <= content_width {
         meta_lines.push(vec![
             Span::styled(title.to_string(), text),
             Span::styled(" ".to_string(), Style::default()),
@@ -376,7 +349,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
         let label = format!("{label_text} ");
         let value = truncate_to_width(
             value_text,
-            meta_width.saturating_sub(str_width(&label)).max(1),
+            content_width.saturating_sub(str_width(&label)).max(1),
             "",
         );
         meta_lines.push(vec![Span::styled(label, dim), Span::styled(value, muted)]);
@@ -385,7 +358,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
         let label = "model ";
         let value = truncate_to_width(
             model_id,
-            meta_width.saturating_sub(str_width(label)).max(1),
+            content_width.saturating_sub(str_width(label)).max(1),
             "",
         );
         meta_lines.push(vec![
@@ -398,7 +371,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
         let home = pa_types::platform::home_dir().map(|home| home.to_string_lossy().into_owned());
         let cwd = truncate_path_middle(
             &format_splash_cwd(&state.cwd, home.as_deref()),
-            meta_width.saturating_sub(str_width(cwd_label)).max(1),
+            content_width.saturating_sub(str_width(cwd_label)).max(1),
         );
         meta_lines.push(vec![
             Span::styled(cwd_label.to_string(), dim),
@@ -407,29 +380,11 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
     }
 
     let mut lines: Vec<Line> = vec![Vec::new()];
-    let row_count = logo_raw.len().max(meta_lines.len());
-    let meta_start = if show_logo {
-        (row_count - meta_lines.len()) / 2
-    } else {
-        0
-    };
-    let logo_text = theme.fg_style(ThemeColor::Text);
-    for index in 0..row_count {
+    for meta_line in meta_lines {
         let mut spans: Line = Vec::new();
         let pad = if padding_x > 0 { " " } else { "" };
         spans.push(Span::styled(pad.to_string(), Style::default()));
-        if show_logo {
-            let logo_line = logo_raw.get(index).copied().unwrap_or("");
-            spans.push(Span::styled(logo_line.to_string(), logo_text));
-            let fill = logo_canvas_width.saturating_sub(str_width(logo_line)) + gutter;
-            spans.push(Span::styled(" ".repeat(fill), Style::default()));
-        }
-        let meta_index = index as isize - meta_start as isize;
-        if meta_index >= 0 {
-            if let Some(meta_line) = meta_lines.get(meta_index as usize) {
-                spans.extend(meta_line.iter().cloned());
-            }
-        }
+        spans.extend(meta_line);
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
         spans.push(Span::styled(
             " ".repeat(safe_width.saturating_sub(used + padding_x)),
