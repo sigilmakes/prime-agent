@@ -81,13 +81,5 @@ audit-build:
 	@command -v cargo-auditable >/dev/null 2>&1 || { echo 'cargo-auditable unavailable; enter a Nix shell that provides it' >&2; exit 1; }
 	cargo auditable build --release --locked -p pa-cli --bin prime-agent
 
-# Optional local performance evidence; does not publish or fetch artifacts.
-perf:
-	cargo build --release --locked -p pa-cli --bin prime-agent -p pa-perf --bin pa-perf
-	./target/release/pa-perf run --binary target/release/prime-agent \
-		--profile small --out target/perf --runs 10
-	./target/release/pa-perf report --baseline crates/pa-perf/baseline.json \
-		--results target/perf/results/*.json
-
 .PHONY: help check fmt-check lint typecheck test hooks-check package package-check \
-	workspace-check deny windows-cross windows-msvc-cross audit-build perf
+	workspace-check deny windows-cross windows-msvc-cross audit-build
