@@ -81,9 +81,6 @@ const CORPUS: &[&[&str]] = &[
     &["--goal-token-budget", "5"],
     &["--goal", ""],
     &["--goal", "  "],
-    &["--autonomous-max-turns", "0"],
-    &["--autonomous-max-turns", "abc"],
-    &["--autonomous-max-tokens", "-1"],
     &["--export", "foo"],
     &["--export=foo"],
     &["--list-models"],
@@ -517,10 +514,6 @@ fn declared_native_contract(
             ts.is_none_or(|ts| declared_output_matches(ts, 0, include_str!("fixtures/native-cli-contract/ts-update-help.txt"), "", roots))
                 && declared_output_matches(native, 0, include_str!("fixtures/native-cli-contract/native-update-help.txt"), "", roots),
         ),
-        ["--autonomous-max-turns", "0" | "abc"] => Some(
-            ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: --autonomous-max-turns must be a positive integer\n", roots))
-                && declared_output_matches(native, 1, "", "Error: --autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)\n", roots),
-        ),
         ["--mode", "rpc" | "daemon", "@file.txt"] => Some(
             ts.is_none_or(|ts| declared_output_matches(ts, 1, "", "Error: @file arguments are not supported in RPC or daemon mode\n", roots))
                 && declared_output_matches(native, 1, "", "Error: @file arguments are not supported in RPC, daemon, or ACP mode\n", roots),
@@ -585,8 +578,6 @@ fn native_cli_contract_fixtures() {
         &["help"],
         &["help", "package"],
         &["help", "update"],
-        &["--autonomous-max-turns", "0"],
-        &["--autonomous-max-turns", "abc"],
         &["--mode", "rpc", "@file.txt"],
         &["--mode", "daemon", "@file.txt"],
         &["model", "list", "--json"],

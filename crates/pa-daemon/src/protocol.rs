@@ -86,7 +86,6 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "cancel_rlm_child",
     "delete_rlm_subagent",
     "wait_for_idle",
-    "wait_for_headless_completion",
     "get_session_header",
     "get_state",
     "get_connection_state",
@@ -693,9 +692,6 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::WaitForIdle {
             active_session_id, ..
         }
-        | DaemonCommand::WaitForHeadlessCompletion {
-            active_session_id, ..
-        }
         | DaemonCommand::GetSessionHeader {
             active_session_id, ..
         }
@@ -991,7 +987,6 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
-        DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",
         DaemonCommand::GetSessionHeader { .. } => "get_session_header",
         DaemonCommand::GetState { .. } => "get_state",
         DaemonCommand::GetConnectionState { .. } => "get_connection_state",

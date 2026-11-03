@@ -517,7 +517,7 @@ impl Worker {
         }
     }
 
-    /// The idle park shared by `wait_for_idle` and the headless barrier:
+    /// The idle park shared by the plain and quiescence idle waits:
     /// register the permit before the flag check, or a turn that settles
     /// between the check and the await loses its wake
     /// (`notify_waiters` only reaches registered futures).
@@ -539,8 +539,7 @@ impl Worker {
         }
     }
 
-    /// The idle wait, plus `waitForRlmQuiescence` (TS
-    /// `waitForHeadlessCompletion`'s strong arm over `agent-session.ts`
+    /// The idle wait, plus `waitForRlmQuiescence` (TS `agent-session.ts`
     /// `waitForRlmQuiescence`): the barrier also owns descendant work - it
     /// holds past the session's idle until every tracked child run's
     /// settle funnel fires (after the terminal notice is delivered), and
@@ -591,32 +590,8 @@ impl Worker {
         self.wait_until_quiescent(payload).await;
         response_success(None, "wait_for_idle", None)
     }
-
-    /// `wait_for_headless_completion` (TS daemon command): settle the
-    /// headless run first (same idle wait as `wait_for_idle`), then answer
-    /// the autonomous-run accounting snapshot (`DaemonAutonomousStatus`).
-    pub(crate) async fn handle_wait_for_headless_completion(
-        &self,
-        payload: &Value,
-    ) -> DaemonResponse {
-        if let Err(response) = self.require_created("wait_for_headless_completion") {
-            return response;
-        }
-        self.wait_until_quiescent(payload).await;
-        // The idle wait finished, so no turn holds the accounting state;
-        // the snapshot read cannot interleave with a running turn.
-        let status = self
-            .engine
-            .autonomous_status()
-            .await
-            .unwrap_or_else(pa_core::autonomous::disabled_autonomous_status);
-        response_success(
-            None,
-            "wait_for_headless_completion",
-            Some(serde_json::to_value(&status).unwrap_or(Value::Null)),
-        )
-    }
 }
+
 /// Agents-view visibility is message-based: a resident subagent is visible
 /// before its first message; a message-less top-level session is a draft the
 /// view hides. A busy turn is live, so a mid-turn roster delta must never

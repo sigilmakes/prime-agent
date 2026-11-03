@@ -17,8 +17,8 @@ impl AgentSessionEngine {
     }
 
     /// The turn loop: run one model turn, consume turn-boundary requests,
-    /// then ask the autonomous driver what follows. The single trailing
-    /// `Done` ends the run.
+    /// then ask the goal boundary what follows. The single trailing `Done`
+    /// ends the run.
     pub(in crate::agent_engine) fn run_turns(
         &self,
         first: TurnPrompt,
@@ -35,8 +35,8 @@ impl AgentSessionEngine {
             .as_deref()
             .map(|engine| engine.session.turn_activity_state())
             .map(|state| state.begin_turn());
-        // The first turn admits the prompt; every autonomous follow-up turn
-        // runs text-only (attachments are never re-sent).
+        // The first turn admits the prompt; every follow-up turn runs
+        // text-only (attachments are never re-sent).
         let prompt = first;
         let mut overflow_retry = false;
         self.threshold_yielded
@@ -172,7 +172,7 @@ impl AgentSessionEngine {
                 BoundaryRun::Proceed => {}
             }
             // The settled turn's usage crossing the headroom auto-compacts; the
-            // autonomous continuation decision below still runs after it.
+            // goal continuation decision below still runs after it.
             if self
                 .threshold_checks_enabled
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -182,8 +182,8 @@ impl AgentSessionEngine {
             }
             // The compact-trigger round is NOT consumed here: the review runs
             // in the background while idle (a review call on this boundary held
-            // the queued prompt behind the whole round). The goal takes exclusive
-            // priority over autonomous; `signal?.aborted` gates it.
+            // the queued prompt behind the whole round). `signal?.aborted`
+            // gates the goal boundary.
             if !aborted() {
                 match self.goal_turn_end_boundary() {
                     GoalBoundary::End => {
@@ -191,24 +191,6 @@ impl AgentSessionEngine {
                         return;
                     }
                     GoalBoundary::Proceed => {}
-                }
-            }
-            // What may remain here is the continuation the threshold arm minted
-            // ahead of the boundary's compaction: hand it to the worker's queue
-            // lanes. A stop surfaces nothing here.
-            if let Some(text) = self
-                .held_autonomous_continuation
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                let admission = self
-                    .autonomous_admission
-                    .lock()
-                    .expect("autonomous admission lock")
-                    .clone();
-                if let Some(admit) = admission {
-                    admit(text);
                 }
             }
             emit(EngineEvent::Done(Ok(())));

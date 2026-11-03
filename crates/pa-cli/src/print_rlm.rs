@@ -257,7 +257,7 @@ async fn child_is_unsettled(child: &Arc<InlineChild>) -> bool {
 /// Whether inline subagent work is unsettled (TS
 /// `_hasUnsettledRlmQuiescenceWork`): a running child, a delivered row
 /// waiting in a child's lane, or a row queued on the root's own agent.
-/// The goal/autonomous continuation gates and the drive's return read
+/// The goal continuation gates and the drive's return read
 /// this one predicate: the live session state — not a bookkeeping flag
 /// alone — is the fact (TS `child.isSessionActive`).
 pub(crate) async fn has_unsettled_rlm_work(node: &Arc<InlineSessionNode>) -> bool {

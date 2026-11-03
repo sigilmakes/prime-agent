@@ -101,21 +101,12 @@ impl AgentSessionEngine {
             let registration_tx = registration_tx.clone();
             let pending_model_changes = pending_model_changes.clone();
             let boundary_passed = std::sync::Arc::clone(&boundary_passed);
-            let autonomous_state = std::sync::Arc::clone(&self.autonomous);
-            let autonomous_driver = std::sync::Arc::clone(
-                &*self
-                    .autonomous_driver
-                    .read()
-                    .expect("autonomous driver lock"),
-            );
             agent
                 .subscribe(move |event, _signal| {
                     let tx = tx.clone();
                     let registration_tx = registration_tx.clone();
                     let pending_model_changes = pending_model_changes.clone();
                     let boundary_passed = std::sync::Arc::clone(&boundary_passed);
-                    let autonomous_state = std::sync::Arc::clone(&autonomous_state);
-                    let autonomous_driver = std::sync::Arc::clone(&autonomous_driver);
                     let goal_runtime = goal_runtime.clone();
                     let goal_budget_crossed = goal_budget_crossed.clone();
                     Box::pin(async move {
@@ -138,10 +129,6 @@ impl AgentSessionEngine {
                             if let Some(message) =
                                 json_round_trip::<_, pa_types::ai::AssistantMessage>(assistant)
                             {
-                                {
-                                    let mut state = autonomous_state.lock().await;
-                                    autonomous_driver.account_message(&mut state, &message);
-                                }
                                 // Goal accounting: only turns neither errors
                                 // nor aborted spend the budget, only while
                                 // active.

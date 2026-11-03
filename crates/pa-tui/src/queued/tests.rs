@@ -863,7 +863,7 @@ fn injected_continuations_condense_into_the_counted_row() {
         follow_ups: vec![
             "keep going".to_string(),
             "[goal: continuation]\n\nKeep driving the goal.".to_string(),
-            "[autonomous continuation after compaction]".to_string(),
+            "[continuation after compaction]".to_string(),
         ],
         starting: None,
         rlm_child_status: QueueLaneIndices::default(),

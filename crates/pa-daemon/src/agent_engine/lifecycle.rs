@@ -48,10 +48,6 @@ impl AgentSessionEngine {
                 link_config.active_session_id.clone(),
             ))
         });
-        let autonomous_driver = std::sync::RwLock::new(std::sync::Arc::new(
-            pa_core::autonomous::ShellAutonomousDriver::new(config.cwd.clone()),
-        )
-            as std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>);
         let cwd = std::sync::Arc::new(std::sync::RwLock::new(config.cwd.clone()));
         // The ACP MCP store (auth storage construction is blocking, off the hot async paths).
         let agent_dir = config.agent_dir.clone();
@@ -137,7 +133,6 @@ impl AgentSessionEngine {
             stale_goal_terminal_pending: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
             queue_modes,
-            autonomous_boundary: std::sync::Mutex::new(None),
             background_bash_probe: std::sync::Mutex::new(None),
             kernel_release_probe: std::sync::Mutex::new(None),
             registered_jobs_probe: std::sync::Mutex::new(None),
@@ -163,9 +158,6 @@ impl AgentSessionEngine {
             reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             create_resources: std::sync::RwLock::default(),
-            autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
-                pa_core::autonomous::create_autonomous_runtime_state(None, None),
-            )),
             link,
             children,
             usage_producer: std::sync::Mutex::new(None),
@@ -173,14 +165,8 @@ impl AgentSessionEngine {
             initial_context_selection_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
             quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            autonomous_driver,
-            autonomous_driver_default: std::sync::atomic::AtomicBool::new(true),
-            held_autonomous_continuation: std::sync::Mutex::new(None),
-            autonomous_admission: std::sync::Mutex::new(None),
-            autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool::new(false),
             session_closed: std::sync::atomic::AtomicBool::new(false),
             self_weak: std::sync::Mutex::new(None),
-            autonomous_queue_purge: std::sync::Mutex::new(None),
             cwd,
             rlm_depth: std::sync::atomic::AtomicU32::new(0),
             rlm_max_depth_source: std::sync::Mutex::new("default"),
@@ -196,23 +182,6 @@ impl AgentSessionEngine {
             progress_note_emit: std::sync::Mutex::new(None),
             semantic_identity: std::sync::Mutex::new(None),
         })
-    }
-
-    /// Replace the autonomous continuation policy. Call before the first admitted turn.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the autonomous-driver lock is poisoned.
-    pub fn set_autonomous_driver(
-        &self,
-        driver: std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>,
-    ) {
-        self.autonomous_driver_default
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        *self
-            .autonomous_driver
-            .write()
-            .expect("autonomous driver lock") = driver;
     }
 
     pub(crate) fn cwd(&self) -> std::path::PathBuf {
@@ -437,17 +406,6 @@ impl AgentSessionEngine {
         {
             built.session.set_turn_activity_probe(probe);
         }
-        // The in-run consult's mirror: the session mutex is held across
-        // compaction turns, and the consult runs inside one.
-        *self
-            .autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock") =
-            Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
-                turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
-                agent: std::sync::Arc::clone(built.session.agent()),
-                session: Arc::downgrade(built),
-            });
         // The background-bash liveness probe: a deadlock-free read over the
         // build's provisioner.
         let provisioner = built.kernel_provisioner_weak();
@@ -480,8 +438,6 @@ impl AgentSessionEngine {
                 }
             })
         }));
-        // The in-run autonomous continuation hook (the goal seam keeps its own boundary mint).
-        self.install_autonomous_continuation_hook_on(built.session.agent());
         // Live children outlive the rebuild and registered their spawns on the old producer:
         // adopt those registrations before the new sink observes, or the first post-swap
         // report drops against a producer that never saw the spawn.
@@ -942,10 +898,6 @@ impl AgentSessionEngine {
         *self.progress_notes.lock().expect("progress notes lock") = None;
         *self.turn_agent.lock().expect("turn agent lock") = None;
         *self
-            .autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock") = None;
-        *self
             .background_bash_probe
             .lock()
             .expect("background bash probe lock") = None;
@@ -986,14 +938,14 @@ impl AgentSessionEngine {
     /// # Panics
     ///
     /// Panics when an internal mutex is poisoned.
+    pub fn register_arc(self: &Arc<Self>) {
+        *self.self_weak.lock().expect("engine self weak lock") = Some(Arc::downgrade(self));
+    }
+
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
         *self.goal_runtime.lock().expect("goal runtime lock") = None;
-        *self
-            .autonomous_boundary
-            .lock()
-            .expect("autonomous boundary lock") = None;
         *self
             .background_bash_probe
             .lock()
@@ -1080,11 +1032,9 @@ impl AgentSessionEngine {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
-        let mut autonomous = self.autonomous.blocking_lock();
         let mut params = SessionCommandParams {
             model: &model,
             api_key,
-            autonomous: &mut autonomous,
         };
         // The lock covers the clone only: the command below can run a summarizer call, so the
         // mutex must not ride it.
@@ -1290,7 +1240,6 @@ impl AgentSessionEngine {
                 std::sync::Arc::new(move || {
                     if let Some(engine) = weak.upgrade() {
                         engine.retry_owed_goal_continuation();
-                        engine.retry_owed_autonomous_continuation();
                     }
                 }) as pa_core::kernel::shared::BackgroundWorkSettledCallback
             });

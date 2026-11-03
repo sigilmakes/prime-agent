@@ -1,4 +1,4 @@
-//! The worker's RLM quiescence barrier e2e: `wait_for_headless_completion` with
+//! The worker's RLM quiescence barrier e2e: `wait_for_idle` with
 //! `waitForRlmQuiescence` owns the parent's idle, then every admitted descendant
 //! run's settlement, looping back through the idle wait (work may start at the
 //! child-settlement boundary). Skips on machines without a live install.
@@ -345,48 +345,9 @@ fn spawn_held_child_lane(kernel_python: &Path) -> HeldChildLane {
     }
 }
 
-/// The barrier must answer only after the held child turn settles and the terminal
-/// notice it queues drains; the pre-fix worker answered at the parent's idle.
-#[test]
-fn headless_completion_waits_for_rlm_quiescence() {
-    let Some(kernel_python) = kernel_python() else {
-        return;
-    };
-    let mut lane = spawn_held_child_lane(&kernel_python);
-
-    lane.client.send_command(
-        "w1",
-        &json!({
-            "type": "wait_for_headless_completion",
-            "activeSessionId": lane.parent_id,
-            "waitForRlmQuiescence": true,
-        }),
-    );
-    let completion = lane.client.read_response("w1");
-    assert_eq!(
-        completion["success"], true,
-        "wait_for_headless_completion failed: {completion}"
-    );
-
-    let messages = messages_text(&mut lane.client, "m1", &lane.parent_id);
-    assert!(
-        messages.contains("notice seen"),
-        "the barrier answered before the terminal-notice turn drained"
-    );
-    let rows = rlm_children_rows(&mut lane.client, "g1", &lane.parent_id);
-    let child_row = rows
-        .iter()
-        .find(|row| row["id"] == json!(lane.child_id))
-        .expect("the spawned child's roster row");
-    assert_eq!(
-        child_row["status"], "done",
-        "the barrier answered while the child was still running"
-    );
-}
-
-/// `wait_for_idle` with `waitForRlmQuiescence: true` is the same barrier:
-/// the parent's settle watcher waits on a child this way, so a child with
-/// running subagents is not idle until its whole subtree settled.
+/// The barrier must answer only after the held child turn settles and the
+/// terminal notice it queues drains; a child with running subagents is not
+/// idle until its whole subtree settled.
 #[test]
 fn wait_for_idle_waits_for_rlm_quiescence() {
     let Some(kernel_python) = kernel_python() else {
@@ -423,7 +384,7 @@ fn wait_for_idle_waits_for_rlm_quiescence() {
 /// terminal notice's parent turn; a status-reading barrier answers
 /// inside the settle window.
 #[test]
-fn headless_completion_holds_through_the_settle_window() {
+fn wait_for_idle_holds_through_the_settle_window() {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -450,7 +411,7 @@ fn headless_completion_holds_through_the_settle_window() {
     lane.client.send_command(
         "w1",
         &json!({
-            "type": "wait_for_headless_completion",
+            "type": "wait_for_idle",
             "activeSessionId": lane.parent_id,
             "waitForRlmQuiescence": true,
         }),
@@ -458,7 +419,7 @@ fn headless_completion_holds_through_the_settle_window() {
     let completion = lane.client.read_response("w1");
     assert_eq!(
         completion["success"], true,
-        "wait_for_headless_completion failed: {completion}"
+        "wait_for_idle failed: {completion}"
     );
     let messages = messages_text(&mut lane.client, "m1", &lane.parent_id);
     assert!(

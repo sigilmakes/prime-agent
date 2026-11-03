@@ -1,5 +1,5 @@
 //! Session slash-command execution: the daemon-side behavior behind
-//! `/compact`, `/goal`, and `/autonomous`. The host runtime owns
+//! `/compact` and `/goal`. The host runtime owns
 //! persistence of what this returns; errors carry the exact TS message and
 //! the host renders the `Command failed: ...` result row.
 
@@ -7,14 +7,8 @@ use std::sync::Arc;
 
 use pa_types::session::CustomMessage;
 
-use crate::autonomous::{
-    autonomous_status, set_autonomous_enabled, set_autonomous_limits, AutonomousRuntimeState,
-};
 use crate::goals::{create_goal_context_message, GoalContextKind, GoalStatus};
-use crate::slash_command_args::{
-    format_autonomous_status, parse_autonomous_command, parse_goal_command, AutonomousCommand,
-    GoalCommand,
-};
+use crate::slash_command_args::{parse_goal_command, GoalCommand};
 
 use super::compact_session::CompactOutcome;
 use super::engine::SessionEngine;
@@ -24,14 +18,11 @@ use super::messages::{
 };
 use super::slash_commands::SessionSlashCommand;
 
-pub use crate::autonomous::AUTONOMOUS_STATUS_CUSTOM_TYPE;
-
 /// Inputs the host runtime supplies to one execution.
 pub struct SessionCommandParams<'a> {
     pub model: &'a pa_types::ai::Model,
     /// Resolved API key (None falls back to provider resolution).
     pub api_key: Option<String>,
-    pub autonomous: &'a mut AutonomousRuntimeState,
 }
 
 /// A completed compaction to persist: the session record plus the
@@ -254,7 +245,6 @@ pub async fn execute_session_command(
     let result = match command.name.as_str() {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
         "goal" => execute_goal(engine, command, images, &mut execution).await,
-        "autonomous" => execute_autonomous(params, command, &mut execution),
         other => Err(format!("Unknown session command: {other}")),
     };
     if let Err(message) = result {
@@ -396,34 +386,6 @@ async fn execute_goal(
     Ok(())
 }
 
-/// `/autonomous`: status, on (with budget flags), off; emits the
-/// durable `autonomous_status` row.
-fn execute_autonomous(
-    params: &mut SessionCommandParams<'_>,
-    command: &SessionSlashCommand,
-    execution: &mut SessionCommandExecution,
-) -> Result<(), String> {
-    let parsed = parse_autonomous_command(&command.args)?;
-    match parsed {
-        AutonomousCommand::Status => {}
-        AutonomousCommand::On { config } => {
-            set_autonomous_enabled(params.autonomous, true);
-            set_autonomous_limits(params.autonomous, &config);
-        }
-        AutonomousCommand::Off => set_autonomous_enabled(params.autonomous, false),
-    }
-    let status = autonomous_status(params.autonomous);
-    execution.push_message(CustomMessage {
-        custom_type: AUTONOMOUS_STATUS_CUSTOM_TYPE.to_string(),
-        content: pa_types::ai::UserContent::Text(format_autonomous_status(&status)),
-        display: true,
-        details: serde_json::to_value(&status).ok(),
-        timestamp: now_millis(),
-        rest: serde_json::Map::default(),
-    });
-    Ok(())
-}
-
 /// The rows are durable in the session's own entry chain: the live context
 /// rebuild and a later `/compact` see the same rows the host runtime persists.
 async fn persist_rows<'a>(
@@ -459,7 +421,6 @@ async fn persist_rows<'a>(
 mod tests {
     use super::*;
     use crate::goals::{empty_goal_state, GoalState, GoalStatus};
-    use pa_types::ai::UserContent;
 
     fn command(name: &'static str, args: &str) -> SessionSlashCommand {
         let text = if args.is_empty() {
@@ -534,30 +495,6 @@ mod tests {
         assert_eq!(goal_status_text(&state), "Goal paused: ship it");
         state.status = GoalStatus::BudgetLimited;
         assert_eq!(goal_status_text(&state), "Goal budget_limited: ship it");
-    }
-
-    #[tokio::test]
-    async fn autonomous_status_row_emitted() {
-        // The autonomous branch touches only the runtime state.
-        let mut autonomous = crate::autonomous::create_autonomous_runtime_state(None, None);
-        let mut execution = SessionCommandExecution::default();
-        execute_autonomous(
-            &mut SessionCommandParams {
-                model: &scripted_model(),
-                api_key: None,
-                autonomous: &mut autonomous,
-            },
-            &command("autonomous", "on --max-turns 5"),
-            &mut execution,
-        )
-        .unwrap();
-        assert!(autonomous.enabled);
-        assert_eq!(autonomous.limits.max_turns, 5);
-        assert_eq!(execution.messages.len(), 1);
-        let status = &execution.messages[0];
-        assert_eq!(status.custom_type, "autonomous_status");
-        assert!(message_text(status).starts_with("[autonomous-status: on]"));
-        assert!(matches!(status.content, UserContent::Text(_)));
     }
 
     fn scripted_model() -> pa_types::ai::Model {

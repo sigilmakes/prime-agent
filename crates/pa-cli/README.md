@@ -20,21 +20,16 @@ session engine directly: prompt admission, the turn-boundary compaction
 checks (`print_boundary.rs` — the overflow compact-and-retry arm, the
 model-requested compaction consumption, and the threshold arm), the json event stream, and the headless
 terminal selection (stdout/stderr/exit code) mirroring modes/print-mode.ts.
-Autonomous continuation (print_autonomous.rs, the #254 follow-up): the
-composed in-run continuation hook (the pa-agent loop's
-`getContinuationMessages` seam) runs the natural continuations inside
-the one agent run (the TS shape: `turn_end` -> `turn_start` with the
-continuation user row between them, no run boundary); the goal arm runs
-first (exclusive priority), the boundary gates (queued input, a
-requested compaction, the threshold arm) are shared, and a threshold
-compaction holds its minted continuation for the boundary's queued
-`followUp` admission (`TurnBoundary::admit_continuation`). The stop
-surfaces only through the headless exit contract (TS: no row, no frame).
 Goal continuation (print_goal.rs, the #252 residue): the `--goal` seed rides
-the first turn; the in-loop continuation hook runs an active goal's natural
-continuations inside the one agent run; the budget-limit steer and the
-threshold-held continuation drain as this invocation's follow-up runs
-with the TS session-action phase frames.
+the first turn; the in-loop continuation hook (the pa-agent loop's
+`getContinuationMessages` seam) runs an active goal's natural continuations
+inside the one agent run (the TS shape: `turn_end` -> `turn_start` with the
+continuation user row between them, no run boundary), gated by queued input,
+a requested compaction, and the threshold arm; a threshold compaction holds
+its minted continuation for the boundary's queued `followUp` admission
+(`TurnBoundary::admit_continuation`). The budget-limit steer and the
+threshold-held continuation drain as this invocation's follow-up runs with
+the TS session-action phase frames.
 Inline subagents (print_rlm.rs): the daemonless print session hosts
 `rlm.spawn` children in-process over a tree of session nodes — the
 `RlmSubagentHost` impl (depth gate, name uniqueness, model resolution,
@@ -42,11 +37,11 @@ the child session/engine build, the kickoff row), the
 `AgentMessageController` (family roster, one steer-lane delivery path),
 the quiescence drive that holds the run open until every admitted
 descendant settles and its replies and notices drain (the #2270 fix),
-the goal/autonomous deferral behind unsettled work, and the exit
+the goal deferral behind unsettled work, and the exit
 disposal (kernels snapshotted, drivers joined; no child outlives the
 process).
 Session slash commands (`print_session_command.rs`): `/compact`, `/goal`,
-`/autonomous`, and active Lua commands share the pa-core executor. The stream
+and active Lua commands share the pa-core executor. The stream
 includes `session_action_update` phase frames around the durable echo row,
 `compaction_start`/`compaction_end` for `/compact`, the unconditional
 `goal_update` for `/goal`, result rows, and the settled queue frame.

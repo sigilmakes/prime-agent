@@ -207,8 +207,7 @@ impl SessionEngine {
         self.goal_driver.lock().await.mark_continuation_owed();
     }
 
-    /// Whether an active goal owns the wake-up discipline (an autonomous
-    /// hold defers behind it and drops its own continuation).
+    /// Whether an active goal owns the wake-up discipline.
     pub async fn goal_owns_continuation_wakeup(&self) -> bool {
         self.goal_driver.lock().await.owns_continuation_wakeup()
     }

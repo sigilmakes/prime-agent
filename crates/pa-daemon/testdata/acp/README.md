@@ -38,13 +38,6 @@ the process exit code and stderr.
 - `goal_command`: `/goal <objective>` then `/goal status`. Shows the
   goal-start `_meta.goal` frame, mid-turn usage updates after each settled
   message, the completion observation, and the status-prompt frame.
-- `autonomous_gate`: `--autonomous --autonomous-gate true`. The gate passes
-  after the first turn: the completion and terminal envelopes carry the
-  `_meta.autonomous` accounting and `remainingAutonomousContinuations`
-  reflects the configured budget; the stop reason is `end_turn`.
-- `autonomous_limit`: `--autonomous --autonomous-max-tokens 1`. The token
-  limit stops the run: the envelopes carry the final accounting and the
-  stop reason is `max_tokens`.
 - `mcp_stdio`: `session/new` with two valid servers (one stdio with a
   literal environment entry, one http with a header) plus one
   schema-invalid entry (missing the required `env` array): the ACP SDK
@@ -76,9 +69,8 @@ on the sandboxed `--daemon-socket`, hosts a client-owned daemon session,
 and streams its session events as ACP updates. The daemon-attached
 captures are: happy_path, cwd_mismatch, errors, second_initialize,
 tool_call, compact_command, mcp_stdio, mcp_replace, mcp_errors — all
-MATCH in full mode. `cancel`, `goal_command`, `autonomous_limit`, and
-`autonomous_gate` were captured on the since-removed in-process
-transport; recapture is pending (the files stay):
+MATCH in full mode. `cancel` and `goal_command` were captured on the
+since-removed in-process transport; recapture is pending (the files stay):
 
 - `cancel`: the capture matched in full mode; the daemon-attached run
   resolves the same `{stopReason: "cancelled"}` shape with no boundary
@@ -86,9 +78,8 @@ transport; recapture is pending (the files stay):
   scenario's 2s cancel window, so the pre-cancel chunk count differs
   per run. The daemon-attached cancel semantics are locked by the
   deterministic e2e (`acp_daemon_attached_cancels_mid_turn`).
-- `goal_command` / `autonomous_limit` / `autonomous_gate`: the captures
-  predate the daemon's `goal_update` / autonomous-accounting producers;
-  recapture is pending.
+- `goal_command`: the capture predates the daemon's `goal_update`
+  producer; recapture is pending.
 
 ## Comparing a Rust run
 
@@ -110,10 +101,8 @@ networked box.
 chunk streams, and mid-turn goal-usage updates) and compares the protocol
 envelopes only. Use it for scenarios where the two model runs legally
 diverge in their tool usage (`goal_command`: one run answered directly,
-the other ran several ipython cells; `autonomous_limit`: one run wrote
-the essay with tool calls, the other without — both sequences are
-correct protocol behavior). The goal and autonomous frames themselves are
-locked field-by-field by the offline e2e tests. All other scenarios
-(happy_path, cwd_mismatch, errors, second_initialize, tool_call,
-compact_command, cancel, autonomous_gate, mcp_stdio, mcp_replace,
-mcp_errors) match in full mode.
+the other ran several ipython cells — both sequences are correct protocol
+behavior). The goal frames themselves are locked field-by-field by the
+offline e2e tests. All other scenarios (happy_path, cwd_mismatch, errors,
+second_initialize, tool_call, compact_command, cancel, mcp_stdio,
+mcp_replace, mcp_errors) match in full mode.

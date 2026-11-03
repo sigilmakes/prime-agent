@@ -111,8 +111,6 @@ pub enum AcpStopReason {
     EndTurn,
     #[serde(rename = "max_tokens")]
     MaxTokens,
-    #[serde(rename = "max_turn_requests")]
-    MaxTurnRequests,
     #[serde(rename = "refusal")]
     Refusal,
     #[serde(rename = "cancelled")]

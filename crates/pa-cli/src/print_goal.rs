@@ -19,6 +19,75 @@ use tokio::sync::Mutex;
 /// sink contract `print_boundary` uses).
 pub(crate) type EventSink = std::sync::Arc<dyn Fn(&Value) + Send + Sync>;
 
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// The latest settled assistant message's error text, when the loop's terminal
+/// state is a failed model request.
+pub(crate) async fn latest_assistant_error(engine: &SessionEngine) -> Option<Option<String>> {
+    let state = engine.session.agent().state().await;
+    state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| -> Option<pa_types::ai::AssistantMessage> {
+            match message {
+                pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
+                    assistant,
+                )) => pa_core::session_engine::provider_adapter::json_round_trip(assistant),
+                _ => None,
+            }
+        })
+        .and_then(|message| {
+            (message.stop_reason == pa_types::ai::StopReason::Error)
+                .then(|| message.error_message.clone())
+        })
+}
+
+/// Install the goal continuation hook on the agent's natural turn end.
+pub(crate) fn wire_goal_continuation_hook(
+    engine: &Arc<SessionEngine>,
+    agent: &Arc<Agent>,
+    model: &pa_types::ai::Model,
+    goal: &Arc<PrintGoalSurface>,
+    root_node: Option<&Arc<crate::print_rlm::InlineSessionNode>>,
+) {
+    let weak_engine = Arc::downgrade(engine);
+    let weak_goal = Arc::downgrade(goal);
+    let weak_root = root_node.map(Arc::downgrade);
+    let model = Arc::new(model.clone());
+    agent.set_continuation_hook(Some(Arc::new(move |_context, _signal| {
+        let weak_engine = weak_engine.clone();
+        let weak_goal = weak_goal.clone();
+        let weak_root = weak_root.clone();
+        let model = Arc::clone(&model);
+        Box::pin(async move {
+            let (Some(engine), Some(goal)) = (weak_engine.upgrade(), weak_goal.upgrade()) else {
+                return Ok(Vec::new());
+            };
+            let unsettled_rlm_work = match weak_root.as_ref().and_then(std::sync::Weak::upgrade) {
+                Some(root) => crate::print_rlm::has_unsettled_rlm_work(&root).await,
+                None => false,
+            };
+            match goal
+                .natural_continuation(&engine, &model, unsettled_rlm_work)
+                .await
+            {
+                NaturalContinuation::GoalRow(row) => Ok(vec![*row]),
+                NaturalContinuation::QueuedInput
+                | NaturalContinuation::RequestedCompaction
+                | NaturalContinuation::ThresholdDue
+                | NaturalContinuation::HeldForRlmWork
+                | NaturalContinuation::FallThrough => Ok(Vec::new()),
+            }
+        }) as pa_agent::BoxFut<'static, anyhow::Result<Vec<AgentMessage>>>
+    })));
+}
+
 /// Collapse whitespace, cap at 160 chars with a trailing `...` (the session-action label form).
 fn compact_rlm_text(text: &str, max_length: usize) -> String {
     let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -58,7 +127,7 @@ pub(crate) enum NaturalContinuation {
     HeldForRlmWork,
     /// The goal minted its next continuation row.
     GoalRow(Box<pa_agent::types::AgentMessage>),
-    /// No goal work owns the boundary: the autonomous arm may consult.
+    /// No goal work owns the boundary.
     FallThrough,
 }
 
@@ -344,7 +413,7 @@ impl PrintGoalSurface {
 
     /// One durable row's `message_start`/`message_end` pair (rows appended outside the agent loop).
     pub(crate) fn emit_row_pair(&self, row: &CustomMessage) {
-        let value = crate::headless_autonomous::custom_row_wire_value(row);
+        let value = crate::print_boundary::custom_row_wire_value(row);
         for event_type in ["message_start", "message_end"] {
             self.emit(&json!({ "type": event_type, "message": value }));
         }
@@ -480,8 +549,7 @@ impl PrintGoalSurface {
         // The daemon's consult order: a goal that does not own the
         // wake-up drops any armed RLM deferral (the deferral dies with
         // the goal's loop); only an owning goal gates behind unsettled
-        // descendant work — an ownerless boundary never starves the
-        // autonomous arm.
+        // descendant work.
         let owns_wakeup = engine.goal_owns_continuation_wakeup().await;
         if !owns_wakeup {
             engine.drop_owed_goal_continuation().await;
@@ -544,8 +612,7 @@ impl PrintGoalSurface {
                 ran = true;
                 continue;
             }
-            if let Some(message) = crate::headless_autonomous::latest_assistant_error(engine).await
-            {
+            if let Some(message) = latest_assistant_error(engine).await {
                 engine
                     .fail_goal_for_terminal_error(message.as_deref())
                     .await
@@ -554,7 +621,7 @@ impl PrintGoalSurface {
             }
             if let Some(wake_at) = engine.take_goal_backoff_wake_at().await {
                 tokio::time::sleep(std::time::Duration::from_millis(
-                    wake_at.saturating_sub(pa_core::autonomous::now_millis()),
+                    wake_at.saturating_sub(now_millis()),
                 ))
                 .await;
                 boundary
@@ -599,9 +666,7 @@ impl PrintGoalSurface {
         boundary
             .run_at_settled_turn(engine, model, api_key.clone())
             .await?;
-        if let Some(error_message) =
-            crate::headless_autonomous::latest_assistant_error(engine).await
-        {
+        if let Some(error_message) = latest_assistant_error(engine).await {
             engine
                 .fail_goal_for_terminal_error(error_message.as_deref())
                 .await
@@ -866,15 +931,11 @@ mod tests {
         let accounting = surface
             .wire_accounting(&engine, engine.session.agent())
             .await;
-        let autonomous_run = std::sync::Arc::new(
-            crate::headless_autonomous::HeadlessAutonomous::disabled(dir.path()),
-        );
-        crate::print_autonomous::wire_continuation_hook(
+        crate::print_goal::wire_goal_continuation_hook(
             &engine,
             engine.session.agent(),
             &model,
             &surface,
-            &autonomous_run,
             /*root_node*/ None,
         );
         GoalBed {
@@ -883,7 +944,6 @@ mod tests {
             surface,
             frames,
             _accounting: accounting,
-            _autonomous_run: autonomous_run,
             _dir: dir,
         }
     }
@@ -894,9 +954,6 @@ mod tests {
         surface: Arc<PrintGoalSurface>,
         frames: Frames,
         _accounting: pa_agent::agent::Subscription,
-        /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
-        /// weakly).
-        _autonomous_run: Arc<crate::headless_autonomous::HeadlessAutonomous>,
         _dir: tempfile::TempDir,
     }
 
@@ -1479,15 +1536,11 @@ mod tests {
         let accounting = surface
             .wire_accounting(&engine, engine.session.agent())
             .await;
-        let autonomous_run = std::sync::Arc::new(
-            crate::headless_autonomous::HeadlessAutonomous::disabled(dir.path()),
-        );
-        crate::print_autonomous::wire_continuation_hook(
+        crate::print_goal::wire_goal_continuation_hook(
             &engine,
             engine.session.agent(),
             &model,
             &surface,
-            &autonomous_run,
             /*root_node*/ None,
         );
         GoalBed {
@@ -1496,7 +1549,6 @@ mod tests {
             surface,
             frames,
             _accounting: accounting,
-            _autonomous_run: autonomous_run,
             _dir: dir,
         }
     }

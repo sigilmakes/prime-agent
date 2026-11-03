@@ -28,9 +28,7 @@ let updateRequested = coordinator;
 const valueFlags = new Set(["--mode", "--daemon-socket", "--provider", "--model", "--api-key",
   "--cwd", "--system-prompt", "--append-system-prompt", "--fork", "--session-dir", "--models",
   "--tools", "-t", "--thinking", "--extension", "-e", "--skill", "--prompt-template", "--theme",
-  "--autonomous-gate", "--autonomous-gate-retries", "--autonomous-gate-timeout-ms",
-  "--autonomous-max-continuations", "--autonomous-max-turns", "--autonomous-max-tokens",
-  "--autonomous-timeout-ms", "--goal", "--goal-token-budget", "--print", "-p"]);
+  "--goal", "--goal-token-budget", "--print", "-p"]);
 let promptRun = false;
 for (let index = 0; !coordinator && index < args.length; index++) {
   const arg = args[index];

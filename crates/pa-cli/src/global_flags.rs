@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 /// Global flags that consume the next argument as their value.
-pub const GLOBAL_VALUE_FLAGS: [&str; 22] = [
+pub const GLOBAL_VALUE_FLAGS: [&str; 15] = [
     "--mode",
     "--daemon-socket",
     "--provider",
@@ -20,16 +20,9 @@ pub const GLOBAL_VALUE_FLAGS: [&str; 22] = [
     "--skill",
     "--prompt-template",
     "--theme",
-    "--autonomous-gate",
-    "--autonomous-gate-retries",
-    "--autonomous-gate-timeout-ms",
-    "--autonomous-max-continuations",
-    "--autonomous-max-turns",
-    "--autonomous-max-tokens",
-    "--autonomous-timeout-ms",
 ];
 
-const FREEFORM_VALUE_FLAGS: [&str; 2] = ["--goal", "--autonomous-gate"];
+const FREEFORM_VALUE_FLAGS: [&str; 1] = ["--goal"];
 const PROMPT_VALUE_FLAGS: [&str; 2] = ["--system-prompt", "--append-system-prompt"];
 
 /// Flags that mark a one-shot prompt run; their positional is a message.
@@ -37,7 +30,7 @@ pub const PROMPT_RUN_FLAGS: [&str; 4] =
     ["--print", "-p", "--system-prompt", "--append-system-prompt"];
 
 /// parseArgs-known long flags that take no separate value.
-const GLOBAL_BOOLEAN_FLAGS: [&str; 12] = [
+const GLOBAL_BOOLEAN_FLAGS: [&str; 11] = [
     "--help",
     "--version",
     "--continue",
@@ -46,7 +39,6 @@ const GLOBAL_BOOLEAN_FLAGS: [&str; 12] = [
     "--no-prompt-templates",
     "--no-themes",
     "--no-context-files",
-    "--autonomous",
     "--verbose",
     "--offline",
     "--refresh",

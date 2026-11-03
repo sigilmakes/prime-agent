@@ -200,19 +200,6 @@ order match uncoalesced streaming. The supervisor stays payload-free:
 deltas ride the worker -> client session-event stream (direct-attach or
 supervisor-routed).
 
-Autonomous
-continuation driving in the worker's engine: per-message usage accounting
-runs in the agent-loop subscription, and the in-run continuation hook
-(`autonomous_continuation.rs`) consults the pa-core `AutonomousDriver`
-policy at the agent loop's natural turn end (product default: shell
-quality gates in the session cwd; deterministic drivers injectable for
-eval harnesses) — continuations mint as durable user rows churned
-inside the one prompt wait (the TS `getContinuationMessages` shape), a
-threshold compaction holds its minted continuation for the worker's
-queued `followUp` admission, and gate pass/fail or limit stops surface no
-row (the headless status request and the print exit contract carry
-them).
-
 Live MCP product-path verifier
 (`tests/mcp_product_path_e2e.rs`): a settings-declared stdio MCP server
 round-trips through a real worker session and kernel - the kernel cell's
