@@ -320,10 +320,6 @@ impl Supervisor {
         // for every worker it spawns — startup refresh plus the hourly loop, fire-and-forget.
         let _ = pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
-        // The plugins service catalog's keep-warm (the `/mcp` view's remote catalog): same
-        // cadence — startup refresh plus the hourly loop, failures keep the last-good cache.
-        pa_core::mcp::startup_plugins_refresh(&self.options.agent_dir);
-        pa_core::mcp::spawn_hourly_plugins_refresh(&self.options.agent_dir);
         socket::prepare_socket_path(&self.options.socket_path).await?;
         let listener = bind_transport(&self.options.socket_path)
             .await
