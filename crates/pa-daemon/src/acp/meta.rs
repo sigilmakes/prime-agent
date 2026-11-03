@@ -81,8 +81,6 @@ pub struct PrimeAgentSessionMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub goal: Option<PrimeAgentGoalMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub refinement: Option<PrimeAgentRefinementMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_message: Option<PrimeAgentAgentMessageMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction: Option<PrimeAgentCompactionMeta>,
@@ -103,19 +101,6 @@ pub struct PrimeAgentGoalMeta {
     pub token_budget: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_used: Option<u64>,
-}
-
-/// The outcome of one continual-harness refinement run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrimeAgentRefinementMeta {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub changes: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 /// An agent-to-agent message sent from inside a kernel cell.

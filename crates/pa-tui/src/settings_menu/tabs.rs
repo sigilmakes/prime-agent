@@ -57,7 +57,6 @@ const TAB_LAYOUT: &[TabLayout] = &[
             "builtin-skills",
             "idle-eviction-minutes",
             "tree-filter-mode",
-            "harness-refinements",
         ],
     },
 ];

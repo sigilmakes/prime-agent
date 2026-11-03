@@ -846,7 +846,6 @@ impl SessionEngine for AgentSessionEngine {
         &self,
         identity: crate::engine::RlmSessionIdentity,
     ) -> anyhow::Result<()> {
-        // This session's own depth gates the kernel `refine.*` host requests (depth-0 only).
         self.rlm_depth
             .store(identity.rlm_depth, std::sync::atomic::Ordering::Relaxed);
         if let Some(thinking) = &identity.thinking {

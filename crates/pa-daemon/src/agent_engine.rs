@@ -38,8 +38,7 @@ use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_M
 // The test mass (the faux harness and the in-file unit battery) moved to
 // the child module at the same tree position (agent_engine::tests); the
 // FAUX_TEST_LOCK re-export keeps the facade's FAUX_TEST_LOCK paths stable
-// for the sibling test modules (overflow_compaction, compact_autorefine,
-// session_navigation).
+// for the sibling test modules (overflow_compaction, session_navigation).
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -304,8 +303,7 @@ pub struct AgentSessionEngine {
     /// The session's live working directory, shared with the MCP user-servers
     /// closure so a [`SessionEngine::set_cwd`] rebind is visible to it.
     cwd: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
-    /// This session's RLM recursion depth (0 for top-level): gates the kernel `refine.*` host
-    /// requests.
+    /// This session's RLM recursion depth (0 for top-level).
     rlm_depth: std::sync::atomic::AtomicU32,
     /// The depth bound's source stamp (`default` | `env` | `global` |
     /// `inherited` | `chat`).

@@ -287,7 +287,7 @@ return {
             std::fs::create_dir_all(&agent).unwrap();
             std::fs::write(cwd.join("counter.lua"), SOURCE).unwrap();
             std::fs::write(agent.join("settings.json"), json!({
-                "harnessRefinements":false,"enableBuiltinSkills":false,
+                "enableBuiltinSkills":false,
                 "bundledSkills":{"websearch":false},
                 "plugins":{"counter":{"enabled":true,"path":"counter.lua","config":{"value":"initial"}}}
             }).to_string()).unwrap();
@@ -485,7 +485,8 @@ return {
             .as_str()
             .unwrap()
             .contains("replacement"));
-        fixture.project(&json!({"plugins":{"counter":{"enabled":false}}}));
+        fixture
+            .project(&json!({"plugins":{"counter":{"enabled":false},"harness":{"enabled":false}}}));
         let history = fixture.rows();
         let disabled = fixture.worker.dispatch("reload", &json!({})).await;
         assert!(
@@ -537,96 +538,6 @@ return {
         assert_eq!(fixture.read_count().await, json!(0));
         assert_eq!(fixture.rows(), before);
         assert!(fixture.provider.calls().is_empty());
-    }
-
-    #[tokio::test]
-    async fn legacy_refine_and_native_refine_share_the_active_lua_handler() {
-        let fixture = Fixture::new().await;
-        // The command name is plugin-owned. No daemon refinement engine or
-        // model adapter takes part in either transport route.
-        std::fs::write(
-            fixture.cwd.join("counter.lua"),
-            SOURCE.replace("name='count'", "name='refine'"),
-        )
-        .unwrap();
-        let reload = fixture.command("/reload", None).await;
-        assert!(reload.success, "{reload:?}");
-        let command = fixture
-            .catalog()
-            .await
-            .into_iter()
-            .find(|entry| entry["name"] == "refine")
-            .unwrap();
-        let native = fixture
-            .command("/refine native request", Some(&command["target"]))
-            .await;
-        assert!(native.success, "{native:?}");
-        let legacy = fixture
-            .worker
-            .dispatch(
-                "refine",
-                &json!({"global":true,"instructions":"legacy request /reload"}),
-            )
-            .await;
-        assert!(legacy.success, "{legacy:?}");
-        assert_eq!(legacy.command, "refine");
-        let result: Value =
-            serde_json::from_str(legacy.data.unwrap()["text"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            result,
-            json!({"count":2,"args":"--global legacy request /reload","configured":"initial"})
-        );
-        assert_eq!(fixture.read_count().await, json!(2));
-        let rollback = fixture
-            .worker
-            .dispatch("refine", &json!({"rollbackId":"record-123","global":true}))
-            .await;
-        assert!(rollback.success, "{rollback:?}");
-        let result: Value =
-            serde_json::from_str(rollback.data.unwrap()["text"].as_str().unwrap()).unwrap();
-        assert_eq!(result["args"], "--global rollback record-123");
-        fixture.worker.core.lock().unwrap().busy = true;
-        let busy = fixture
-            .worker
-            .dispatch("refine", &json!({"instructions":"never run"}))
-            .await;
-        assert!(!busy.success && busy.error.unwrap().contains("busy"));
-        fixture.worker.core.lock().unwrap().busy = false;
-        assert_eq!(fixture.read_count().await, json!(3));
-        let saved = fixture.agent.join("harness/memories.json");
-        std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
-        std::fs::write(&saved, "preserved user data").unwrap();
-        fixture
-            .project(&json!({"plugins":{"counter":{"enabled":false},"harness":{"enabled":false}}}));
-        let reload = fixture.command("/reload", None).await;
-        assert!(reload.success, "{reload:?}");
-        assert!(!fixture
-            .catalog()
-            .await
-            .iter()
-            .any(|entry| entry["name"] == "refine"));
-        let before = fixture.rows();
-        for payload in [
-            json!({}),
-            json!({"instructions":"do not become a model prompt"}),
-        ] {
-            let rejected = fixture.worker.dispatch("refine", &payload).await;
-            assert!(!rejected.success, "{rejected:?}");
-            assert!(rejected.error.unwrap().contains("Unknown plugin command"));
-        }
-        let stale = fixture
-            .command("/refine stale", Some(&command["target"]))
-            .await;
-        assert!(!stale.success);
-        assert_eq!(fixture.rows(), before);
-        assert_eq!(
-            std::fs::read_to_string(saved).unwrap(),
-            "preserved user data"
-        );
-        assert!(
-            fixture.provider.calls().is_empty(),
-            "neither wire route may fall back to inference"
-        );
     }
 
     #[tokio::test]

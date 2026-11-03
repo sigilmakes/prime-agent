@@ -17,7 +17,6 @@ return {
   {name='plugin_echo',run=function(input,ctx)
     return {args=input.args,value=config.value,identity=ctx.call('session.info',{})}
   end},
-  {name='refine',run=function(input) return {args=input.args,policy='configured-lua'} end},
   {name='plugin_fail',run=function() error('fixture command failed') end},
   {name='plugin_stream',mode='streaming',run=function() return null end}
  }
@@ -43,7 +42,7 @@ impl Fixture {
         }
         std::fs::write(cwd.join("fixture.lua"), PLUGIN).unwrap();
         std::fs::write(agent.join("settings.json"), json!({
-            "enableBuiltinSkills":false,"harnessRefinements":false,
+            "enableBuiltinSkills":false,
             "plugins":{"fixture":{"enabled":true,"path":"fixture.lua","config":{"value":"global"}}}
         }).to_string()).unwrap();
         let fixture = Self {
@@ -460,79 +459,10 @@ fn prompt_inspection_keeps_model_rules_and_append_layers_consistent() {
 }
 
 #[test]
-fn configured_refine_is_a_generic_lua_command_without_core_refinement_events() {
-    let fixture = Fixture::new();
-    let output = fixture.run(
-        &["--mode", "json", "-p", "/refine capture this tactic"],
-        &json!({"responses":[]}),
-    );
-    success(&output);
-    let frames: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert!(!frames.iter().any(|frame| matches!(
-        frame["type"].as_str(),
-        Some("agent_start" | "refine_complete" | "refine_failed")
-    )));
-    let row = frames
-        .iter()
-        .find(|frame| {
-            frame["type"] == "message_end"
-                && frame["message"]["customType"] == "session_slash_command_result"
-        })
-        .unwrap();
-    let result: Value = serde_json::from_str(row["message"]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        result,
-        json!({"args":"capture this tactic","policy":"configured-lua"})
-    );
-    assert_eq!(row["message"]["details"]["command"]["name"], "refine");
-    let entries = fixture.entries();
-    let rows: Vec<_> = entries
-        .iter()
-        .filter(|entry| entry["type"] == "custom_message")
-        .collect();
-    assert_eq!(
-        rows.iter()
-            .map(|entry| entry["customType"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["session_slash_command", "session_slash_command_result"]
-    );
-}
-
-#[test]
-fn disabled_refine_policy_has_no_command_prompt_inventory_or_model_turn() {
-    let fixture = Fixture::new();
-    fixture.settings(&json!({"plugins":{"fixture":{"enabled":false},"harness":{"enabled":false}}}));
-    let output = fixture.run(
-        &["-p", "/refine must not run"],
-        &json!({"responses":["MODEL MUST NEVER RUN"]}),
-    );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(stdout(&output).is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("Unknown or unavailable headless command:"));
-    assert!(!fixture
-        .entries()
-        .iter()
-        .any(|entry| entry["type"] == "message" || entry["type"] == "custom_message"));
-    let inspected = fixture.run(&["prompt", "--json"], &json!({"responses":[]}));
-    success(&inspected);
-    let prompt: Value = serde_json::from_str(&stdout(&inspected)).unwrap();
-    assert!(!prompt["prompt"].as_str().unwrap().contains("/refine"));
-    assert!(!prompt["prompt"]
-        .as_str()
-        .unwrap()
-        .contains("plugin.harness."));
-}
-
-#[test]
 fn prompt_inspection_uses_first_party_harness_activation_settings() {
     let fixture = Fixture::new();
-    // Explicit plugin activation wins over the fixture's legacy harnessRefinements=false.
     fixture.settings(&json!({"plugins":{"fixture":{"enabled":false},"harness":{
-        "enabled":true,"config":{"autoRefine":{"enabled":false}}
+        "enabled":true
     }}}));
     let active = fixture.run(&["prompt", "--json"], &json!({"responses":[]}));
     success(&active);
@@ -541,7 +471,6 @@ fn prompt_inspection_uses_first_party_harness_activation_settings() {
         .as_str()
         .unwrap()
         .contains("plugin.harness."));
-    assert!(active["prompt"].as_str().unwrap().contains("/refine"));
     fixture.settings(&json!({"plugins":{"fixture":{"enabled":false},"harness":{"enabled":false}}}));
     let disabled = fixture.run(&["prompt", "--json"], &json!({"responses":[]}));
     success(&disabled);
@@ -550,6 +479,5 @@ fn prompt_inspection_uses_first_party_harness_activation_settings() {
         .as_str()
         .unwrap()
         .contains("plugin.harness."));
-    assert!(!disabled["prompt"].as_str().unwrap().contains("/refine"));
     assert!(fixture.entries().is_empty());
 }

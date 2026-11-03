@@ -111,14 +111,6 @@ impl AgentView {
                     width,
                 )
             }
-            ChatEntry::RefinementOutcome(row) => {
-                crate::custom_message::refinement::count_refinement_outcome(
-                    row,
-                    detail,
-                    &self.theme,
-                    width,
-                )
-            }
             ChatEntry::BranchSummary { summary } => {
                 usize::from(spacing)
                     + crate::branch_row::count_branch_summary(
@@ -372,14 +364,6 @@ mod tests {
                         content,
                     }))
                 }),
-            1 => (markdown_text(), markdown_text()).prop_map(|(summary, meta)| {
-                ChatEntry::RefinementOutcome(Box::new(RefinementOutcomeRow {
-                    header: "Refined".to_string(),
-                    summary,
-                    meta,
-                    edits: Vec::new(),
-                }))
-            }),
             1 => markdown_text().prop_map(|content| {
                 ChatEntry::CustomPanel(Box::new(CustomPanelRow {
                     custom_type: "notice".to_string(),

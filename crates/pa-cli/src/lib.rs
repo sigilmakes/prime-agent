@@ -279,13 +279,7 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     .initial_message;
     let options = mode::RunOptions {
         app_mode,
-        config: mode::runtime_config_from_args(
-            &parsed,
-            cwd,
-            agent_dir,
-            session_dir.clone(),
-            app_mode,
-        ),
+        config: mode::runtime_config_from_args(&parsed, cwd, agent_dir, session_dir.clone()),
         session: mode::SessionOptions {
             continue_recent: parsed.continue_,
             resume_bare: parsed.resume_bare,

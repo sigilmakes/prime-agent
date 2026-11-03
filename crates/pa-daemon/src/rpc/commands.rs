@@ -39,8 +39,8 @@ pub struct RpcState {
     pub pump_suspended: Arc<std::sync::atomic::AtomicBool>,
     /// The model-selection commands' serialization lane (read-then-apply switches must not race).
     pub model_ops: Arc<tokio::sync::Mutex<()>>,
-    /// The context-rebuilding commands' serialization lane (`compact`,
-    /// `refine`): they must not interleave.
+    /// The context-rebuilding commands' serialization lane (`compact`):
+    /// they must not interleave.
     pub session_ops: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -201,10 +201,6 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
             model_commands::set_queue_mode(state, &payload, name).await
         }
         "compact" => compact(state, &payload).await,
-        "refine" => Err(
-            "Plugin commands require daemon mode; use /refine through a daemon connection"
-                .to_string(),
-        ),
         "set_auto_compaction" => set_auto_compaction(state, &payload).await,
         "set_auto_retry" => set_auto_retry(state, &payload).await,
         // `abort_retry` always answers success (the in-process turn path
@@ -363,7 +359,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
     // summarizes a SETTLED transcript.
     engine.session.agent().abort();
     engine.session.agent().wait_for_idle().await;
-    // Compact rebuilds the session context (like refine): serialize the rebuilders.
+    // Compact rebuilds the session context: serialize the rebuilders.
     let _ops = state.session_ops.lock().await;
     state
         .session

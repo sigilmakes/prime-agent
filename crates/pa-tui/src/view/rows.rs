@@ -285,14 +285,6 @@ impl AgentView {
                     self.conversation_leading(index, detail.tool_output_expanded()),
                 )
             }
-            ChatEntry::RefinementOutcome(row) => {
-                crate::custom_message::refinement::render_refinement_outcome(
-                    row,
-                    detail,
-                    &self.theme,
-                    width,
-                )
-            }
             ChatEntry::CustomPanel(row) => {
                 crate::custom_message::render::render_custom_panel(row, &self.theme, width)
             }

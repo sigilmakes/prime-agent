@@ -401,7 +401,7 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
                 .filter(|message| matches!(message, pa_types::session::AgentMessage::User(_)))
                 .count(),
             prompt_index + 1,
-            "compact/refine context must retain each repeated prompt once"
+            "compaction context must retain each repeated prompt once"
         );
         assert_eq!(
             store
@@ -443,7 +443,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({
-            "harnessRefinements":false, "enableBuiltinSkills":false, "prewarmIpythonKernel":false
+            "enableBuiltinSkills":false, "prewarmIpythonKernel":false
         })
         .to_string(),
     )
@@ -474,7 +474,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
     ] {
         producer.persist_entry(kind, payload).unwrap();
     }
-    for kind in ["harness_digest", "refinement_notice", "refinement_outcome"] {
+    for kind in ["harness_digest"] {
         producer
             .persist_entry(
                 "custom_message",
@@ -491,7 +491,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
         json!({"role":"assistant", "content":[{"type":"toolCall", "id":"fixture-tool-call", "name":"python_repl", "arguments":{"code":"pass"}}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"toolUse", "timestamp":12, "responseId":"fixture-tool-response"}),
         json!({"role":"toolResult", "toolCallId":"fixture-tool-call", "toolName":"python_repl", "content":[{"type":"text", "text":"controlled result"}], "details":{"opaque":[null,true]}, "isError":false, "timestamp":13}),
         json!({"role":"assistant", "content":[{"type":"text", "text":"source assistant"}], "api":"openai-completions", "provider":"openai", "model":"test", "usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}, "stopReason":"stop", "timestamp":14, "responseId":"fixture-final-response"}),
-        json!({"role":"user", "content":[{"type":"text", "text":"[harness-digest] shared controlled text [refinement-notice]"}], "timestamp":15}),
+        json!({"role":"user", "content":[{"type":"text", "text":"[harness-digest] shared controlled text"}], "timestamp":15}),
     ];
     for message in &ordinary {
         producer
@@ -639,7 +639,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
             json!({"role":"assistant", "content":null, "tool_calls":[{"id":"fixture-tool-call","type":"function","function":{"name":"python_repl","arguments":"{\"code\":\"pass\"}"}}]}),
             json!({"role":"tool","tool_call_id":"fixture-tool-call","content":"controlled result"}),
             json!({"role":"assistant","content":"source assistant"}),
-            json!({"role":"user","content":[{"type":"text","text":"[harness-digest] shared controlled text [refinement-notice]"}]}),
+            json!({"role":"user","content":[{"type":"text","text":"[harness-digest] shared controlled text"}]}),
             json!({"role":"user","content":[{"type":"text","text":"shared controlled text"}]}),
             json!({"role":"user","content":[{"type":"text","text":"continue controlled history"}]}),
         ]
@@ -712,10 +712,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
             .iter()
             .filter_map(|message| match message {
                 pa_types::session::AgentMessage::Custom(custom)
-                    if matches!(
-                        custom.custom_type.as_str(),
-                        "harness_digest" | "refinement_notice" | "refinement_outcome"
-                    ) =>
+                    if matches!(custom.custom_type.as_str(), "harness_digest") =>
                 {
                     Some(custom.custom_type.as_str())
                 }
@@ -724,7 +721,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
             .collect::<Vec<_>>();
         assert_eq!(
             legacy,
-            vec!["harness_digest", "refinement_notice", "refinement_outcome"],
+            vec!["harness_digest"],
             "only the model view excludes legacy rows, never canonical context or physical history"
         );
     });
@@ -733,7 +730,7 @@ fn cold_real_owner_preserves_legacy_harness_rows_but_excludes_them_from_model_vi
 
 #[test]
 fn opaque_legacy_payload_is_preserved_without_becoming_a_model_message() {
-    for kind in ["harness_digest", "refinement_notice", "refinement_outcome"] {
+    for kind in ["harness_digest"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut store =
