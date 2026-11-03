@@ -376,19 +376,19 @@ mod tests {
     #[test]
     fn custom_panel_guttered_shape() {
         let row = CustomPanelRow {
-            custom_type: "autonomous_status".to_string(),
-            content: "[autonomous-status: on]".to_string(),
+            custom_type: "extension_status".to_string(),
+            content: "[extension-status: on]".to_string(),
         };
         let rows = render_custom_panel(&row, &theme(), 40);
         // No box background anywhere on the row.
         assert_eq!(
             rows[1][1],
-            custom_message_label("autonomous_status", &theme())
+            custom_message_label("extension_status", &theme())
         );
         assert!(rows[1].iter().all(|span| span.style.bg.is_none()));
         let body = rows[2]
             .iter()
-            .find(|span| span.content.contains("[autonomous-status: on]"))
+            .find(|span| span.content.contains("[extension-status: on]"))
             .expect("the body text renders");
         assert_eq!(
             body.style.fg,

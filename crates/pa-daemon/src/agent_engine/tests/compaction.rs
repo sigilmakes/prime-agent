@@ -1382,20 +1382,4 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
         assistant_texts(&events).last().map(String::as_str),
         Some("short response")
     );
-
-    // The autonomous mirror shares the same live getter rather than a copied refresh.
-    let mut settings =
-        pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
-    settings.set_compaction_threshold_percent(75.0).unwrap();
-    let mirror = engine.autonomous_boundary.lock().unwrap().clone().unwrap();
-    let session = mirror.session.upgrade().unwrap();
-    assert_eq!(
-        session.session.compaction_settings(),
-        pa_core::session_engine::compaction::CompactionSettings {
-            threshold_percent: 75.0,
-            reserve_tokens: 16_384,
-            keep_recent_tokens: 20_000,
-            ..Default::default()
-        }
-    );
 }

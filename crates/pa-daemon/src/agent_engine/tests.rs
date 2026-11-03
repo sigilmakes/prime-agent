@@ -9,7 +9,6 @@ use serde_json::Map;
 
 mod abort;
 pub(crate) mod abort_fixture;
-mod autonomous;
 mod compaction;
 mod failover_facts;
 mod goal;

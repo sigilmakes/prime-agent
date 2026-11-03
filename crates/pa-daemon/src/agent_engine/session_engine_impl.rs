@@ -189,24 +189,6 @@ impl SessionEngine for AgentSessionEngine {
         AgentSessionEngine::release_goal_continuation_handle(handle.as_ref());
     }
 
-    fn autonomous_status(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<pa_core::autonomous::AgentAutonomousStatus>>
-                + Send
-                + '_,
-        >,
-    > {
-        // The turn loop's accounting holds the state lock across awaits, so
-        // the snapshot takes the async lock.
-        let autonomous = std::sync::Arc::clone(&self.autonomous);
-        Box::pin(async move {
-            let state = autonomous.lock().await;
-            Some(pa_core::autonomous::autonomous_status(&state))
-        })
-    }
-
     /// The replacement teardown (see
     /// [`Self::discard_replaced_session_runtime`]): the moved-to session rebuilds cold.
     fn teardown_for_replacement(
@@ -819,26 +801,11 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     /// Rebind the session cwd: the rebuilt session's kernel-resident tools
-    /// run in the moved-to cwd; the default driver follows, an injected
-    /// driver stays.
+    /// run in the moved-to cwd.
     fn set_cwd(&self, cwd: std::path::PathBuf) {
-        {
-            let mut slot = self.cwd.write().expect("engine cwd lock");
-            if *slot == cwd {
-                return;
-            }
+        let mut slot = self.cwd.write().expect("engine cwd lock");
+        if *slot != cwd {
             (*slot).clone_from(&cwd);
-        }
-        if self
-            .autonomous_driver_default
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            *self
-                .autonomous_driver
-                .write()
-                .expect("autonomous driver lock") =
-                std::sync::Arc::new(pa_core::autonomous::ShellAutonomousDriver::new(cwd))
-                    as std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>;
         }
     }
 

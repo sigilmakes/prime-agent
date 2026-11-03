@@ -3,7 +3,6 @@
 use super::{
     emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
     SessionCore, Value, VecDeque, WorkerRecoveryJournal, AGENT_MESSAGE_SOURCE,
-    AUTONOMOUS_QUEUE_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,43 +430,6 @@ pub(crate) fn restore_queue_snapshot(
     (steering, follow_up)
 }
 
-/// Admit one held autonomous continuation through the follow-up lane:
-/// the item runs as its own queue item after the current run settles.
-pub(crate) fn admit_autonomous_follow_up(
-    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
-    core: &Arc<Mutex<SessionCore>>,
-    work_notify: &Arc<Notify>,
-    text: String,
-) {
-    {
-        let mut core = core.lock().unwrap();
-        core.follow_up.push_back(QueuedItem {
-            priority: QueuePriority::Background,
-            preview: None,
-            message: text,
-            custom_message: None,
-            agent_message: None,
-            queue_key: Some(AUTONOMOUS_QUEUE_KEY.to_string()),
-            admission_id: None,
-            images: Vec::new(),
-            done: None,
-            queue_visible: false,
-            policy: TurnPolicy::Injected,
-            forced_batch: false,
-        });
-    }
-    // The admission checkpoint: a continuation admitted while idle is undelivered
-    // live work the journal must prove (a kill before the settle would park it).
-    checkpoint_queue_recovery(
-        recovery,
-        core,
-        QueueCheckpoint::Admitted {
-            operation: "follow_up_queued",
-        },
-    );
-    work_notify.notify_waiters();
-}
-
 pub(crate) fn admit_goal_follow_up(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
@@ -503,8 +465,8 @@ pub(crate) fn admit_goal_follow_up(
             Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
     }
-    // The admission checkpoint: same idle-admission gap as the
-    // autonomous continuation above.
+    // The admission checkpoint: an idle admission is live work the
+    // journal must prove.
     checkpoint_queue_recovery(
         recovery,
         core,

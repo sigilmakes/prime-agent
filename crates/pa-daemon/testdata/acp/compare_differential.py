@@ -72,9 +72,6 @@ def normalize_frame(direction, frame, sequence_index):
                 if "refinement" in meta:
                     shape["has_refinement"] = True
                     shape["refinement_status"] = meta["refinement"].get("status")
-                if "autonomous" in meta:
-                    shape["has_autonomous"] = True
-                    shape["autonomous_enabled"] = meta["autonomous"].get("enabled")
                 if "heartbeatsChanged" in meta:
                     shape["heartbeatsChanged"] = meta["heartbeatsChanged"]
             shape["phase"] = meta.get("phase")
@@ -143,7 +140,7 @@ def landmark_frame(frame_shape):
     `--landmarks` mode drops model-behavior-dependent work frames (tool
     calls, streamed chunks, and mid-turn goal-usage updates) and keeps the
     protocol envelopes: requests, responses, boundaries, completion and
-    terminal envelopes, compaction/refinement/autonomous metas, and stop
+    terminal envelopes, compaction and refinement metas, and stop
     reasons.
     """
     if frame_shape.get("method") != "session/update":
@@ -157,7 +154,6 @@ def landmark_frame(frame_shape):
         and frame_shape.get("has_goal")
         and not frame_shape.get("has_compaction")
         and not frame_shape.get("has_refinement")
-        and not frame_shape.get("has_autonomous")
     ):
         return False
     return True

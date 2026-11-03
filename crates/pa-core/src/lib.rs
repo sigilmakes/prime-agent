@@ -55,7 +55,6 @@ pub use tools::ipython::{
 };
 // RLM kernel subsystem: persistent IPython kernel lifecycle.
 pub mod auth;
-pub mod autonomous;
 pub mod cron;
 pub mod export_html;
 pub mod goals;

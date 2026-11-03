@@ -25,13 +25,12 @@ mod queue;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
-    admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
-    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
-    gather_delivery_batch, hold_is_protected, parse_custom_message, parse_prompt_images,
-    queue_lanes, restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice,
-    QueueCheckpoint, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
-    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    admit_bash_completion_notice, admit_goal_follow_up, checkpoint_queue_recovery,
+    clear_withdrawn_progress_note, enqueue_priority, gather_delivery_batch, hold_is_protected,
+    parse_custom_message, parse_prompt_images, queue_lanes, restore_queue_snapshot,
+    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueuedItem, TurnPolicy,
+    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
+    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -74,7 +73,6 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot, Notify};
 
 use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine, SupervisorLinkConfig};
-use crate::autonomous_continuation::AUTONOMOUS_QUEUE_KEY;
 use crate::engine::{
     AssistantSnapshot, EngineEvent, EngineModelSelection, PromptRequest, RlmSessionIdentity,
     ScriptedEngine, SessionEngine,
@@ -448,8 +446,6 @@ impl Worker {
             // The goal continuation seam (TS `getContinuationMessages`):
             // the worker owns the queue and gates, the engine owns the mint.
             if let Some(concrete) = agent_engine.as_ref() {
-                // The in-run autonomous continuation seam: the hook holds
-                // itself weakly through the registered arc.
                 concrete.register_arc();
                 concrete
                     .set_rlm_usage_store(std::sync::Arc::new(CoreUsageStore(Arc::clone(&core))));
@@ -470,46 +466,6 @@ impl Worker {
                         retrying: core.retry_abort_requested,
                     }
                 }));
-                let sink_core = Arc::clone(&core);
-                let sink_notify = Arc::clone(&work_notify);
-                let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
-                    let sink_core = Arc::clone(&sink_core);
-                    let sink_notify = Arc::clone(&sink_notify);
-                    let sink_recovery = Arc::clone(&recovery);
-                    std::sync::Arc::new(move |text| {
-                        admit_autonomous_follow_up(&sink_recovery, &sink_core, &sink_notify, text);
-                    })
-                };
-                concrete.set_autonomous_admission(autonomous_sink);
-                let purge_core = Arc::clone(&core);
-                let purge_recovery = Arc::clone(&recovery);
-                let purge_engine = Arc::downgrade(concrete);
-                let autonomous_purge: std::sync::Arc<dyn Fn() + Send + Sync> =
-                    std::sync::Arc::new(move || {
-                        {
-                            let mut core = purge_core.lock().unwrap();
-                            core.follow_up.retain(|item| {
-                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
-                            });
-                            core.steering.retain(|item| {
-                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
-                            });
-                            if let Some(engine) = purge_engine.upgrade() {
-                                clear_withdrawn_progress_note(&core, engine.as_ref());
-                            }
-                        }
-                        // The withdraw settles the rows: dropping the last
-                        // queued row must not leave busy=true promising a
-                        // revive (mid-turn stays busy until its own `turn_end`).
-                        checkpoint_queue_recovery(
-                            &purge_recovery,
-                            &purge_core,
-                            QueueCheckpoint::Settle {
-                                operation: "queue_purged",
-                            },
-                        );
-                    });
-                concrete.set_autonomous_queue_purge(autonomous_purge);
                 let probe_core = Arc::clone(&core);
                 let probe: crate::engine::SessionInputProbe = Arc::new(move || {
                     let core = probe_core.lock().unwrap();
@@ -562,8 +518,8 @@ impl Worker {
                             clear_withdrawn_progress_note(&core, engine.as_ref());
                         }
                     }
-                    // Same settle as the autonomous withdraw: a pause/clear
-                    // cannot leave busy=true.
+                    // Same settle as the goal withdraw: a pause/clear cannot
+                    // leave busy=true.
                     checkpoint_queue_recovery(
                         &purge_recovery,
                         &purge_core,

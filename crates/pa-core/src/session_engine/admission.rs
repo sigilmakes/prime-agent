@@ -4,7 +4,7 @@ use super::{
 };
 
 impl AgentSession {
-    /// Submit a prompt. Session commands (compact/goal/autonomous)
+    /// Submit a prompt. Session commands (compact/goal)
     /// are recognized before admission and never reach the model.
     ///
     /// # Errors

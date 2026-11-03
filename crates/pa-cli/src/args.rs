@@ -22,7 +22,7 @@ pub fn parse_thinking_level(value: &str) -> Option<ModelThinkingLevel> {
 }
 
 /// Value flags whose free-form text may legitimately start with a dash.
-const FREEFORM_VALUE_FLAGS: [&str; 2] = ["--goal", "--autonomous-gate"];
+const FREEFORM_VALUE_FLAGS: [&str; 1] = ["--goal"];
 /// Prompt value flags whose text may look like a long option (YAML frontmatter).
 const PROMPT_VALUE_FLAGS: [&str; 2] = ["--system-prompt", "--append-system-prompt"];
 
@@ -79,55 +79,6 @@ impl Diagnostic {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AutonomousGates {
-    pub commands: Vec<String>,
-    pub max_retries: Option<u32>,
-    pub timeout_ms: Option<u64>,
-}
-
-/// The autonomous configuration inferred from the CLI flags.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AutonomousConfig {
-    pub max_continuations: Option<u32>,
-    pub max_turns: Option<u32>,
-    pub max_tokens: Option<u64>,
-    pub timeout_ms: Option<u64>,
-    pub gates: Option<AutonomousGates>,
-}
-
-impl AutonomousConfig {
-    /// Build the autonomous runtime config from parsed args; `None` when no
-    /// autonomous flag was given at all.
-    pub fn from_args(args: &Args) -> Option<AutonomousConfig> {
-        let has_autonomous_options = args.autonomous
-            || args.autonomous_gates.is_some()
-            || args.autonomous_gate_retries.is_some()
-            || args.autonomous_gate_timeout_ms.is_some()
-            || args.autonomous_max_continuations.is_some()
-            || args.autonomous_max_turns.is_some()
-            || args.autonomous_max_tokens.is_some()
-            || args.autonomous_timeout_ms.is_some();
-        if !has_autonomous_options {
-            return None;
-        }
-        let has_gate_options = args.autonomous_gates.is_some()
-            || args.autonomous_gate_retries.is_some()
-            || args.autonomous_gate_timeout_ms.is_some();
-        Some(AutonomousConfig {
-            max_continuations: args.autonomous_max_continuations,
-            max_turns: args.autonomous_max_turns,
-            max_tokens: args.autonomous_max_tokens,
-            timeout_ms: args.autonomous_timeout_ms,
-            gates: has_gate_options.then(|| AutonomousGates {
-                commands: args.autonomous_gates.clone().unwrap_or_default(),
-                max_retries: args.autonomous_gate_retries,
-                timeout_ms: args.autonomous_gate_timeout_ms,
-            }),
-        })
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)] // the TS `Args` surface mirrored verbatim
 pub struct Args {
@@ -159,14 +110,6 @@ pub struct Args {
     pub themes: Vec<String>,
     pub no_themes: bool,
     pub no_context_files: bool,
-    pub autonomous: bool,
-    pub autonomous_gates: Option<Vec<String>>,
-    pub autonomous_gate_retries: Option<u32>,
-    pub autonomous_gate_timeout_ms: Option<u64>,
-    pub autonomous_max_continuations: Option<u32>,
-    pub autonomous_max_turns: Option<u32>,
-    pub autonomous_max_tokens: Option<u64>,
-    pub autonomous_timeout_ms: Option<u64>,
     pub goal: Option<String>,
     pub goal_token_budget: Option<u32>,
     /// The `--list-models` flag's tri-state (None = absent,
@@ -198,20 +141,6 @@ fn parse_positive_u32(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>
         _ => {
             diagnostics.push(Diagnostic::error(format!(
                 "{flag} must be a positive integer between 1 and u32::MAX (4294967295)"
-            )));
-            None
-        }
-    }
-}
-
-fn parse_positive_u64(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>) -> Option<u64> {
-    // Number() accepts arbitrary precision, so parse as i128 to cover the
-    // full accepted range before the integer/positivity check.
-    match value.trim().parse::<i128>() {
-        Ok(parsed) if parsed > 0 && parsed <= i128::from(u64::MAX) => u64::try_from(parsed).ok(),
-        _ => {
-            diagnostics.push(Diagnostic::error(format!(
-                "{flag} must be a positive integer between 1 and u64::MAX (18446744073709551615)"
             )));
             None
         }
@@ -363,51 +292,6 @@ pub fn parse_args(args: &[String]) -> Args {
             "--no-prompt-templates" | "-np" => result.no_prompt_templates = true,
             "--no-themes" => result.no_themes = true,
             "--no-context-files" | "-nc" => result.no_context_files = true,
-            "--autonomous" => result.autonomous = true,
-            "--autonomous-gate" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result
-                    .autonomous_gates
-                    .get_or_insert_with(Vec::new)
-                    .push(value);
-            }
-            "--autonomous-gate-retries" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result.autonomous_gate_retries =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics);
-            }
-            "--autonomous-gate-timeout-ms" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result.autonomous_gate_timeout_ms =
-                    parse_positive_u64(&value, arg, &mut result.diagnostics);
-            }
-            "--autonomous-max-continuations" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result.autonomous_max_continuations =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics);
-            }
-            "--autonomous-max-turns" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result.autonomous_max_turns =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics);
-            }
-            "--autonomous-max-tokens" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result.autonomous_max_tokens =
-                    parse_positive_u64(&value, arg, &mut result.diagnostics);
-            }
-            "--autonomous-timeout-ms" => {
-                result.autonomous = true;
-                let value = require_value!(arg);
-                result.autonomous_timeout_ms =
-                    parse_positive_u64(&value, arg, &mut result.diagnostics);
-            }
             "--goal" => {
                 let value = require_value!(arg);
                 if value.trim().is_empty() {
@@ -586,29 +470,26 @@ mod tests {
 
     #[test]
     fn positive_int_rejects_zero_and_text() {
-        let parsed = parse(&["--autonomous-max-turns", "0"]);
+        let parsed = parse(&["--goal", "x", "--goal-token-budget", "0"]);
         assert_eq!(
             last_error(&parsed),
-            "--autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)"
+            "--goal-token-budget must be a positive integer between 1 and u32::MAX (4294967295)"
         );
-        let parsed = parse(&["--autonomous-max-turns", "abc"]);
+        let parsed = parse(&["--goal", "x", "--goal-token-budget", "abc"]);
         assert_eq!(
             last_error(&parsed),
-            "--autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)"
+            "--goal-token-budget must be a positive integer between 1 and u32::MAX (4294967295)"
         );
     }
 
     #[test]
     fn positive_int_rejects_past_the_field_range() {
-        // 2**32: the u32 flags reject it out loud instead of silently
+        // 2**32: the u32 flag rejects it out loud instead of silently
         // truncating into the flag's u32 field.
-        let parsed = parse(&["--autonomous-max-turns", "4294967296"]);
+        let parsed = parse(&["--goal", "x", "--goal-token-budget", "4294967296"]);
         assert_eq!(
             last_error(&parsed),
-            "--autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)"
+            "--goal-token-budget must be a positive integer between 1 and u32::MAX (4294967295)"
         );
-        // The u64 flags accept the same value.
-        let parsed = parse(&["--autonomous-timeout-ms", "4294967296"]);
-        assert_eq!(parsed.autonomous_timeout_ms, Some(4_294_967_296));
     }
 }

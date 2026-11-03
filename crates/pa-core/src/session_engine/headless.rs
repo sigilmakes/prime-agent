@@ -171,7 +171,6 @@ pub fn select_from_entries(entries: &[FileEntry]) -> HeadlessTerminalResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autonomous::{AgentAutonomousStatus, AutonomousLimitReason};
     use pa_types::ai::{
         AssistantContentBlock, AssistantMessage, StopReason, TextContent, UserContent, UserMessage,
     };
@@ -336,68 +335,5 @@ mod tests {
         assert_eq!(result.compaction_outcomes.len(), 1);
         assert_eq!(result.compaction_outcomes[0].content, "later");
         assert!(result.primary.is_none());
-    }
-
-    #[test]
-    fn gate_attempt_and_limit_descriptions() {
-        let mut status = AgentAutonomousStatus {
-            enabled: true,
-            continuations_used: 2,
-            turns_used: 5,
-            tokens_used: 1_000,
-            started_at: Some(1_000),
-            limits: crate::autonomous::AutonomousLimits {
-                max_continuations: 3,
-                max_turns: 12,
-                max_tokens: 80_000,
-                timeout_ms: 1_800_000,
-            },
-            gates: crate::autonomous::NormalizedGateConfig {
-                commands: vec!["make check".to_string()],
-                max_retries: 3,
-                timeout_ms: 300_000,
-            },
-            gate_attempts: [("make check".to_string(), 2u64)].into_iter().collect(),
-            last_gate_failure: None,
-            subagent_keep_alive_ms: None,
-        };
-        assert_eq!(
-            crate::autonomous::latest_autonomous_gate_attempt(&status),
-            2
-        );
-        status.last_gate_failure = Some(crate::autonomous::AgentAutonomousGateFailure {
-            command: "make check".to_string(),
-            attempt: 3,
-            exit_text: "exited with code 1".to_string(),
-            output: String::new(),
-        });
-        assert_eq!(
-            crate::autonomous::latest_autonomous_gate_attempt(&status),
-            3
-        );
-        assert_eq!(
-            crate::autonomous::describe_autonomous_limit(
-                &status,
-                AutonomousLimitReason::MaxTurns,
-                0,
-            ),
-            "maxTurns reached (5/12)"
-        );
-        assert_eq!(
-            crate::autonomous::describe_autonomous_limit(
-                &status,
-                AutonomousLimitReason::MaxTokens,
-                0
-            ),
-            "maxTokens reached (1000/80000)"
-        );
-        assert_eq!(
-            crate::autonomous::describe_autonomous_limit(
-                &status,
-                AutonomousLimitReason::MaxContinuations,
-                0
-            ),
-            "maxContinuations reached (2/3)"
-        );
     }
 }

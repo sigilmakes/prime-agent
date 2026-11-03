@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::args::{Args, AutonomousConfig, Mode};
+use crate::args::{Args, Mode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -84,7 +84,6 @@ pub struct RuntimeConfig {
     pub themes: Vec<PathBuf>,
     pub no_themes: bool,
     pub no_context_files: bool,
-    pub autonomous: Option<AutonomousConfig>,
     pub initial_goal: Option<InitialGoal>,
 }
 
@@ -242,7 +241,6 @@ pub fn runtime_config_from_args(
         themes,
         no_themes: parsed.no_themes,
         no_context_files: parsed.no_context_files,
-        autonomous: AutonomousConfig::from_args(parsed),
         initial_goal: parsed.goal.as_ref().map(|objective| InitialGoal {
             objective: objective.clone(),
             token_budget: parsed.goal_token_budget,

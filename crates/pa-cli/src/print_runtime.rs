@@ -9,7 +9,6 @@ use pa_core::session::discovery::{
 };
 use pa_types::ai::Model;
 
-use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
 use pa_core::session_engine::provider_adapter::{
@@ -181,9 +180,6 @@ fn daemon_acp_create(
                 .into();
         }
     }
-    if let Some(autonomous) = &config.autonomous {
-        create_config["autonomous"] = serde_json::json!(autonomous_runtime_config(autonomous));
-    }
     // Verification seam (the interactive mode's contract): a scripted daemon
     // session from a script FILE path. The product never sets it.
     if let Some(script) = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT") {
@@ -249,11 +245,6 @@ async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
         engine_factory: Some(factory),
         cwd: config.cwd.clone(),
         agent_dir: config.agent_dir.clone(),
-        autonomous_config: options
-            .config
-            .autonomous
-            .as_ref()
-            .map(autonomous_runtime_config),
     })
     .await
     .map_err(|error| format!("{error:#}"))?;
@@ -1420,7 +1411,7 @@ fn emit_plugin_job_outcomes(
 }
 
 /// Admit prompts, stream json events when requested, and decide the exit code
-/// from the headless terminal result plus the autonomous gate contract.
+/// from the headless terminal result.
 async fn run_prompts_and_emit(
     engine: &std::sync::Arc<pa_core::session_engine::engine::SessionEngine>,
     model: &Model,
@@ -1455,28 +1446,16 @@ async fn run_prompts_and_emit(
     goal.seed_publish_baseline(engine).await;
     let goal_updated_at_start = engine.goal_state().await.updated_at;
     let goal_accounting = goal.wire_accounting(engine, engine.session.agent()).await;
-    // The autonomous run: the CLI flags enable it, a no-flag session starts disabled and
-    // `/autonomous` rewrites it live.
-    let autonomous = std::sync::Arc::new(match options.config.autonomous.as_ref() {
-        Some(config) => HeadlessAutonomous::from_cli(config, &options.config.cwd),
-        None => HeadlessAutonomous::disabled(&options.config.cwd),
-    });
-    let accounting = autonomous.wire_accounting(engine.session.agent()).await;
-    // The composed natural-turn-end hook: the goal arm first (exclusive priority), the
-    // autonomous arm on the fall-through; both arms defer while inline-subagent work is
+    // The natural-turn-end hook: the goal arm defers while inline-subagent work is
     // unsettled.
-    crate::print_autonomous::wire_continuation_hook(
+    crate::print_goal::wire_goal_continuation_hook(
         engine,
         engine.session.agent(),
         model,
         &goal,
-        &autonomous,
         Some(root_node),
     );
     let mut boundary = crate::print_boundary::TurnBoundary::new(json_mode);
-    // The autonomous runtime state the session-command executor mutates —
-    // `/autonomous` rewrites what the hook, accounting, and exit contract read.
-    let autonomous_state = autonomous.state_handle();
     // A failed session command rejects the prompt wait: the raw error prints to stderr and the run
     // exits 1.
     let mut command_failure: Option<String> = None;
@@ -1505,7 +1484,6 @@ async fn run_prompts_and_emit(
                 &goal,
                 model,
                 api_key.clone(),
-                &autonomous_state,
                 &command,
                 &images,
             )
@@ -1572,16 +1550,6 @@ async fn run_prompts_and_emit(
             .await?;
         goal.drive_boundary(engine, &mut boundary, model, api_key.clone())
             .await?;
-        // The autonomous arm runs only when the goal does not own the boundary (the goal arm takes
-        // exclusive priority).
-        if !engine.goal_owns_continuation_wakeup().await {
-            // The held threshold continuation drains as this invocation's follow-up
-            // turn; the stop surfaces only through the exit contract.
-            autonomous
-                .drive_boundary(engine, &mut boundary, model, api_key.clone())
-                .await
-                .map_err(|error| format!("{error:#}"))?;
-        }
         if let Some(diagnostic) = emit_plugin_job_outcomes(
             engine.drain_plugin_jobs_since(&job_checkpoint).await,
             json_mode,
@@ -1602,7 +1570,6 @@ async fn run_prompts_and_emit(
             eprintln!("Plugin job diagnostic: {diagnostic}");
         }
         goal_accounting.unsubscribe().await;
-        accounting.unsubscribe().await;
         if let Some(subscription) = unsubscribe {
             subscription.unsubscribe().await;
         }
@@ -1613,8 +1580,8 @@ async fn run_prompts_and_emit(
     // before the terminal result is selected (json mode keeps streaming;
     // the subscription lives until after the drive). One drive loop then
     // keeps the run alive while deferred work exists: the deferred
-    // goal/autonomous continuations deliver after the settle ("no
-    // front": the settling child's terminal notice is read first), and
+    // goal continuations deliver after the settle ("no front": the
+    // settling child's terminal notice is read first), and
     // the boundary drain runs whatever turns it drained armed — a
     // threshold continuation, a budget steer, more descendants.
     loop {
@@ -1635,24 +1602,13 @@ async fn run_prompts_and_emit(
                 .await?;
             continue;
         }
-        if autonomous
-            .deliver_rlm_continuation(engine, &mut boundary, model, api_key.clone())
-            .await?
-        {
-            continue;
-        }
         // The boundary drain: turns it ran may spawn descendants or arm
         // more holds, so it reports whether it ran and the loop goes
         // around — the leading quiescence pass then waits for whatever
         // they left behind.
-        let mut boundary_ran = goal
+        let boundary_ran = goal
             .drive_boundary(engine, &mut boundary, model, api_key.clone())
             .await?;
-        if !engine.goal_owns_continuation_wakeup().await {
-            boundary_ran |= autonomous
-                .drive_boundary(engine, &mut boundary, model, api_key.clone())
-                .await?;
-        }
         if boundary_ran {
             continue;
         }
@@ -1668,7 +1624,6 @@ async fn run_prompts_and_emit(
         eprintln!("Plugin job diagnostic: {diagnostic}");
     }
     goal_accounting.unsubscribe().await;
-    accounting.unsubscribe().await;
     if let Some(subscription) = unsubscribe {
         subscription.unsubscribe().await;
     }
@@ -1677,8 +1632,8 @@ async fn run_prompts_and_emit(
         state.messages.iter().filter_map(json_round_trip).collect();
     let result = pa_core::session_engine::headless::select_headless_terminal_result(&messages);
     // The print-mode exit contract: json mode never derives the exit code from the
-    // terminal selection — only the autonomous gates exit non-zero; text mode prints
-    // the primary message (error to stderr with exit 1, settled answer to stdout).
+    // terminal selection; text mode prints the primary message (error to stderr with
+    // exit 1, settled answer to stdout).
     let mut exit_code = 0;
     if !json_mode {
         let goal = engine.goal_state().await;
@@ -1710,11 +1665,6 @@ async fn run_prompts_and_emit(
                 exit_code = 1;
             }
         }
-    }
-    // The autonomous contract applies to both output modes.
-    if let Some(stderr) = autonomous.exit_stderr().await {
-        eprintln!("{stderr}");
-        exit_code = 1;
     }
     Ok(exit_code)
 }

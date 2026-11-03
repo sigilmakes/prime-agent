@@ -1,11 +1,10 @@
-//! Print-mode session slash-command execution: `/compact`,
-//! `/goal`, `/autonomous`, `/reload`, and active Lua commands share the pa-core
-//! executor and stream the print-json shapes; a failed command rejects
-//! the prompt wait (stderr, exit 1, never the later prompts).
+//! Print-mode session slash-command execution: `/compact`, `/goal`, `/reload`,
+//! and active Lua commands share the pa-core executor and stream the print-json
+//! shapes; a failed command rejects the prompt wait (stderr, exit 1, never the
+//! later prompts).
 
 use std::sync::Arc;
 
-use pa_core::autonomous::AutonomousRuntimeState;
 use pa_core::session_engine::engine::SessionEngine;
 use pa_core::session_engine::session_commands::{
     execute_session_command, session_command_echo_row, SessionCommandExecution,
@@ -84,7 +83,6 @@ pub(crate) async fn execute_prompt_session_command(
     goal: &Arc<PrintGoalSurface>,
     model: &Model,
     api_key: Option<String>,
-    autonomous: &Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     command: &SessionSlashCommand,
     images: &[pa_agent::types::ImageContent],
 ) -> SessionCommandExecution {
@@ -103,12 +101,7 @@ pub(crate) async fn execute_prompt_session_command(
         goal.emit_stream_event(&event);
     }
     let execution = {
-        let mut autonomous = autonomous.lock().await;
-        let mut params = SessionCommandParams {
-            model,
-            api_key,
-            autonomous: &mut autonomous,
-        };
+        let mut params = SessionCommandParams { model, api_key };
         execute_session_command(engine, &mut params, command, images).await
     };
     // `/compact`: the settled `compaction_end` precedes any failure result row; a skip stays silent
@@ -149,8 +142,8 @@ pub(crate) async fn execute_prompt_session_command(
         goal.emit_command_queue_hold(&command.text, continuation)
             .await;
     }
-    // The executor's first row is the echo (already streamed); the rest — result
-    // rows, the `autonomous_status` row, the failure row — follow in order.
+    // The executor's first row is the echo (already streamed); the result and
+    // failure rows follow in order.
     for row in execution.messages.iter().skip(1) {
         goal.emit_row_pair(row);
     }
@@ -260,16 +253,12 @@ mod tests {
         engine: Arc<SessionEngine>,
         model: Model,
         goal: Arc<PrintGoalSurface>,
-        autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
         frames: Frames,
-        /// Keeps the composed hook's autonomous arm alive for the bed's lifetime (the hook holds it
-        /// weakly).
-        _run: Arc<crate::headless_autonomous::HeadlessAutonomous>,
         _dir: tempfile::TempDir,
     }
 
     /// The faux engine bed (the `print_goal` test pattern): a persisted session
-    /// over its own tempdir, the wired goal surface, the default autonomous state.
+    /// over its own tempdir and the wired goal surface.
     async fn bed(script: Value) -> Bed {
         bed_with_settings(script, json!({})).await
     }
@@ -348,25 +337,18 @@ mod tests {
         let goal = Arc::new(PrintGoalSurface::with_sink(true, sink));
         goal.seed_publish_baseline(&engine).await;
         let _accounting = goal.wire_accounting(&engine, engine.session.agent()).await;
-        let run = Arc::new(crate::headless_autonomous::HeadlessAutonomous::disabled(
-            dir.path(),
-        ));
-        crate::print_autonomous::wire_continuation_hook(
+        crate::print_goal::wire_goal_continuation_hook(
             &engine,
             engine.session.agent(),
             &model,
             &goal,
-            &run,
             /*root_node*/ None,
         );
-        let autonomous = run.state_handle();
         Bed {
             engine,
             model,
             goal,
-            autonomous,
             frames,
-            _run: run,
             _dir: dir,
         }
     }
@@ -383,7 +365,6 @@ mod tests {
             &bed.goal,
             &bed.model,
             None,
-            &bed.autonomous,
             &command(text),
             &[],
         )

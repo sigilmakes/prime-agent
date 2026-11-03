@@ -30,7 +30,6 @@ pub(crate) mod daemon_session_list;
 pub(crate) mod factory_command;
 pub(crate) mod file_processor;
 pub(crate) mod global_flags;
-pub(crate) mod headless_autonomous;
 pub(crate) mod incident;
 pub(crate) mod initial_message;
 pub(crate) mod installer_update;
@@ -54,7 +53,6 @@ pub(crate) mod subscription_login;
 /// into the `prime-agent` binary, plus the entry point that drives it.
 pub use mode::{AppMode, MissingSubsystem, RunOptions, Runtime, UnavailableRuntime};
 pub(crate) mod piped_stdin;
-pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
 pub(crate) mod print_goal;
 pub(crate) mod print_rlm;
