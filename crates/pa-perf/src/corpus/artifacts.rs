@@ -173,12 +173,8 @@ mod tests {
     #[test]
     fn generated_kernel_snapshot_unpickles_to_an_empty_dictionary() {
         let directory = tempfile::tempdir().expect("artifact directory");
-        super::write_artifact_dir(
-            directory.path(),
-            "session",
-            &mut crate::rng::Rng::new(7),
-        )
-        .expect("write real artifact partition");
+        super::write_artifact_dir(directory.path(), "session", &mut crate::rng::Rng::new(7))
+            .expect("write real artifact partition");
         let output = std::process::Command::new("python3")
             .arg("-c")
             .arg("import pickle,sys; value=pickle.load(open(sys.argv[1],'rb')); assert type(value) is dict and not value")
