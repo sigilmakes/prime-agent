@@ -5,10 +5,12 @@ use super::{
     anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
     Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelState,
     LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
-    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
-    KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS,
+    MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
 };
 use std::fmt::Write as _;
+
+use crate::kernel::shared::KernelBusyAfterInterruptError;
 
 impl Inner {
     /// Write one JSON-lines request frame; completes when the OS accepted the bytes.
@@ -101,7 +103,9 @@ impl Inner {
             }
         }
         if lock(&self.guarded).active_execution.is_some() {
-            return Err(anyhow!("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}"));
+            // Typed on purpose: the ipython tool's wait/kill recovery branches on
+            // this refusal, so it must survive the trip to the tool layer.
+            return Err(KernelBusyAfterInterruptError.into());
         }
         Ok(())
     }

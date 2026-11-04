@@ -350,9 +350,23 @@ impl KernelExecutor for KernelManagerExecutor {
                     },
                 )
                 .await
-                .map_err(KernelExecError::Other)?;
+                .map_err(kernel_exec_error)?;
             Ok(convert_execute_result(result))
         })
+    }
+}
+
+/// Preserve the kernel's typed busy-after-interrupt refusal. The ipython tool's
+/// wait/kill recovery branches on it, and wrapping every failure as
+/// `KernelExecError::Other` hides the one refusal a restart can resolve.
+fn kernel_exec_error(error: anyhow::Error) -> KernelExecError {
+    match error.downcast::<crate::kernel::shared::KernelBusyAfterInterruptError>() {
+        Ok(busy) => KernelExecError::BusyAfterInterrupt(
+            crate::tools::ipython::KernelBusyAfterInterruptError {
+                message: busy.to_string(),
+            },
+        ),
+        Err(error) => KernelExecError::Other(error),
     }
 }
 
@@ -407,5 +421,29 @@ pub fn ipython_tool_options(
         provisioner,
         ui: None,
         on_late_sent_agent_message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kernel_exec_error, KernelExecError};
+    use crate::kernel::shared::KernelBusyAfterInterruptError;
+
+    #[test]
+    fn busy_after_interrupt_survives_the_adapter() {
+        let error = kernel_exec_error(anyhow::Error::new(KernelBusyAfterInterruptError));
+        assert!(
+            error.is_busy_after_interrupt(),
+            "a blanket wrap would hide the only refusal a restart can resolve: {error:?}"
+        );
+        assert!(matches!(error, KernelExecError::BusyAfterInterrupt(_)));
+    }
+
+    #[test]
+    fn other_kernel_errors_stay_other() {
+        let error = kernel_exec_error(anyhow::anyhow!("kernel exploded"));
+        assert!(!error.is_busy_after_interrupt());
+        assert!(matches!(error, KernelExecError::Other(_)));
+        assert!(error.message().contains("kernel exploded"));
     }
 }

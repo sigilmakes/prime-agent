@@ -466,6 +466,35 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(error["ename"], "KeyboardInterrupt")
         self.assertEqual(one(events, "done")["status"], "error")
 
+    def test_system_exit_cell_reports_an_error_and_the_kernel_keeps_serving(self):
+        # exit()/sys.exit()/raise SystemExit must report as that cell's error.
+        # asyncio re-raises SystemExit into the loop, so without the serve-loop
+        # guard the interpreter finalizes before the cell's frames are written.
+        events = self.repl.execute("sysexit", "for x in [1, 2]:\n    raise SystemExit")
+        error = one(events, "error")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["ename"], "SystemExit")
+        self.assertEqual(one(events, "done")["status"], "error")
+        follow = self.repl.execute("after-exit", "print('alive')")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+        self.assertEqual(stream_text(follow, "stdout").strip(), "alive")
+
+    def test_system_exit_with_a_live_non_daemon_thread_does_not_wedge_the_kernel(self):
+        # The wedge case: interpreter finalization joins the non-daemon thread
+        # forever, so the process stays alive with a dead loop and answers
+        # nothing. The serve-loop guard must report the cell before any exit.
+        started = self.repl.execute(
+            "thread",
+            "import threading, time\nthreading.Thread(target=time.sleep, args=(30,)).start()\n"
+            "print('started')",
+        )
+        self.assertEqual(one(started, "done")["status"], "ok")
+        events = self.repl.execute("sysexit-threaded", "raise SystemExit")
+        self.assertEqual(one(events, "error")["ename"], "SystemExit")
+        self.assertEqual(one(events, "done")["status"], "error")
+        follow = self.repl.execute("after-threaded-exit", "print('alive')")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
     def test_stdout_buffer_write_works_and_surfaces_as_null(self):
         # Libraries write bytes via sys.stdout.buffer; the tagged writer must
         # expose a working buffer whose bytes surface (null-attributed) before done.
