@@ -1,6 +1,6 @@
 //! Message normalization shared by providers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Map;
 
@@ -170,48 +170,49 @@ pub fn transform_messages_with_normalizer(
     model: &Model,
     normalize_tool_call_id: &Normalizer<'_>,
 ) -> Vec<Message> {
+    fn synthetic_result(tool_call: &ToolCall) -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            content: vec![UserOrToolContent::Text(TextContent {
+                text: "No result provided".to_string(),
+                text_signature: None,
+                rest: Map::default(),
+            })],
+            details: None,
+            is_error: true,
+            // Deterministic: a wall-clock timestamp here changes the request
+            // prefix on every replay, defeating provider prompt caching.
+            timestamp: 0,
+            rest: Map::default(),
+        })
+    }
+
+    fn flush_pending(
+        result: &mut Vec<Message>,
+        pending: &mut Vec<ToolCall>,
+        deferred_users: &mut Vec<Message>,
+    ) {
+        for tool_call in pending.drain(..) {
+            result.push(synthetic_result(&tool_call));
+        }
+        result.append(deferred_users);
+    }
+
     let transformed = normalize_messages_with_normalizer(messages, model, normalize_tool_call_id);
 
-    // This preserves thinking signatures and satisfies API requirements
+    // This preserves thinking signatures and satisfies API requirements.
     let mut result: Vec<Message> = Vec::new();
     let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
-    let mut existing_tool_result_ids: HashSet<String> = HashSet::new();
-    // Epoch millis fit u64 for ~584 million years; the u128 duration's millis are the timestamp's convention.
-    #[allow(clippy::cast_possible_truncation)]
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
+    // A custom/user row can land between an assistant tool call and its real
+    // result. Hold it until the result is emitted instead of inventing a
+    // synthetic result and dropping the real one.
+    let mut deferred_users: Vec<Message> = Vec::new();
 
-    let insert_synthetic_tool_results =
-        |result: &mut Vec<Message>, pending: &mut Vec<ToolCall>, existing: &mut HashSet<String>| {
-            for tool_call in pending.drain(..) {
-                if !existing.contains(&tool_call.id) {
-                    result.push(Message::ToolResult(ToolResultMessage {
-                        tool_call_id: tool_call.id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        content: vec![UserOrToolContent::Text(TextContent {
-                            text: "No result provided".to_string(),
-                            text_signature: None,
-                            rest: Map::default(),
-                        })],
-                        details: None,
-                        is_error: true,
-                        timestamp: now,
-                        rest: Map::default(),
-                    }));
-                }
-            }
-            existing.clear();
-        };
-
-    for msg in transformed {
-        match &msg {
+    for (index, msg) in transformed.iter().enumerate() {
+        match msg {
             Message::Assistant(assistant) => {
-                insert_synthetic_tool_results(
-                    &mut result,
-                    &mut pending_tool_calls,
-                    &mut existing_tool_result_ids,
-                );
+                flush_pending(&mut result, &mut pending_tool_calls, &mut deferred_users);
 
                 // Skip errored/aborted assistant messages entirely. These are incomplete turns that
                 // shouldn't be replayed.
@@ -232,37 +233,53 @@ pub fn transform_messages_with_normalizer(
                     .collect();
                 if !tool_calls.is_empty() {
                     pending_tool_calls = tool_calls;
-                    existing_tool_result_ids.clear();
                 }
-                result.push(msg);
+                result.push(msg.clone());
             }
             Message::ToolResult(tool_result) => {
-                if !pending_tool_calls
+                let Some(position) = pending_tool_calls
                     .iter()
-                    .any(|tool_call| tool_call.id == tool_result.tool_call_id)
-                {
+                    .position(|tool_call| tool_call.id == tool_result.tool_call_id)
+                else {
                     continue;
+                };
+                pending_tool_calls.remove(position);
+                result.push(msg.clone());
+                if pending_tool_calls.is_empty() {
+                    result.append(&mut deferred_users);
                 }
-                existing_tool_result_ids.insert(tool_result.tool_call_id.clone());
-                result.push(msg);
             }
             Message::User(_) => {
-                insert_synthetic_tool_results(
-                    &mut result,
-                    &mut pending_tool_calls,
-                    &mut existing_tool_result_ids,
-                );
-                result.push(msg);
+                // Only a result before the next assistant turn can satisfy
+                // this call. A user row that interrupts the batch is deferred
+                // past the real result, preserving both order and content.
+                let remaining = transformed[index + 1..]
+                    .iter()
+                    .take_while(|later| !matches!(later, Message::Assistant(_)));
+                let (resolved_later, unresolved): (Vec<_>, Vec<_>) =
+                    pending_tool_calls.drain(..).partition(|tool_call| {
+                        remaining.clone().any(|later| {
+                            matches!(
+                                later,
+                                Message::ToolResult(result)
+                                    if result.tool_call_id == tool_call.id
+                            )
+                        })
+                    });
+                for tool_call in unresolved {
+                    result.push(synthetic_result(&tool_call));
+                }
+                pending_tool_calls = resolved_later;
+                if pending_tool_calls.is_empty() {
+                    result.push(msg.clone());
+                } else {
+                    deferred_users.push(msg.clone());
+                }
             }
         }
     }
 
-    insert_synthetic_tool_results(
-        &mut result,
-        &mut pending_tool_calls,
-        &mut existing_tool_result_ids,
-    );
-
+    flush_pending(&mut result, &mut pending_tool_calls, &mut deferred_users);
     result
 }
 
@@ -384,5 +401,48 @@ mod tests {
         let transformed =
             transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
         assert_eq!(transformed.len(), 2);
+    }
+
+    #[test]
+    fn interleaved_user_keeps_the_real_tool_result() {
+        let messages = vec![
+            assistant_with_tool_call("call-1"),
+            user("[agent update]"),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "call-1".into(),
+                tool_name: "echo".into(),
+                content: vec![UserOrToolContent::Text(TextContent {
+                    text: "real result".into(),
+                    text_signature: None,
+                    rest: Map::default(),
+                })],
+                details: None,
+                is_error: false,
+                timestamp: 1,
+                rest: Map::default(),
+            }),
+        ];
+        let transformed =
+            transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
+        assert_eq!(transformed.len(), 3);
+        match &transformed[1] {
+            Message::ToolResult(result) => {
+                assert_eq!(result.tool_call_id, "call-1");
+                assert!(!result.is_error);
+                assert!(matches!(&result.content[0],
+                    UserOrToolContent::Text(text) if text.text == "real result"));
+            }
+            other => panic!("expected the real tool result, got {other:?}"),
+        }
+        assert!(matches!(&transformed[2], Message::User(_)));
+    }
+
+    #[test]
+    fn synthetic_tool_results_are_byte_stable() {
+        let messages = vec![assistant_with_tool_call("call-1"), user("again")];
+        let first = transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = transform_messages_with_normalizer(&messages, &test_model(), &|_, _, _| None);
+        assert_eq!(first, second);
     }
 }
