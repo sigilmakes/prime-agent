@@ -1781,10 +1781,17 @@ def main() -> None:
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
     # A KeyboardInterrupt escaping a cell or background task stops
     # run_until_complete; the interrupt is already recorded, so resume serving.
+    # SystemExit is the same kind of escape, not a shutdown: asyncio re-raises it
+    # from the cell task into the loop, and letting it out of main() ends the
+    # interpreter before the awaiting _handle_execute can report the cell. (A
+    # non-daemon thread left by an earlier cell then blocks interpreter exit
+    # forever, leaving a live kernel that answers nothing.) Resuming the loop
+    # delivers the stored SystemExit to `await task`, which reports it as that
+    # cell's error and keeps the kernel serving.
     while not _serve_task.done():
         try:
             _loop.run_until_complete(_serve_task)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, SystemExit):
             continue
     _loop.close()
 
