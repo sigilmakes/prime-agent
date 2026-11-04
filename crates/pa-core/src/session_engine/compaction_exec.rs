@@ -123,6 +123,24 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
 /// the final summary comes from the terminal assistant message.
 pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The summary request options shared by compaction and turn-prefix calls.
+/// `session_id` is the owning session, not a derived summary key: TS passes
+/// `this.sessionId` into every summarization call.
+fn summary_stream_options(
+    api_key: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
+    max_tokens: u64,
+    session_id: Option<&str>,
+) -> pa_ai::types::StreamOptions {
+    pa_ai::types::StreamOptions {
+        max_tokens: Some(max_tokens),
+        api_key,
+        headers: headers.map(|headers| headers.into_iter().collect()),
+        session_id: session_id.map(str::to_string),
+        ..Default::default()
+    }
+}
+
 /// Run one summarizer wire call through `pa_ai::complete_simple`: `headers`
 /// are the routed model's merged request headers; `on_delta` is the live sink
 /// ([`SummaryDeltaSink`]); `failure` labels the error-stop bail.
@@ -131,6 +149,7 @@ pub type SummaryDeltaSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 ///
 /// Returns an error when the summarizer wire call fails, or when its reply
 /// stops with an error (labeled with `failure`).
+#[allow(clippy::too_many_arguments)]
 pub async fn complete_summary_call(
     model: &pa_types::ai::Model,
     api_key: Option<String>,
@@ -139,6 +158,7 @@ pub async fn complete_summary_call(
     request_messages: Vec<AgentMessage>,
     on_delta: Option<SummaryDeltaSink>,
     failure: &'static str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<SummarySlice> {
     complete_summary_call_routed(
         model,
@@ -148,6 +168,7 @@ pub async fn complete_summary_call(
         request_messages,
         on_delta,
         failure,
+        session_id,
         None,
     )
     .await
@@ -163,6 +184,7 @@ pub(crate) async fn complete_summary_call_routed(
     request_messages: Vec<AgentMessage>,
     on_delta: Option<SummaryDeltaSink>,
     failure: &'static str,
+    session_id: Option<&str>,
     inference: Option<&std::sync::Arc<super::inference_router::AuxiliaryInference>>,
 ) -> anyhow::Result<SummarySlice> {
     let messages = request_messages
@@ -182,18 +204,15 @@ pub(crate) async fn complete_summary_call_routed(
     // The daemon races this future against cancellation at the compaction boundary.
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let mut stream_options =
-        pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
-            signal: Some(cancel),
-            max_tokens: Some(max_tokens),
-            api_key,
-            headers: headers.map(|headers| headers.into_iter().collect()),
-            ..Default::default()
-        });
+    let mut stream_options = pa_ai::types::SimpleStreamOptions::from_base(summary_stream_options(
+        api_key, headers, max_tokens, session_id,
+    ));
+    stream_options.base.signal = Some(cancel);
     stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
     let assistant = if let Some(inference) = inference {
         let options = pa_agent::stream::StreamRequestOptions {
             api_key: stream_options.base.api_key.clone(),
+            session_id: stream_options.base.session_id.clone(),
             headers: stream_options
                 .base
                 .headers
@@ -708,6 +727,16 @@ mod tests {
             .expect("usage recorded");
         assert_eq!(mixed.total_tokens, 5);
         assert_eq!(summed_usage(&[slice("a", None)]), None);
+    }
+
+    #[test]
+    fn summary_options_carry_the_owning_session_id() {
+        let options = summary_stream_options(None, None, 512, Some("session-1"));
+        assert_eq!(options.session_id.as_deref(), Some("session-1"));
+        assert_eq!(options.max_tokens, Some(512));
+        assert!(summary_stream_options(None, None, 512, None)
+            .session_id
+            .is_none());
     }
 
     #[test]

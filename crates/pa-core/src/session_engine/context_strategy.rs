@@ -436,6 +436,7 @@ impl AgentSession {
             };
             let attempt_options = CompactOptions {
                 inference: self.auxiliary_inference(),
+                session_id: options.session_id.clone(),
                 model: options.model.clone(),
                 api_key: options.api_key.clone(),
                 custom_instructions: options.custom_instructions,

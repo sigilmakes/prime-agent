@@ -17,6 +17,7 @@ async fn execute_compaction_with_pre_aborted_signal_never_runs_the_summarizer() 
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -70,6 +71,7 @@ async fn execute_compaction_with_late_abort_cancels_before_the_commit() {
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -107,6 +109,7 @@ async fn execute_compaction_skips_short_sessions() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -148,6 +151,7 @@ async fn execute_compaction_skips_when_already_compacted() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,

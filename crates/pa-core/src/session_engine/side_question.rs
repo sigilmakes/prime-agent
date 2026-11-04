@@ -194,9 +194,9 @@ pub async fn run_side_question(
         stream_fn: Some(stream_fn),
         before_tool_call: Some(before_tool_call),
         should_stop_after_turn: Some(should_stop_after_turn),
-        // A side question shares the parent history but not its divergent
-        // prefix, so it gets its own stable cache identity.
-        session_id: parent.session_id().map(|id| format!("{id}:side")),
+        // TS `side-question.ts` reuses the parent session id so the side
+        // question shares the parent's prompt-cache namespace.
+        session_id: parent.session_id().map(ToString::to_string),
         ..Default::default()
     }));
 
@@ -525,6 +525,7 @@ mod tests {
                 ]),
             },
             stream_fn: Some(provider.stream_fn()),
+            session_id: Some("parent-session".to_string()),
             ..Default::default()
         }))
     }
@@ -608,6 +609,40 @@ mod tests {
 
         // Side results never touch the parent history.
         assert_eq!(parent.state().await.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn side_question_reuses_the_parent_session_id() {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        provider.push_text_turn("the side answer");
+        let parent = parent_agent(&provider);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = provider.stream_fn();
+        let seen_by_caller = Arc::clone(&seen);
+        let recording: pa_agent::stream::StreamFn = Arc::new(move |model, context, options| {
+            seen_by_caller
+                .lock()
+                .unwrap()
+                .push(options.session_id.clone());
+            base(model, context, options)
+        });
+        let sink: SideQuestionSink = Arc::new(|_| true);
+        let result = run_side_question(
+            &parent,
+            recording,
+            "what is the answer?",
+            &[],
+            &fast_retry_policy(),
+            &AbortSignal::never(),
+            &sink,
+        )
+        .await;
+        assert_eq!(result.status, SideQuestionStatus::Complete);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[Some("parent-session".to_string())],
+            "TS side questions reuse parent.sessionId"
+        );
     }
 
     #[tokio::test]

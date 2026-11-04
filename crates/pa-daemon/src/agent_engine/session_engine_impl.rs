@@ -719,11 +719,20 @@ impl SessionEngine for AgentSessionEngine {
             cwd: self.cwd(),
             agent_dir: self.config.agent_dir.clone(),
         };
+        // The durable session-file stem is the session id the core engine uses.
+        let branch_session_id = self
+            .session_file
+            .lock()
+            .ok()
+            .and_then(|path| path.clone())
+            .and_then(|path| path.file_stem().map(std::ffi::OsStr::to_owned))
+            .and_then(|stem| stem.into_string().ok());
         let run = async {
             pa_core::session_engine::branch_summarization::generate_branch_summary(
                 &entries,
                 pa_core::session_engine::branch_summarization::GenerateBranchSummaryOptions {
                     model: &model,
+                    session_id: branch_session_id.as_deref(),
                     api_key,
                     custom_instructions: custom_instructions.as_deref(),
                     replace_instructions,

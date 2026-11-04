@@ -175,6 +175,10 @@ impl AgentSession {
             }),
         );
         let started_at = std::time::Instant::now();
+        let session_id = {
+            let session = self.session.lock().await;
+            session.get_session_id().to_owned()
+        };
         let summary_delta = self
             .compaction_summary_sink
             .lock()
@@ -183,6 +187,7 @@ impl AgentSession {
         let model = self.configure_ollama_model(model);
         let options = crate::session_engine::compact_session::CompactOptions {
             inference: self.auxiliary_inference(),
+            session_id: Some(session_id),
             model,
             api_key,
             custom_instructions,
@@ -274,6 +279,7 @@ impl AgentSession {
             };
             let attempt_options = crate::session_engine::compact_session::CompactOptions {
                 inference: options.inference.clone(),
+                session_id: options.session_id.clone(),
                 model: options.model.clone(),
                 api_key: options.api_key.clone(),
                 custom_instructions: options.custom_instructions,

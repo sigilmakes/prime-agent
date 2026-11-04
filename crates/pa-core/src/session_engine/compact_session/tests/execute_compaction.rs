@@ -14,6 +14,7 @@ async fn execute_compaction_persists_and_rebuilds() {
     let result = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -106,6 +107,7 @@ async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() 
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -188,6 +190,7 @@ async fn execute_compaction_streams_summary_deltas_to_the_sink() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -292,6 +295,7 @@ async fn split_turn_compaction_streams_in_final_order_and_converges() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -365,6 +369,7 @@ async fn execute_compaction_fails_on_an_error_summarizer_response() {
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -404,6 +409,7 @@ async fn durable_compaction_row_carries_the_ts_record() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,

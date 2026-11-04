@@ -455,6 +455,7 @@ pub(super) async fn run(
 
 fn clone_options<'a>(options: &CompactOptions<'a>) -> CompactOptions<'a> {
     CompactOptions {
+        session_id: options.session_id.clone(),
         inference: options.inference.clone(),
         model: options.model.clone(),
         api_key: options.api_key.clone(),
