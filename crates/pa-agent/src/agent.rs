@@ -908,6 +908,12 @@ impl Agent {
         Agent { inner }
     }
 
+    /// Stable provider cache identity, when the owner supplied one.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&str> {
+        self.inner.session_id.as_deref()
+    }
+
     fn from_inner(inner: Arc<AgentInner>) -> Self {
         Agent { inner }
     }

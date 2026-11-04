@@ -495,7 +495,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         .map_err(|join| anyhow::anyhow!("websearch key resolve join failed: {join}"))?
     };
     let provisioner = super::runtime_wiring::kernel_provisioner(
-        session_id,
+        session_id.clone(),
         handlers,
         python_skills,
         cwd.clone(),
@@ -751,6 +751,9 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         should_stop_before_turn: config.queued_steering_probe.clone(),
         steering_mode: config.steering_mode,
         follow_up_mode: config.follow_up_mode,
+        // Stable identity for provider cache affinity, session headers, and
+        // websocket reuse. Without it Codex sends no prompt_cache_key.
+        session_id: Some(session_id),
         ..Default::default()
     });
 

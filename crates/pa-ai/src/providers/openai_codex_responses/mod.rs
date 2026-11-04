@@ -867,6 +867,19 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn request_body_carries_the_session_prompt_cache_key() {
+        let options = OpenAICodexResponsesOptions {
+            base: StreamOptions {
+                session_id: Some("session-1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let body = build_request_body(&codex_wire_model(), &codex_test_context("hello"), &options);
+        assert_eq!(body.get("prompt_cache_key"), Some(&json!("session-1")));
+    }
+
     /// The user-facing text for a failed codex stream is the verbatim error message; the
     /// raw-`fetch` connection failure surfaces the runtime's own refused-connect text.
     #[test]

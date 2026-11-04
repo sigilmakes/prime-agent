@@ -889,3 +889,61 @@ async fn context_custom_prefix_cannot_consume_the_admitted_custom_input() {
         .collect();
     assert_eq!(custom_types, ["accepted", "context-notice"]);
 }
+
+#[tokio::test]
+async fn engine_supplies_session_id_to_the_model_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let agent_model = test_model();
+    let model_info = super::provider_adapter::native_model(&agent_model).unwrap();
+    let wire: pa_agent::types::Model =
+        super::provider_adapter::json_round_trip(&model_info).unwrap();
+    let provider = Arc::new(ScriptedProvider::new(wire.clone()));
+    provider.push_text_turn("ok");
+    let inner = provider.stream_fn();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_by_stream = Arc::clone(&seen);
+    let stream_fn: pa_agent::stream::StreamFn = Arc::new(move |model, context, options| {
+        seen_by_stream
+            .lock()
+            .unwrap()
+            .push(options.session_id.clone());
+        inner(model, context, options)
+    });
+    let engine = super::engine::create_session(super::engine::SessionEngineConfig {
+        cwd: cwd.clone(),
+        agent_dir,
+        model: Some(wire.clone()),
+        model_info: Some(model_info),
+        session_manager: Some(SessionManager::in_memory(&cwd)),
+        stream_fn: Some(stream_fn),
+        prewarm_ipython_kernel: Some(false),
+        daemonless: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let expected = engine
+        .session
+        .session
+        .lock()
+        .await
+        .get_session_id()
+        .to_string();
+    engine
+        .session
+        .prompt("hi", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_deref() == Some(expected.as_str())),
+        "model stream never saw the engine session id {expected}"
+    );
+}
