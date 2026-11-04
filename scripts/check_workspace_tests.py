@@ -81,10 +81,12 @@ def run(command, *, repo, env, deadline, capture=False):
 # Their in-process Mutex cannot exclude kernel producers in another binary.
 EXCLUSIVE = {"kernel_dispose_e2e", "replacement_kernel_e2e"}
 
-# Parallel test slots. The runner host has 32 cores; this cap keeps
-# kernel-booting binaries from starving each other, while the EXCLUSIVE list
-# still serializes the process-table-global fixtures.
-PARALLEL_SLOTS = 3
+# Parallel test slots. CI raises this to eight on the 32-core runner; the
+# EXCLUSIVE list still serializes process-table-global fixtures. The default
+# stays conservative for local runs and smaller hosts.
+PARALLEL_SLOTS = int(os.environ.get("PA_WORKSPACE_TEST_SLOTS", "3"))
+if PARALLEL_SLOTS < 1:
+    raise ValueError("PA_WORKSPACE_TEST_SLOTS must be at least 1")
 
 # Groups whose area most changes touch run first: a regression there fails in
 # the first minute of the test phase instead of the last.

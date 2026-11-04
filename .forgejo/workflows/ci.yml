@@ -22,12 +22,14 @@ env:
     CARGO_INCREMENTAL: "0"
     CARGO_PROFILE_DEV_DEBUG: "0"
     CARGO_PROFILE_TEST_DEBUG: "0"
+    # The workspace scheduler owns whole-binary slots. Eight fills the 32-core
+    # runner without making every harness fight for a CPU.
+    PA_WORKSPACE_TEST_SLOTS: "8"
 
 jobs:
-    # The cheapest gates run first and alone: a formatting, hook or lint
-    # failure stops the workflow before the package build and the workspace
-    # tests start, and the `docs_only` output lets a prose-only push report
-    # the same check names green without paying for either.
+    # Lint stays a cheap gate. The heavy package and workspace jobs start
+    # together after it, and the package job now builds + smoke-tests the
+    # release artifact instead of rerunning the test suite.
     lint:
         name: lint
         runs-on: gaia-runner
@@ -97,10 +99,12 @@ jobs:
               with:
                   persist-credentials: false
               timeout-minutes: 5
-            - name: Downstream Nix checks
+            - name: Build release package and static checks
               if: needs.lint.outputs.docs_only != 'true'
-              timeout-minutes: 25
-              run: nix flake check --no-update-lock-file --print-build-logs
+              timeout-minutes: 20
+              run: |
+                  nix build .#prime-agent-ci --no-update-lock-file --print-build-logs --out-link "$RUNNER_TEMP/pa-package"
+                  nix build .#checks.x86_64-linux.static --no-update-lock-file --print-build-logs --out-link "$RUNNER_TEMP/pa-static"
             - name: Documentation-only change
               if: needs.lint.outputs.docs_only == 'true'
               run: echo "No build-affecting files changed; the package is unchanged."
