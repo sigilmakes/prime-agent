@@ -645,14 +645,12 @@ impl PrintGoalSurface {
 }
 
 #[cfg(test)]
-// The faux provider registry is process-global: one std lock serializes every test that drives it.
+// The faux provider registry is process-global: one shared lock serializes every pa-cli test that drives it.
 mod tests {
     use super::*;
+    use crate::test_support::FAUX_TEST_LOCK;
     use pa_core::session_engine::provider_adapter::json_round_trip;
     use serde_json::json;
-
-    /// One test at a time over the global faux registry.
-    static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// One captured event line (the sink's frames, in order).
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
