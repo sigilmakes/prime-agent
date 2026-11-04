@@ -194,6 +194,9 @@ pub async fn run_side_question(
         stream_fn: Some(stream_fn),
         before_tool_call: Some(before_tool_call),
         should_stop_after_turn: Some(should_stop_after_turn),
+        // A side question shares the parent history but not its divergent
+        // prefix, so it gets its own stable cache identity.
+        session_id: parent.session_id().map(|id| format!("{id}:side")),
         ..Default::default()
     }));
 
