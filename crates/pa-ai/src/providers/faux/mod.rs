@@ -383,7 +383,6 @@ fn with_usage_estimate(
     let prompt_text = serialize_context(context);
     let prompt_tokens = estimate_tokens(&prompt_text);
     let output_tokens = estimate_tokens(&assistant_content_to_text(&message.content));
-    let mut input = prompt_tokens;
     let mut cache_read = 0u64;
     let mut cache_write = 0u64;
     let session_id = options.and_then(|options| options.session_id.clone());
@@ -403,7 +402,6 @@ fn with_usage_estimate(
                 cache_read = estimate_tokens(&cached_prefix);
                 let remaining: String = prompt_text.chars().skip(cached_chars).collect();
                 cache_write = estimate_tokens(&remaining);
-                input = prompt_tokens.saturating_sub(cache_read);
             } else {
                 cache_write = prompt_tokens;
             }
@@ -411,6 +409,10 @@ fn with_usage_estimate(
         }
     }
 
+    // Cache reads and writes are disjoint slices of the prompt, so the
+    // uncached input is whatever neither slice covers. Adding `cache_write`
+    // back into the total would bill the same suffix twice.
+    let input = prompt_tokens.saturating_sub(cache_read + cache_write);
     message.usage = Usage {
         rest: pa_types::JsonMap::new(),
         input,

@@ -654,6 +654,12 @@ async fn simulates_prompt_caching_per_session_id() {
     .unwrap();
     assert_eq!(first.usage.cache_read, 0);
     assert!(first.usage.cache_write > 0);
+    assert_eq!(first.usage.input, 0);
+    assert_eq!(
+        first.usage.total_tokens,
+        first.usage.cache_write + first.usage.output,
+        "the first cached prompt is billed once as cache write"
+    );
 
     context.messages.push(Message::Assistant(first));
     context.messages.push(user_text("follow up"));
