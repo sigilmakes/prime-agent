@@ -19,16 +19,36 @@ pub struct CachedConnection {
     pub worker: mpsc::Sender<WorkerCommand>,
     pub busy: bool,
     pub continuation: Option<ContinuationState>,
-    /// Monotonic socket creation time; checkout rotates at the absolute age limit.
+    /// When the connection last became idle. `None` while a request holds it.
+    pub last_released_at: Option<Instant>,
+    /// When the socket was opened. Codex caps a WebSocket at 60 minutes; rotate before that.
     pub created_at: Instant,
     /// Unique id of this connection (monotonic).
     pub connection_id: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FallbackState {
+    failures: u32,
+    retry_at: Instant,
+}
+
+const WEBSOCKET_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(30);
+const WEBSOCKET_RETRY_MAX: std::time::Duration = std::time::Duration::from_mins(15);
+
+fn websocket_retry_delay(failures: u32) -> std::time::Duration {
+    let doublings = failures.saturating_sub(1).min(6);
+    WEBSOCKET_RETRY_INITIAL
+        .saturating_mul(1 << doublings)
+        .min(WEBSOCKET_RETRY_MAX)
 }
 
 #[derive(Default)]
 pub struct SessionState {
     pub connections: HashMap<String, CachedConnection>,
     pub stats: HashMap<String, WebSocketDebugStats>,
+    /// A transport failure puts the session on SSE until this cooldown expires.
+    websocket_fallbacks: HashMap<String, FallbackState>,
 }
 
 pub fn session_state() -> &'static Mutex<SessionState> {
@@ -43,12 +63,13 @@ pub fn record_websocket_sse_fallback(session_id: Option<&str>) {
     let Ok(mut state) = session_state().lock() else {
         return;
     };
+    let active = state.websocket_fallbacks.contains_key(session_id);
     let session_stats = state.stats.entry(session_id.to_string()).or_default();
     session_stats.sse_fallbacks += 1;
-    session_stats.websocket_fallback_active = Some(false);
+    session_stats.websocket_fallback_active = Some(active);
 }
 
-/// Retain failure history without changing the next logical request's transport choice.
+/// Record a transport failure and start the session's WebSocket retry cooldown.
 pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamError) {
     let Some(session_id) = session_id else {
         return;
@@ -56,10 +77,49 @@ pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamErr
     let Ok(mut state) = session_state().lock() else {
         return;
     };
+    let failures = state
+        .websocket_fallbacks
+        .get(session_id)
+        .map_or(1, |fallback| fallback.failures.saturating_add(1));
+    state.websocket_fallbacks.insert(
+        session_id.to_string(),
+        FallbackState {
+            failures,
+            retry_at: Instant::now() + websocket_retry_delay(failures),
+        },
+    );
     let session_stats = state.stats.entry(session_id.to_string()).or_default();
     session_stats.websocket_failures += 1;
     session_stats.last_websocket_error = Some(error.to_string());
-    session_stats.websocket_fallback_active = Some(false);
+    session_stats.websocket_fallback_active = Some(true);
+}
+
+/// A successful WebSocket request clears the fallback and its backoff.
+pub fn record_websocket_success(session_id: Option<&str>) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let Ok(mut state) = session_state().lock() else {
+        return;
+    };
+    state.websocket_fallbacks.remove(session_id);
+    if let Some(session_stats) = state.stats.get_mut(session_id) {
+        session_stats.websocket_fallback_active = Some(false);
+    }
+}
+
+/// Whether the session may probe WebSocket again. No fallback means ready.
+#[must_use]
+pub fn websocket_retry_ready(session_id: Option<&str>) -> bool {
+    let Some(session_id) = session_id else {
+        return true;
+    };
+    session_state().lock().is_ok_and(|state| {
+        state
+            .websocket_fallbacks
+            .get(session_id)
+            .is_none_or(|fallback| Instant::now() >= fallback.retry_at)
+    })
 }
 
 #[must_use]
@@ -73,8 +133,10 @@ pub fn reset_debug_stats(session_id: Option<&str>) {
     };
     if let Some(session_id) = session_id {
         state.stats.remove(session_id);
+        state.websocket_fallbacks.remove(session_id);
     } else {
         state.stats.clear();
+        state.websocket_fallbacks.clear();
     }
 }
 
@@ -84,17 +146,20 @@ pub fn close_websocket_sessions(session_id: Option<&str>) {
     let Ok(mut state) = session_state().lock() else {
         return;
     };
-    let entries: Vec<mpsc::Sender<WorkerCommand>> = match session_id {
-        Some(session_id) => state
+    let entries: Vec<mpsc::Sender<WorkerCommand>> = if let Some(session_id) = session_id {
+        state.websocket_fallbacks.remove(session_id);
+        state
             .connections
             .remove(session_id)
             .map(|entry| vec![entry.worker])
-            .unwrap_or_default(),
-        None => state
+            .unwrap_or_default()
+    } else {
+        state.websocket_fallbacks.clear();
+        state
             .connections
             .drain()
             .map(|(_, entry)| entry.worker)
-            .collect(),
+            .collect()
     };
     for worker in entries {
         let _ = worker.try_send(WorkerCommand::Close);
@@ -194,7 +259,6 @@ mod tests {
     fn sse_fallback_lifecycle() {
         let session = format!("test-session-{}", std::process::id());
         reset_debug_stats(Some(&session));
-        // A fallback counter is historical, not a transport policy for later requests.
         record_websocket_sse_fallback(Some(&session));
         let stats = get_debug_stats(&session).expect("stats recorded");
         assert_eq!(stats.sse_fallbacks, 1);
@@ -204,7 +268,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn records_failure_history_without_pinning_fallback() {
+    async fn records_failure_and_reopens_after_the_retry_cooldown() {
+        tokio::time::pause();
         let session = format!("failure-session-{}", std::process::id());
         reset_debug_stats(Some(&session));
         record_websocket_failure(
@@ -213,7 +278,31 @@ mod tests {
         );
         let stats = get_debug_stats(&session).expect("stats recorded");
         assert_eq!(stats.websocket_failures, 1);
-        assert_eq!(stats.websocket_fallback_active, Some(false));
+        assert_eq!(stats.websocket_fallback_active, Some(true));
+        assert!(!websocket_retry_ready(Some(&session)));
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        assert!(!websocket_retry_ready(Some(&session)));
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(websocket_retry_ready(Some(&session)));
+
+        record_websocket_failure(
+            Some(&session),
+            &CodexStreamError::Transport(WebSocketTransportError::runtime("boom again")),
+        );
+        tokio::time::advance(std::time::Duration::from_secs(59)).await;
+        assert!(
+            !websocket_retry_ready(Some(&session)),
+            "second failure doubles the delay"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(websocket_retry_ready(Some(&session)));
+
+        record_websocket_success(Some(&session));
+        assert!(websocket_retry_ready(Some(&session)));
+        assert_eq!(
+            get_debug_stats(&session).unwrap().websocket_fallback_active,
+            Some(false)
+        );
         assert_eq!(stats.last_websocket_error.as_deref(), Some("boom"));
         close_websocket_sessions(Some(&session));
         reset_debug_stats(Some(&session));

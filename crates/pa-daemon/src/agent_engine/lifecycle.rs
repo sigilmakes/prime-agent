@@ -957,6 +957,11 @@ impl AgentSessionEngine {
         // The retired session's provider target goes with it: a pre-build demand seam resolves the
         // CURRENT model.
         *self.provider_target.write().expect("provider target lock") = None;
+        if let Some(engine) = &built {
+            // TS registers a per-session cleanup for cached provider sockets.
+            let session_id = engine.session.session_id().await;
+            pa_ai::codex_debug::close_websocket_sessions(Some(&session_id));
+        }
         if let Some(engine) = built {
             engine.dispose_kernel().await;
         }
@@ -969,6 +974,8 @@ impl AgentSessionEngine {
     pub async fn dispose_kernel(&self) {
         let guard = self.session.lock().await;
         if let Some(engine) = guard.as_deref() {
+            let session_id = engine.session.session_id().await;
+            pa_ai::codex_debug::close_websocket_sessions(Some(&session_id));
             engine.dispose_kernel().await;
         }
     }

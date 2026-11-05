@@ -190,7 +190,7 @@ async fn complete(
 }
 
 #[tokio::test]
-async fn close_fallback_is_one_request_only_next_request_probes_fresh_websocket() {
+async fn close_fallback_uses_sse_then_reopens_the_websocket_after_cooldown() {
     for transport in [
         Transport::Auto,
         Transport::Websocket,
@@ -199,7 +199,8 @@ async fn close_fallback_is_one_request_only_next_request_probes_fresh_websocket(
         let server = Loopback::start(vec![
             Reply::Close(vec![]),
             success("resp_http"),
-            success("resp_ws"),
+            success("resp_http_deferred"),
+            success("resp_ws_reopened"),
         ])
         .await;
         let session = format!("request-local-{transport:?}");
@@ -213,22 +214,29 @@ async fn close_fallback_is_one_request_only_next_request_probes_fresh_websocket(
             complete(&server, &context, &options).await.stop_reason,
             StopReason::Stop
         );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::time::resume();
+        assert_eq!(
+            complete(&server, &context, &options).await.stop_reason,
+            StopReason::Stop
+        );
         let requests = server.captured();
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.websocket)
                 .collect::<Vec<_>>(),
-            vec![true, false, true]
+            vec![true, false, false, true]
         );
-        assert_ne!(requests[0].socket, requests[2].socket);
-        let mut expected = build_request_body(&server.model(), &context, &options);
+        let expected = build_request_body(&server.model(), &context, &options);
         assert_eq!(
             requests[1].body, expected,
             "SSE fallback must use full store:false body unchanged"
         );
-        expected["type"] = json!("response.create");
         assert_eq!(requests[2].body, expected);
+        assert_eq!(requests[3].body["input"], expected["input"]);
+        assert!(requests[3].body.get("previous_response_id").is_none());
         let stats = get_debug_stats(&session).unwrap();
         assert_eq!(
             (
@@ -236,15 +244,21 @@ async fn close_fallback_is_one_request_only_next_request_probes_fresh_websocket(
                 stats.sse_fallbacks,
                 stats.websocket_fallback_active
             ),
-            (1, 1, Some(false))
+            (1, 2, Some(false)),
+            "a successful probe clears the fallback"
         );
         close_websocket_sessions(Some(&session));
     }
 }
 
 #[tokio::test]
-async fn capped_api_error_evicts_anchor_preserves_error_and_next_socket_is_fresh() {
-    let server = Loopback::start(vec![success("resp_first"), Reply::Events(vec![json!({"type":"error", "status_code":400, "error":{"code":"websocket_connection_limit_reached", "message":"Maximum connection duration reached"}})]), success("resp_fresh")]).await;
+async fn capped_connection_reopens_once_and_succeeds() {
+    let server = Loopback::start(vec![
+        success("resp_first"),
+        Reply::Events(vec![json!({"type":"error", "status_code":400, "error":{"code":"websocket_connection_limit_reached", "message":"Maximum connection duration reached"}})]),
+        success("resp_fresh"),
+    ])
+    .await;
     let session = "capped-connection";
     let options = options(session, Transport::WebsocketCached);
     let first = complete(&server, &codex_test_context("Say hello"), &options).await;
@@ -253,7 +267,7 @@ async fn capped_api_error_evicts_anchor_preserves_error_and_next_socket_is_fresh
     let (writer, _reader) = AssistantMessageEventStream::new();
     let mut output = first.clone();
     output.content.clear();
-    let error = run_stream(
+    run_stream(
         &server.model(),
         &context,
         Some(&options),
@@ -261,29 +275,7 @@ async fn capped_api_error_evicts_anchor_preserves_error_and_next_socket_is_fresh
         &writer,
     )
     .await
-    .unwrap_err();
-    let ProviderError::Http(error) = error else {
-        panic!("cap must remain a structured API error");
-    };
-    assert_eq!(
-        (
-            error.status,
-            error.sdk_name.as_deref(),
-            error.provider_error_type.as_deref(),
-            error.message.as_str()
-        ),
-        (
-            Some(400),
-            Some("CodexApiError"),
-            Some("websocket_connection_limit_reached"),
-            "Codex error: Maximum connection duration reached"
-        )
-    );
-    assert_eq!(cached_connection_id(session), None);
-    assert_eq!(
-        complete(&server, &context, &options).await.stop_reason,
-        StopReason::Stop
-    );
+    .expect("a pre-start cap is retried on a fresh socket");
     let new_id = session_state().lock().unwrap().connections[session].connection_id;
     assert_ne!(old_id, new_id);
     let requests = server.captured();
@@ -297,11 +289,21 @@ async fn capped_api_error_evicts_anchor_preserves_error_and_next_socket_is_fresh
         requests[2].body["input"],
         build_request_body(&server.model(), &context, &options)["input"]
     );
+    let stats = get_debug_stats(session).unwrap();
+    assert_eq!(
+        (
+            stats.websocket_failures,
+            stats.sse_fallbacks,
+            stats.websocket_fallback_active
+        ),
+        (0, 0, Some(false)),
+        "a successful retry is not a fallback"
+    );
     close_websocket_sessions(Some(session));
 }
 
 #[tokio::test]
-async fn actively_pooled_socket_rotates_at_fifty_minutes_not_idle_ttl() {
+async fn actively_pooled_socket_stays_below_the_idle_ttl() {
     let server = Loopback::start((0..14).map(|_| success("resp_age")).collect()).await;
     let session = "active-age-rotation";
     let options = options(session, Transport::Auto);
@@ -329,15 +331,14 @@ async fn actively_pooled_socket_rotates_at_fifty_minutes_not_idle_ttl() {
         );
     }
     let current = session_state().lock().unwrap().connections[session].connection_id;
-    assert_ne!(
+    assert_eq!(
         original, current,
-        "active pooling must not keep a socket beyond proactive max age"
+        "each busy interval stays below the five-minute idle TTL"
     );
     let requests = server.captured();
-    assert!(requests[..13]
+    assert!(requests
         .iter()
         .all(|request| request.socket == requests[0].socket));
-    assert_ne!(requests[13].socket, requests[0].socket);
     close_websocket_sessions(Some(session));
 }
 
@@ -465,13 +466,12 @@ async fn explicit_sse_sends_full_body_without_websocket_probe() {
 }
 
 #[tokio::test]
-async fn idle_gaps_over_two_and_five_minutes_keep_same_socket_under_max_age() {
+async fn idle_gap_past_five_minutes_expires_the_socket() {
     let server = Loopback::start((0..3).map(|_| success("resp_idle")).collect()).await;
     let session = "idle-under-absolute-age";
     let options = options(session, Transport::Auto);
     let context = codex_test_context("Say hello");
     complete(&server, &context, &options).await;
-    let original = session_state().lock().unwrap().connections[session].connection_id;
     for gap in [3 * 60, 6 * 60] {
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(gap)).await;
@@ -480,12 +480,53 @@ async fn idle_gaps_over_two_and_five_minutes_keep_same_socket_under_max_age() {
             complete(&server, &context, &options).await.stop_reason,
             StopReason::Stop
         );
-        assert_eq!(cached_connection_id(session), Some(original));
     }
     let requests = server.captured();
-    assert!(requests
-        .iter()
-        .all(|request| request.socket == requests[0].socket));
+    assert_eq!(requests[0].socket, requests[1].socket);
+    assert_ne!(requests[1].socket, requests[2].socket);
+    close_websocket_sessions(Some(session));
+}
+
+#[tokio::test]
+async fn repeated_connection_limit_falls_back_to_sse_without_surfacing_an_error() {
+    let server = Loopback::start(vec![
+        success("resp_first"),
+        Reply::Events(codex_error_events(
+            "websocket_connection_limit_reached",
+            "cap one",
+        )),
+        Reply::Events(codex_error_events(
+            "websocket_connection_limit_reached",
+            "cap two",
+        )),
+        success("resp_http"),
+    ])
+    .await;
+    let session = "double-cap-fallback";
+    let options = options(session, Transport::WebsocketCached);
+    let first = complete(&server, &codex_test_context("Say hello"), &options).await;
+    let context = codex_followup_context(&first, "continue");
+    assert_eq!(
+        complete(&server, &context, &options).await.stop_reason,
+        StopReason::Stop
+    );
+    let requests = server.captured();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.websocket)
+            .collect::<Vec<_>>(),
+        vec![true, true, true, false]
+    );
+    let stats = get_debug_stats(session).unwrap();
+    assert_eq!(
+        (
+            stats.websocket_failures,
+            stats.sse_fallbacks,
+            stats.websocket_fallback_active
+        ),
+        (1, 1, Some(true))
+    );
     close_websocket_sessions(Some(session));
 }
 
@@ -497,6 +538,7 @@ async fn capped_uncached_overlap_must_not_evict_other_busy_socket() {
             "websocket_connection_limit_reached",
             "cap",
         )),
+        success("resp_retry"),
     ])
     .await;
     let session = "cap-overlapping-leases";
@@ -516,7 +558,7 @@ async fn capped_uncached_overlap_must_not_evict_other_busy_socket() {
         &options(session, Transport::Auto),
     )
     .await;
-    assert_eq!(failed.stop_reason, StopReason::Error);
+    assert_eq!(failed.stop_reason, StopReason::Stop);
     let matching_busy = session_state()
         .lock()
         .unwrap()
@@ -532,7 +574,7 @@ async fn capped_uncached_overlap_must_not_evict_other_busy_socket() {
             .stop_reason,
         StopReason::Aborted
     );
-    assert_eq!(server.captured().len(), 2);
+    assert_eq!(server.captured().len(), 3);
 }
 
 #[tokio::test]
@@ -562,7 +604,7 @@ async fn anchored_delta_close_falls_back_with_full_store_false_context() {
             .iter()
             .map(|request| request.websocket)
             .collect::<Vec<_>>(),
-        vec![true, true, false, true]
+        vec![true, true, false, false]
     );
     assert_eq!(requests[1].body["previous_response_id"], "resp_anchor");
     assert_eq!(requests[1].body["input"].as_array().unwrap().len(), 1);
@@ -631,7 +673,7 @@ async fn reused_socket_observes_current_request_cancellation_not_creator_signal(
 }
 
 #[tokio::test]
-async fn large_context_wire_full_then_delta_survives_idle_until_absolute_rotation() {
+async fn large_context_wire_full_then_delta_expires_at_the_idle_ttl() {
     // The optional external fixture is shared with the TypeScript parity run. Keep the default
     // equally large so the checked-in regression never silently degrades to a tiny transcript.
     let text = match std::env::var("PA_CODEX_LONG_CONTEXT_FIXTURE") {
@@ -665,14 +707,14 @@ async fn large_context_wire_full_then_delta_survives_idle_until_absolute_rotatio
         .iter()
         .all(|request| request.websocket && request.body["store"] == false));
     assert_eq!(requests[0].socket, requests[1].socket);
-    assert_eq!(requests[0].socket, requests[2].socket);
-    assert_ne!(requests[0].socket, requests[3].socket);
+    assert_ne!(requests[0].socket, requests[2].socket);
+    assert_ne!(requests[2].socket, requests[3].socket);
     assert!(requests[0].body_bytes > 640_000);
-    assert!(requests[1].body_bytes < 1024 && requests[2].body_bytes < 1024);
-    assert!(requests[3].body_bytes > 640_000);
+    assert!(requests[1].body_bytes < 1024);
+    assert!(requests[2].body_bytes > 640_000 && requests[3].body_bytes > 640_000);
     assert!(requests[0].body.get("previous_response_id").is_none());
     assert!(requests[1].body.get("previous_response_id").is_some());
-    assert!(requests[2].body.get("previous_response_id").is_some());
+    assert!(requests[2].body.get("previous_response_id").is_none());
     assert!(requests[3].body.get("previous_response_id").is_none());
     let metadata = json!({
         "fixtureBytes": text.len(), "numericPieces": text.split_whitespace().count(),
