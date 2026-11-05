@@ -627,14 +627,14 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
     // usage is estimated from the context).
     admit(
         &engine,
-        "/goal --budget 10 budget the runaway turn".to_string(),
+        "/goal --budget 1 budget the runaway turn".to_string(),
         &mut events,
     );
     let goal = engine.goal_state_value();
     assert_eq!(goal["status"], "budget_limited");
     assert_eq!(
         goal["lastReason"],
-        serde_json::json!("Reached 10 token goal budget")
+        serde_json::json!("Reached 1 token goal budget")
     );
     let work = goal_work.lock().unwrap();
     let [crate::engine::GoalTurnEndWork::BudgetLimitSteer(steer)] = work.as_slice() else {
