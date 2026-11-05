@@ -446,11 +446,26 @@ fn an_archived_session_resumes_through_the_wake() {
     });
     assert!(!saved.is_file(), "aged session left the sessions dir");
 
-    client.send_command(
-        "s1",
-        &json!({ "type": "send_message", "targetActiveSessionId": "beta", "message": "wake up" }),
-    );
-    let sent = client.read_response("s1");
+    // The boot sweep publishes the archived file before it drops the source
+    // lease; a wake that lands in that window is refused as "busy". Retry the
+    // same product command until the sweep releases it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let sent = loop {
+        client.send_command(
+            "s1",
+            &json!({ "type": "send_message", "targetActiveSessionId": "beta", "message": "wake up" }),
+        );
+        let response = client.read_response("s1");
+        if response["success"] == true || Instant::now() >= deadline {
+            break response;
+        }
+        let error = response["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("restore archived session"),
+            "send by name failed: {response}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
     assert_eq!(sent["success"], true, "send by name failed: {sent}");
     let receipt = &sent["data"];
     assert_eq!(receipt["deliveryStatus"], "delivered", "{receipt}");
