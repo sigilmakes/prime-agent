@@ -55,6 +55,7 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model: model.clone(),
             api_key: None,
@@ -83,6 +84,7 @@ async fn second_compaction_updates_the_prior_summary_over_new_history() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -212,6 +214,7 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model: model.clone(),
             api_key: None,
@@ -272,6 +275,7 @@ async fn second_compaction_request_carries_the_anchor_and_strips_file_blocks() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -381,6 +385,7 @@ async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model: model.clone(),
             api_key: None,
@@ -411,6 +416,7 @@ async fn second_compaction_split_turn_history_updates_prefix_does_not() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,

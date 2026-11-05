@@ -21,6 +21,17 @@ from unittest.mock import patch
 import npm_bridge
 from npm_bridge import assemble
 
+def rust_socket(tmp, uid=None):
+    """Mirror pa-daemon socket_dir(): reserve the longest worker endpoint."""
+    uid = os.getuid() if uid is None else uid
+    tmp = str(tmp)
+    worker = f"{tmp}/prime-agent-rust-{uid}/worker-000000000000-000000000000.sock"
+    if len(worker.encode()) > 103:
+        suffix = hashlib.sha256(tmp.encode()).hexdigest()[:12]
+        return f"/tmp/prime-agent-rust-{uid}-{suffix}/daemon.sock"
+    return f"{tmp}/prime-agent-rust-{uid}/daemon.sock"
+
+
 
 @unittest.skipUnless(sys.platform in ("darwin", "linux") and shutil.which("node") and shutil.which("npm"),
                      "requires Node and npm on a historical TypeScript platform")
@@ -373,17 +384,18 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                 self.assertEqual(list(command.parent.glob(".prime-agent.*")), [])
 
     def test_real_launcher_pin_respects_the_sun_path_limit(self):
-        # The launcher pins the daemon socket env; a TMPDIR whose pin cannot
-        # fit the non-Linux 103-byte sun_path limit must pin /tmp instead
-        # (the same fallback pa-daemon socket_dir() gives the binary default).
+        # A TMPDIR whose longest worker endpoint cannot fit the portable
+        # 103-byte sun_path limit must pin a hashed /tmp directory, never the
+        # product default. The rule no longer varies by platform.
         command = self.npm_prefix / "bin/prime-agent"
         result = self.install_real_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
-        # The PATH shim makes both arms testable on every platform.
         shim_dir = self.root / "uname-shim"
         shim_dir.mkdir()
         long_tmp = self.root / ("t" * 80)
-        for system, root in (("Darwin", "/tmp"), ("Linux", str(long_tmp))):
+        expected = rust_socket(long_tmp)
+        self.assertTrue(expected.startswith("/tmp/prime-agent-rust-"))
+        for system in ("Darwin", "Linux"):
             with self.subTest(system=system):
                 (shim_dir / "uname").write_text(f'#!/bin/sh\necho {system}\n')
                 (shim_dir / "uname").chmod(0o755)
@@ -393,8 +405,7 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                 probe = subprocess.run([str(command), "socket"], env=probe_env,
                                        text=True, capture_output=True, timeout=10)
                 self.assertEqual(probe.returncode, 0, probe.stderr)
-                self.assertEqual(probe.stdout.strip(),
-                                 f"{root}/prime-agent-rust-{os.getuid()}/daemon.sock")
+                self.assertEqual(probe.stdout.strip(), expected)
 
     def test_utf8_socket_limit_applies_to_launcher_and_stop_probe(self):
         result = self.install_real_launcher()
@@ -417,7 +428,7 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                        "LC_ALL": "en_US.UTF-8",
                        "PATH": str(shim_dir) + os.pathsep + self.env["PATH"]}
                 env.pop("PRIME_AGENT_DAEMON_SOCKET", None)
-                expected = f"/tmp/prime-agent-rust-{os.getuid()}/daemon.sock" if system == "Darwin" else pin
+                expected = rust_socket(tmp)
                 for shell in ("sh", "bash"):
                     with self.subTest(shell=shell):
                         probe = subprocess.run([shell, str(command), "socket"], env=env,
@@ -448,13 +459,11 @@ else console.log(JSON.stringify(process.argv.slice(2)));
         self.env["TMPDIR"] = str(self.root / "sockets")
         expected = str(self.root / "sockets" / f"prime-agent-rust-{os.getuid()}" / "daemon.sock")
         self.assertEqual(self.launch("socket").stdout.strip(), expected)
-        # A TMPDIR deeper than the non-Linux 103-byte sun_path limit pins
-        # /tmp instead (node's platform cannot be shimmed, so the expected
-        # value follows the host OS).
+        # A TMPDIR deeper than the portable 103-byte worker limit pins a
+        # hashed /tmp directory instead.
         long_tmp = str(self.root / ("t" * 80))
         self.env["TMPDIR"] = long_tmp
-        expected = (f"/tmp/prime-agent-rust-{os.getuid()}/daemon.sock" if sys.platform == "darwin"
-                    else f"{long_tmp}/prime-agent-rust-{os.getuid()}/daemon.sock")
+        expected = rust_socket(long_tmp)
         self.assertEqual(self.launch("socket").stdout.strip(), expected)
 
     def test_concurrent_first_launches_install_once(self):

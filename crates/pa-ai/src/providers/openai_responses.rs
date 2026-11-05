@@ -199,6 +199,11 @@ fn build_headers(
             headers.push((name.clone(), value.clone()));
         }
     }
+    crate::providers::opencode_headers::with_opencode_headers(
+        &model.provider,
+        options.base.session_id.as_deref(),
+        &mut headers,
+    );
     headers.push(("Authorization".into(), format!("Bearer {api_key}")));
     headers
 }
@@ -586,6 +591,32 @@ mod tests {
             "compat": raw,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn opencode_identity_headers_are_added_for_responses() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "m", "name": "m", "api": "openai-responses",
+            "provider": "opencode", "baseUrl": "https://opencode.ai/zen/v1",
+            "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000, "maxTokens": 100
+        }))
+        .unwrap();
+        let options = OpenAIResponsesOptions::from_base(StreamOptions {
+            session_id: Some("session-1".into()),
+            ..Default::default()
+        });
+        let headers = build_headers(&model, "k", &options, None);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("User-Agent"), Some("prime-agent"));
+        assert_eq!(header("x-opencode-session"), Some("session-1"));
+        assert_eq!(header("session_id"), None);
     }
 
     #[test]

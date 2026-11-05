@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::FAUX_TEST_LOCK;
 use pa_core::session::manager::SessionManager;
 use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
 use pa_types::session::FileEntry;
@@ -7,10 +8,6 @@ use serde_json::json;
 /// The faux model's per-request output budget: threshold fixtures
 /// subtract it from the window alongside the headroom.
 const FAUX_REQUEST_BUDGET: u64 = 16_384;
-
-/// The faux provider registers process-globally; one test at a time
-/// keeps the queued responses deterministic.
-static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The TS overflow error shape: an Anthropic token-overflow message. The
 /// retry-turn `delayMs` puts its settled timestamp strictly after the

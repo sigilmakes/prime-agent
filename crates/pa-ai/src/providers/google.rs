@@ -218,6 +218,26 @@ fn build_params(model: &Model, context: &Context, options: &GoogleOptions) -> Va
     Value::Object(body)
 }
 
+fn build_headers(model: &Model, options: &GoogleOptions, api_key: String) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (name, value) in model.headers.iter().flatten() {
+        headers.push((name.clone(), value.clone()));
+    }
+    if let Some(options_headers) = &options.base.headers {
+        for (name, value) in options_headers {
+            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+            headers.push((name.clone(), value.clone()));
+        }
+    }
+    crate::providers::opencode_headers::with_opencode_headers(
+        &model.provider,
+        options.base.session_id.as_deref(),
+        &mut headers,
+    );
+    headers.push(("x-goog-api-key".into(), api_key));
+    headers
+}
+
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
@@ -276,22 +296,7 @@ async fn run_stream(
         )
     };
 
-    let mut headers: Vec<(String, String)> = Vec::new();
-    for (name, value) in model.headers.iter().flatten() {
-        headers.push((name.clone(), value.clone()));
-    }
-    if let Some(options_headers) = &options.base.headers {
-        for (name, value) in options_headers {
-            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-            headers.push((name.clone(), value.clone()));
-        }
-    }
-    if model.provider == "opencode" || model.provider == "opencode-go" {
-        if let Some(session_id) = &options.base.session_id {
-            headers.push(("session_id".into(), session_id.clone()));
-        }
-    }
-    headers.push(("x-goog-api-key".into(), api_key));
+    let headers = build_headers(model, &options, api_key);
 
     let mut response: HttpResponse = send(RequestOptions {
         method: reqwest::Method::POST,
@@ -468,5 +473,67 @@ impl Provider for GoogleGenerativeAiProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_google(model, context, options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_headers, GoogleOptions};
+    use crate::types::{zero_model_cost, Model, ModelInput, StreamOptions};
+
+    fn opencode_model() -> Model {
+        Model {
+            id: "gemini-3-flash".into(),
+            name: "Gemini".into(),
+            api: "google-generative-ai".into(),
+            provider: "opencode".into(),
+            base_url: "https://opencode.ai/zen/v1".into(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: zero_model_cost(),
+            context_window: 1_000,
+            max_tokens: 100,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn opencode_requests_use_the_routing_identity() {
+        let model = opencode_model();
+        let options = GoogleOptions::from_base(StreamOptions {
+            session_id: Some("session-1".into()),
+            ..Default::default()
+        });
+        let headers = build_headers(&model, &options, "key".into());
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("User-Agent"), Some("prime-agent"));
+        assert_eq!(header("x-opencode-session"), Some("session-1"));
+        assert_eq!(header("session_id"), None);
+    }
+
+    #[test]
+    fn non_opencode_requests_keep_their_existing_headers() {
+        let mut model = opencode_model();
+        model.provider = "google".into();
+        let options = GoogleOptions::from_base(StreamOptions {
+            session_id: Some("session-1".into()),
+            ..Default::default()
+        });
+        let headers = build_headers(&model, &options, "key".into());
+        assert!(headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("x-opencode-session")));
+        assert!(headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("User-Agent")));
     }
 }

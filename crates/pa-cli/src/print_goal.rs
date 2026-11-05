@@ -645,14 +645,12 @@ impl PrintGoalSurface {
 }
 
 #[cfg(test)]
-// The faux provider registry is process-global: one std lock serializes every test that drives it.
+// The faux provider registry is process-global: one shared lock serializes every pa-cli test that drives it.
 mod tests {
     use super::*;
+    use crate::test_support::FAUX_TEST_LOCK;
     use pa_core::session_engine::provider_adapter::json_round_trip;
     use serde_json::json;
-
-    /// One test at a time over the global faux registry.
-    static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// One captured event line (the sink's frames, in order).
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
@@ -1192,7 +1190,7 @@ mod tests {
         let bed = goal_bed(
             script(&json!(["goal turn reply", "wrap-up reply"]), 128_000),
             no_compaction(),
-            Some(("finish the work", Some(5))),
+            Some(("finish the work", Some(1))),
         )
         .await;
         let (counter, subscription) = agent_run_counter(&bed.engine).await;
@@ -1205,7 +1203,7 @@ mod tests {
         assert_eq!(goal.status, pa_types::goal::GoalStatus::BudgetLimited);
         assert_eq!(
             goal.last_reason.as_deref(),
-            Some("Reached 5 token goal budget")
+            Some("Reached 1 token goal budget")
         );
         assert_eq!(goal.continuations_used, 0, "the steer consumes no slot");
         let texts = assistant_texts(&bed.engine).await;

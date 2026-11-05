@@ -8,10 +8,14 @@
             system = "x86_64-linux";
             pkgs = import nixpkgs { inherit system; };
             compiled = pkgs.callPackage ./nix/build.nix { };
+            # CI has already run the full workspace gate; rebuilding the audited
+            # test profile here used to duplicate the package checkPhase.
+            compiled-ci = compiled.overrideAttrs (_: { doCheck = false; });
             prime-agent = pkgs.callPackage ./nix/package.nix { inherit compiled; };
+            prime-agent-ci = pkgs.callPackage ./nix/package.nix { compiled = compiled-ci; };
         in {
             packages.${system} = {
-                inherit prime-agent compiled;
+                inherit prime-agent compiled prime-agent-ci;
                 default = prime-agent;
             };
             apps.${system}.default = {

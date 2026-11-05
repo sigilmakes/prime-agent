@@ -236,7 +236,14 @@ pub fn stream_once_with_native(
             max_tokens: options.max_tokens,
             signal: Some(cancel.clone()),
             api_key,
-            transport: None,
+            transport: options.transport.map(|transport| match transport {
+                pa_agent::types::Transport::Auto => pa_types::ai::Transport::Auto,
+                pa_agent::types::Transport::Sse => pa_types::ai::Transport::Sse,
+                pa_agent::types::Transport::Websocket => pa_types::ai::Transport::Websocket,
+                pa_agent::types::Transport::WebsocketCached => {
+                    pa_types::ai::Transport::WebsocketCached
+                }
+            }),
             service_tier,
             cache_retention: None,
             session_id: options.session_id.clone(),
@@ -595,6 +602,46 @@ mod tests {
                 registration.unregister();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn configured_transport_reaches_the_provider_options() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("transport-plumbing-test".to_owned()),
+                ..Default::default()
+            });
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&received);
+        let factory = pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, _| {
+            captured
+                .lock()
+                .unwrap()
+                .push(options.and_then(|options| options.transport));
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "ok",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }));
+        registration.set_responses(vec![factory]);
+        let mut stream = stream_once(
+            &registration.get_model(),
+            None,
+            None,
+            None,
+            LlmContext::default(),
+            StreamRequestOptions {
+                transport: Some(pa_agent::types::Transport::Sse),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        stream.result().await.unwrap();
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![Some(pa_types::ai::Transport::Sse)]
+        );
+        registration.unregister();
     }
 
     #[tokio::test]

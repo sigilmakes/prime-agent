@@ -9,6 +9,17 @@ use std::sync::Arc;
 use crate::abort::AbortSignal;
 use crate::BoxFut;
 
+/// Provider transport selected by the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    Auto,
+    Sse,
+    Websocket,
+    #[serde(rename = "websocket-cached")]
+    WebsocketCached,
+}
+
 /// Thinking/reasoning level for models that support it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

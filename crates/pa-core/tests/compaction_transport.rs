@@ -102,6 +102,7 @@ async fn summary_respects_mandatory_thinking() {
         Vec::new(),
         None,
         "summary failed",
+        None,
     )
     .await
     .unwrap();
@@ -129,6 +130,7 @@ async fn dropped_summary_closes_hung_transport() {
                 Vec::new(),
                 on_delta,
                 "summary failed",
+                None,
             )
             .await
         });
@@ -172,6 +174,7 @@ async fn summary_preserves_unspecified_reasoning_when_off_is_supported() {
             Vec::new(),
             None,
             "summary failed",
+            None,
         )
         .await
         .unwrap();
@@ -199,6 +202,7 @@ async fn branch_summary_respects_mandatory_thinking() {
     let result = generate_branch_summary(
         &entries,
         GenerateBranchSummaryOptions {
+            session_id: None,
             model: &model,
             api_key: Some("synthetic-key".into()),
             custom_instructions: None,

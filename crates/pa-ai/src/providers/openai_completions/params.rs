@@ -347,8 +347,12 @@ pub(crate) fn build_headers(
         }
     }
 
+    crate::providers::opencode_headers::with_opencode_headers(
+        &model.provider,
+        conversation_id,
+        &mut headers,
+    );
     headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
-    let _ = conversation_id;
     headers
 }
 
@@ -389,6 +393,46 @@ mod tests {
             }),
             "the auth owner's header must ship: {headers:?}"
         );
+    }
+
+    #[test]
+    fn opencode_headers_use_the_raw_session_id_and_caller_wins() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "m", "name": "m", "api": "openai-completions",
+            "provider": "opencode", "baseUrl": "https://opencode.ai/zen/v1",
+            "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000, "maxTokens": 100
+        }))
+        .unwrap();
+        let compat = crate::providers::openai_completions::get_compat(&model);
+        let headers = build_headers(&model, "k", None, None, &compat, Some("session-1"));
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("User-Agent"), Some("prime-agent"));
+        assert_eq!(header("x-opencode-session"), Some("session-1"));
+        assert_eq!(header("session_id"), None);
+
+        let caller = std::collections::HashMap::from([
+            ("user-agent".to_string(), "caller-agent".to_string()),
+            (
+                "X-OpenCode-Session".to_string(),
+                "caller-session".to_string(),
+            ),
+        ]);
+        let headers = build_headers(&model, "k", Some(&caller), None, &compat, Some("session-1"));
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("user-agent"), Some("caller-agent"));
+        assert_eq!(header("x-opencode-session"), Some("caller-session"));
     }
 
     /// Assemble params for a compiled catalog model with a reasoning level requested, mirroring

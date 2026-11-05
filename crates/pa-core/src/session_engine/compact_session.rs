@@ -36,6 +36,8 @@ mod tests;
 pub struct CompactOptions<'a> {
     /// Per-session plugin inference routing for auxiliary summary calls.
     pub(crate) inference: Option<std::sync::Arc<super::inference_router::AuxiliaryInference>>,
+    /// The owning session id: TS passes it through every compaction summary call.
+    pub(crate) session_id: Option<String>,
     pub model: pa_types::ai::Model,
     /// Resolved API key (None falls back to provider env resolution).
     pub api_key: Option<String>,
@@ -356,6 +358,7 @@ pub(crate) async fn summarize_attempt(
                     request,
                     options.summary_delta.clone(),
                     "Summarization failed",
+                    options.session_id.as_deref(),
                     options.inference.as_ref(),
                 )
             },
@@ -386,6 +389,7 @@ pub(crate) async fn summarize_attempt(
                     // exact committed summary.
                     None,
                     "Turn prefix summarization failed",
+                    options.session_id.as_deref(),
                     options.inference.as_ref(),
                 )
             },

@@ -306,7 +306,8 @@ const CORPUS: &[&[&str]] = &[
 
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
-        return Some(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        return path.exists().then_some(path);
     }
     let found = Command::new("which")
         .arg("prime-agent")
@@ -323,11 +324,16 @@ struct InvocationOutput {
     stderr: String,
 }
 
-fn run(binary: &Path, args: &[&str], sandbox: &Path) -> InvocationOutput {
-    let output = Command::new("timeout")
-        .arg("20")
-        .arg(binary)
-        .args(args)
+fn isolate_child(command: &mut Command, sandbox: &Path) {
+    // A differential run may be launched from inside a live agent worker.
+    // Never let that worker's state dirs, daemon socket, or install identity
+    // leak into the fixture under comparison.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("PRIME_AGENT_INTERNAL_") {
+            command.env_remove(key);
+        }
+    }
+    command
         .env("HOME", sandbox.join("home"))
         // Isolate the agent state dir: the TS binary resolves the real home
         // through passwd rather than $HOME, so the env override is the only
@@ -338,9 +344,21 @@ fn run(binary: &Path, args: &[&str], sandbox: &Path) -> InvocationOutput {
         // `shutdown --force` kills unrelated sockets (containment contract).
         .env("TMPDIR", sandbox.join("tmp"))
         .env("PI_OFFLINE", "1")
-        .current_dir(sandbox.join("cwd"))
-        .output()
-        .expect("failed to spawn binary under test");
+        .env_remove("PRIME_AGENT_AGENT_DIR")
+        .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
+        .env_remove("PRIME_AGENT_DAEMON_SOCKET")
+        .env_remove("PRIME_AGENT_INSTALL_MANAGED_BY")
+        .env_remove("PRIME_AGENT_KERNEL_OWNER_PID")
+        .env_remove("PRIME_AGENT_PLUGIN_SESSION_ID")
+        .env_remove("PRIME_AGENT_SESSION_DIR")
+        .current_dir(sandbox.join("cwd"));
+}
+
+fn run(binary: &Path, args: &[&str], sandbox: &Path) -> InvocationOutput {
+    let mut command = Command::new("timeout");
+    command.arg("20").arg(binary).args(args);
+    isolate_child(&mut command, sandbox);
+    let output = command.output().expect("failed to spawn binary under test");
     InvocationOutput {
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -658,15 +676,8 @@ fn run_with_env(
     envs: &[(&str, &str)],
 ) -> InvocationOutput {
     let mut command = Command::new("timeout");
-    command
-        .arg("20")
-        .arg(binary)
-        .args(args)
-        .env("HOME", sandbox.join("home"))
-        .env("TMPDIR", sandbox.join("tmp"))
-        .env("PRIME_AGENT_CODING_AGENT_DIR", sandbox.join("agent"))
-        .env("PI_OFFLINE", "1")
-        .current_dir(sandbox.join("cwd"));
+    command.arg("20").arg(binary).args(args);
+    isolate_child(&mut command, sandbox);
     for (key, value) in envs {
         command.env(key, value);
     }

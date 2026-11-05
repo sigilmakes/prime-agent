@@ -101,6 +101,7 @@ async fn split_turn_compaction_runs_two_summarizer_calls_and_merges_the_turn_con
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -272,6 +273,7 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model: model.clone(),
             api_key: None,
@@ -326,6 +328,7 @@ async fn injected_custom_turn_cuts_whole_turns_the_double_row_splits() {
     let outcome = execute_compaction(
         &mut doubled,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -439,6 +442,7 @@ async fn split_turn_without_history_makes_only_the_prefix_call() {
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -608,6 +612,7 @@ async fn a_split_turn_compaction_commits_both_summary_slices_before_its_entry() 
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,
@@ -712,6 +717,7 @@ async fn an_aborted_compaction_fails_its_slices_and_records_cancelled() {
     let error = execute_compaction(
         &mut session,
         CompactOptions {
+            session_id: None,
             inference: None,
             model,
             api_key: None,

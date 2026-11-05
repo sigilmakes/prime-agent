@@ -15,6 +15,14 @@
 
 // Internal ported modules are crate-private: the only public API is the
 // runtime boundary below (see crates/pa-cli/README.md).
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// The faux provider registers process-globally. Every pa-cli test module
+    /// that drives it must hold this one lock: per-module locks still allow
+    /// another module's registration to replace the provider mid-test.
+    pub(crate) static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+}
+
 pub(crate) mod args;
 pub(crate) mod client_settings;
 pub(crate) mod client_update;

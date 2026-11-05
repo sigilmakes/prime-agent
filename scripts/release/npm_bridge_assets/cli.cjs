@@ -4,7 +4,7 @@
 // Ship this at dist/bundle/cli.js and cli-node.js: historical updaters relaunch
 // their original absolute entrypoint, including the later shim's Node fallback.
 const { spawn, spawnSync } = require("node:child_process");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -47,11 +47,16 @@ const receipt = path.join(receiptDir, metadata.version);
 const failedReceipt = `${receipt}.failed`;
 const legacySocketMarker = path.join(receiptDir, "legacy-daemon-socket");
 const legacySocket = path.join(os.tmpdir(), `prime-agent-${process.getuid()}`, "daemon.sock");
-const rustSocket = path.join(process.env.TMPDIR || "/tmp", `prime-agent-rust-${process.getuid()}`, "daemon.sock");
-// Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
-// socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
-const pinnedRustSocket = process.platform !== "linux" && Buffer.byteLength(rustSocket) > 103
-  ? path.join("/tmp", `prime-agent-rust-${process.getuid()}`, "daemon.sock") : rustSocket;
+const rustTmp = process.env.TMPDIR || "/tmp";
+const rustSocket = path.join(rustTmp, `prime-agent-rust-${process.getuid()}`, "daemon.sock");
+// Match pa-daemon socket_dir(): reserve the longest worker endpoint. A deep
+// TMPDIR gets a hashed rust-only directory under /tmp, never the product default.
+const rustWorker = path.join(rustTmp, `prime-agent-rust-${process.getuid()}`,
+  "worker-000000000000-000000000000.sock");
+const rustSocketHash = createHash("sha256").update(rustTmp).digest("hex").slice(0, 12);
+const pinnedRustSocket = Buffer.byteLength(rustWorker) > 103
+  ? path.join("/tmp", `prime-agent-rust-${process.getuid()}-${rustSocketHash}`, "daemon.sock")
+  : rustSocket;
 const nativeEnvironment = { ...process.env,
   PRIME_AGENT_CODING_AGENT_DIR: process.env.PRIME_AGENT_CODING_AGENT_DIR || path.join(os.homedir(), ".prime/agent"),
   PRIME_AGENT_DAEMON_SOCKET: process.env.PRIME_AGENT_DAEMON_SOCKET ||

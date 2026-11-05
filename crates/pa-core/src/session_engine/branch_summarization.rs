@@ -253,6 +253,8 @@ pub fn finalize_branch_summary(
 /// Options for one branch-summary generation run.
 pub struct GenerateBranchSummaryOptions<'a> {
     pub model: &'a pa_types::ai::Model,
+    /// The owning session id: TS passes it into the branch summary call.
+    pub session_id: Option<&'a str>,
     pub api_key: Option<String>,
     pub custom_instructions: Option<&'a str>,
     /// Replace the default prompt instead of appending the custom focus.
@@ -308,12 +310,29 @@ pub fn estimate_branch_summary_request_tokens(
 
 /// Generate the abandoned-branch summary: prepare the entries under the
 /// context budget, run the summarizer, and fold in the file-ops block.
+/// The branch-summary request carries the owning session id; TS passes the
+/// branch session's `sessionId`, not a summary-specific key.
+fn branch_summary_stream_options(
+    api_key: Option<String>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
+    session_id: Option<&str>,
+) -> pa_ai::types::StreamOptions {
+    pa_ai::types::StreamOptions {
+        max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
+        api_key,
+        headers: headers.map(|headers| headers.into_iter().collect()),
+        session_id: session_id.map(str::to_string),
+        ..Default::default()
+    }
+}
+
 pub async fn generate_branch_summary(
     entries: &[FileEntry],
     options: GenerateBranchSummaryOptions<'_>,
 ) -> BranchSummaryResult {
     let GenerateBranchSummaryOptions {
         model,
+        session_id,
         api_key,
         custom_instructions,
         replace_instructions,
@@ -400,13 +419,9 @@ pub async fn generate_branch_summary(
             .collect(),
         tools: None,
     };
-    let mut stream_options =
-        pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
-            max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
-            api_key,
-            headers: summary_headers.map(|headers| headers.into_iter().collect()),
-            ..Default::default()
-        });
+    let mut stream_options = pa_ai::types::SimpleStreamOptions::from_base(
+        branch_summary_stream_options(api_key, summary_headers, session_id),
+    );
     stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
     let response = match pa_ai::complete_simple(model, &context, Some(stream_options)).await {
         Ok(response) => response,
@@ -588,6 +603,7 @@ mod tests {
         let result = generate_branch_summary(
             &entries,
             GenerateBranchSummaryOptions {
+                session_id: None,
                 model: &model,
                 api_key: None,
                 custom_instructions: Some("focus on x"),
@@ -620,6 +636,7 @@ mod tests {
         let result = generate_branch_summary(
             &[],
             GenerateBranchSummaryOptions {
+                session_id: None,
                 model: &model,
                 api_key: None,
                 custom_instructions: None,
@@ -683,6 +700,7 @@ mod tests {
             let result = generate_branch_summary(
                 &entries,
                 GenerateBranchSummaryOptions {
+                    session_id: None,
                     model: &model,
                     api_key: None,
                     custom_instructions: None,
@@ -701,6 +719,15 @@ mod tests {
 
     /// The window estimate mirrors `generate_branch_summary`'s slicing
     /// and prompt exactly.
+    #[test]
+    fn branch_summary_options_carry_the_owning_session_id() {
+        let options = branch_summary_stream_options(None, None, Some("session-1"));
+        assert_eq!(options.session_id.as_deref(), Some("session-1"));
+        assert!(branch_summary_stream_options(None, None, None)
+            .session_id
+            .is_none());
+    }
+
     #[test]
     fn branch_window_estimate_shapes() {
         // An entry too large for the slice budget: no wire request, but

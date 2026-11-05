@@ -236,6 +236,22 @@ pub fn is_stale_codex_continuation_error(error: &CodexStreamError) -> bool {
 }
 
 const STALE_CONTINUATION_ERROR_CODE: &str = "previous_response_not_found";
+const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE: &str = "websocket_connection_limit_reached";
+
+/// The Codex backend's 60-minute WebSocket cap. It can arrive before the first event; a fresh
+/// socket is the correct recovery because the cached connection is already at its limit.
+#[must_use]
+pub fn is_websocket_connection_limit_error(error: &CodexStreamError) -> bool {
+    match error {
+        CodexStreamError::Api(api) => api
+            .code
+            .as_deref()
+            .is_some_and(|code| code == WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE),
+        CodexStreamError::Protocol(_)
+        | CodexStreamError::Transport(_)
+        | CodexStreamError::Aborted => false,
+    }
+}
 
 struct CodexErrorPayload<'a> {
     code: Option<&'a str>,

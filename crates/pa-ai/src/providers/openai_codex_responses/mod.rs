@@ -12,8 +12,8 @@ use crate::event_stream::{
 use crate::models::clamp_thinking_level;
 use crate::providers::openai_codex_responses::errors::{
     append_transport_failure_diagnostic, apply_codex_service_tier_pricing,
-    is_stale_codex_continuation_error, map_codex_event, parse_error_response,
-    resolve_codex_service_tier, CodexProtocolError, CodexStreamError,
+    is_stale_codex_continuation_error, is_websocket_connection_limit_error, map_codex_event,
+    parse_error_response, resolve_codex_service_tier, CodexProtocolError, CodexStreamError,
 };
 use crate::providers::openai_codex_responses::request::{
     build_sse_headers, build_websocket_headers, create_codex_request_id, extract_account_id,
@@ -21,7 +21,8 @@ use crate::providers::openai_codex_responses::request::{
 };
 use crate::providers::openai_codex_responses::session::{
     clear_continuation, record_request_stats, record_websocket_failure,
-    record_websocket_sse_fallback, take_continuation_for,
+    record_websocket_sse_fallback, record_websocket_success, take_continuation_for,
+    websocket_retry_ready,
 };
 use crate::providers::openai_codex_responses::websocket::{
     acquire_websocket, build_cached_websocket_request_body, release_connection, ContinuationState,
@@ -234,13 +235,20 @@ async fn run_stream(
     );
     let body_json = body.to_string();
     let transport = options.base.transport.unwrap_or(Transport::Auto);
-    // Transport recovery belongs to this logical request. Historical socket failures must not
-    // disable the next request's fresh WebSocket probe.
-    if transport != Transport::Sse {
+    // A transport failure puts the session on SSE for a cooldown, then allows
+    // one fresh WebSocket probe. Each failed probe doubles the next cooldown
+    // (30s, 1m, 2m, ... 15m); a successful probe clears it automatically.
+    let websocket_deferred =
+        transport != Transport::Sse && !websocket_retry_ready(session_id.as_deref());
+    if websocket_deferred {
+        record_websocket_sse_fallback(session_id.as_deref());
+    }
+    if transport != Transport::Sse && !websocket_deferred {
         let mut progress = WebSocketAttemptProgress::default();
         // Retry a stale previous_response_id once on a fresh connection (the failed attempt's
         // cleanup dropped the cached one); the retry resends the full request body.
         let mut chain_reset_retried = false;
+        let mut connection_limit_retried = false;
         loop {
             let attempt = run_websocket_attempt(
                 model,
@@ -262,6 +270,7 @@ async fn run_stream(
                     {
                         return Err(ProviderError::Aborted);
                     }
+                    record_websocket_success(session_id.as_deref());
                     return Ok(());
                 }
                 Err(error) => {
@@ -284,25 +293,31 @@ async fn run_stream(
                         output.response_id = None;
                         continue;
                     }
-                    if aborted || error.is_non_transport_error() {
+                    // The server caps a WebSocket at 60 minutes. Latest Pi opens one fresh
+                    // socket immediately when that arrives before any visible event; the failed
+                    // attempt already evicted the capped connection.
+                    let connection_limit =
+                        !progress.visible && is_websocket_connection_limit_error(&error);
+                    if !aborted && !connection_limit_retried && connection_limit {
+                        connection_limit_retried = true;
+                        output.response_id = None;
+                        continue;
+                    }
+                    if aborted || (error.is_non_transport_error() && !connection_limit) {
                         return Err(error.into_provider_error());
                     }
-                    // Aborts and non-transport errors were handled above; only transport failures
-                    // reach the SSE fallback.
-                    let transport_error = match &error {
-                        CodexStreamError::Transport(transport) => transport,
-                        CodexStreamError::Api(_) | CodexStreamError::Protocol(_) => {
-                            return Err(error.into_provider_error());
-                        }
-                        CodexStreamError::Aborted => return Err(error.into_provider_error()),
-                    };
-                    append_transport_failure_diagnostic(
-                        output,
-                        transport_error,
-                        transport_debug_name(transport),
-                        progress.visible,
-                        body_json.len(),
-                    );
+                    // Transport failures and an exhausted connection-limit retry reach SSE. A
+                    // connection-limit API error has no WebSocket transport shape, so only
+                    // transport errors add the transport diagnostic.
+                    if let CodexStreamError::Transport(transport_error) = &error {
+                        append_transport_failure_diagnostic(
+                            output,
+                            transport_error,
+                            transport_debug_name(transport),
+                            progress.visible,
+                            body_json.len(),
+                        );
+                    }
                     record_websocket_failure(session_id.as_deref(), &error);
                     if progress.visible {
                         return Err(error.into_provider_error());
@@ -412,6 +427,7 @@ async fn run_websocket_attempt(
     progress: &mut WebSocketAttemptProgress,
 ) -> Result<(), CodexStreamError> {
     progress.used_continuation = false;
+    progress.visible = false;
     let session_id = options.base.session_id.as_deref();
     let url = resolve_codex_websocket_url(&model.base_url);
     let connection = acquire_websocket(

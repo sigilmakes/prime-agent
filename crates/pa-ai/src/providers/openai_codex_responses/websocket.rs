@@ -29,8 +29,11 @@ use crate::providers::openai_codex_responses::session::{
 };
 
 pub const OPENAI_BETA_RESPONSES_WEBSOCKETS: &str = "responses_websockets=2026-02-06";
-// Rotate before the upstream 60-minute cap, regardless of idle or active reuse.
-const SESSION_WEBSOCKET_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(50);
+// Pi keeps a released socket for five idle minutes, then closes it.
+const SESSION_WEBSOCKET_CACHE_TTL: std::time::Duration = std::time::Duration::from_mins(5);
+// The Codex backend caps a WebSocket at 60 minutes. Pi rotates at 55 minutes so the
+// next request never reuses a socket that is about to be rejected.
+const SESSION_WEBSOCKET_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(55);
 
 #[allow(unused_imports)] // re-exported for consumers of the transport module
 pub use crate::providers::openai_codex_responses::session::{
@@ -468,7 +471,10 @@ pub async fn acquire_websocket(
         if let Some(state) = state.as_mut() {
             let expired = state.connections.get(session_id).is_some_and(|entry| {
                 !entry.busy
-                    && (entry.created_at.elapsed() >= SESSION_WEBSOCKET_MAX_AGE
+                    && (entry
+                        .last_released_at
+                        .is_some_and(|released| released.elapsed() >= SESSION_WEBSOCKET_CACHE_TTL)
+                        || entry.created_at.elapsed() >= SESSION_WEBSOCKET_MAX_AGE
                         || entry.worker.is_closed())
             });
             let retired = if expired {
@@ -486,6 +492,7 @@ pub async fn acquire_websocket(
         {
             Some(entry) if !entry.busy => {
                 entry.busy = true;
+                entry.last_released_at = None;
                 Some((entry.worker.clone(), entry.connection_id))
             }
             _ => None,
@@ -505,7 +512,6 @@ pub async fn acquire_websocket(
     // Decide cache ownership after connecting: another request can acquire the session while
     // this handshake is in flight. Never overwrite its connection or continuation.
     let (worker, connection_id) = spawn_connection_worker(url, headers, signal).await?;
-    let created_at = Instant::now();
     let cached = if let Ok(mut state) = session_state().lock() {
         if let std::collections::hash_map::Entry::Vacant(slot) =
             state.connections.entry(session_id.to_string())
@@ -514,7 +520,8 @@ pub async fn acquire_websocket(
                 worker: worker.clone(),
                 busy: true,
                 continuation: None,
-                created_at,
+                last_released_at: None,
+                created_at: Instant::now(),
                 connection_id,
             });
             true
@@ -552,20 +559,45 @@ pub async fn release_connection(
         connection.close().await;
         return;
     }
+    let released_at = Instant::now();
     let matched = match session_state().lock() {
         Ok(mut state) => match state.connections.get_mut(&session_id) {
             Some(entry) if entry.connection_id == connection.connection_id => {
                 entry.busy = false;
                 entry.continuation = continuation;
+                entry.last_released_at = Some(released_at);
                 true
             }
             _ => false,
         },
         Err(_) => false,
     };
-    if !matched {
+    if matched {
+        schedule_session_websocket_expiry(session_id, connection.connection_id, released_at);
+    } else {
         connection.close().await;
     }
+}
+
+/// Close a released connection if it is still idle when Pi's five-minute cache
+/// TTL elapses.
+fn schedule_session_websocket_expiry(session_id: String, connection_id: u64, released_at: Instant) {
+    tokio::spawn(async move {
+        tokio::time::sleep(SESSION_WEBSOCKET_CACHE_TTL).await;
+        let Ok(mut state) = session_state().lock() else {
+            return;
+        };
+        let expired = state.connections.get(&session_id).is_some_and(|entry| {
+            !entry.busy
+                && entry.connection_id == connection_id
+                && entry.last_released_at == Some(released_at)
+        });
+        if expired {
+            if let Some(entry) = state.connections.remove(&session_id) {
+                let _ = entry.worker.try_send(WorkerCommand::Close);
+            }
+        }
+    });
 }
 
 /// Compute the continuation delta (input items beyond the cached baseline) for an

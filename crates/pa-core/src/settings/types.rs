@@ -72,6 +72,7 @@ pub enum QueueModeSetting {
 pub enum TransportSetting {
     Auto,
     Sse,
+    #[serde(rename = "websocket")]
     WebSocket,
     #[serde(rename = "websocket-cached")]
     WebSocketCached,

@@ -1,6 +1,8 @@
 //! Per-OS Rust daemon endpoint naming: Unix socket files under
-//! `<tmpdir>/prime-agent-rust-<uid>/`; Windows named pipes in the `\\.\\pipe\\`
-//! namespace. Rust defaults stay separate from the TypeScript runtime.
+//! `<tmpdir>/prime-agent-rust-<uid>/`; a too-deep tmpdir falls back to a
+//! hashed name under `/tmp` so it cannot alias the product default. Windows
+//! named pipes live in the `\\.\\pipe\\` namespace. Rust defaults stay
+//! separate from the TypeScript runtime.
 use std::path::{Path, PathBuf};
 
 use crate::paths::hash_key;
@@ -21,14 +23,19 @@ pub fn socket_dir() -> PathBuf {
 fn socket_dir_for(tmp: &Path, uid: u32) -> PathBuf {
     let name = format!("prime-agent-rust-{uid}");
     let dir = tmp.join(&name);
-    if std::os::unix::net::SocketAddr::from_pathname(
-        dir.join("worker-000000000000-000000000000.sock"),
-    )
-    .is_err()
-    {
-        return Path::new("/tmp").join(name);
+    // Reserve the longest generated endpoint. The byte cap is the portable
+    // non-Linux sun_path ceiling, and the installer and npm bridge use the
+    // same 103-byte probe so every launcher resolves the same directory.
+    let probe = dir.join("worker-000000000000-000000000000.sock");
+    if probe.as_os_str().as_encoded_bytes().len() <= 103 {
+        return dir;
     }
-    dir
+    // A deep TMPDIR must not alias the product default: that path is the
+    // live daemon for every process whose TMPDIR is short, so a test (or a
+    // relocated install) with a long TMPDIR would bind or connect to it.
+    // Keep the fallback under /tmp but namespace it by the rejected root.
+    let suffix = hash_key(&tmp.to_string_lossy(), 12);
+    Path::new("/tmp").join(format!("{name}-{suffix}"))
 }
 
 /// The socket-dir half of a discovery state root on Windows. Keep Rust
@@ -121,7 +128,14 @@ mod tests {
             let worker = dir.join("worker-000000000000-000000000000.sock");
             assert!(SocketAddr::from_pathname(&worker).is_ok());
             if length >= 65 {
-                assert_eq!(dir, Path::new("/tmp/prime-agent-rust-501"));
+                assert_eq!(
+                    dir,
+                    Path::new("/tmp").join(format!(
+                        "prime-agent-rust-501-{}",
+                        hash_key(&tmp.to_string_lossy(), 12)
+                    ))
+                );
+                assert_ne!(dir, Path::new("/tmp/prime-agent-rust-501"));
             } else {
                 assert_eq!(dir, tmp.join("prime-agent-rust-501"));
             }
@@ -134,11 +148,29 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn deep_tmpdir_yields_to_a_connectable_directory() {
+        use std::os::unix::net::SocketAddr;
+
         let tmp = PathBuf::from(format!("/{}", "d".repeat(120)));
+        let dir = socket_dir_for(&tmp, 501);
         assert_eq!(
-            socket_dir_for(&tmp, 501),
-            Path::new("/tmp/prime-agent-rust-501")
+            dir,
+            Path::new("/tmp").join(format!(
+                "prime-agent-rust-501-{}",
+                hash_key(&tmp.to_string_lossy(), 12)
+            ))
         );
+        assert_ne!(dir, Path::new("/tmp/prime-agent-rust-501"));
+        assert!(
+            SocketAddr::from_pathname(dir.join("worker-000000000000-000000000000.sock")).is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_tmpdirs_get_distinct_socket_directories() {
+        let first = PathBuf::from(format!("/{}", "a".repeat(120)));
+        let second = PathBuf::from(format!("/{}", "b".repeat(120)));
+        assert_ne!(socket_dir_for(&first, 501), socket_dir_for(&second, 501));
     }
 
     #[cfg(unix)]

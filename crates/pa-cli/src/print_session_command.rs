@@ -167,12 +167,9 @@ mod tests {
     use super::*;
     use crate::print_boundary::TurnBoundary;
     use crate::print_goal::PrintGoalSurface;
+    use crate::test_support::FAUX_TEST_LOCK;
     use pa_core::session_engine::slash_commands::{parse_session_command, SlashCommandRegistry};
     use serde_json::json;
-
-    /// One test at a time over the global faux registry (the same contract `print_goal` and
-    /// `print_boundary` tests hold).
-    static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
 
