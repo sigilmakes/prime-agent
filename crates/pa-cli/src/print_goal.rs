@@ -1237,16 +1237,18 @@ mod tests {
     #[tokio::test]
     async fn threshold_hold_mints_before_the_compaction_and_runs_after() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        // A small output budget keeps the 20k window's combined input+output
-        // ceiling satisfiable (threshold 13_904 = window - 2_000 budget - 4_096
-        // estimate floor).
+        // The 40k window leaves the compacted held turn below the threshold
+        // (33_904 = window - 2_000 budget - 4_096 estimate floor) while the 60k
+        // history still crosses it on the first request. The held turn reports
+        // 24_001 total tokens (input plus cache write), so it needs the wider
+        // window to avoid a second, unintended threshold compaction.
         let mut model_script = script(
             &json!([
                 "crossing reply",
                 "the compaction summary",
                 "continuation reply",
             ]),
-            20_000,
+            40_000,
         );
         model_script["maxTokens"] = json!(2_000);
         let bed = goal_bed_with_resumed_goal(
