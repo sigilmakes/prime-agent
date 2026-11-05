@@ -713,7 +713,9 @@ impl PtyReader {
     }
 
     fn wait_from(&mut self, mark: usize, needle: &[u8], what: &str) {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // The kitty flags push lands after the TUI handshake; a loaded host can
+        // stretch that under a parallel workspace run.
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if find_subsequence_from(&self.output, mark, needle).is_some() {
                 return;
