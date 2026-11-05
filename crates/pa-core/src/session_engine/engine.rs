@@ -256,6 +256,16 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     );
 
     let service_tier_preference = settings.get_default_service_tier();
+    // Captured before `settings` moves into the resource loader: the provider
+    // transport selection.
+    let agent_transport = match settings.get_transport() {
+        crate::settings::TransportSetting::Auto => pa_agent::types::Transport::Auto,
+        crate::settings::TransportSetting::Sse => pa_agent::types::Transport::Sse,
+        crate::settings::TransportSetting::WebSocket => pa_agent::types::Transport::Websocket,
+        crate::settings::TransportSetting::WebSocketCached => {
+            pa_agent::types::Transport::WebsocketCached
+        }
+    };
     // Captured before `settings` moves into the resource loader: the
     // compaction budget.
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
@@ -754,6 +764,7 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         // Stable identity for provider cache affinity, session headers, and
         // websocket reuse. Without it Codex sends no prompt_cache_key.
         session_id: Some(session_id),
+        transport: Some(agent_transport),
         ..Default::default()
     });
 

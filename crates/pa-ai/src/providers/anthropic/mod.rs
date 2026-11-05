@@ -350,7 +350,7 @@ pub(crate) fn build_request_headers(
             .collect()
     });
 
-    let mut default_headers = match model.provider.as_str() {
+    let default_headers = match model.provider.as_str() {
         "cloudflare-ai-gateway" => {
             let mut headers = Map::new();
             headers.insert("accept".into(), json!("application/json"));
@@ -410,14 +410,14 @@ pub(crate) fn build_request_headers(
         }
     };
 
-    // withOpenCodeHeaders: session header for opencode providers.
-    if model.provider == "opencode" || model.provider == "opencode-go" {
-        if let Some(session_id) = session_id {
-            default_headers.insert("session_id".into(), json!(session_id));
-        }
-    }
-
     let mut pairs = headers_to_pairs(&default_headers);
+    if !is_oauth {
+        crate::providers::opencode_headers::with_opencode_headers(
+            &model.provider,
+            session_id,
+            &mut pairs,
+        );
+    }
     // The Anthropic SDK always sends the API version; mirror it.
     pairs.insert(0, ("anthropic-version".into(), "2023-06-01".into()));
     if model.provider == "cloudflare-ai-gateway" || model.provider == "github-copilot" || is_oauth {
@@ -611,6 +611,24 @@ mod subscription_identity_tests {
             headers: None,
             compat: None,
         }
+    }
+
+    #[test]
+    fn non_oauth_opencode_requests_use_the_routing_identity() {
+        let mut model = test_model();
+        model.provider = "opencode".into();
+        let (headers, is_oauth) =
+            build_request_headers(&model, "api-key", false, false, None, Some("session-1"));
+        assert!(!is_oauth);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("User-Agent"), Some("prime-agent"));
+        assert_eq!(header("x-opencode-session"), Some("session-1"));
+        assert_eq!(header("session_id"), None);
     }
 
     #[test]

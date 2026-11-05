@@ -115,6 +115,7 @@ pub fn migrate(document: &mut serde_json::Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::TransportSetting;
     use serde_json::json;
 
     #[test]
@@ -173,6 +174,8 @@ mod tests {
         migrate(&mut map);
         assert_eq!(map.get("steeringMode"), Some(&json!("all")));
         assert_eq!(map.get("transport"), Some(&json!("websocket")));
+        let migrated: Settings = serde_json::from_value(Value::Object(map.clone())).unwrap();
+        assert_eq!(migrated.transport, Some(TransportSetting::WebSocket));
         assert_eq!(map.get("skills"), Some(&json!(["/x"])));
         assert_eq!(
             map.get("retry"),

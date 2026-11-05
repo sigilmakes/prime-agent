@@ -195,8 +195,10 @@ pub async fn run_side_question(
         before_tool_call: Some(before_tool_call),
         should_stop_after_turn: Some(should_stop_after_turn),
         // TS `side-question.ts` reuses the parent session id so the side
-        // question shares the parent's prompt-cache namespace.
+        // question shares the parent's prompt-cache namespace, but forces SSE
+        // so it cannot touch the parent's Codex WebSocket continuation.
         session_id: parent.session_id().map(ToString::to_string),
+        transport: Some(pa_agent::types::Transport::Sse),
         ..Default::default()
     }));
 
@@ -623,7 +625,7 @@ mod tests {
             seen_by_caller
                 .lock()
                 .unwrap()
-                .push(options.session_id.clone());
+                .push((options.session_id.clone(), options.transport));
             base(model, context, options)
         });
         let sink: SideQuestionSink = Arc::new(|_| true);
@@ -640,8 +642,11 @@ mod tests {
         assert_eq!(result.status, SideQuestionStatus::Complete);
         assert_eq!(
             seen.lock().unwrap().as_slice(),
-            &[Some("parent-session".to_string())],
-            "TS side questions reuse parent.sessionId"
+            &[(
+                Some("parent-session".to_string()),
+                Some(pa_agent::types::Transport::Sse)
+            )],
+            "TS side questions reuse parent.sessionId and force SSE"
         );
     }
 

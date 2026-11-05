@@ -96,7 +96,7 @@ pub type BeforeEventFn = Arc<
 >;
 
 /// Options for constructing an [`Agent`]. The loop's request surface
-/// (temperature, max tokens, reasoning, session id, API key) is carried by
+/// (temperature, max tokens, reasoning, session id, transport, API key) is carried by
 /// [`crate::agent_loop::AgentLoopConfig`] / [`crate::stream::StreamRequestOptions`].
 #[derive(Default)]
 pub struct AgentOptions {
@@ -115,6 +115,8 @@ pub struct AgentOptions {
     pub steering_mode: Option<QueueMode>,
     pub follow_up_mode: Option<QueueMode>,
     pub session_id: Option<String>,
+    /// The host's configured provider transport; `None` keeps the provider default.
+    pub transport: Option<crate::types::Transport>,
     pub tool_execution: Option<ToolExecutionMode>,
 }
 
@@ -381,6 +383,7 @@ struct AgentInner {
     /// await.
     model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
+    transport: Option<crate::types::Transport>,
     tool_execution: ToolExecutionMode,
 }
 
@@ -593,6 +596,7 @@ impl AgentInner {
         config.max_tokens = None;
         config.reasoning = reasoning;
         config.session_id.clone_from(&self.session_id);
+        config.transport = self.transport;
         config.transform_context.clone_from(&self.transform_context);
         config.get_api_key.clone_from(&self.get_api_key);
         config.should_stop_after_turn = should_stop_after_turn;
@@ -901,6 +905,7 @@ impl Agent {
             get_continuation_messages: Mutex::new(options.get_continuation_messages),
             model_override: Mutex::new(None),
             session_id: options.session_id,
+            transport: options.transport,
             tool_execution: options
                 .tool_execution
                 .unwrap_or(ToolExecutionMode::Parallel),
@@ -1570,6 +1575,26 @@ mod tests {
         first.abort();
         let _cancelled = first.await;
         assert!(agent.has_queued_messages());
+    }
+
+    #[tokio::test]
+    async fn configured_transport_reaches_the_stream_request() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&seen);
+        let stream_fn: crate::stream::StreamFn = Arc::new(move |_, _, options| {
+            captured.lock().unwrap().push(options.transport);
+            Box::pin(async { Err(anyhow::anyhow!("stop after capture")) })
+        });
+        let agent = Agent::new(AgentOptions {
+            stream_fn: Some(stream_fn),
+            transport: Some(crate::types::Transport::Sse),
+            ..Default::default()
+        });
+        assert!(agent.prompt("capture").await.is_err());
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[Some(crate::types::Transport::Sse)]
+        );
     }
 
     #[tokio::test]
