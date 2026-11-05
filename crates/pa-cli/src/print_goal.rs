@@ -1190,7 +1190,7 @@ mod tests {
         let bed = goal_bed(
             script(&json!(["goal turn reply", "wrap-up reply"]), 128_000),
             no_compaction(),
-            Some(("finish the work", Some(5))),
+            Some(("finish the work", Some(1))),
         )
         .await;
         let (counter, subscription) = agent_run_counter(&bed.engine).await;
@@ -1203,7 +1203,7 @@ mod tests {
         assert_eq!(goal.status, pa_types::goal::GoalStatus::BudgetLimited);
         assert_eq!(
             goal.last_reason.as_deref(),
-            Some("Reached 5 token goal budget")
+            Some("Reached 1 token goal budget")
         );
         assert_eq!(goal.continuations_used, 0, "the steer consumes no slot");
         let texts = assistant_texts(&bed.engine).await;
