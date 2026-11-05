@@ -28,7 +28,8 @@ use pa_core::platform::LockDir;
 /// (`PA_TS_BINARY` or `prime-agent` on PATH; skipped when absent).
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
-        return Some(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        return path.exists().then_some(path);
     }
     let found = Command::new("which")
         .arg("prime-agent")

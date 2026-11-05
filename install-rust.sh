@@ -90,7 +90,8 @@
 #          the product binary/package — the user can remove it by hand).
 #   3. WHY DAEMON CONFLICTS ARE GONE AFTER THIS INSTALL: the launcher
 #      pins a rust-only daemon socket
-#      (${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock) — a
+#      (${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock, or a
+#      hashed /tmp fallback for a deep TMPDIR) — a
 #      different path than the TS daemon's own — so BY DEFAULT this CLI
 #      and the TS daemon never meet (each product's default socket is its
 #      own), and the install-time stop-when-idle above retires a TS daemon
@@ -1606,11 +1607,17 @@ ts_stop_rust_stopped=""
 windows_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
-# The launcher pins /tmp when the TMPDIR path exceeds the non-Linux
-# 103-byte sun_path limit (pa-daemon socket_dir() owns the rule); the
-# stop probe must look where the launcher actually pinned.
-if [ "$OS" != "Linux" ] && [ "$(printf '%s' "$rust_socket" | wc -c)" -gt 103 ]; then
-  rust_socket="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+# The launcher pins a hashed /tmp directory when the longest generated
+# worker endpoint exceeds the portable 103-byte sun_path limit; the stop
+# probe must look where the launcher actually pinned.
+rust_worker="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/worker-000000000000-000000000000.sock"
+if [ "$(printf '%s' "$rust_worker" | wc -c)" -gt 103 ]; then
+  rust_hash="$(if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${TMPDIR:-/tmp}" | sha256sum
+  else
+    printf '%s' "${TMPDIR:-/tmp}" | shasum -a 256
+  fi | cut -c1-12)"
+  rust_socket="/tmp/prime-agent-rust-$(id -u)-${rust_hash}/daemon.sock"
 fi
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
 # THE TILDE EXPANSION (the CLI's own spelling: the products' clients
@@ -2854,11 +2861,17 @@ if [ -f "$(dirname "$0")/../share/.prime-agent-npm-bridge/legacy-daemon-socket" 
   export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/prime-agent-$(id -u)/daemon.sock}"
 else
   if [ -z "${PRIME_AGENT_DAEMON_SOCKET:-}" ]; then
-    # Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
-    # socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
+    # A deep TMPDIR gets a hashed rust-only directory under /tmp, matching
+    # pa-daemon socket_dir(); never the product default.
     PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
-    if [ "$(printf '%s' "$PRIME_AGENT_DAEMON_SOCKET" | wc -c)" -gt 103 ] && [ "$(uname -s)" != "Linux" ]; then
-      PRIME_AGENT_DAEMON_SOCKET="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+    launcher_worker="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/worker-000000000000-000000000000.sock"
+    if [ "$(printf '%s' "$launcher_worker" | wc -c)" -gt 103 ]; then
+      launcher_hash="$(if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "${TMPDIR:-/tmp}" | sha256sum
+      else
+        printf '%s' "${TMPDIR:-/tmp}" | shasum -a 256
+      fi | cut -c1-12)"
+      PRIME_AGENT_DAEMON_SOCKET="/tmp/prime-agent-rust-$(id -u)-${launcher_hash}/daemon.sock"
     fi
     export PRIME_AGENT_DAEMON_SOCKET
   fi

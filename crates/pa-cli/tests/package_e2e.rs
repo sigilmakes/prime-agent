@@ -443,7 +443,8 @@ fn normalize_keeps_git_fetch_ranges_for_all_hash_shapes() {
 
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
-        return Some(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        return path.exists().then_some(path);
     }
     let found = Command::new("which")
         .arg("prime-agent")

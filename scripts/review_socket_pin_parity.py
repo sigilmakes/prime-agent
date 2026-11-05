@@ -7,6 +7,7 @@ published launcher on Linux with the exact CI-built Rust payload. Both daemons
 run only in fixture-owned homes and socket paths. No installer downloads occur.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,7 +78,7 @@ def main():
     args = parser.parse_args()
     receipt = {'passed': False, 'scenario': 'socket_pin', 'runs': {},
                'scope': 'Actual daemons: legacy namespace compatibility and explicit override; actual Rust launcher and installer stop probe: UTF-8 byte fallback under Darwin uname shim.',
-               'intentional_difference': 'Unmarked Rust launcher uses rust-only namespace; non-Linux oversized pins fall back to /tmp. TS namespace and migration marker remain unchanged.'}
+               'intentional_difference': 'Unmarked Rust launcher uses its own namespace; a deep TMPDIR with an oversized worker endpoint falls back to a hashed rust-only /tmp directory. TS namespace and migration marker remain unchanged.'}
     fallback_dir = None
     try:
         assert digest(Path(os.environ['PA_TS_ARCHIVE'])) == TS_ARCHIVE_SHA256
@@ -113,7 +114,8 @@ def main():
                     long_tmp = str(owned / ('é' * 25))
                     long_pin = f'{long_tmp}/prime-agent-rust-{fixture_uid}/daemon.sock'
                     assert len(long_pin) <= 103 and len(long_pin.encode()) > 103, long_pin
-                    candidate = Path(f'/tmp/prime-agent-rust-{fixture_uid}')
+                    suffix = hashlib.sha256(long_tmp.encode()).hexdigest()[:12]
+                    candidate = Path(f'/tmp/prime-agent-rust-{fixture_uid}-{suffix}')
                     # Atomic reservation: a collision never authorizes cleanup.
                     candidate.mkdir(mode=0o700, exist_ok=False)
                     fallback_dir = candidate
