@@ -456,9 +456,18 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     assert_eq!(seeded_summary["rlmChildId"], handle.rlm_child_id);
     assert_eq!(seeded_summary["sessionName"], "worker-a");
     assert_eq!(seeded_summary["parentSessionPath"], parent_file);
-    assert_eq!(
-        seeded_summary["messageCount"],
-        child_entry["summary"]["messageCount"]
+    // The prompt can finish between the subscribe snapshot and the kill.
+    // Passivation must retain every message the child had reached, but it
+    // must not require a message count frozen before the turn ran.
+    let subscribed_message_count = child_entry["summary"]["messageCount"]
+        .as_u64()
+        .expect("resident child message count");
+    let seeded_message_count = seeded_summary["messageCount"]
+        .as_u64()
+        .expect("seeded child message count");
+    assert!(
+        seeded_message_count >= subscribed_message_count,
+        "passivation dropped messages: {seeded_summary:?}"
     );
 
     let (mut client_b, _hello_b) = Client::connect(&socket);
@@ -477,8 +486,8 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .unwrap_or_else(|| panic!("seeded child missing from the snapshot: {roster:?}"));
     assert_eq!(seeded_entry["status"], "inactive");
     assert_eq!(
-        seeded_entry["summary"]["messageCount"],
-        child_entry["summary"]["messageCount"]
+        seeded_entry["summary"]["messageCount"], seeded_message_count,
+        "a fresh subscriber must see the same durable count"
     );
     let parent_entry = roster
         .iter()
