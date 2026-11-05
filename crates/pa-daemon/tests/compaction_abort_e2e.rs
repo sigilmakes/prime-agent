@@ -359,7 +359,22 @@ struct Client {
 
 impl Client {
     fn connect(socket: &Path) -> Client {
-        let stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
+        // `bind` creates the path before `listen`, so a connect can race the
+        // listener under parallel load. Retry the pre-listen refusal briefly.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let stream = loop {
+            match std::os::unix::net::UnixStream::connect(socket) {
+                Ok(stream) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "supervisor never accepted connections: {error}"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("connect: {error:?}"),
+            }
+        };
         let writer = stream.try_clone().expect("clone");
         let mut client = Client {
             reader: BufReader::new(stream),
