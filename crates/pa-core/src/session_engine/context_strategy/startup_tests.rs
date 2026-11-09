@@ -78,7 +78,7 @@ impl StartupFixture {
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(cwd.join("policy.lua"), source).unwrap();
+        std::fs::write(agent.join("policy.lua"), source).unwrap();
         std::fs::write(
             agent.join("settings.json"),
             json!({
@@ -859,7 +859,7 @@ async fn startup_native_export(
 async fn startup_native_optchat_sources_only_prefix_then_includes_admitted_user_once_at_model() {
     let f = StartupFixture::new("return {}", "optchat/tree");
     std::fs::create_dir_all(f.cwd.join(".prime/agent")).unwrap();
-    std::fs::write(f.cwd.join("summarizer.lua"), STARTUP_TREE_SUMMARIZER).unwrap();
+    std::fs::write(f.agent.join("summarizer.lua"), STARTUP_TREE_SUMMARIZER).unwrap();
     std::fs::write(
         f.agent.join("settings.json"),
         json!({

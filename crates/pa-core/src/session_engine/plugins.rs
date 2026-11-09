@@ -97,19 +97,6 @@ pub(crate) struct SessionPlugins {
 #[derive(Clone)]
 pub(super) struct ContextRegistration(Arc<()>);
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfiguredPlugin {
-    enabled: Option<bool>,
-    path: Option<PathBuf>,
-    #[serde(default = "empty_config")]
-    config: Value,
-}
-
-fn empty_config() -> Value {
-    json!({})
-}
-
 impl SessionPlugins {
     pub(crate) fn new(session: String, cwd: PathBuf, agent_dir: PathBuf, depth: u32) -> Self {
         // Command reservations belong to session composition, not the Lua runtime.
@@ -162,6 +149,9 @@ impl SessionPlugins {
                 bail!("plugin settings read failed: {}", error.message);
             }
             let settings = settings.settings();
+            if settings.extra.contains_key("plugins") {
+                bail!("plugins must be an object of {{enabled?, path?, config?}} entries");
+            }
             let pinned = manager
                 .pinned_context_strategy
                 .lock()
@@ -189,18 +179,12 @@ impl SessionPlugins {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            if let Some(value) = settings.plugins.as_ref() {
-                let entries = value.as_object().context("plugins must be an object")?;
-                for (name, entry) in entries {
-                    if crate::plugins::validate_plugin_name(name).is_err() {continue;}
-                    if !entry.is_object() {wanted.insert(name.clone());continue;}
-                    let enabled = match entry.get("enabled") {
-                        Some(Value::Bool(enabled)) => *enabled,
-                        None => desired.contains_key(name),
-                        // An invalid enabled setting is a replacement error, not
-                        // an implicit request to retire the last valid source.
-                        Some(_) => true,
-                    };
+            if let Some(plugins) = settings.plugins.as_ref() {
+                for (name, entry) in plugins {
+                    if crate::plugins::validate_plugin_name(name).is_err() {
+                        continue;
+                    }
+                    let enabled = entry.enabled.unwrap_or(desired.contains_key(name));
                     if enabled {
                         wanted.insert(name.clone());
                     } else {
@@ -228,12 +212,9 @@ impl SessionPlugins {
                 manager.disabled_plugins.lock().unwrap_or_else(PoisonError::into_inner).clone_from(&disabled);
             }
             let enabled_result=(||->anyhow::Result<Arc<ContributionSnapshot>> {
-            if let Some(value) = settings.plugins.as_ref() {
-                let entries = value.as_object().context("plugins must be an object")?;
-                for (name, entry) in entries {
+            if let Some(plugins) = settings.plugins.as_ref() {
+                for (name, entry) in plugins {
                     crate::plugins::validate_plugin_name(name)?;
-                    let entry: ConfiguredPlugin = serde_json::from_value(entry.clone())
-                        .with_context(|| format!("invalid plugin configuration: {name}"))?;
                     let builtin = desired.remove(name);
                     if !entry.enabled.unwrap_or(builtin.is_some()) {
                         disabled.insert(name.clone());
@@ -242,14 +223,9 @@ impl SessionPlugins {
                     if !entry.config.is_object() {
                         bail!("plugin {name} config must be an object");
                     }
-                    let source = match entry.path {
-                        Some(path) => {
-                            // Relative explicit paths resolve from cwd. No ambient discovery.
-                            let path = manager.cwd.join(path);
-                            std::fs::read_to_string(&path).with_context(|| {
-                                format!("read plugin {name} at {}", path.display())
-                            })?
-                        }
+                    let source = match entry.path.as_deref() {
+                        Some(path) => crate::plugins::source::read(name, path, &manager.agent_dir)?
+                            .1,
                         None => builtin
                             .map(|source| source.source)
                             .or_else(|| {
@@ -1245,7 +1221,7 @@ mod context_selection_tests {
                 {name='fatal',run=function() return {status='fatal',message='stop'} end},
                 {name='success',run=function() return {status='success',summary='summary',first_kept_entry_id='kept'} end}
             }}";
-        std::fs::write(f.manager.cwd.join("custom.lua"), source).unwrap();
+        std::fs::write(f.manager.agent_dir.join("custom.lua"), source).unwrap();
         f.configure(&json!({"contextStrategy":"custom/custom","plugins":{"custom":{"enabled":true,"path":"custom.lua"},"default_context":{"enabled":false}}}));
         f.manager.reload().await.unwrap();
         let strategy = f.manager.context_selection().unwrap();
@@ -1286,7 +1262,7 @@ mod context_selection_tests {
     #[tokio::test]
     async fn context_registration_rejects_away_then_back_even_same_generation() {
         let f = Fixture::new();
-        std::fs::write(f.manager.cwd.join("away.lua"), "return {context_strategies={{name='other',run=function(input) return {messages=input.messages} end}}}").unwrap();
+        std::fs::write(f.manager.agent_dir.join("away.lua"), "return {context_strategies={{name='other',run=function(input) return {messages=input.messages} end}}}").unwrap();
         f.configure(&json!({"plugins":{"away":{"enabled":true,"path":"away.lua"}}}));
         f.manager.reload().await.unwrap();
         let strategy = f.manager.context_selection().unwrap();

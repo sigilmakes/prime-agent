@@ -199,12 +199,12 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(
-            cwd.join("good.lua"),
+            agent.join("good.lua"),
             "return {hooks={{name='context_contribution',run=function() return {instructions='GOOD-INSTRUCTIONS'} end}}}",
         )
         .unwrap();
         std::fs::write(
-            cwd.join("broken.lua"),
+            agent.join("broken.lua"),
             "return {hooks={{name='context_contribution',run=function() error('boom') end}}}",
         )
         .unwrap();

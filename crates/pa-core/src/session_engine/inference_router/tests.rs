@@ -24,6 +24,7 @@ end}}}
 struct Fixture {
     dir: tempfile::TempDir,
     cwd: std::path::PathBuf,
+    agent_dir: std::path::PathBuf,
     engine: super::super::engine::SessionEngine,
     native: Arc<ScriptedProvider>,
 }
@@ -35,7 +36,7 @@ impl Fixture {
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(cwd.join("provider.lua"), source).unwrap();
+        std::fs::write(agent_dir.join("provider.lua"), source).unwrap();
         std::fs::write(
             agent_dir.join("settings.json"),
             json!({"enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
@@ -48,7 +49,7 @@ impl Fixture {
         let native = Arc::new(ScriptedProvider::new(model.clone()));
         let engine = create_session(SessionEngineConfig {
             cwd: cwd.clone(),
-            agent_dir,
+            agent_dir: agent_dir.clone(),
             model: Some(model),
             stream_fn: Some(native.stream_fn()),
             daemonless: true,
@@ -60,6 +61,7 @@ impl Fixture {
         Self {
             dir,
             cwd,
+            agent_dir,
             engine,
             native,
         }
@@ -75,7 +77,7 @@ impl Fixture {
     }
     async fn disable(&self) {
         std::fs::write(
-            self.cwd.join(".prime/agent/settings.json"),
+            self.agent_dir.join("settings.json"),
             json!({"plugins":{"route":{"enabled":false}}}).to_string(),
         )
         .unwrap();
@@ -187,7 +189,7 @@ async fn invalid_reload_preserves_route_and_disable_fences_queued_terminal_witho
         stream.next_event().await,
         Some(AssistantMessageEvent::Start { .. })
     ));
-    std::fs::write(f.cwd.join("provider.lua"), "not valid Lua !").unwrap();
+    std::fs::write(f.agent_dir.join("provider.lua"), "not valid Lua !").unwrap();
     assert!(f.engine.reload_plugins().await.is_err());
     assert_eq!(
         text(&f.stream("preserved").await.result().await.unwrap()),

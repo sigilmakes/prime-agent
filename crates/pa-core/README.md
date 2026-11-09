@@ -73,6 +73,16 @@ subprocess work.
 
 ## Plugin host foundation
 
+`plugins::ManifestCatalog` is the session-free fact layer. It reads the global
+`plugins` setting, resolves each enabled explicit path against the agent
+directory, and evaluates the chunk in a fresh VM with no host capabilities.
+It extracts the returned `providers` table, validates every value as bounded
+pure data (nil/bool/number/string/table, depth and byte limits), and caches the
+result by source bytes plus config. Facts are available to registry construction
+before any session exists. A provider entry in this pass is facts only;
+functions, threads, and userdata are rejected. Project-scope `plugins` entries
+are dropped during settings merge, so a cloned repository cannot execute Lua.
+
 `plugins::PluginHost` is a session-local deep module with three lifecycle operations:
 `reconcile(Vec<PluginSource>)`, `snapshot()`, and
 `invoke(&Contribution, JSON, CancellationToken)`. This is a new public core interface

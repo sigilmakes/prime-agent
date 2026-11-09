@@ -515,7 +515,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(
-            cwd.join("test.lua"),
+            agent.join("test.lua"),
             "return {commands={{name='local_command',run=function(input) return input.args end}}}",
         )
         .unwrap();

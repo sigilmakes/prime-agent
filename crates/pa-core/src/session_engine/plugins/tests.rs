@@ -52,8 +52,8 @@ impl Fixture {
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(cwd.join("alpha.lua"), alpha).unwrap();
-        std::fs::write(cwd.join("beta.lua"), BETA).unwrap();
+        std::fs::write(agent.join("alpha.lua"), alpha).unwrap();
+        std::fs::write(agent.join("beta.lua"), BETA).unwrap();
         std::fs::write(agent.join("settings.json"), json!({
             "enableBuiltinSkills":false,"bundledSkills":{"websearch":false},
             "plugins":{
@@ -95,12 +95,47 @@ impl Fixture {
         }
     }
 
-    fn project(&self, value: &Value) {
-        std::fs::write(
-            self.cwd.join(".prime/agent/settings.json"),
-            value.to_string(),
-        )
-        .unwrap();
+    fn configure(&self, value: &Value) {
+        let path = self.agent.join("settings.json");
+        let Some(update) = value.as_object() else {
+            std::fs::write(path, value.to_string()).unwrap();
+            return;
+        };
+        let mut document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_default())
+                .unwrap_or_else(|_| json!({}));
+        if !document.is_object() {
+            document = json!({});
+        }
+        for (key, entry) in update {
+            if key == "plugins" {
+                let Some(plugins) = entry.as_object() else {
+                    document[key] = entry.clone();
+                    continue;
+                };
+                let target = document
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("plugins")
+                    .or_insert_with(|| json!({}));
+                for (name, plugin) in plugins {
+                    match (target.get_mut(name), plugin.as_object()) {
+                        (Some(existing), Some(fields)) if existing.is_object() => {
+                            let existing = existing.as_object_mut().unwrap();
+                            for (field, value) in fields {
+                                existing.insert(field.clone(), value.clone());
+                            }
+                        }
+                        _ => {
+                            target[name] = plugin.clone();
+                        }
+                    }
+                }
+            } else {
+                document[key] = entry.clone();
+            }
+        }
+        std::fs::write(path, document.to_string()).unwrap();
     }
 }
 
@@ -204,7 +239,7 @@ async fn configured_plugins_cross_engine_kernel_and_slash_surfaces() {
         .unwrap();
     assert_eq!(
         info,
-        json!({"config":{"value":"project","nested":{"kept":true}},"identity":{"session":session,"cwd":f.cwd,"role":"root"},"input":{"hello":"world"},"observed":0,"started":false,"tick":0})
+        json!({"config":{"value":"global","nested":{"kept":true}},"identity":{"session":session,"cwd":f.cwd,"role":"root"},"input":{"hello":"world"},"observed":0,"started":false,"tick":0})
     );
     assert_eq!(
         run_export(engine, "beta", "value", json!({}))
@@ -298,7 +333,7 @@ async fn reload_is_atomic_config_sensitive_and_history_neutral() {
         .contains("Plugins reloaded"));
     assert_eq!(catalog(engine).await, initial);
     assert_eq!(history(engine).await, before);
-    f.project(&json!({"plugins":{"alpha":{"config":{"value":"changed"}}}}));
+    f.configure(&json!({"plugins":{"alpha":{"config":{"value":"changed"}}}}));
     assert_eq!(command(engine, "/reload").await.error, None);
     let changed = catalog(engine).await;
     assert_ne!(
@@ -328,31 +363,28 @@ async fn reload_is_atomic_config_sensitive_and_history_neutral() {
     .is_err());
     // A malformed replacement must preserve the entire previous host, including
     // the unchanged second plugin. Settings errors must not masquerade as disable.
-    std::fs::write(f.cwd.join("alpha.lua"), "not Lua !").unwrap();
+    std::fs::write(f.agent.join("alpha.lua"), "not Lua !").unwrap();
     assert!(command(engine, "/reload").await.error.is_some());
     assert_eq!(catalog(engine).await, changed);
     assert!(engine.plugin_diagnostic().is_some());
+    let baseline = std::fs::read_to_string(f.agent.join("settings.json")).unwrap();
     for malformed in [Value::Null, json!([])] {
-        f.project(&malformed);
+        f.configure(&malformed);
         assert!(engine.reload_plugins().await.is_err());
         assert_eq!(catalog(engine).await, changed);
     }
-    f.project(&json!({"plugins":null,"defaultProvider":42}));
+    std::fs::write(f.agent.join("settings.json"), &baseline).unwrap();
+    f.configure(&json!({"plugins":{"alpha":{"config":null}}}));
     assert!(engine.reload_plugins().await.is_err());
     assert_eq!(catalog(engine).await, changed);
-    f.project(&json!({"plugins":null}));
+    f.configure(&json!({"plugins":"malformed"}));
     assert!(engine.reload_plugins().await.is_err());
     assert_eq!(catalog(engine).await, changed);
-    f.project(&json!({"plugins":{"alpha":{"config":null}}}));
+    std::fs::write(f.agent.join("settings.json"), "{malformed").unwrap();
     assert!(engine.reload_plugins().await.is_err());
     assert_eq!(catalog(engine).await, changed);
-    f.project(&json!({"plugins":"malformed"}));
-    assert!(engine.reload_plugins().await.is_err());
-    assert_eq!(catalog(engine).await, changed);
-    std::fs::write(f.cwd.join(".prime/agent/settings.json"), "{malformed").unwrap();
-    assert!(engine.reload_plugins().await.is_err());
-    assert_eq!(catalog(engine).await, changed);
-    f.project(&json!({"plugins":{"alpha":{"enabled":false}}}));
+    std::fs::write(f.agent.join("settings.json"), &baseline).unwrap();
+    f.configure(&json!({"plugins":{"alpha":{"enabled":false}}}));
     assert_eq!(command(engine, "/reload").await.error, None);
     let disabled = catalog(engine).await;
     assert_eq!(disabled["exports"].as_array().unwrap().len(), 1);
@@ -374,7 +406,7 @@ async fn reload_is_atomic_config_sensitive_and_history_neutral() {
     assert_eq!(history(engine).await, before);
     assert_eq!(engine.plugin_diagnostic(), None);
     // No manager operation deletes files or saved data.
-    assert!(f.cwd.join("alpha.lua").is_file());
+    assert!(f.agent.join("alpha.lua").is_file());
     assert!(f.agent.join("settings.json").is_file());
 }
 
@@ -411,7 +443,7 @@ async fn disable_cancels_active_kernel_work_and_fences_saved_command() {
     })
     .await
     .unwrap();
-    f.project(&json!({"plugins":{"alpha":{"enabled":false}}}));
+    f.configure(&json!({"plugins":{"alpha":{"enabled":false}}}));
     engine.reload_plugins().await.unwrap();
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(5), running)
@@ -461,7 +493,7 @@ async fn malformed_activation_does_not_kill_normal_startup_and_sessions_are_priv
         catalog(&first.engine).await["session"],
         catalog(&second.engine).await["session"]
     );
-    first.project(&json!({"plugins":{"alpha":{"enabled":false}}}));
+    first.configure(&json!({"plugins":{"alpha":{"enabled":false}}}));
     first.engine.reload_plugins().await.unwrap();
     assert_eq!(
         catalog(&second.engine).await["exports"]
@@ -470,7 +502,7 @@ async fn malformed_activation_does_not_kill_normal_startup_and_sessions_are_priv
             .len(),
         6
     );
-    second.project(&json!({"plugins":{"beta":{"path":"missing.lua"}}}));
+    second.configure(&json!({"plugins":{"beta":{"path":"missing.lua"}}}));
     let prior = catalog(&second.engine).await;
     assert!(second.engine.reload_plugins().await.is_err());
     assert_eq!(catalog(&second.engine).await, prior);
@@ -481,6 +513,7 @@ async fn namespace_incompatible_replacement_preserves_native_inventory() {
     let f = Fixture::new(ALPHA).await;
     let engine = &f.engine;
     let before = catalog(engine).await;
+    let baseline = std::fs::read_to_string(f.agent.join("settings.json")).unwrap();
     for name in [
         "refresh",
         "inventory",
@@ -491,17 +524,17 @@ async fn namespace_incompatible_replacement_preserves_native_inventory() {
         "class",
         "return",
     ] {
-        f.project(&json!({"plugins":{(name):{"enabled":true,"path":"beta.lua","config":{}}}}));
+        f.configure(&json!({"plugins":{(name):{"enabled":true,"path":"beta.lua","config":{}}}}));
         assert!(
             engine.reload_plugins().await.is_err(),
             "accepted plugin name {name}"
         );
         assert_eq!(catalog(engine).await, before);
     }
-    f.project(&json!({}));
+    std::fs::write(f.agent.join("settings.json"), &baseline).unwrap();
     for name in ["return", "class", "await", "_private"] {
         std::fs::write(
-            f.cwd.join("alpha.lua"),
+            f.agent.join("alpha.lua"),
             format!("return {{exports={{{{name='{name}',run=function() return true end}}}}}}"),
         )
         .unwrap();
@@ -513,7 +546,7 @@ async fn namespace_incompatible_replacement_preserves_native_inventory() {
     }
     // Python root-manager names are valid on a plugin view; soft keywords are
     // valid identifiers. Native command/hook names do not inherit Python bans.
-    std::fs::write(f.cwd.join("alpha.lua"),"return {exports={{name='refresh',run=function() return true end},{name='match',run=function() return true end}},commands={{name='class',run=function() return true end}},hooks={{name='return',run=function() return true end}}}").unwrap();
+    std::fs::write(f.agent.join("alpha.lua"),"return {exports={{name='refresh',run=function() return true end},{name='match',run=function() return true end}},commands={{name='class',run=function() return true end}},hooks={{name='return',run=function() return true end}}}").unwrap();
     engine.reload_plugins().await.unwrap();
     assert_eq!(
         run_export(engine, "alpha", "refresh", json!({}))
@@ -543,7 +576,7 @@ async fn active_inventory_is_a_live_model_prompt_tail_not_canonical_history() {
         Some(expected.as_str())
     );
     let before = history(engine).await;
-    f.project(&json!({"plugins":{"alpha":{"enabled":false},"beta":{"enabled":false}}}));
+    f.configure(&json!({"plugins":{"alpha":{"enabled":false},"beta":{"enabled":false}}}));
     engine.reload_plugins().await.unwrap();
     assert_eq!(history(engine).await, before);
     assert_eq!(engine.assembled_system_prompt(), base);
@@ -585,13 +618,13 @@ print(json.dumps({"alpha":await plugin.alpha.report(hello="kernel"),"beta":await
     assert_eq!(first.status, ExecuteStatus::Ok, "{:?}", first.error);
     let output: Value = serde_json::from_str(first.stdout.trim()).unwrap();
     assert_eq!(output["alpha"]["input"], json!({"hello":"kernel"}));
-    assert_eq!(output["alpha"]["config"]["value"], "project");
+    assert_eq!(output["alpha"]["config"]["value"], "global");
     assert_eq!(output["beta"]["configured"], "second");
     assert_eq!(
         output["alpha"]["identity"]["session"],
         engine.session.session_id().await
     );
-    f.project(&json!({"plugins":{"alpha":{"config":{"value":"kernel-change"}}}}));
+    f.configure(&json!({"plugins":{"alpha":{"config":{"value":"kernel-change"}}}}));
     engine.reload_plugins().await.unwrap();
     let changed = manager
         .execute(
@@ -612,7 +645,7 @@ print("NEW_GENERATION_OK")
     assert_eq!(changed.status, ExecuteStatus::Ok, "{:?}", changed.error);
     assert!(changed.stdout.contains("NEW_GENERATION_OK"));
     std::fs::write(
-        f.cwd.join("alpha.lua"),
+        f.agent.join("alpha.lua"),
         "return {exports={{name='class',run=function() return true end}}}",
     )
     .unwrap();
@@ -625,14 +658,14 @@ print("NEW_GENERATION_OK")
         .await
         .unwrap();
     assert_eq!(preserved.status, ExecuteStatus::Ok, "{:?}", preserved.error);
-    f.project(&json!({"plugins":{"alpha":{"enabled":false},"beta":{"enabled":false}}}));
+    f.configure(&json!({"plugins":{"alpha":{"enabled":false},"beta":{"enabled":false}}}));
     engine.reload_plugins().await.unwrap();
-    std::fs::write(f.cwd.join("alpha.lua"), "return {exports={{name='refresh',run=function() return true end},{name='match',run=function() return true end},{name='case',run=function() return true end},{name='type',run=function() return true end}}}").unwrap();
-    f.project(&json!({}));
+    std::fs::write(f.agent.join("alpha.lua"), "return {exports={{name='refresh',run=function() return true end},{name='match',run=function() return true end},{name='case',run=function() return true end},{name='type',run=function() return true end}}}").unwrap();
+    f.configure(&json!({"plugins":{"alpha":{"enabled":true,"path":"alpha.lua"},"beta":{"enabled":true,"path":"beta.lua"}}}));
     engine.reload_plugins().await.unwrap();
     let accepted = manager.execute("assert await plugin.alpha.refresh() is True\nassert await plugin.alpha.match() is True\nassert await plugin.alpha.case() is True\nassert await plugin.alpha.type() is True",ExecuteOptions::default()).await.unwrap();
     assert_eq!(accepted.status, ExecuteStatus::Ok, "{:?}", accepted.error);
-    f.project(&json!({"plugins":{"alpha":{"enabled":false},"beta":{"enabled":false}}}));
+    f.configure(&json!({"plugins":{"alpha":{"enabled":false},"beta":{"enabled":false}}}));
     engine.reload_plugins().await.unwrap();
     let disabled = manager
         .execute(

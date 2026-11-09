@@ -1,6 +1,9 @@
 //! Settings types. All fields optional; JSON values of the wrong type load
 //! as `None` (the TS access-time typechecks), never a load error.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 // The mode is shared vocabulary: `pa-tui` renders diagrams from it but may not depend on
@@ -253,10 +256,29 @@ pub enum McpServerConfig {
     },
 }
 
-fn deserialize_plugin_configuration<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<serde_json::Value>, D::Error> {
-    serde_json::Value::deserialize(deserializer).map(Some)
+fn empty_plugin_config() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn is_empty_plugin_config(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+/// One explicit plugin declaration. `enabled` unset means the entry does not
+/// enable a file-backed plugin; `path` is absolute or relative to the agent
+/// directory; `config` is the owned JSON exposed as `config` to the chunk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(
+        default = "empty_plugin_config",
+        skip_serializing_if = "is_empty_plugin_config"
+    )]
+    pub config: serde_json::Value,
 }
 
 /// The settings document: every known field optional; unknown keys preserved.
@@ -308,14 +330,10 @@ pub struct Settings {
     pub shell_command_prefix: Option<String>,
     pub npm_command: Option<Vec<String>>,
     pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Explicit plugin map, validated atomically by the session plugin manager.
-    /// Retain malformed JSON values so reload cannot silently disable active plugins.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_plugin_configuration",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub plugins: Option<serde_json::Value>,
+    /// Global-only plugin declarations. Project scope never contributes entries,
+    /// so a cloned repository cannot cause Lua to execute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<BTreeMap<String, PluginEntry>>,
     pub packages: Option<Vec<serde_json::Value>>,
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,
