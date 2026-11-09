@@ -163,15 +163,16 @@ def target_environment(repo, state, ambient):
     return env
 
 
-def run_groups(groups, *, repo, state, env, deadline, jobs, failures):
+def run_groups(groups, *, repo, state, env, deadline, jobs):
     """Run whole-binary groups, recording failures instead of stopping at the first.
 
     A failing group does not cancel the ones behind it: one red target used to
     hide every target scheduled after it, which is how a broken main reached the
     default branch with only the first failure visible. Return ``(name, seconds)``
-    costs; failing names are appended to ``failures``.
+    costs and a list of ``(name, exit code, command)`` failures.
     """
     timings = []
+    failures = []
     pending = deque(groups)
     active = {}
     private_dirs = []
@@ -222,7 +223,7 @@ def run_groups(groups, *, repo, state, env, deadline, jobs, failures):
                 output.close()
             for private in private_dirs:
                 shutil.rmtree(private, ignore_errors=True)
-    return timings
+    return timings, failures
 
 
 def main():
@@ -246,11 +247,12 @@ def main():
     ordinary, exclusive = target_groups(metadata)
     print(f"Workspace tests: {len(ordinary)} parallel groups ({PARALLEL_SLOTS} slots), "
           f"{len(exclusive)} globally exclusive groups, then all doctests", flush=True)
-    failures = []
-    timings = run_groups(ordinary, repo=repo, state=args.state_root, env=env,
-                         deadline=deadline, jobs=PARALLEL_SLOTS, failures=failures)
-    timings += run_groups(exclusive, repo=repo, state=args.state_root, env=env,
-                          deadline=deadline, jobs=1, failures=failures)
+    timings, failures = run_groups(ordinary, repo=repo, state=args.state_root, env=env,
+                                   deadline=deadline, jobs=PARALLEL_SLOTS)
+    exclusive_timings, exclusive_failures = run_groups(
+        exclusive, repo=repo, state=args.state_root, env=env, deadline=deadline, jobs=1)
+    timings += exclusive_timings
+    failures += exclusive_failures
     doc_env = target_environment(repo, args.state_root / "doctests", env)
     run(["cargo", "test", "--locked", "--offline", "--workspace", "--doc"],
         repo=repo, env=doc_env, deadline=deadline)

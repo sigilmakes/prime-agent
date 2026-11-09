@@ -180,11 +180,16 @@ class WorkspaceTestScheduling(unittest.TestCase):
                     # Both targets reached readiness before either was released.
                     peers[0].sendall(b"f" if fail else b"x")
                     if fail:
-                        with self.assertRaises(subprocess.CalledProcessError) as error:
-                            future.result(timeout=5)
-                        self.assertEqual(error.exception.returncode, 7)
-                        self.assertFalse((root / "c.log").exists())
-                        self.assertEqual(peers[1].recv(1), b"")
+                        # A failing target no longer cancels the rest: the pending
+                        # target still starts, and the failure is reported at the end.
+                        peer, _ = server.accept()
+                        peers.append(peer)
+                        self.assertEqual(peer.recv(100).strip(), b"c")
+                        for peer in peers[1:]:
+                            peer.sendall(b"x")
+                        _, failures = future.result(timeout=5)
+                        self.assertEqual([code for _, code, _ in failures], [7])
+                        self.assertTrue((root / "c.log").exists())
                     else:
                         peer, _ = server.accept()
                         peers.append(peer)
@@ -208,7 +213,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
     def test_only_two_targets_run_and_a_slot_is_reused_after_completion(self):
         self.run_probe(False)
 
-    def test_failure_stops_active_target_and_does_not_start_pending_target(self):
+    def test_a_failure_does_not_cancel_the_remaining_targets(self):
         self.run_probe(True)
 
     def test_exclusive_phase_and_doctests_follow_parallel_phase(self):
@@ -219,7 +224,7 @@ class WorkspaceTestScheduling(unittest.TestCase):
                     patch.object(gate, "run", return_value=json.dumps({})), \
                     patch.object(gate, "target_groups", return_value=([("ordinary", [])],
                                                                     [("exclusive", [])])), \
-                    patch.object(gate, "run_groups") as run_groups, \
+                    patch.object(gate, "run_groups", return_value=([], [])) as run_groups, \
                     patch.object(gate, "target_environment", return_value={}), \
                     patch.object(gate, "run") as run:
                 run.return_value = json.dumps({})
