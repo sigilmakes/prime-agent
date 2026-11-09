@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, VmState};
+use mlua::{Function, HookTriggers, Lua, LuaSerdeExt, Table, VmState};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -57,8 +57,9 @@ pub(super) struct EvaluatedChunk {
     pub declaration: Table,
 }
 
-/// Build the plugin VM and evaluate one declarative chunk. There are no host
-/// capabilities in this VM; only the chunk, its owned `config`, and `null` exist.
+/// Build the plugin VM and evaluate one declarative chunk. Host capabilities are
+/// call-scoped, so this VM holds only the chunk, its owned `config`, and the
+/// standard library.
 pub(super) fn evaluate(source: &PluginSource) -> Result<EvaluatedChunk, PluginError> {
     if source.source.len() > 1024 * 1024 {
         return Err(PluginError::Invalid(format!(
@@ -66,19 +67,11 @@ pub(super) fn evaluate(source: &PluginSource) -> Result<EvaluatedChunk, PluginEr
             name = source.name
         )));
     }
-    // Trusted local plugins, not a hostile-code security sandbox. All external
-    // operations still require an explicit host capability; no ambient IO/package libs.
-    let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
-        LuaOptions::default(),
-    )
-    .map_err(lua_error)?;
+    // Trusted local plugins, not a hostile-code sandbox. The full safe standard
+    // library is present (io, os, load, print) short of the debug library; the
+    // limits below are resource bounds, not isolation promises.
+    let lua = Lua::new();
     lua.set_memory_limit(16 * 1024 * 1024).map_err(lua_error)?;
-    for name in ["dofile", "loadfile", "load", "print", "warn"] {
-        lua.globals()
-            .set(name, mlua::Value::Nil)
-            .map_err(lua_error)?;
-    }
     lua.globals().set("null", lua.null()).map_err(lua_error)?;
     // Serialize into this VM before activation. Lua mutations cannot change the
     // desired JSON retained for reconciliation or any other generation's config.
@@ -259,7 +252,6 @@ impl Generation {
 
 #[derive(Clone)]
 struct CallScope {
-    session: String,
     invocation: Uuid,
     contribution: Contribution,
     capabilities: Arc<dyn HostCapabilities>,
@@ -276,8 +268,8 @@ impl CallScope {
             let scope = call_scope.clone();
             async move {
                 let request = CapabilityRequest {
-                    session: scope.session.clone(), plugin: scope.contribution.plugin.clone(),
-                    generation: scope.contribution.generation, invocation: scope.invocation, operation,
+                    invocation: scope.invocation,
+                    operation,
                     input: lua.from_value(input)?,
                 };
                 let output = tokio::select! {
@@ -319,7 +311,6 @@ pub(super) async fn run(
     generation: Arc<Generation>,
     contribution: Contribution,
     input: Value,
-    session: String,
     capabilities: Arc<dyn HostCapabilities>,
     cancellation: CancellationToken,
     sender: mpsc::Sender<InvocationEvent>,
@@ -331,7 +322,6 @@ pub(super) async fn run(
     let work = cancellation.child_token();
     let _cancel_work_on_exit = work.clone().drop_guard();
     let scope = CallScope {
-        session,
         invocation: Uuid::new_v4(),
         contribution: contribution.clone(),
         capabilities,

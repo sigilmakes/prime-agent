@@ -121,19 +121,16 @@ impl HostCapabilities for PluginJobs {
             match request.operation.as_str() {
                 "jobs.enqueue" => {
                     let name = request.input["hook"].as_str().ok_or("job hook required")?;
-                    let target = host
-                        .snapshot()
-                        .contributions
-                        .iter()
-                        .find(|target| {
-                            target.plugin == request.plugin
-                                && target.generation == request.generation
-                                && target.kind == ContributionKind::Hook
-                                && target.name == name
-                        })
-                        .cloned()
-                        .ok_or("job target is not active")?;
+                    let snapshot = host.snapshot();
+                    let mut hooks = snapshot.contributions.iter().filter(|target| {
+                        target.kind == ContributionKind::Hook && target.name == name
+                    });
+                    let target = hooks.next().cloned().ok_or("job target is not active")?;
+                    if hooks.next().is_some() {
+                        return Err("job hook name is ambiguous across plugins".into());
+                    }
                     let retirement = host.retirement(&target).map_err(|e| e.to_string())?;
+                    let session_id = session.lock().await.get_session_id().to_owned();
                     let branch = match command_barrier.try_lock().ok() {
                         Some(_permit) => {
                             Some(session.lock().await.get_leaf_id().map(str::to_owned))
@@ -145,8 +142,8 @@ impl HostCapabilities for PluginJobs {
                     jobs.lock().unwrap_or_else(PoisonError::into_inner).insert(
                         id.clone(),
                         Job {
-                            plugin: request.plugin,
-                            generation: request.generation,
+                            plugin: target.plugin.clone(),
+                            generation: target.generation,
                             cancellation: stop.clone(),
                             state: json!({"status":"queued"}),
                         },
@@ -238,7 +235,7 @@ impl HostCapabilities for PluginJobs {
                             // Retired generations keep their terminal state for
                             // drains, but cannot publish into a replacement.
                             if let Err(error) = host.with_current_contributions(&[&target], || {
-                                observer(&request.session, outcome);
+                                observer(&session_id, outcome);
                             }) {
                                 tracing::debug!(%error, "retired plugin job outcome not published");
                             }
@@ -251,9 +248,6 @@ impl HostCapabilities for PluginJobs {
                     let id = request.input["id"].as_str().ok_or("job id required")?;
                     let mut jobs = jobs.lock().unwrap_or_else(PoisonError::into_inner);
                     let job = jobs.get_mut(id).ok_or("unknown job")?;
-                    if job.plugin != request.plugin || job.generation != request.generation {
-                        return Err("job generation mismatch".into());
-                    }
                     if request.operation == "jobs.cancel" {
                         job.cancellation.cancel();
                     }

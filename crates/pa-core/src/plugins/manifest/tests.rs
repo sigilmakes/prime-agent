@@ -95,8 +95,8 @@ fn fact_pass_has_no_host_capability() {
         assert(ctx == nil, "ctx capability was exposed")
         assert(host == nil, "host capability was exposed")
         assert(session == nil, "session capability was exposed")
-        assert(io == nil and os == nil and package == nil and require == nil, "ambient library was exposed")
-        assert(dofile == nil and loadfile == nil and load == nil, "loader was exposed")
+        assert(io ~= nil and os ~= nil and load ~= nil and print ~= nil, "standard library was absent")
+        assert(debug == nil, "debug library was exposed")
         return {providers = {{name = "safe", url = "http://localhost", protocol = "openai"}}}
         "#,
     );

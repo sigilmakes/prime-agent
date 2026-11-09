@@ -421,7 +421,7 @@ return {{providers={{{{name='custom',mode='streaming',run=function(input,ctx)
   while true do
     local frame=ctx.call('native.http.next',{{handle=stream.handle}}).event
     if frame==null then break end
-    local event=ctx.call('native.json.decode',{{text=frame.data}})
+    local event=frame.json
     if event.message then result=event.message end
     ctx.emit(event)
   end
@@ -499,7 +499,7 @@ return {{providers={{{{name='custom',mode='streaming',run=function(input,ctx)
   while true do
     local frame=ctx.call('native.http.next',{{handle=stream.handle}}).event
     if frame==null then return {{}} end
-    ctx.emit(ctx.call('native.json.decode',{{text=frame.data}}))
+    ctx.emit(frame.json)
   end
 end}}}}}}
 "

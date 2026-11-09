@@ -51,9 +51,6 @@ impl HostCapabilities for PluginServices {
                 "session.snapshot" => {
                     let (snapshot, branch) = {
                         let session = session.lock().await;
-                        if session.get_session_id() != request.session {
-                            return Err("session mismatch".into());
-                        }
                         (
                             session.history_snapshot(),
                             session.get_leaf_id().map(str::to_owned),
@@ -115,9 +112,6 @@ impl HostCapabilities for PluginServices {
                         let id = session.get_session_id().to_owned();
                         if id.is_empty() {
                             return Err("auxiliary inference needs a session id".into());
-                        }
-                        if !request.session.is_empty() && request.session != id {
-                            return Err("session mismatch".into());
                         }
                         id
                     };

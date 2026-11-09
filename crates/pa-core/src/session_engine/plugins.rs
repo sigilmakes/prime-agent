@@ -51,9 +51,6 @@ impl HostCapabilities for SessionFacts {
             if cancellation.is_cancelled() {
                 return Err("cancelled".into());
             }
-            if request.session != info["session"].as_str().unwrap_or_default() {
-                return Err("plugin session mismatch".into());
-            }
             match request.operation.as_str() {
                 "session.info" => Ok(info),
                 _ => match delegate {
@@ -111,11 +108,7 @@ impl SessionPlugins {
             }),
             delegates: Mutex::default(),
         });
-        let host = Arc::new(PluginHost::new(
-            session.clone(),
-            capabilities.clone(),
-            reserved,
-        ));
+        let host = Arc::new(PluginHost::new(capabilities.clone(), reserved));
         let snapshot = host
             .reconcile(crate::plugins::context::builtin_sources())
             .expect("compiled context plugins must activate");
@@ -914,7 +907,7 @@ mod context_selection_tests {
     }
 
     #[tokio::test]
-    async fn capability_namespaces_route_independently_and_keep_request_identity() {
+    async fn capability_namespaces_route_independently() {
         struct Capture {
             name: &'static str,
             requests:
@@ -954,9 +947,6 @@ mod context_selection_tests {
             }),
         );
         let request = CapabilityRequest {
-            session: "context-test".into(),
-            plugin: "identity".into(),
-            generation: uuid::Uuid::new_v4(),
             invocation: uuid::Uuid::new_v4(),
             operation: String::new(),
             input: json!({"retained":true}),

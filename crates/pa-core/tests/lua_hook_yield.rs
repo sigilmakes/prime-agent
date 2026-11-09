@@ -44,11 +44,7 @@ async fn unary(host: &PluginHost, name: &str) -> Value {
     }
 }
 async fn trial(round: usize) {
-    let host = Arc::new(PluginHost::new(
-        format!("probe-{round}"),
-        Arc::new(NoCapabilities),
-        [],
-    ));
+    let host = Arc::new(PluginHost::new(Arc::new(NoCapabilities), []));
     host.reconcile(vec![PluginSource {
         name: "route".into(),
         source: LUA.into(),

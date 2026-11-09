@@ -12,11 +12,7 @@ const COUNTER: &str = include_str!("fixtures/counter.lua");
 struct Echo;
 impl HostCapabilities for Echo {
     fn call(&self, request: CapabilityRequest, _: CancellationToken) -> CapabilityFuture {
-        Box::pin(async move {
-            Ok(
-                json!({"session": request.session, "plugin": request.plugin, "input": request.input}),
-            )
-        })
+        Box::pin(async move { Ok(json!({"operation": request.operation, "input": request.input})) })
     }
 }
 
@@ -29,11 +25,7 @@ fn source(name: &str, text: &str) -> PluginSource {
 }
 
 fn host() -> PluginHost {
-    PluginHost::new(
-        "session-a".into(),
-        Arc::new(Echo),
-        ["resume".into(), "model".into()],
-    )
+    PluginHost::new(Arc::new(Echo), ["resume".into(), "model".into()])
 }
 
 fn target(host: &PluginHost, plugin: &str, kind: ContributionKind, name: &str) -> Contribution {
@@ -68,7 +60,7 @@ async fn result(
 }
 
 #[tokio::test]
-async fn two_real_plugins_exports_commands_hooks_and_session_isolation() {
+async fn two_real_plugins_exports_commands_hooks_and_host_isolation() {
     let host = host();
     let desired = vec![source("ledger", LEDGER), source("counter", COUNTER)];
     let snapshot = host.reconcile(desired.clone()).unwrap();
@@ -119,7 +111,7 @@ async fn two_real_plugins_exports_commands_hooks_and_session_isolation() {
     assert_eq!(
         command.next().await,
         Some(InvocationEvent::Finished(Ok(InvocationOutcome::Streamed(
-            json!({"session": "session-a", "plugin": "ledger", "input": {"note": "hello"}})
+            json!({"operation": "auxiliary", "input": {"note": "hello"}})
         ))))
     );
     assert_eq!(command.next().await, None);
@@ -132,11 +124,11 @@ async fn two_real_plugins_exports_commands_hooks_and_session_isolation() {
             Value::Null
         )
         .await,
-        Ok(InvocationOutcome::Unary(
-            json!({"io": false, "os": false, "package": false, "require": false, "loadfile": false})
-        ))
+        Ok(InvocationOutcome::Unary(json!({
+            "io": true, "os": true, "load": true, "print": true, "dofile": true, "debug": false
+        })))
     );
-    let other = PluginHost::new("session-b".into(), Arc::new(Echo), []);
+    let other = PluginHost::new(Arc::new(Echo), []);
     other.reconcile(desired).unwrap();
     assert_eq!(
         result(
@@ -301,7 +293,7 @@ async fn config_is_private_owned_before_activation_and_changes_replace_the_gener
                 .unwrap()
         ));
     }
-    let other = PluginHost::new("other-session".into(), Arc::new(Echo), []);
+    let other = PluginHost::new(Arc::new(Echo), []);
     other.reconcile(vec![configured.clone()]).unwrap();
     for (instance, plugin) in [(&host, "sibling"), (&other, "configured")] {
         assert_eq!(
@@ -379,7 +371,6 @@ async fn cancellation_retirement_and_drop_release_capability_futures_without_blo
     let (started_tx, mut started) = mpsc::unbounded_channel();
     let (dropped_tx, mut dropped) = mpsc::unbounded_channel();
     let host = PluginHost::new(
-        "private-session".into(),
         Arc::new(Gate {
             started: started_tx,
             dropped: dropped_tx,
@@ -401,12 +392,9 @@ async fn cancellation_retirement_and_drop_release_capability_futures_without_blo
         assert_eq!(
             request,
             CapabilityRequest {
-                session: "private-session".into(),
-                plugin: "counter".into(),
-                generation: target(&host, "counter", ContributionKind::Export, "wait").generation,
                 invocation: request.invocation,
                 operation: "wait".into(),
-                input: json!({"action": action})
+                input: json!({"action": action}),
             }
         );
         // Same VM and another plugin remain callable while the capability is pending.
@@ -534,11 +522,7 @@ async fn revoked_retained_context_never_constructs_the_adapter_future() {
         }
     }
     let dispatches = Arc::new(AtomicUsize::new(0));
-    let host = PluginHost::new(
-        "session".into(),
-        Arc::new(DispatchCounter(Arc::clone(&dispatches))),
-        [],
-    );
+    let host = PluginHost::new(Arc::new(DispatchCounter(Arc::clone(&dispatches))), []);
     host.reconcile(vec![source("counter", COUNTER)]).unwrap();
     assert_eq!(
         result(
@@ -570,7 +554,6 @@ async fn host_drop_retires_invocations_and_drops_the_pending_capability_future()
     let (started_tx, mut started) = mpsc::unbounded_channel();
     let (dropped_tx, mut dropped) = mpsc::unbounded_channel();
     let host = PluginHost::new(
-        "session".into(),
         Arc::new(Gate {
             started: started_tx,
             dropped: dropped_tx,
@@ -627,7 +610,7 @@ async fn stream_backpressure_then_ordered_delivery_crosses_the_same_host_interfa
         }
     }
     let (observed_tx, mut observed) = mpsc::unbounded_channel();
-    let host = PluginHost::new("session".into(), Arc::new(Observe(observed_tx)), []);
+    let host = PluginHost::new(Arc::new(Observe(observed_tx)), []);
     host.reconcile(vec![source("burst", "return {exports={{name='run',mode='streaming',run=function(input,ctx) ctx.call('begun', null); for i=1,40 do ctx.emit(i) end; ctx.call('drained', null); return 'done' end}}}")]).unwrap();
     let mut invocation = host
         .invoke(
@@ -713,7 +696,6 @@ async fn already_buffered_update_is_fenced_on_disable_and_cancellation() {
         let (started_tx, mut started) = mpsc::unbounded_channel();
         let (dropped_tx, mut dropped) = mpsc::unbounded_channel();
         let host = PluginHost::new(
-            "session".into(),
             Arc::new(Gate {
                 started: started_tx,
                 dropped: dropped_tx,
@@ -868,7 +850,7 @@ async fn capability_requests_bind_each_callback_to_a_distinct_invocation() {
         }
     }
     let (sent, mut received) = mpsc::unbounded_channel();
-    let host = PluginHost::new("identity-test".into(), Arc::new(Capture(sent)), []);
+    let host = PluginHost::new(Arc::new(Capture(sent)), []);
     host.reconcile(vec![source(
         "identity",
         r"return {exports={{name='calls',run=function(input,ctx)
@@ -896,17 +878,8 @@ async fn capability_requests_bind_each_callback_to_a_distinct_invocation() {
         calls.push(first);
     }
     assert_ne!(calls[0].invocation, calls[1].invocation);
-    assert_eq!(
-        calls[0],
-        CapabilityRequest {
-            session: "identity-test".into(),
-            plugin: "identity".into(),
-            generation: calls[1].generation,
-            invocation: calls[0].invocation,
-            operation: "identity".into(),
-            input: json!({}),
-        }
-    );
+    assert_eq!(calls[0].operation, "identity");
+    assert_eq!(calls[0].input, json!({}));
 }
 
 #[tokio::test]
@@ -979,6 +952,82 @@ async fn context_data_declarations_are_explicit_and_do_not_rewrite_invocation_va
             );
         }
     }
+}
+
+#[tokio::test]
+async fn runaway_declaration_hits_the_initialization_deadline() {
+    let host = host();
+    assert!(matches!(
+        host.reconcile(vec![source("runaway", "while true do end")]),
+        Err(PluginError::Lua(message)) if message.contains("instruction budget")
+    ));
+    assert!(host.snapshot().contributions.is_empty());
+}
+
+#[tokio::test]
+async fn reload_cannot_publish_a_result_from_the_retired_generation() {
+    struct Reload {
+        host: std::sync::Mutex<std::sync::Weak<PluginHost>>,
+        produced: Arc<tokio::sync::Notify>,
+    }
+    impl HostCapabilities for Reload {
+        fn call(&self, request: CapabilityRequest, _: CancellationToken) -> CapabilityFuture {
+            let host = self.host.lock().unwrap().clone();
+            let produced = Arc::clone(&self.produced);
+            Box::pin(async move {
+                match request.operation.as_str() {
+                    "reload" => {
+                        let host = host.upgrade().ok_or("host ended")?;
+                        host.reconcile(vec![source(
+                            "stale",
+                            "return {exports={{name='run',run=function() return 'fresh' end}}}",
+                        )])
+                        .map_err(|error| error.to_string())?;
+                        produced.notify_one();
+                    }
+                    other => return Err(format!("unexpected capability {other}")),
+                }
+                Ok(Value::Null)
+            })
+        }
+    }
+
+    let produced = Arc::new(tokio::sync::Notify::new());
+    let reload = Arc::new(Reload {
+        host: std::sync::Mutex::new(std::sync::Weak::new()),
+        produced: Arc::clone(&produced),
+    });
+    let host = Arc::new(PluginHost::new(reload.clone(), []));
+    *reload.host.lock().unwrap() = Arc::downgrade(&host);
+    host.reconcile(vec![source(
+        "stale",
+        r"return {exports={{name='run',run=function(input,ctx)
+            ctx.call('reload', {})
+            return 'stale'
+        end}}}",
+    )])
+    .unwrap();
+    let mut invocation = host
+        .invoke(
+            &target(&host, "stale", ContributionKind::Export, "run"),
+            Value::Null,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    produced.notified().await;
+    // Let the producer queue its terminal outcome before the consumer observes it.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        invocation.next().await,
+        Some(InvocationEvent::Finished(Err(PluginError::Retired)))
+    );
+    assert_eq!(invocation.next().await, None);
+    assert_eq!(
+        result(&host, "stale", ContributionKind::Export, "run", Value::Null).await,
+        Ok(InvocationOutcome::Unary(json!("fresh")))
+    );
 }
 
 #[tokio::test]

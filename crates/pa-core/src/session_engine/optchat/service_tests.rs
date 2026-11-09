@@ -8,20 +8,9 @@ use sha2::Digest as _;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-struct NoCapabilities;
-impl HostCapabilities for NoCapabilities {
-    fn call(
-        &self,
-        _request: CapabilityRequest,
-        _cancel: CancellationToken,
-    ) -> crate::plugins::CapabilityFuture {
-        Box::pin(async { Err("no default capabilities".into()) })
-    }
-}
 struct Fixture {
     _dir: tempfile::TempDir,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
-    host: Arc<PluginHost>,
     service: OptChatServices,
     request: CapabilityRequest,
     path: std::path::PathBuf,
@@ -36,32 +25,14 @@ impl Fixture {
             }
         }
         session.flush_now().unwrap();
-        let id = session.get_session_id().to_owned();
         let artifact = session.get_session_artifact_dir().unwrap();
-        let host = Arc::new(PluginHost::new(
-            id.clone(),
-            Arc::new(NoCapabilities),
-            Vec::<String>::new(),
-        ));
-        let snapshot = host
-            .reconcile(vec![PluginSource {
-                name: "optchat".into(),
-                source: "return {exports={{name='status',run=function()return {} end}}}".into(),
-                config: json!({}),
-            }])
-            .unwrap();
-        let generation = snapshot.contributions[0].generation;
         let session = Arc::new(tokio::sync::Mutex::new(session));
-        let service = OptChatServices::new(session.clone(), &host, Some(artifact.clone()));
+        let service = OptChatServices::new(session.clone(), Some(artifact.clone()));
         Self {
             _dir: dir,
             session,
-            host,
             service,
             request: CapabilityRequest {
-                session: id,
-                plugin: "optchat".into(),
-                generation,
                 invocation: uuid::Uuid::new_v4(),
                 operation: String::new(),
                 input: Value::Null,
@@ -151,7 +122,7 @@ async fn native_public_capability_roundtrip_durable_cache_and_exact_source() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let resumed = OptChatServices::new(f.session.clone(), &f.host, Some(artifact));
+    let resumed = OptChatServices::new(f.session.clone(), Some(artifact));
     let mut request = f.request.clone();
     request.operation = "optchat.begin".into();
     request.input = json!({"budget_bytes":4096,"summary_bytes":128});
@@ -170,8 +141,8 @@ async fn native_public_capability_roundtrip_durable_cache_and_exact_source() {
     );
 }
 #[tokio::test]
-async fn cancellation_retirement_branch_departure_and_persistence_failure_preserve_active_view() {
-    for mode in ["cancel", "retire", "branch", "persist"] {
+async fn cancellation_branch_departure_and_persistence_failure_preserve_active_view() {
+    for mode in ["cancel", "branch", "persist"] {
         let f = Fixture::new();
         f.prepare().await;
         f.call("finish", json!({})).await.unwrap();
@@ -184,9 +155,6 @@ async fn cancellation_retirement_branch_departure_and_persistence_failure_preser
         let cancellation = CancellationToken::new();
         match mode {
             "cancel" => cancellation.cancel(),
-            "retire" => {
-                f.host.reconcile(vec![]).unwrap();
-            }
             "branch" => {
                 f.session
                     .lock()
@@ -209,16 +177,11 @@ async fn cancellation_retirement_branch_departure_and_persistence_failure_preser
             f.service.call(request, cancellation).await.is_err(),
             "{mode}"
         );
-        if mode == "retire" {
-            // Absence of every contribution is checked through the real host.
-            assert!(f.host.snapshot().contributions.is_empty());
-        } else {
-            assert_eq!(
-                f.call("status", json!({})).await.unwrap(),
-                previous,
-                "{mode}"
-            );
-        }
+        assert_eq!(
+            f.call("status", json!({})).await.unwrap(),
+            previous,
+            "{mode}"
+        );
         if mode == "persist" {
             std::fs::remove_dir(&f.path).unwrap();
             std::fs::rename(f.path.with_extension("saved"), &f.path).unwrap();
@@ -336,14 +299,9 @@ async fn actual_native_plan_reply_stays_within_lua_quota_without_shrinking_histo
         .collect::<Vec<_>>();
     let session = Arc::new(tokio::sync::Mutex::new(manager));
     let router = Arc::new(PlanRouter::default());
-    let host = Arc::new(PluginHost::new(
-        session_id,
-        router.clone(),
-        Vec::<String>::new(),
-    ));
+    let host = Arc::new(PluginHost::new(router.clone(), Vec::<String>::new()));
     let service = Arc::new(OptChatServices::new(
         session.clone(),
-        &host,
         Some(artifact.clone()),
     ));
     *router.service.lock().unwrap() = Some(service);
@@ -422,11 +380,7 @@ end},{name='recall',run=function(input,ctx) return ctx.call('optchat.zoom',input
         );
     }
     // Resume through a NEW native service and the SAME unchanged Lua quota.
-    *router.service.lock().unwrap() = Some(Arc::new(OptChatServices::new(
-        session,
-        &host,
-        Some(artifact),
-    )));
+    *router.service.lock().unwrap() = Some(Arc::new(OptChatServices::new(session, Some(artifact))));
     let mut resumed = host
         .invoke(target, json!({}), &CancellationToken::new())
         .unwrap();

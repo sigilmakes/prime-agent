@@ -85,18 +85,21 @@ are dropped during settings merge, so a cloned repository cannot execute Lua.
 
 `plugins::PluginHost` is a session-local deep module with three lifecycle operations:
 `reconcile(Vec<PluginSource>)`, `snapshot()`, and
-`invoke(&Contribution, JSON, CancellationToken)`. This is a new public core interface
-and embedded-VM dependency. It is not engine, kernel, prompt, settings, or TUI integration,
-and it does not by itself activate any optional first-party plugin. A native test
-consumer is provisional until those integration slices replace their current policies.
+`invoke(&Contribution, JSON, CancellationToken)`. The host itself carries no session
+identifier. This is a public core interface and embedded-VM dependency. It is not
+engine, kernel, prompt, settings, or TUI integration, and it does not by itself
+activate any optional first-party plugin. A native test consumer is provisional
+until those integration slices replace their current policies.
 
 Each enabled source returns a declaration table with optional dense `exports`,
 `commands`, and `hooks` arrays. Each entry has `name`, optional `description`, optional
 `mode` (`unary` by default, or `streaming`), and a `run(input, ctx)` Lua function.
 Exports map to `plugin.<plugin>.<name>` when a kernel adapter is added; commands map
-to `/<name>`. Hooks are plugin-scoped named callbacks. The future engine adapter
-must define stage inputs, outcomes, and ordering; this host does not invent stage
-policy or claim context/compaction/provider contributions are implemented.
+to `/<name>`. Hooks are plugin-scoped named callbacks; a deferred `jobs.enqueue`
+resolves its hook by name, so that name must be unique across active plugins. The
+future engine adapter must define stage inputs, outcomes, and ordering; this host
+does not invent stage policy or claim context/compaction/provider contributions are
+implemented.
 Unknown declaration fields and unsupported modes are errors, not ignored stubs.
 Names are lowercase ASCII identifiers, at most 64 bytes. Duplicate plugins,
 per-kind callbacks, and global command names are rejected. The composition root
@@ -122,24 +125,33 @@ yield cooperatively at instruction intervals, allowing native cancellation to ru
 Cancelled/retired work is never treated as a fallback candidate.
 
 A callback receives only invocation-scoped `ctx.call(operation, JSON)` and
-`ctx.emit(JSON)`. `HostCapabilities` is a dynamically supplied async adapter for
-explicit host operations, including future auxiliary inference. Requests carry the
-session, plugin, and generation identity. Adapters must authorize operations, honor
-cancellation, and use explicit private runtime paths. They must not block while
-constructing or polling their future. Registry locks are not held during callbacks;
-mlua VM locks release on each pending coroutine poll. Retained Lua contexts lose
-capability authority when their originating invocation ends. There are no default
-filesystem, network, credential, storage, or inference-provider adapters.
+`ctx.emit(JSON)`. `HostCapabilities` is a per-session async adapter for explicit host
+operations such as native inference, HTTP, session snapshots, auxiliary inference,
+deferred jobs, and OptChat. A request carries the operation, its input, and one
+per-invocation identifier; it carries no session, plugin, or generation identity.
+Adapters are already scoped to the session and operation namespace that registered
+them, so they honor cancellation and must not block while constructing or polling
+their future. Registry locks are not held during callbacks; mlua VM locks release on
+each pending coroutine poll. Retained Lua contexts cannot call capabilities after
+their originating invocation ends. There are no default filesystem, network,
+credential, storage, or inference-provider adapters.
+
+Staleness stays a host concern: each generation has one opaque epoch, invocation
+delivery is fenced by its generation's retirement, and a reload cannot publish a
+result produced by a retired generation. That fence is correctness, not an
+authorization model.
 
 The reviewed dependency is `mlua` 0.11.6 (MIT), with `lua54`, `vendored`, `async`,
 `send`, and `serialize`: an actual embedded Lua VM plus coroutine/JSON support that
 existing workspace crates cannot supply. Vendored Lua avoids ambient system-Lua ABI
 selection. Lua values and functions stay private to generation/runtime files.
-Only table/string/math/UTF-8 standard libraries are loaded; ambient OS, IO, package
-loading, and console output are absent. Local plugins are trusted code, not a
-hostile-code sandbox. A 16 MiB VM allocation limit, 1 MiB source limit, callback
-inventory limits, and initialization instruction budget bound common mistakes;
-these are not a complete security/resource isolation promise.
+
+Plugins are trusted local code. The VM is `Lua::new()`: the full safe standard
+library, including io, os, load, dofile, print, and package loading, is present;
+only the debug library is absent. This is not a hostile-code sandbox. A 16 MiB VM
+allocation limit, 1 MiB source limit, callback inventory limits, and an
+initialization instruction deadline bound runaway or accidental work. These are
+resource bounds, not a security or isolation promise.
 
 Future contribution forms should add an explicit declaration validator, typed
 inventory descriptor, and generation-bound invocation adapter together. They must
