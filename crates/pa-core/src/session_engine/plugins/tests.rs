@@ -178,13 +178,11 @@ async fn command(
         "id":"test","name":"Test","api":"openai-completions","provider":"test","baseUrl":"http://localhost",
         "reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":10000,"maxTokens":100
     })).unwrap();
-    let mut autonomous = crate::autonomous::create_autonomous_runtime_state(None, None);
     execute_session_command(
         engine,
         &mut SessionCommandParams {
             model: &model,
             api_key: None,
-            autonomous: &mut autonomous,
         },
         &command,
         &[],

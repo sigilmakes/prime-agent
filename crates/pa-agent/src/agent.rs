@@ -1057,7 +1057,7 @@ impl Agent {
     }
 
     /// Install or replace the natural-turn-end continuation hook: the embedding that owns the
-    /// goal/autonomous continuation policy wires it after the agent exists. `None` uninstalls the
+    /// goal continuation policy wires it after the agent exists. `None` uninstalls the
     /// hook.
     ///
     /// # Panics

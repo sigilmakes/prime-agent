@@ -106,10 +106,6 @@ impl Worker {
             }
         };
         if let Some(agent_engine) = &self.agent_engine {
-            if let Some(autonomous) = &resources.autonomous {
-                *agent_engine.autonomous.lock().await =
-                    pa_core::autonomous::create_autonomous_runtime_state(Some(autonomous), None);
-            }
             *agent_engine
                 .create_resources
                 .write()

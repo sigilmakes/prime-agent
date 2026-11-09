@@ -146,11 +146,9 @@ async fn run_session_command(
         // The executor rebuilds session context on its compact branch:
         // serialize against the other context rebuilders.
         let _ops = state.session_ops.lock().await;
-        let mut autonomous = state.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,
             api_key: api_key.clone(),
-            autonomous: &mut autonomous,
         };
         // The executor never errors out of the call: failures ride
         // `execution.error` and the session events.

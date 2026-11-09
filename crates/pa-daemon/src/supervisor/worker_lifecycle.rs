@@ -295,7 +295,6 @@ impl Supervisor {
             "appendSystemPrompt",
             "skills",
             "promptTemplates",
-            "autonomous",
             "executionMode",
         ] {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {

@@ -16,12 +16,11 @@ pub struct PrimeAgentCwdMeta {
     pub actual: String,
 }
 
-/// Observed subagent and autonomous-continuation counts at a completion point.
+/// Observed subagent count at a completion point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrimeAgentQuiescenceMeta {
     pub outstanding_subagents: u64,
-    pub remaining_autonomous_continuations: u64,
 }
 
 /// Producer-side ordering of an update inside its prompt turn.
@@ -86,8 +85,6 @@ pub struct PrimeAgentSessionMeta {
     pub compaction: Option<PrimeAgentCompactionMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagents: Option<Vec<PrimeAgentSubagentMeta>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub autonomous: Option<PrimeAgentAutonomousMeta>,
 }
 
 /// A goal's live state, surfaced after `/goal` commands and driver turns.
@@ -142,88 +139,23 @@ pub struct PrimeAgentSubagentMeta {
     pub error: Option<String>,
 }
 
-/// Autonomous-mode accounting surfaced with a turn's completion.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrimeAgentAutonomousMeta {
-    pub enabled: bool,
-    pub continuations_used: u64,
-    pub turns_used: u64,
-    pub tokens_used: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gate_attempt: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gate_failure: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit_reason: Option<String>,
-}
-
-/// The `_meta.autonomous` accounting for a completion update: per-run usage
-/// plus the latest gate attempt and failure (TS `autonomousMeta` in
-/// acp-mode.ts). The daemon-attached settlement's accounting.
-pub fn autonomous_meta(
-    status: &pa_core::autonomous::AgentAutonomousStatus,
-) -> PrimeAgentAutonomousMeta {
-    let gate_attempt = std::iter::once(
-        status
-            .last_gate_failure
-            .as_ref()
-            .map_or(0, |failure| failure.attempt),
-    )
-    .chain(status.gate_attempts.values().copied())
-    .max()
-    .unwrap_or(0);
-    PrimeAgentAutonomousMeta {
-        enabled: status.enabled,
-        continuations_used: status.continuations_used,
-        turns_used: status.turns_used,
-        tokens_used: status.tokens_used,
-        gate_attempt: (gate_attempt > 0).then_some(gate_attempt),
-        gate_failure: status
-            .last_gate_failure
-            .as_ref()
-            .map(|failure| failure.exit_text.clone()),
-        limit_reason: None,
-    }
-}
-
 /// Map a finished turn onto an ACP stop reason. Precedence: an explicit
-/// cancel, then the TS `acpStopReason` mapping for an enabled autonomous
-/// run, then the turn's final assistant stop reason (#3363): a per-call
+/// cancel, then the turn's final assistant stop reason (#3363): a per-call
 /// output-token truncation (`StopReason::Length`) is an honest
 /// `max_tokens`, so `end_turn` stays reserved for a finished answer;
 /// every other final reason (and none) keeps TS's `end_turn`.
-pub fn acp_stop_reason_for_status(
+pub fn acp_stop_reason(
     cancelled: bool,
-    status: Option<&pa_core::autonomous::AgentAutonomousStatus>,
     assistant_stop_reason: Option<pa_types::ai::StopReason>,
 ) -> super::types::AcpStopReason {
-    use pa_core::autonomous::{autonomous_limit_reason_of_status, AutonomousLimitReason};
     use pa_types::ai::StopReason;
     if cancelled {
         return super::types::AcpStopReason::Cancelled;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default();
-    match status
-        .filter(|status| status.enabled)
-        .and_then(|status| autonomous_limit_reason_of_status(status, now))
-    {
-        Some(AutonomousLimitReason::MaxTokens) => super::types::AcpStopReason::MaxTokens,
-        Some(
-            AutonomousLimitReason::MaxContinuations
-            | AutonomousLimitReason::MaxTurns
-            | AutonomousLimitReason::TimeoutMs,
-        ) => super::types::AcpStopReason::MaxTurnRequests,
-        None => match assistant_stop_reason {
-            Some(StopReason::Length) => super::types::AcpStopReason::MaxTokens,
-            Some(
-                StopReason::Stop | StopReason::ToolUse | StopReason::Error | StopReason::Aborted,
-            )
-            | None => super::types::AcpStopReason::EndTurn,
-        },
+    match assistant_stop_reason {
+        Some(StopReason::Length) => super::types::AcpStopReason::MaxTokens,
+        Some(StopReason::Stop | StopReason::ToolUse | StopReason::Error | StopReason::Aborted)
+        | None => super::types::AcpStopReason::EndTurn,
     }
 }
 
@@ -257,62 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn acp_stop_reason_keeps_cancel_and_run_limits_first() {
-        // The precedence the e2e cannot build against a truncated final
-        // message: the explicit cancel and the enabled run's own limits
-        // stay ahead of the final assistant stop reason (the e2e covers
-        // the disabled-status and below-mapping cases).
+    fn acp_stop_reason_keeps_cancel_and_truncation() {
         use super::super::types::AcpStopReason;
-        use pa_core::autonomous::{AgentAutonomousStatus, AutonomousLimits, NormalizedGateConfig};
         use pa_types::ai::StopReason;
-        let status = |enabled: bool, turns_used: u64| AgentAutonomousStatus {
-            enabled,
-            continuations_used: 0,
-            turns_used,
-            tokens_used: 1_000,
-            started_at: None,
-            limits: AutonomousLimits {
-                max_continuations: 3,
-                max_turns: 12,
-                max_tokens: 80_000,
-                timeout_ms: 1_800_000,
-            },
-            gates: NormalizedGateConfig {
-                commands: Vec::new(),
-                max_retries: 0,
-                timeout_ms: 0,
-            },
-            gate_attempts: std::collections::HashMap::new(),
-            last_gate_failure: None,
-            subagent_keep_alive_ms: None,
-        };
         // An explicit cancel wins over the turn's own truncated stop reason.
         assert_eq!(
-            acp_stop_reason_for_status(
-                /*cancelled*/ true,
-                Some(&status(false, 1)),
-                Some(StopReason::Length)
-            ),
+            acp_stop_reason(/*cancelled*/ true, Some(StopReason::Length)),
             AcpStopReason::Cancelled
         );
-        // An enabled run below its limits maps the final length (#3363).
+        // A length stop maps to max_tokens.
         assert_eq!(
-            acp_stop_reason_for_status(
-                /*cancelled*/ false,
-                Some(&status(true, 1)),
-                Some(StopReason::Length)
-            ),
+            acp_stop_reason(/*cancelled*/ false, Some(StopReason::Length)),
             AcpStopReason::MaxTokens
         );
-        // The turn-request limit stays the run's stop reason even when the
-        // final message also truncated.
+        // A settled answer keeps end_turn.
         assert_eq!(
-            acp_stop_reason_for_status(
-                /*cancelled*/ false,
-                Some(&status(true, 12)),
-                Some(StopReason::Length)
-            ),
-            AcpStopReason::MaxTurnRequests
+            acp_stop_reason(/*cancelled*/ false, Some(StopReason::Stop)),
+            AcpStopReason::EndTurn
         );
     }
 
@@ -321,13 +214,12 @@ mod tests {
         let wrapped = prime_agent_meta(&PrimeAgentSessionMeta {
             quiescence: Some(PrimeAgentQuiescenceMeta {
                 outstanding_subagents: 0,
-                remaining_autonomous_continuations: 0,
             }),
             ..Default::default()
         });
         assert_eq!(
             wrapped[PRIME_AGENT_META_NAMESPACE]["quiescence"],
-            json!({ "outstandingSubagents": 0, "remainingAutonomousContinuations": 0 })
+            json!({ "outstandingSubagents": 0 })
         );
     }
 }

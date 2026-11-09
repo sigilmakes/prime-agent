@@ -28,6 +28,12 @@ use compaction_arms::OVERFLOW_RECOVERY_FAILED_MESSAGE;
 /// buffer in tests.
 type EventSink = std::sync::Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
 
+/// The wire shape of one durable custom row for the json event stream.
+pub(crate) fn custom_row_wire_value(row: &pa_types::session::CustomMessage) -> Value {
+    serde_json::to_value(pa_types::session::AgentMessage::Custom(row.clone()))
+        .unwrap_or(Value::Null)
+}
+
 /// The print loop's turn-boundary state: the one-attempt overflow machine and output mode.
 pub(crate) struct TurnBoundary {
     recovery: OverflowRecovery,
@@ -117,8 +123,8 @@ impl TurnBoundary {
         Ok(())
     }
 
-    /// Admit one autonomous continuation turn through the same boundary pair the
-    /// CLI prompts run: the arms belong to the session loop, not the prompt loop.
+    /// Admit one continuation turn through the same boundary pair the CLI
+    /// prompts run: the arms belong to the session loop, not the prompt loop.
     pub(crate) async fn admit_continuation(
         &mut self,
         engine: &SessionEngine,

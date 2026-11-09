@@ -765,16 +765,16 @@ mod tests {
     fn unknown_displayed_types_render_the_generic_box() {
         let entries = decoded(&json!({
             "role": "custom",
-            "customType": "autonomous_status",
-            "content": "[autonomous-status: on]",
+            "customType": "extension_status",
+            "content": "[extension-status: on]",
             "display": true,
             "details": { "enabled": true },
         }));
         assert!(matches!(
             entries.as_slice(),
             [ChatEntry::CustomPanel(row)]
-                if row.custom_type == "autonomous_status"
-                    && row.content == "[autonomous-status: on]"
+                if row.custom_type == "extension_status"
+                    && row.content == "[extension-status: on]"
         ));
     }
 

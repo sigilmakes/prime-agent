@@ -9,7 +9,7 @@ pub use pa_types::slash_commands::{
     SESSION_SLASH_COMMAND_NAMES,
 };
 
-/// A parsed session slash command (compact/goal/autonomous).
+/// A parsed session slash command (compact/goal).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionSlashCommand {
     pub name: String,

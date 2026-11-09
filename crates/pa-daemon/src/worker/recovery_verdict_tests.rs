@@ -54,11 +54,23 @@ async fn idle_time_injected_admission_is_busy_evidence() {
         "the settled session proves nothing"
     );
     let notify = Arc::new(Notify::new());
-    admit_autonomous_follow_up(
+    admit_goal_follow_up(
         &worker.recovery,
         &worker.core,
+        &worker.events,
         &notify,
-        "continue the mission".to_string(),
+        crate::engine::GoalTurnEndWork::Continuation(crate::engine::GoalContinuation {
+            request: crate::engine::PromptRequest {
+                message: "continue the mission".to_string(),
+                images: Vec::new(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+                batch: Vec::new(),
+            },
+            goal_update: None,
+            pending_handle: None,
+        }),
     );
     assert!(
         WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),

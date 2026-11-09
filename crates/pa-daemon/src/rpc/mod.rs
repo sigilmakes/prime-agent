@@ -29,8 +29,6 @@ pub struct RpcOptions {
     pub cwd: std::path::PathBuf,
     /// The agent dir (model registry auth and session resources).
     pub agent_dir: std::path::PathBuf,
-    /// The CLI autonomous flags seeding the host-owned autonomous state (`None` starts disabled).
-    pub autonomous_config: Option<pa_core::autonomous::AgentAutonomousConfig>,
 }
 
 /// The ordered stdout writer: one queue for responses and events, in
@@ -135,12 +133,6 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         cwd: options.cwd,
         agent_dir: options.agent_dir.clone(),
         compacting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        autonomous: Arc::new(tokio::sync::Mutex::new(
-            pa_core::autonomous::create_autonomous_runtime_state(
-                options.autonomous_config.as_ref(),
-                None,
-            ),
-        )),
         last_goal: Arc::new(tokio::sync::Mutex::new(initial_goal)),
         queue_pump: Arc::new(tokio::sync::Mutex::new(())),
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),

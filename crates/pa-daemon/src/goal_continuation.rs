@@ -1,7 +1,6 @@
 //! The goal continuation loop at the natural turn end: an active goal
 //! mints a continuation, deferred behind unsettled RLM descendant work
-//! or a live background `bash()` handle until they settle. The goal
-//! takes exclusive priority over autonomous continuation.
+//! or a live background `bash()` handle until they settle.
 
 use std::sync::Arc;
 
@@ -14,9 +13,9 @@ use crate::engine::{GoalContinuation, GoalTurnEndWork, PromptRequest};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalBoundary {
     /// The goal owns the boundary: work was minted (or defers), the run
-    /// ends, and the autonomous continuation hook never runs.
+    /// ends.
     End,
-    /// No active goal: the boundary proceeds to the autonomous hook.
+    /// No active goal: the boundary proceeds.
     Proceed,
 }
 
@@ -43,10 +42,7 @@ impl AgentSessionEngine {
         let weak = Arc::downgrade(self);
         children.set_settle_hook(Arc::new(move || {
             if let Some(engine) = weak.upgrade() {
-                // The settle site retries both owed continuations
-                // (goal and autonomous share it).
                 engine.retry_owed_goal_continuation();
-                engine.retry_owed_autonomous_continuation();
             }
         }));
     }
@@ -122,8 +118,8 @@ impl AgentSessionEngine {
         });
     }
 
-    /// The natural-turn-end goal consult: the goal arm runs before the
-    /// autonomous arm; a budget steer ends the run first.
+    /// The natural-turn-end goal consult: a budget steer ends the run
+    /// first.
     pub(crate) fn goal_turn_end_boundary(&self) -> GoalBoundary {
         // The turn that crossed the budget ends the run and its wrap-up
         // steer queues (the steering lane owns the next turn).

@@ -1,4 +1,4 @@
-//! Daemon-side session slash-command execution: `run_prompt` parses the four
+//! Daemon-side session slash-command execution: `run_prompt` parses the
 //! session commands before admission — they never reach the model loop, and
 //! a command admitted through `run_turn` would wait for an `AgentStart` that
 //! never arrives (the spin fix). `/compact` emits the echo row and
@@ -81,11 +81,6 @@ pub(crate) fn run_session_command(
     // the event before the queued-command catch arm appends `Command failed: ...`).
     if is_compact && !emit_compact_end(command, &execution, emit) {
         return None;
-    }
-    // `/autonomous` (either flip): the previous run's owed continuations
-    // clear; the durable status row follows with the new state.
-    if command.name == "autonomous" {
-        engine.clear_autonomous_continuations();
     }
     // The executor's first row is the echo (already emitted); the rest of
     // the durable rows follow in order.

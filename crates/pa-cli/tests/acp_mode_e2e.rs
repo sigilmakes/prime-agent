@@ -1662,93 +1662,6 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
 }
 
 #[test]
-fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
-    // A one-token budget is exhausted by the first turn: the driver stops
-    // with the token limit, the completion envelope carries the autonomous
-    // accounting, and the stop reason is `max_tokens`.
-    let script = json!({ "engine": "faux", "responses": ["an answer"] });
-    let mut client = AcpChild::spawn(
-        &[
-            "--mode",
-            "acp",
-            "--no-session",
-            "--autonomous",
-            "--autonomous-max-tokens",
-            "1",
-        ],
-        &script,
-    );
-    let init = client.request("initialize", &initialize_params());
-    let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", &json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, TIMEOUT);
-    let session_id = new_response["result"]["sessionId"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let prompt = client.request(
-        "session/prompt",
-        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "do the thing" }] }),
-    );
-    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
-
-    let completion = updates
-        .iter()
-        .find(|update| {
-            let meta = &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"];
-            meta["phase"] == "event" && meta.get("autonomous").is_some_and(|v| !v.is_null())
-        })
-        .expect("an autonomous completion meta");
-    let autonomous =
-        &completion["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["autonomous"];
-    assert_eq!(autonomous["enabled"], true);
-    assert_eq!(autonomous["turnsUsed"], 1);
-    let quiescence =
-        &completion["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["quiescence"];
-    assert_eq!(quiescence["outstandingSubagents"], 0);
-
-    assert_eq!(
-        prompt_response["result"],
-        json!({ "stopReason": "max_tokens" })
-    );
-}
-
-#[test]
-fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
-    // Without autonomous flags the completion envelope carries no autonomous
-    // meta and the stop reason is end_turn.
-    let script = json!({ "engine": "faux", "responses": ["an answer"] });
-    let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", &initialize_params());
-    let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", &json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, TIMEOUT);
-    let session_id = new_response["result"]["sessionId"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let prompt = client.request(
-        "session/prompt",
-        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hi" }] }),
-    );
-    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
-    for update in &updates {
-        let meta = &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"];
-        assert!(
-            meta.get("autonomous")
-                .is_none_or(serde_json::Value::is_null),
-            "no autonomous meta"
-        );
-    }
-    assert_eq!(
-        prompt_response["result"],
-        json!({ "stopReason": "end_turn" })
-    );
-}
-
-#[test]
 fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
     // Issue #3363: a turn whose final assistant message stopped at the
     // provider's output-token cap resolves with max_tokens, not end_turn;
@@ -1788,86 +1701,6 @@ fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
         slash_response["result"],
         json!({ "stopReason": "end_turn" })
     );
-}
-
-#[test]
-fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
-    // An autonomous run with --max-turns 1: the completion envelope carries
-    // the _meta.autonomous accounting (TS waitForHeadlessCompletion), the
-    // quiescence observation counts the remaining continuations, and the
-    // turn limit surfaces as max_turn_requests (TS acpStopReason).
-    let mut client = AcpChild::spawn(
-        &["--mode", "acp", "--no-session"],
-        &json!({ "engine": "faux", "responses": [
-            "enabling the run",
-            "one turn runs, then the limit stops the run",
-        ] }),
-    );
-    let init = client.request("initialize", &initialize_params());
-    let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", &json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
-    assert!(
-        new_response["result"]["sessionId"].is_string(),
-        "daemon-attached admission succeeds: {new_response}"
-    );
-    let session_id = new_response["result"]["sessionId"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let enable = client.request(
-        "session/prompt",
-        &json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": "/autonomous on --max-turns 1" }],
-        }),
-    );
-    let (enable_response, updates) = client.wait_response(enable, Duration::from_mins(2));
-    assert_eq!(enable_response["result"]["stopReason"], "end_turn");
-    // The enabled accounting is already visible on the command turn's completion envelope.
-    let enabled_meta = updates.iter().find_map(|update| {
-        let meta =
-            &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["autonomous"];
-        (!meta.is_null()).then(|| meta.clone())
-    });
-    let enabled_meta = enabled_meta.expect("the enabled run's accounting reached the surface");
-    assert_eq!(enabled_meta["enabled"], true);
-    let prompt = client.request(
-        "session/prompt",
-        &json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": "say something" }],
-        }),
-    );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
-    assert_eq!(
-        prompt_response["result"],
-        json!({ "stopReason": "max_turn_requests" }),
-        "the turn limit maps to the TS stop reason: {prompt_response}"
-    );
-    let accounted = updates.iter().find_map(|update| {
-        let meta =
-            &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["autonomous"];
-        (meta["enabled"] == json!(true) && meta["turnsUsed"] == json!(1)).then(|| meta.clone())
-    });
-    let accounted = accounted.expect("the limited turn's accounting reached the surface");
-    assert_eq!(accounted["continuationsUsed"], 0);
-    // The named `--max-turns 1` flag makes the unnamed limits the JSON-safe
-    // unlimited sentinel (TS parseAutonomousCommand budget fill).
-    let remaining = updates.iter().find_map(|update| {
-        let quiescence =
-            &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["quiescence"];
-        (!quiescence.is_null()).then(|| quiescence["remainingAutonomousContinuations"].clone())
-    });
-    assert_eq!(
-        remaining,
-        Some(json!(9_007_199_254_740_991u64)),
-        "the run's unlimited continuation budget minus used"
-    );
-    let close = client.request("session/close", &json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
-    assert_eq!(close_response["result"], json!({}));
-    drop(client);
 }
 
 /// One raw daemon command on a fresh connection (the hello frame is skipped by the id match).
@@ -1911,9 +1744,6 @@ fn acp_daemon_attached_forwards_cli_session_options() {
             "ACP_ARGV_MARKER",
             "--skill",
             &skill,
-            "--autonomous",
-            "--autonomous-max-turns",
-            "1",
         ],
         &json!({ "engine": "faux", "responses": ["one turn, then the limit stops"] }),
     );
@@ -1942,10 +1772,7 @@ fn acp_daemon_attached_forwards_cli_session_options() {
         &json!({ "sessionId": new_response["result"]["sessionId"], "prompt": [{ "type": "text", "text": "say something" }] }),
     );
     let (turn_response, _) = client.wait_response(turn, Duration::from_mins(2));
-    assert_eq!(
-        turn_response["result"],
-        json!({ "stopReason": "max_turn_requests" })
-    );
+    assert_eq!(turn_response["result"], json!({ "stopReason": "end_turn" }));
     drop(client);
 }
 

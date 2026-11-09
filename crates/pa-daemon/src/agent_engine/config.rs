@@ -50,10 +50,6 @@ pub struct SupervisorLinkConfig {
     pub worker_token: String,
 }
 
-/// The worker's autonomous admission sink: a held threshold
-/// continuation's text, queued into the follow-up lane.
-pub(crate) type AutonomousAdmission = std::sync::Arc<dyn Fn(String) + Send + Sync>;
-
 /// The goal driver and session-manager handles mirrored from the core
 /// session (see `AgentSessionEngine::goal_runtime`).
 #[derive(Clone)]
@@ -83,7 +79,6 @@ pub(crate) struct CreateSessionResources {
     pub(crate) append_system_prompt: Vec<String>,
     pub(crate) skills: Vec<String>,
     pub(crate) prompt_templates: Vec<String>,
-    pub(crate) autonomous: Option<pa_core::autonomous::AgentAutonomousConfig>,
     /// The creating client's mode (`interactive`, `acp`, ...), accepted for
     /// compatibility with older create payloads.
     pub(crate) execution_mode: Option<String>,

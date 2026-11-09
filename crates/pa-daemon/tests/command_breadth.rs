@@ -1,15 +1,16 @@
 //! Daemon command-type breadth coverage (roadmap item 7, wave 1): the TS
 //! `DAEMON_COMMAND_TYPES` list (daemon-supervisor.ts) is the accept contract,
-//! pinned verbatim below in declaration order. Every TS type (plus the Rust-
-//! native frames) must parse, keep its wire `type`, and route by selector.
+//! pinned below in declaration order. Every TS type (plus the Rust-native
+//! frames) must parse, keep its wire `type`, and route by selector. The
+//! removed `wait_for_headless_completion` is the one deliberate omission.
 
 use pa_daemon::protocol::command_active_session_id;
 use pa_daemon::protocol::command_type_name;
 use pa_daemon::protocol::parse_daemon_command_line;
 use pa_daemon::protocol::KNOWN_COMMAND_TYPES;
 
-/// TS `DAEMON_COMMAND_TYPES`, verbatim and in declaration order
-/// (modes/daemon/daemon-supervisor.ts).
+/// TS `DAEMON_COMMAND_TYPES` in declaration order, minus the removed
+/// `wait_for_headless_completion` (modes/daemon/daemon-supervisor.ts).
 const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
     "ack_result",
     "list",
@@ -50,7 +51,6 @@ const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
     "cancel_rlm_child",
     "delete_rlm_subagent",
     "wait_for_idle",
-    "wait_for_headless_completion",
     "get_session_header",
     "get_state",
     "get_connection_state",
@@ -243,10 +243,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
     (
         "wait_for_idle",
         r#"{"type": "wait_for_idle", "activeSessionId": "sess"}"#,
-    ),
-    (
-        "wait_for_headless_completion",
-        r#"{"type": "wait_for_headless_completion", "activeSessionId": "sess"}"#,
     ),
     (
         "get_session_header",

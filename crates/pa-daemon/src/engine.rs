@@ -379,20 +379,6 @@ pub trait SessionEngine: Send + Sync {
     /// store do nothing.
     fn clear_progress_note(&self) {}
 
-    /// The session's autonomous-run status snapshot (the accounting lock
-    /// is async-held, hence the boxed future). The scripted harness reports `None`.
-    fn autonomous_status(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<pa_core::autonomous::AgentAutonomousStatus>>
-                + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async { None })
-    }
-
     /// The worker's live session summary (the `create` response data):
     /// rendered into the sender identity block of worker-to-worker messages.
     fn set_session_summary(&self, _summary: Value) {}

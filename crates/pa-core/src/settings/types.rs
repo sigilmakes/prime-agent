@@ -87,14 +87,6 @@ fn deserialize_threshold_percent<'de, D: serde::Deserializer<'de>>(
         .filter(|percent| pa_types::compaction::is_valid_threshold_percent(*percent)))
 }
 
-/// `number | "unlimited"` autonomous limit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AutonomousLimitSetting {
-    Number(f64),
-    Unlimited(String),
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
@@ -186,15 +178,6 @@ pub struct ThinkingBudgetsSettings {
     pub low: Option<u64>,
     pub medium: Option<u64>,
     pub high: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutonomousSettings {
-    pub max_continuations: Option<AutonomousLimitSetting>,
-    pub max_turns: Option<AutonomousLimitSetting>,
-    pub max_tokens: Option<AutonomousLimitSetting>,
-    pub timeout_ms: Option<AutonomousLimitSetting>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -313,7 +296,6 @@ pub struct Settings {
     /// session model does not accept image input. Default: none - image turns on a text-only model
     /// fail with a configuration hint instead of silently dropping the images.
     pub image_model: Option<String>,
-    pub autonomous: Option<AutonomousSettings>,
     /// Custom shell that runs every kernel `bash()` and user-bash command as
     /// `<shell> -c <command>`: an absolute path to an existing executable,
     /// validated once at session start (a bad value fails session creation

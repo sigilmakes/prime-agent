@@ -71,7 +71,6 @@ mod artifacts;
 pub(crate) use artifacts::{artifact_reference, now_millis};
 
 pub use config::AgentEngineConfig;
-pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
 use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
@@ -174,11 +173,6 @@ pub struct AgentSessionEngine {
     /// The queue delivery modes: seeded from the start config, switched live;
     /// `None` keeps the default ("one-at-a-time").
     queue_modes: std::sync::Mutex<(Option<String>, Option<String>)>,
-    /// The in-run autonomous consult's deadlock-free mirror (see
-    /// [`crate::autonomous_continuation`]): read without the session mutex
-    /// (a compaction run holds it).
-    pub(crate) autonomous_boundary:
-        std::sync::Mutex<Option<crate::autonomous_continuation::AutonomousBoundaryMirror>>,
     /// `true` while the kernel still runs background `bash()` handles, so the
     /// continuation gates hold their turns without the session mutex. `None`
     /// (unwired) answers `false`.
@@ -273,24 +267,6 @@ pub struct AgentSessionEngine {
         std::sync::Mutex<Option<std::sync::Arc<dyn InitialContextSelectionStore>>>,
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,
-    pub(crate) autonomous:
-        std::sync::Arc<tokio::sync::Mutex<pa_core::autonomous::AutonomousRuntimeState>>,
-    /// The continuation policy the turn loop consults after every settled
-    /// turn. Product default: the shell-gate driver in the session cwd;
-    /// harnesses replace it via
-    /// [`AgentSessionEngine::set_autonomous_driver`].
-    pub(crate) autonomous_driver:
-        std::sync::RwLock<std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>>,
-    /// Whether `autonomous_driver` still holds the product default: a cwd
-    /// rebind swaps the default but must keep an injected one.
-    autonomous_driver_default: std::sync::atomic::AtomicBool,
-    /// The continuation the threshold arm minted ahead of the boundary's
-    /// compaction, held for the queued `followUp` admission.
-    pub(crate) held_autonomous_continuation: std::sync::Mutex<Option<String>>,
-    pub(crate) autonomous_admission: std::sync::Mutex<Option<AutonomousAdmission>>,
-    /// Whether the in-run hook deferred the continuation behind unsettled
-    /// RLM descendant work: the settle hook delivers it.
-    pub(crate) autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool,
     /// Set by the worker's kill/shutdown closes: the continuation mint sites
     /// and settle-hook retries bail — a stopped session stays stopped. The
     /// create path clears it.
@@ -298,8 +274,6 @@ pub struct AgentSessionEngine {
     /// The engine's own arc: the in-run continuation hook upgrades the weak so the agent's loop
     /// never pins the engine.
     pub(crate) self_weak: std::sync::Mutex<Option<std::sync::Weak<AgentSessionEngine>>>,
-    pub(crate) autonomous_queue_purge:
-        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// The session's live working directory, shared with the MCP user-servers
     /// closure so a [`SessionEngine::set_cwd`] rebind is visible to it.
     cwd: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,

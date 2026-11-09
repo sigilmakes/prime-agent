@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use pa_core::autonomous::AutonomousRuntimeState;
 use pa_core::session_engine::provider_adapter::json_round_trip;
 
 use pa_types::goal::GoalState;
@@ -29,8 +28,6 @@ pub struct RpcState {
     pub agent_dir: std::path::PathBuf,
     /// The compact handler's in-flight flag: `get_state` reports it while a compact command runs.
     pub compacting: Arc<AtomicUsize>,
-    /// The host-owned autonomous runtime state (`/autonomous` mutates it; the CLI flags seed it).
-    pub autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     /// The last `goal_update` event payload published (change-gated emits).
     pub last_goal: Arc<tokio::sync::Mutex<GoalState>>,
     /// The queued-work pump's serialization lane (one pump at a time).
