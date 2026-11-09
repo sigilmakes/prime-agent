@@ -843,8 +843,6 @@ async fn send_reply(
                 no_session: None,
                 name: None,
                 config: Some(request.resume_config.clone()),
-                // Keep legacy daemons opted out when this client resumes a session.
-                telemetry_disabled: Some(true),
                 runtime_metadata: None,
                 lifecycle: None,
                 env: client_env,

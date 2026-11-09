@@ -248,7 +248,6 @@ mod tests {
             active_session_id: "queue-session".to_string(),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
         };
         let worker = Arc::new(Worker::new(config, None));

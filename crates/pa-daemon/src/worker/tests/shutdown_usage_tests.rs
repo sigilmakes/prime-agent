@@ -35,7 +35,6 @@ async fn accounting_worker(
             active_session_id: "accounting-parent".into(),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({"engine":"faux", "responses":["parent terminal"]})),
         },
         None,

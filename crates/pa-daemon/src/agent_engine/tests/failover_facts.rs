@@ -98,7 +98,6 @@ fn failover_rebinds_model_facts_before_the_backup_can_restore_primary() {
             session_file: None,
             faux_script: None,
             supervisor_link: None,
-            telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
         })

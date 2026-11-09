@@ -308,7 +308,6 @@ mod tests {
             active_session_id: "custom-session".to_string(),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
         };
         let worker = Arc::new(Worker::new(config, None));
@@ -900,7 +899,6 @@ mod tests {
             active_session_id: "custom-session".to_string(),
             agent_dir: dir_path.join("agent"),
             recovery_journal_path: dir_path.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
         };
         let worker = Arc::new(crate::worker::Worker::new(config, None));

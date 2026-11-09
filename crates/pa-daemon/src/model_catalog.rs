@@ -520,7 +520,6 @@ mod tests {
             active_session_id: "catalog-session".to_string(),
             agent_dir: agent_dir.clone(),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
         };
         let worker = Arc::new(Worker::new(config, None));

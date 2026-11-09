@@ -26,8 +26,6 @@ pub struct AgentEngineConfig {
     /// supervisor link. Present only inside a daemon worker (it enables
     /// the kernel's `agent_message/agent_observe` requests).
     pub supervisor_link: Option<SupervisorLinkConfig>,
-    /// Inert legacy opt-out metadata. This build has no telemetry reporters.
-    pub telemetry_disabled: Option<bool>,
     /// The worker's kernel cron wiring: the shared scheduled-jobs store
     /// the kernel `rlm_heartbeat.*` host requests read and write, so
     /// agent-created heartbeats reach the catalog the `heartbeats_list`

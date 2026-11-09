@@ -591,7 +591,6 @@ mod tests {
             active_session_id: "switch-session".to_string(),
             agent_dir: dir.join("agent"),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
         }
     }

@@ -527,8 +527,6 @@ pub(super) async fn create_session(
             no_session: options.no_session.then_some(true),
             name: None,
             config: Some(options.create_config()),
-            // Keep legacy daemons opted out when this client creates a session.
-            telemetry_disabled: Some(true),
             runtime_metadata: None,
             // TS `clientOwned: parsed.noSession`: only a noSession
             // create is client-owned.

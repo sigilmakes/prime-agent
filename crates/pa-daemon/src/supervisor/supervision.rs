@@ -750,9 +750,6 @@ impl Supervisor {
         // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env, orphan_path) = {
             let mut descriptor = resident.descriptor.lock().await.clone();
-            // Stamp only the launch clone here. A live adopted predecessor
-            // must retain its original posture until a replacement is spawned.
-            descriptor.telemetry_disabled = Some(true);
             // Each process lifetime owns a different file. An old owner's
             // in-flight reap must never clear a replacement's journal.
             let orphan_path = crate::journal::orphan_journal_path(
@@ -835,9 +832,6 @@ impl Supervisor {
             // Reuse the one spawn-time observation, including None. A later
             // successful probe must not replace an uncertain owned generation.
             child.publish_process_identity(&mut descriptor);
-            // This flag belongs to the successfully spawned generation, not
-            // to a still-live worker loaded from a legacy descriptor.
-            descriptor.telemetry_disabled = Some(true);
             // Publish the path with its owner identity, never against the
             // previous generation's pid before the spawn succeeds.
             descriptor.orphan_process_journal_path = Some(orphan_path);

@@ -40,7 +40,6 @@ async fn park_engine(dir: &std::path::Path) -> std::sync::Arc<AgentSessionEngine
                     active_session_id: "active-park".to_string(),
                     worker_token: "token".to_string(),
                 }),
-                telemetry_disabled: None,
                 cron_store: Some(cron_store),
                 queued_steering_probe: None,
             })

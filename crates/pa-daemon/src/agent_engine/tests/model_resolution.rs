@@ -86,7 +86,6 @@ fn create_config_flags_reach_the_engine_model_resolution() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -128,7 +127,6 @@ fn settings_default_drives_unflagged_resolution() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -343,7 +341,6 @@ fn restore_test_engine(
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -371,7 +368,6 @@ fn the_startup_chain_refuses_models_outside_the_allowlist() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -870,7 +866,6 @@ fn switch_model_never_poisons_the_selection_with_a_refused_candidate() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -917,7 +912,6 @@ fn switch_model_propagates_the_new_model_to_the_child_identity() {
             active_session_id: "parent-live".to_string(),
             worker_token: "test-token".to_string(),
         }),
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -958,7 +952,6 @@ fn configure_model_merges_only_present_fields() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -1013,7 +1006,6 @@ fn agent_engine_reports_model_resolution_failures() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -1081,7 +1073,6 @@ fn configure_model_thinking_clamps_to_the_models_supported_levels() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -1181,7 +1172,6 @@ fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -1257,7 +1247,6 @@ fn a_lazy_model_switch_roundtrip_preserves_the_requested_level() {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })

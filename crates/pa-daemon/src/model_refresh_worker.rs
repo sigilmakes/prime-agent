@@ -90,7 +90,6 @@ mod tests {
                 active_session_id: "refresh-session".into(),
                 agent_dir: dir.join("agent"),
                 recovery_journal_path: dir.join("recovery.jsonl"),
-                telemetry_disabled: Some(true),
                 script: Some(json!({"responses": ["ack"]})),
             },
             None,

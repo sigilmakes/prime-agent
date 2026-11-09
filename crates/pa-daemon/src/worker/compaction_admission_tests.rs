@@ -21,7 +21,6 @@ pub(super) async fn compaction_admission_worker(compaction: Value) -> Arc<Worker
         active_session_id: "compaction-session".to_string(),
         agent_dir: dir.join("agent"),
         recovery_journal_path: dir.join("recovery.jsonl"),
-        telemetry_disabled: None,
         script: Some(json!({
             "responses": ["steer reply"],
             "compaction": compaction,

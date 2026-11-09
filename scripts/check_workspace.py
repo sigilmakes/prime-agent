@@ -161,7 +161,7 @@ def isolated_environment(repo, state, target, cargo_home, ambient):
         "PRIME_AGENT_CODING_AGENT_DIR": str(state / "agent"),
         "PRIME_AGENT_KERNEL_VENV": str(kernel),
         "PRIME_AGENT_DAEMON_SOCKET": str(state / "run/daemon.sock"),
-        "DO_NOT_TRACK": "1", "PRIME_AGENT_TELEMETRY": "0",
+        "DO_NOT_TRACK": "1",
         "CARGO_TARGET_DIR": str(target), "CARGO_HOME": str(cargo_home),
         "CARGO_BUILD_JOBS": "8", "CARGO_INCREMENTAL": "0",
         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",

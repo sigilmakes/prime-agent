@@ -245,7 +245,6 @@ async fn tui_export_and_share_surface() {
                 "sessionDir": session_dir.display().to_string(),
                 "script": script_path.display().to_string(),
             })),
-            telemetry_disabled: Some(true),
             runtime_metadata: None,
             lifecycle: None,
             env: None,

@@ -66,7 +66,6 @@ fn credential_backed_engine_with_override(
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -85,7 +84,6 @@ fn credential_backed_engine(dir: &std::path::Path) -> AgentSessionEngine {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })
@@ -501,7 +499,6 @@ fn prime_inference_backed_engine(dir: &std::path::Path) -> AgentSessionEngine {
         session_file: None,
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })

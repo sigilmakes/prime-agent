@@ -323,7 +323,6 @@ return {
                 agent_dir: agent.clone(),
                 recovery_journal_path: dir.path().join("recovery.jsonl"),
                 script: None,
-                telemetry_disabled: Some(true),
             };
             let worker = Arc::new(
                 tokio::task::spawn_blocking(move || Worker::new(config, None))

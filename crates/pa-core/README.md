@@ -25,7 +25,7 @@ logic of its own). The RLM recursion host seam
 `rlm.create_session`/`rlm.list_subagents`/`rlm.collect`/
 `rlm.delete_subagent` host requests call into, with the roster/collect/
 selector-error vocabulary the daemon implements over the supervisor link.
-Platform wall (`platform`): process control (signals/process groups, kernel exit waits), file locking, file permissions, and shell selection - every OS-specific behavior in the engine lives there behind cfg-gated implementations (the durable-write rename primitive is pa-telemetry's `rename_onto`, re-exported as `platform::rename_onto`). Scheduled jobs (`cron`, the `AgentCronJobStore` port of `core/cron-jobs.ts`): file-backed job state under session artifacts (`scheduled-jobs.json` partitions) with cross-process locking, plus the public read-only scan (`cron::store::read_scheduled_jobs_artifact`) the update flow's roster projection and boot re-arm read. Tools (bash, edit, python_repl + internal rename/stdout), file mutation queue, truncation and rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, settings/config, package manager (npm/git/local source install/remove/list/update against settings, plus `resolve()`: precedence-ranked session resource resolution over configured packages, settings arrays, auto-discovery, and bundled skills), session manager (persist/resume). origin/main
+Platform wall (`platform`): process control (signals/process groups, kernel exit waits), file locking, file permissions, and shell selection - every OS-specific behavior in the engine lives there behind cfg-gated implementations (the durable-write rename primitive is `platform::rename_onto`). Scheduled jobs (`cron`, the `AgentCronJobStore` port of `core/cron-jobs.ts`): file-backed job state under session artifacts (`scheduled-jobs.json` partitions) with cross-process locking, plus the public read-only scan (`cron::store::read_scheduled_jobs_artifact`) the update flow's roster projection and boot re-arm read. Tools (bash, edit, python_repl + internal rename/stdout), file mutation queue, truncation and rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, settings/config, package manager (npm/git/local source install/remove/list/update against settings, plus `resolve()`: precedence-ranked session resource resolution over configured packages, settings arrays, auto-discovery, and bundled skills), session manager (persist/resume). origin/main
 
 Provider resilience policies in `session_engine`: the shared quick-retry
 policy (TS `provider-retry.ts`: permanent-kind classification,
@@ -94,32 +94,6 @@ The Unix platform process API exposes `current_user_id()` for the daemon
 endpoint namespace to match the TypeScript `process.getuid()` contract on
 macOS as well as Linux. This reads the OS identity without filesystem or
 subprocess work.
-
-Automatic trace delivery (`agent_traces::ContinuousTraceUpload`) owns consent-gated
-persist scheduling and startup outbox recovery alongside the existing manual uploader.
-Hosts reuse `load_settings` to capture consent before their existing settings parse,
-attach `persisted` after successful disk writes, and own the returned installation
-for the session lifetime. Replacements use `rebind` with the effective cwd; forks
-use `forked`. The installation never drains on drop. A detached process-wide runtime
-owns all transcript reads, scans, settings reloads, networking and retries; a maximum
-of 256 registered controllers and four deliveries bounds resident work. Admission
-returns `None` at capacity and logs rejection; hosts attach no hook in that case.
-Retired descriptors free capacity only after background recovery acknowledges them.
-Session replacement transfers its existing slot and cancels the predecessor; forks
-require a distinct slot. Replacement retains a bounded retirement flag until the
-background recovery snapshot acknowledges its exact controller identity. The synchronous
-persist seam checks the cached consent snapshot and performs an exists/create
-pending-marker write; consent metadata reads and reloads stay in the worker after
-the host captures its initial settings generation; it does not fsync the marker (matching TS v0.9.8 process-crash
-recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention
-records one stable fallback marker per session, which is retained conservatively
-until a future sender has delivered it. Its cost must be measured
-separately; startup/paint parity is not established by scheduler unit tests.
-Active requests monitor consent changes every second on the worker and cancel on
-revocation/errors; bytes already sent cannot be recalled. Recovery belongs to all
-live hosts sharing the agent directory and cancels when the last host disappears.
-Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
-and releases upload capacity during retry waits; exhaustion retains durable intent.
 
 ## Plugin host foundation
 

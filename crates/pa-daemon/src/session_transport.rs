@@ -1248,7 +1248,6 @@ mod tests {
             active_session_id: "log-e2e".to_string(),
             agent_dir: agent_dir.clone(),
             recovery_journal_path: dir.join("recovery.jsonl"),
-            telemetry_disabled: None,
             script: Some(json!({
                 "responses": [
                     { "text": "run the listing", "toolCalls": [ {

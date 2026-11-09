@@ -587,30 +587,6 @@ impl Supervisor {
                 }
             }
         }
-        if let DaemonCommand::Attach {
-            telemetry_disabled: Some(true),
-            ..
-        }
-        | DaemonCommand::Reattach {
-            telemetry_disabled: Some(true),
-            ..
-        } = command
-        {
-            let worker_disabled = resident.descriptor.lock().await.telemetry_disabled;
-            if worker_disabled != Some(true) {
-                // A live adopted worker can predate reporter removal. Only an
-                // explicit persisted opt-out proves that this generation is safe.
-                return (
-                    vec![response_line(&response_failure(
-                        Some(&command_id),
-                        &type_name,
-                        "Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry.",
-                        None,
-                    ))],
-                    false,
-                );
-            }
-        }
         if matches!(
             command,
             DaemonCommand::RefreshModels { .. } | DaemonCommand::ApplyModelSnapshots { .. }
@@ -1003,7 +979,6 @@ impl Supervisor {
             no_session: None,
             name: None,
             config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
-            telemetry_disabled: None,
             runtime_metadata: child_id.map(|id| json!({ "rlmChildId": id })),
             lifecycle: None,
             env: None,

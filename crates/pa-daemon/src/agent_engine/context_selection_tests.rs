@@ -306,7 +306,6 @@ fn branch_summary_ack_failure_reaches_no_model() {
         session_file: Some(session_file.clone()),
         faux_script: None,
         supervisor_link: None,
-        telemetry_disabled: Some(true),
         cron_store: None,
         queued_steering_probe: None,
     })

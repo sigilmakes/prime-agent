@@ -126,7 +126,6 @@ mod tests {
             root_session_id: None,
             session_file: session_file.map(|p| p.to_string_lossy().to_string()),
             session_dir: None,
-            telemetry_disabled: None,
             created_at: String::new(),
             updated_at: String::new(),
             lifecycle: DaemonWorkerLifecycle::Ready,
