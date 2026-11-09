@@ -17,7 +17,7 @@ async fn list(options: &RunOptions) -> Result<i32, String> {
     let config = &options.config;
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
     let mut registry =
-        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
+        pa_core::models::ModelRegistry::create_for_agent_dir(auth, &config.agent_dir);
     if let Some(error) = registry.get_error() {
         eprintln!("Warning: errors loading models.json:\n{error}");
     }

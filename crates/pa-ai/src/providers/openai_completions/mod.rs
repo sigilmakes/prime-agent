@@ -112,6 +112,7 @@ pub struct ResolvedCompat {
     pub zai_tool_stream: bool,
     pub open_router_routing: Option<crate::types::OpenRouterRouting>,
     pub vercel_gateway_routing: Option<pa_types::ai::VercelGatewayRouting>,
+    pub send_authorization: bool,
 }
 
 /// Detect compatibility settings from provider and baseUrl for known providers.
@@ -190,6 +191,7 @@ pub fn detect_compat(model: &Model) -> ResolvedCompat {
         cache_control_format,
         send_session_affinity_headers: false,
         supports_long_cache_retention: !(is_cloudflare_workers_ai || is_cloudflare_ai_gateway),
+        send_authorization: true,
     }
 }
 
@@ -249,6 +251,9 @@ pub fn get_compat(model: &Model) -> ResolvedCompat {
         supports_long_cache_retention: compat
             .supports_long_cache_retention
             .unwrap_or(detected.supports_long_cache_retention),
+        send_authorization: compat
+            .send_authorization
+            .unwrap_or(detected.send_authorization),
     }
 }
 

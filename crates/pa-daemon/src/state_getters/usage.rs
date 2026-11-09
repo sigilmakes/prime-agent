@@ -7,7 +7,7 @@ use super::{json, ModelRegistry, Value};
 /// private-authorization cache adopted so create-time resolution agrees).
 pub(crate) fn worker_model_registry(agent_dir: &std::path::Path) -> ModelRegistry {
     let auth = pa_core::auth::AuthStorage::create(agent_dir);
-    let mut registry = ModelRegistry::create(auth, agent_dir.join("models.json"));
+    let mut registry = ModelRegistry::create_for_agent_dir(auth, agent_dir);
     registry.load_private_authorization_from_cache();
     registry
 }

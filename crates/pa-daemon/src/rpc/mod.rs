@@ -144,7 +144,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
     tokio::spawn(async move {
         let auth = pa_core::auth::AuthStorage::create(&options.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, options.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &options.agent_dir);
         let _ = registry.refresh_available_models().await;
     });
     spawn_signal_handlers(&session, writer.clone());

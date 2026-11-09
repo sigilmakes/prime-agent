@@ -27,10 +27,9 @@ impl Worker {
             return response;
         }
         let agent_dir = self.config.agent_dir.clone();
-        let models_json = agent_dir.join("models.json");
-        let mut registry = pa_core::models::ModelRegistry::create(
+        let mut registry = pa_core::models::ModelRegistry::create_for_agent_dir(
             pa_core::auth::AuthStorage::create(&agent_dir),
-            models_json,
+            &agent_dir,
         );
         // The on-disk private authorization (fingerprint-checked): the
         // validated current view of the account's private models, no network.
@@ -67,7 +66,7 @@ impl Worker {
             loop {
                 let auth = pa_core::auth::AuthStorage::create(&agent_dir);
                 let mut registry =
-                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                    pa_core::models::ModelRegistry::create_for_agent_dir(auth, &agent_dir);
                 let available = registry
                     .refresh_available_models_with_trigger(trigger)
                     .await;

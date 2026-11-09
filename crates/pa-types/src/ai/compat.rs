@@ -40,6 +40,9 @@ pub struct OpenAiCompletionsCompat {
     pub send_session_affinity_headers: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    /// Keyless local endpoints speak no bearer token; absent means send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_authorization: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

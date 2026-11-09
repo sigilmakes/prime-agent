@@ -26,6 +26,8 @@ pub struct ProviderRequestConfig {
     /// providers iterate deterministically.
     pub headers: Option<BTreeMap<String, String>>,
     pub auth_header: Option<bool>,
+    /// The provider authorizes requests without a token.
+    pub keyless: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -90,6 +92,9 @@ pub struct ModelRegistry {
     authorized_private_models: Vec<Model>,
     preferred_default: Option<String>,
     unresolved_catalog_sources: Vec<String>,
+    provider_facts: Vec<crate::plugins::ProviderFact>,
+    materialized_fact_providers: HashSet<String>,
+    manifest_error: Option<String>,
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`);
     /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
@@ -157,24 +162,98 @@ fn xai_subscription_thinking_map(model_id: &str) -> ThinkingLevelMap {
     map
 }
 
+fn load_manifest_facts(
+    agent_dir: &Path,
+) -> (Option<Vec<crate::plugins::ProviderFact>>, Option<String>) {
+    match crate::plugins::ManifestCatalog::from_agent_dir(agent_dir) {
+        Ok(manifest) => (Some(manifest.providers), None),
+        Err(error) => (
+            None,
+            Some(format!("Failed to load plugin provider facts: {error}")),
+        ),
+    }
+}
+
 impl ModelRegistry {
     pub fn create(auth: AuthStorage, models_json_path: impl Into<PathBuf>) -> Self {
-        Self::new(auth, Some(models_json_path.into()))
+        let models_json_path = models_json_path.into();
+        let (facts, manifest_error) = models_json_path
+            .parent()
+            .filter(|agent_dir| !agent_dir.as_os_str().is_empty())
+            .map_or((None, None), load_manifest_facts);
+        let catalog = catalog_chain::catalog_for(Some(&models_json_path));
+        Self::build(auth, Some(models_json_path), facts, manifest_error, catalog)
+    }
+
+    /// Construct with an already-loaded fact catalog. Callers that own the
+    /// agent directory should prefer [`Self::create_for_agent_dir`], which is
+    /// the single load path.
+    pub fn create_with_manifest(
+        auth: AuthStorage,
+        models_json_path: impl Into<PathBuf>,
+        manifest: Option<crate::plugins::ManifestCatalog>,
+    ) -> Self {
+        let models_json_path = models_json_path.into();
+        let catalog = catalog_chain::catalog_for(Some(&models_json_path));
+        let facts = manifest.map(|manifest| manifest.providers);
+        Self::build(auth, Some(models_json_path), facts, None, catalog)
+    }
+
+    /// Construct over an agent directory: the model file is
+    /// `<agent_dir>/models.json` and provider facts load once from the global
+    /// plugin settings. A malformed plugin declaration surfaces as the
+    /// registry's load error instead of silently dropping providers.
+    pub fn create_for_agent_dir(auth: AuthStorage, agent_dir: impl AsRef<Path>) -> Self {
+        let agent_dir = agent_dir.as_ref().to_path_buf();
+        let models_json_path = agent_dir.join("models.json");
+        let (facts, manifest_error) = load_manifest_facts(&agent_dir);
+        let catalog = catalog_chain::catalog_for(Some(&models_json_path));
+        Self::build(auth, Some(models_json_path), facts, manifest_error, catalog)
     }
 
     pub fn in_memory(auth: AuthStorage) -> Self {
-        Self::new(auth, None)
+        Self::build(auth, None, None, None, catalog_chain::catalog_for(None))
     }
 
-    fn new(auth: AuthStorage, models_json_path: Option<PathBuf>) -> Self {
-        let catalog = catalog_chain::catalog_for(models_json_path.as_deref());
-        Self::with_catalog(auth, models_json_path, catalog)
+    /// In-memory registry with caller-supplied provider facts.
+    pub fn in_memory_with_manifest(
+        auth: AuthStorage,
+        manifest: crate::plugins::ManifestCatalog,
+    ) -> Self {
+        Self::build(
+            auth,
+            None,
+            Some(manifest.providers),
+            None,
+            catalog_chain::catalog_for(None),
+        )
     }
 
     /// Inject the catalog owner for hermetic endpoints and isolated tests.
     pub fn with_catalog(
         auth: AuthStorage,
         models_json_path: Option<PathBuf>,
+        catalog: std::sync::Arc<pa_models::ModelCatalog>,
+    ) -> Self {
+        Self::build(auth, models_json_path, None, None, catalog)
+    }
+
+    /// Inject both the catalogue owner and the session-free fact snapshot.
+    pub fn with_catalog_and_manifest(
+        auth: AuthStorage,
+        models_json_path: Option<PathBuf>,
+        catalog: std::sync::Arc<pa_models::ModelCatalog>,
+        manifest: Option<crate::plugins::ManifestCatalog>,
+    ) -> Self {
+        let facts = manifest.map(|manifest| manifest.providers);
+        Self::build(auth, models_json_path, facts, None, catalog)
+    }
+
+    fn build(
+        auth: AuthStorage,
+        models_json_path: Option<PathBuf>,
+        provider_facts: Option<Vec<crate::plugins::ProviderFact>>,
+        manifest_error: Option<String>,
         catalog: std::sync::Arc<pa_models::ModelCatalog>,
     ) -> Self {
         let mut registry = Self {
@@ -189,6 +268,9 @@ impl ModelRegistry {
             authorized_private_models: Vec::new(),
             preferred_default: None,
             unresolved_catalog_sources: Vec::new(),
+            provider_facts: provider_facts.unwrap_or_default(),
+            materialized_fact_providers: HashSet::new(),
+            manifest_error,
             catalog,
         };
         registry.load_models();
@@ -231,6 +313,9 @@ impl ModelRegistry {
                 *status_by_provider
                     .entry(model.provider.as_str())
                     .or_insert_with(|| {
+                        if self.is_keyless_provider(&model.provider) {
+                            return true;
+                        }
                         let status = self.auth.get_auth_status_local(&model.provider);
                         status.source != Some(crate::auth::types::AuthSource::Stale)
                             && status.label.as_deref() != Some("expired")
@@ -250,6 +335,13 @@ impl ModelRegistry {
     /// probing for keys.
     pub fn get_provider_auth_status(&self, provider: &str) -> crate::auth::types::AuthStatus {
         use crate::auth::types::{AuthSource, AuthStatus};
+        if self.is_keyless_provider(provider) {
+            return AuthStatus {
+                configured: true,
+                source: None,
+                label: Some("no authentication".to_string()),
+            };
+        }
         let status = self.auth.get_auth_status_local(provider);
         if status.source.is_some() && status.source != Some(AuthSource::Stale) {
             return AuthStatus {
@@ -325,11 +417,19 @@ impl ModelRegistry {
         })
     }
 
+    /// The provider authorizes requests without a credential.
+    #[must_use]
+    pub fn is_keyless_provider(&self, provider: &str) -> bool {
+        self.provider_request_configs
+            .get(provider)
+            .is_some_and(|config| config.keyless)
+    }
+
     fn has_configured_provider_request_auth(&self, provider: &str) -> bool {
         let Some(config) = self.provider_request_configs.get(provider) else {
             return false;
         };
-        if config.headers.is_some() || config.auth_header.is_some() {
+        if config.keyless || config.headers.is_some() || config.auth_header.is_some() {
             return true;
         }
         config.api_key.as_deref().is_some_and(|key| !key.is_empty())
@@ -352,13 +452,19 @@ impl ModelRegistry {
         self.provider_request_configs.clear();
         self.model_request_headers.clear();
         self.load_error = None;
-        let result = self
+        let mut result = self
             .models_json_path
             .clone()
             .map_or_else(CustomModelsResult::default, |path| {
                 self.load_custom_models_file(&path)
             });
-        self.load_error.clone_from(&result.error);
+        self.materialized_fact_providers =
+            self.merge_provider_facts(&mut result).into_iter().collect();
+        self.load_error = [self.manifest_error.clone(), result.error.clone()]
+            .into_iter()
+            .flatten()
+            .reduce(|left, right| format!("{left}\n{right}"));
+        self.install_provider_request_configs(&result.providers);
         let inputs = self.catalog_inputs(&result, local_only);
         (result, inputs)
     }
@@ -371,7 +477,7 @@ impl ModelRegistry {
 
     fn accept_catalog_snapshot(
         &mut self,
-        custom: CustomModelsResult,
+        mut custom: CustomModelsResult,
         snapshot: pa_models::CatalogSnapshot,
     ) {
         self.explicit_private_ids = custom
@@ -406,8 +512,37 @@ impl ModelRegistry {
                 *model = apply_model_override(model, over);
             }
         }
-        self.models = Self::merge_custom_models(models, custom.models);
+        let custom_models = std::mem::take(&mut custom.models);
+        self.models = Self::merge_custom_models(models, custom_models);
+        self.apply_provider_limits(&custom);
         self.apply_subscription_model_adaptations();
+    }
+
+    /// Fact limits cap whatever discovery or a declaration projected. Fact
+    /// models also carry an explicit output ceiling: the fact default is a
+    /// configured value, not a catalog guess.
+    fn apply_provider_limits(&mut self, custom: &CustomModelsResult) {
+        if self.provider_facts.is_empty() {
+            return;
+        }
+        for model in &mut self.models {
+            if !self.materialized_fact_providers.contains(&model.provider) {
+                continue;
+            }
+            if let Some(limits) = custom
+                .providers
+                .get(&model.provider)
+                .and_then(|config| config.limits)
+            {
+                if let Some(context) = limits.context {
+                    model.context_window = model.context_window.min(context);
+                }
+                if let Some(max_tokens) = limits.max_tokens {
+                    model.max_tokens = model.max_tokens.min(max_tokens);
+                }
+            }
+            model.max_tokens_explicit = true;
+        }
     }
 
     /// Per-model base-URL/API overrides plus the xAI subscription switch,
@@ -483,26 +618,6 @@ impl ModelRegistry {
                 }
             },
         );
-        for (provider, provider_config) in &result.providers {
-            self.provider_request_configs.insert(
-                provider.clone(),
-                ProviderRequestConfig {
-                    api_key: provider_config.api_key.clone(),
-                    headers: provider_config.headers.clone(),
-                    auth_header: provider_config.auth_header,
-                },
-            );
-            if let Some(overrides) = &provider_config.model_overrides {
-                for (id, over) in overrides {
-                    self.store_model_headers(provider, id, over.headers.clone());
-                }
-            }
-            if let Some(models) = &provider_config.models {
-                for model in models {
-                    self.store_model_headers(provider, &model.id, model.headers.clone());
-                }
-            }
-        }
         if let Some(error) = &result.error {
             // Keep built-ins only; message mirrors the TS load failure format.
             if !error.contains("models.json") {
@@ -603,7 +718,12 @@ impl ModelRegistry {
             .get_api_key_with_source_token(&model.provider, false);
         let mut api_key = stored.api_key;
         let provider_config = self.provider_request_configs.get(&model.provider).cloned();
-        if api_key.is_none() {
+        let keyless = provider_config
+            .as_ref()
+            .is_some_and(|config| config.keyless);
+        if keyless {
+            api_key = None;
+        } else if api_key.is_none() {
             if let Some(config) = &provider_config {
                 if let Some(configured) = &config.api_key {
                     if let Some(resolved) =
@@ -625,8 +745,10 @@ impl ModelRegistry {
         if let Some(model_headers) = &model.headers {
             headers.extend(model_headers.clone());
         }
-        if let Some(auth_storage_headers) = auth_storage_headers {
-            headers.extend(auth_storage_headers);
+        if !keyless {
+            if let Some(auth_storage_headers) = auth_storage_headers {
+                headers.extend(auth_storage_headers);
+            }
         }
         if let Some(provider_headers) = provider_headers {
             headers.extend(provider_headers);
@@ -634,10 +756,11 @@ impl ModelRegistry {
         if let Some(model_request_headers) = model_request_headers {
             headers.extend(model_request_headers);
         }
-        if provider_config
-            .as_ref()
-            .and_then(|config| config.auth_header)
-            .unwrap_or(false)
+        if !keyless
+            && provider_config
+                .as_ref()
+                .and_then(|config| config.auth_header)
+                .unwrap_or(false)
         {
             let Some(api_key) = &api_key else {
                 return ResolvedRequestAuth {
@@ -653,7 +776,7 @@ impl ModelRegistry {
         }
         ResolvedRequestAuth {
             ok: true,
-            api_key,
+            api_key: if keyless { None } else { api_key },
             headers: (!headers.is_empty()).then_some(headers),
             error: None,
         }
@@ -666,5 +789,7 @@ fn now_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+#[cfg(test)]
+mod provider_facts_tests;
 #[cfg(test)]
 mod tests;

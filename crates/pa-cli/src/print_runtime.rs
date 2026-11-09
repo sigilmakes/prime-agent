@@ -560,7 +560,7 @@ pub(crate) async fn build_headless_engine_with(
     // (the spawn resolved them against this same catalog).
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
     let mut registry =
-        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
+        pa_core::models::ModelRegistry::create_for_agent_dir(auth, &config.agent_dir);
     registry.load_private_authorization_from_cache();
     let model = match embedding {
         HeadlessEmbedding::Child(overrides) => match &overrides.lane {
@@ -845,7 +845,7 @@ fn headless_image_model_router(
             let block_images = settings.get_block_images();
             let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
             let mut registry =
-                pa_core::models::ModelRegistry::create(auth, decide_agent_dir.join("models.json"));
+                pa_core::models::ModelRegistry::create_for_agent_dir(auth, &decide_agent_dir);
             registry.load_private_authorization_from_cache();
             let available: Vec<pa_types::ai::Model> =
                 registry.get_available().into_iter().cloned().collect();
@@ -894,7 +894,7 @@ fn headless_image_model_router(
                 }
                 let auth = pa_core::auth::AuthStorage::create(&agent_dir);
                 let mut registry =
-                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                    pa_core::models::ModelRegistry::create_for_agent_dir(auth, &agent_dir);
                 registry.load_private_authorization_from_cache();
                 let resolved_auth = registry
                     .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());

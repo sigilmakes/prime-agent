@@ -1,5 +1,17 @@
 //! Model subsystem: resolver and Prime Inference private models.
 
+/// Providers whose catalogue templates and auth flows are compiled in. Plugin
+/// facts may not take these ids.
+pub(crate) const BUILTIN_PROVIDER_IDS: [&str; 7] = [
+    "openai",
+    "openrouter",
+    "anthropic",
+    "google",
+    "openai-codex",
+    "ollama-cloud",
+    "prime-inference",
+];
+
 pub use allowlist::{model_allowed, ModelAllowlistRefusal};
 pub use private_auth::get_private_prime_inference_models;
 pub use registry::{

@@ -67,7 +67,7 @@ fn optional_metadata_preserves_baseline_and_never_changes_transport() {
 }
 
 #[test]
-fn explicit_defaults_admit_unknown_ids_and_scope_changes_hide_metadata() {
+fn explicit_defaults_admit_unknown_ids_and_scope_changes_hide_metadata_but_defaults_do_not() {
     let dir = tempfile::tempdir().unwrap();
     let owner = ProviderCatalog::new(Some(dir.path().into()));
     let base = template("custom", "family");
@@ -85,7 +85,16 @@ fn explicit_defaults_admit_unknown_ids_and_scope_changes_hide_metadata() {
         panic!("configured policy");
     };
     model.api = "new-policy".into();
-    assert!(owner.resolve(&[changed], &[]).0.is_empty());
+    let models = owner.resolve(&[changed], &[]).0;
+    assert_eq!(
+        models.len(),
+        1,
+        "a defaults change keeps the last-good discovery cache"
+    );
+    assert_eq!(
+        models[0].api, "new-policy",
+        "the current policy still projects onto the cached row"
+    );
 }
 
 #[test]

@@ -354,3 +354,26 @@ async fn ollama_cloud_api_key_login_and_logout_use_the_standard_store() {
         .get("ollama-cloud")
         .is_none());
 }
+
+#[test]
+fn keyless_fact_providers_have_no_api_key_login_row() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        serde_json::json!({"plugins":{"local":{"enabled":true,"path":"local.lua"}}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("local.lua"),
+        r#"return {providers = {
+          {name = "local-gateway", url = "http://127.0.0.1:8090/v1", protocol = "openai",
+           auth = "none", models = {{id = "local-model"}}}
+        }}"#,
+    )
+    .unwrap();
+    let rows = ProviderAuth::new(dir.path(), dir.path()).login_rows_blocking();
+    assert!(
+        !rows.iter().any(|row| row.id == "local-gateway"),
+        "a keyless provider has no credential to paste: {rows:?}"
+    );
+}

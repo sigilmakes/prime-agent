@@ -263,7 +263,7 @@ fn resolve_available_model(
     model_id: &str,
 ) -> Result<pa_types::ai::Model, pa_core::models::SetModelSelectionError> {
     let auth = pa_core::auth::AuthStorage::create(agent_dir);
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+    let mut registry = pa_core::models::ModelRegistry::create_for_agent_dir(auth, agent_dir);
     registry.load_private_authorization_from_cache();
     registry
         .resolve_set_model_selection(provider, model_id)

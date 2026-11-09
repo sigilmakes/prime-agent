@@ -26,7 +26,7 @@ impl StartupModelProbe {
         let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.agent_dir);
         // Sync resolution on a fresh registry must adopt the on-disk private
         // authorization cache before `get_available`.
         registry.load_private_authorization_from_cache();

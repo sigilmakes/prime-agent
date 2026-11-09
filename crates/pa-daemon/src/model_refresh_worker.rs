@@ -33,7 +33,7 @@ impl Worker {
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         let report = registry
             .refresh_catalog_sources(payload.sources.as_deref())
             .await;
@@ -61,7 +61,7 @@ impl Worker {
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         // Disk-only by contract: this must never call the network refresh API.
         let report = registry.apply_catalog_refresh(payload.since).await;
         if let Some(engine) = &self.agent_engine {
