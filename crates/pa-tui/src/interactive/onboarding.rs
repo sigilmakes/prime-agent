@@ -265,9 +265,6 @@ async fn drive_onboarding_pane(
             } => {
                 return Ok((pane, PaneOutcome::Flow(settled)));
             }
-            () = tokio::time::sleep(Duration::from_millis(120)) => {
-                pane.tick();
-            }
         }
         screen = pane;
     }

@@ -384,13 +384,6 @@ function field(frame,   x, y, k, hash, cx, cy, contour, hy, si, seg, t, base, wa
       else put(x, ty, "·", "A", 3)
     }
   }
-  for (y = 0; y < MH; y++) {
-    n = split(LOGO[y], parts, "|")
-    for (i = 1; i <= n; i++) {
-      eq = index(parts[i], "=")
-      put(LI + substr(parts[i], 1, eq - 1), y, substr(parts[i], eq + 1), "T", 8)
-    }
-  }
 }
 function mark_row(y,   x, k, s, cur) {
   s = ""; cur = ""
@@ -466,13 +459,6 @@ function draw(n,   i) {
 BEGIN {
   ESC = "\033"
   MH = 7; LI = 5; QX0 = 5; QX1 = 26
-  LOGO[0] = "17=▗|18=▄|19=▄|20=█|21=▀"
-  LOGO[1] = "3=█|4=█|5=█|6=▄|14=▗|15=▄|16=█|17=█|18=█|19=▀"
-  LOGO[2] = "2=▗|3=█|4=▛|5=▐|6=█|7=▙|11=▗|12=▄|13=█|14=▀|15=▗|16=█|17=▀"
-  LOGO[3] = "1=▗|2=█|3=▛|5=▟|6=█|7=█|8=▙|9=▄|10=█|11=█|12=▛|14=▟|15=▛"
-  LOGO[4] = "1=▗|2=▟|3=▌|5=▐|6=█|7=█|8=█|9=▛|10=▘|11=▗|12=▄|13=█|14=▖"
-  LOGO[5] = "0=▟|1=█|2=█|3=█|4=▄|7=▄|8=▄|9=▟|10=█|11=█|12=█|13=▀"
-  LOGO[6] = "0=▜|1=█|2=▛|3=▀|4=▘|7=▜|8=█|9=▛|10=▀|11=▘"
   if (color == 1) {
     RESET = ESC "[0m"; BOLD = ESC "[1m"; ITAL = ESC "[3m"; TX = ESC "[39m"
     DIM = ESC "[38;2;113;113;122m"; AC = ESC "[38;2;124;111;175m"
