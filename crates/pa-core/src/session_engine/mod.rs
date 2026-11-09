@@ -27,6 +27,7 @@ pub(crate) mod optchat;
 mod plugin_context;
 mod plugin_jobs;
 mod plugin_services;
+mod plugin_stages;
 pub mod plugins;
 pub mod provider_adapter;
 pub mod provider_failover;
@@ -847,3 +848,6 @@ mod compaction_outcome_tests;
 
 #[cfg(test)]
 mod compaction_unblocked_tests;
+
+#[cfg(test)]
+mod plugin_stages_tests;

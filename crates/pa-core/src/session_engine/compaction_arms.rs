@@ -149,7 +149,8 @@ impl AgentSession {
 
     /// Execute `/compact`: summarize the pre-cut prefix, persist the entry,
     /// and rebuild the loop context summary-first; a skip leaves the session
-    /// untouched, an aborted run never commits.
+    /// untouched, an aborted run never commits. One finished attempt reaches
+    /// the observe-only `compaction_settled` stage exactly once.
     ///
     /// # Errors
     ///
@@ -159,6 +160,28 @@ impl AgentSession {
     ///
     /// Panics when the compaction summary sink slot's mutex is poisoned.
     pub async fn compact(
+        &self,
+        custom_instructions: Option<&str>,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        abort: Option<&pa_agent::abort::AbortSignal>,
+    ) -> anyhow::Result<CompactOutcome> {
+        let outcome = self
+            .compact_inner(custom_instructions, model, api_key, abort)
+            .await?;
+        if let Some(plugins) = &self.plugins {
+            super::plugin_stages::observe_compaction(
+                &plugins.host(),
+                plugins.context_session_id(),
+                &outcome,
+                custom_instructions,
+            )
+            .await;
+        }
+        Ok(outcome)
+    }
+
+    async fn compact_inner(
         &self,
         custom_instructions: Option<&str>,
         model: &pa_types::ai::Model,
