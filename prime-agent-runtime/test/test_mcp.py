@@ -6,7 +6,6 @@ import io
 import json
 import os
 import sys
-import traceback
 import select
 import subprocess
 import tempfile
@@ -443,7 +442,7 @@ class McpRegistryTest(unittest.TestCase):
         self.assertEqual(
             str(caught.exception),
             "MCP credentials for 'github' are not available. Ask the user to connect it "
-            "(/plugins or /mcp login github); do not ask them to set environment variables.",
+            "(run /mcp login github); do not ask them to set environment variables.",
         )
         with mock.patch.object(mcp, "_read_auth", return_value=None):
             with self.assertRaises(mcp.McpCredentialsUnavailable):
@@ -859,8 +858,8 @@ class PagedSession:
         return SimpleNamespace(tools=tools, next_cursor=next_cursor)
 
 
-class McpDiscoveryInventoryTest(unittest.TestCase):
-    """The host-backed inventory surface and live tool discovery."""
+class McpDiscoveryTest(unittest.TestCase):
+    """Live tool discovery."""
 
     def setUp(self):
         mcp._registry = mcp._Registry()
@@ -871,117 +870,6 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         generation.session = FakeSession(tools)
         run(generation.discover())
         return generation
-
-    # -- inventory pass-through --------------------------------------------
-
-    def _patch_host(self, responses):
-        async def host_request(request_type, payload):
-            reply = responses[request_type]
-            if isinstance(reply, Exception):
-                raise reply
-            return reply
-
-        return mock.patch.object(mcp, "host_request", host_request)
-
-    def test_list_connections_passes_through_and_scrubs_secret_keys(self):
-        responses = {
-            "mcp.list_connections": {
-                "connections": [
-                    {
-                        "connectionId": "notion",
-                        "label": "Notion",
-                        "status": "connected",
-                        "accessToken": "tok",
-                        "oauth": {"clientSecret": "cs", "kind": "oauth"},
-                    },
-                    {"connectionId": "acme", "status": "error", "setupHint": "configure API key"},
-                ]
-            }
-        }
-        with self._patch_host(responses):
-            connections = run(mcp.list_connections())
-        self.assertEqual([entry["connectionId"] for entry in connections], ["notion", "acme"])
-        notion = connections[0]
-        self.assertEqual(notion["label"], "Notion")
-        self.assertNotIn("accessToken", notion)
-        self.assertEqual(notion["oauth"], {"kind": "oauth"})
-        self.assertEqual(connections[1]["setupHint"], "configure API key")
-
-    def test_list_connections_rejects_malformed_host_data(self):
-        # One table: each malformed host reply must fail the whole call instead
-        # of passing a broken inventory shape through to the agent.
-        for reply in ({"connections": [{"label": "no-connection-id"}]}, {"connections": ["not-a-dict"]}, {"connections": "no"}, ["not", "a", "dict"]):
-            with self.subTest(reply=reply):
-                with self._patch_host({"mcp.list_connections": reply}):
-                    with self.assertRaises(RuntimeError):
-                        run(mcp.list_connections())
-
-    def test_inventory_wraps_host_failures_without_echoing_them(self):
-        with self._patch_host({"mcp.list_connections": RuntimeError("bridge is down")}):
-            with self.assertRaises(RuntimeError) as caught:
-                run(mcp.list_connections())
-        error = caught.exception
-        self.assertEqual(str(error), "MCP mcp.list_connections request failed")
-        self.assertIsNone(error.__cause__)
-        self.assertIsNone(error.__context__)
-        formatted = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        self.assertNotIn("bridge is down", formatted)
-
-    def test_list_plugins_forwards_filters_limit_and_cursor(self):
-        captured = {}
-
-        async def host_request(request_type, payload):
-            captured["type"] = request_type
-            captured["payload"] = payload
-            return {
-                "plugins": [{"serviceId": "notion", "label": "Notion", "connectionStatus": "not_connected"}],
-                "nextCursor": "page-2",
-            }
-
-        with mock.patch.object(mcp, "host_request", host_request):
-            page = run(mcp.list_plugins(connection_status="not_connected", limit=5, cursor="page-1"))
-        self.assertEqual(captured["type"], "mcp.list_plugins")
-        self.assertEqual(
-            captured["payload"], {"connectionStatus": "not_connected", "limit": 5, "cursor": "page-1"}
-        )
-        self.assertEqual(page["nextCursor"], "page-2")
-        self.assertEqual(page["plugins"][0]["serviceId"], "notion")
-
-        with mock.patch.object(mcp, "host_request", host_request):
-            run(mcp.list_plugins())
-        self.assertEqual(captured["payload"], {"limit": 50})
-
-    def test_list_plugins_validates_inputs_and_host_shapes(self):
-        for kwargs in ({"connection_status": "maybe"}, {"limit": 0}, {"limit": 201}, {"limit": True}, {"cursor": "x" * 600}):
-            with self._patch_host({"mcp.list_plugins": {"plugins": []}}):
-                with self.assertRaises((ValueError, TypeError)):
-                    run(mcp.list_plugins(**kwargs))
-        for reply in ({"plugins": ["no"]}, {"plugins": [], "nextCursor": ""}):
-            with self._patch_host({"mcp.list_plugins": reply}):
-                with self.assertRaises(RuntimeError):
-                    run(mcp.list_plugins())
-
-    def test_search_plugins_sends_query_and_limit(self):
-        captured = {}
-
-        async def host_request(request_type, payload):
-            captured["type"] = request_type
-            captured["payload"] = payload
-            return {"plugins": [{"serviceId": "notion", "apiKey": "leak"}], "nextCursor": None}
-
-        with mock.patch.object(mcp, "host_request", host_request):
-            page = run(mcp.search_plugins("  Notion  "))
-        self.assertEqual(captured["type"], "mcp.search_plugins")
-        self.assertEqual(captured["payload"], {"query": "Notion", "limit": 10})
-        self.assertIsNone(page["nextCursor"])
-        self.assertNotIn("apiKey", page["plugins"][0])
-        for bad in ("", "   "):
-            with self._patch_host({"mcp.search_plugins": {"plugins": []}}):
-                with self.assertRaises(TypeError):
-                    run(mcp.search_plugins(bad))
-        with self._patch_host({"mcp.search_plugins": {"plugins": []}}):
-            with self.assertRaises(ValueError):
-                run(mcp.search_plugins("notion", limit=51))
 
     # -- live tool discovery ------------------------------------------------
 
@@ -1070,128 +958,6 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertTrue(limited["truncated"])
         # A failing connection surfaces its error instead of hiding it.
         self.assertIsNotNone(error)
-
-    def test_search_tools_without_connection_searches_connected_only(self):
-        tools = [SimpleNamespace(name="search-docs", description="Search workspace documents", inputSchema={})]
-        generation = self.generation({"type": "http"}, tools)
-        generation.server = "a"
-        broken = mcp.McpCredentialsUnavailable(
-            "MCP credentials for 'b' are not available. Ask the user to connect it"
-            " (/plugins or /mcp login b); do not ask them to set environment variables."
-        )
-
-        async def get_locked(server):
-            if server == "a":
-                return generation
-            raise broken
-
-        responses = {
-            "mcp.list_connections": {
-                "connections": [
-                    {"connectionId": "a", "status": "connected"},
-                    {"connectionId": "b", "status": "connected"},
-                    {"connectionId": "c", "status": "not_connected"},
-                    {"connectionId": "d", "status": "error"},
-                ]
-            }
-        }
-
-        async def scenario():
-            with self._patch_host(responses), mock.patch.object(
-                mcp._registry, "_get_locked", side_effect=get_locked
-            ):
-                return await mcp.search_tools("documents")
-
-        result = run(scenario())
-        self.assertEqual(result["tools"], [
-            {"connectionId": "a", "name": "search-docs", "description": "Search workspace documents"}
-        ])
-        self.assertEqual(result["searched"], ["a"])
-        self.assertEqual([entry["connectionId"] for entry in result["unavailable"]], ["b"])
-        self.assertEqual(
-            result["unavailable"][0]["error"],
-            "McpCredentialsUnavailable: credentials for this connection are not available; "
-            "the user must connect it",
-        )
-        self.assertFalse(result["truncated"])
-
-    def test_search_tools_bounds_servers_and_reports_truncation(self):
-        connections = {
-            "connections": [
-                {"connectionId": f"svc-{index}", "status": "connected"} for index in range(10)
-            ]
-        }
-        empty = self.generation({"type": "http"}, [])
-        calls = []
-
-        async def get_locked(server):
-            calls.append(server)
-            empty.server = server
-            return empty
-
-        async def scenario():
-            with self._patch_host({"mcp.list_connections": connections}), mock.patch.object(
-                mcp._registry, "_get_locked", side_effect=get_locked
-            ):
-                return await mcp.search_tools("anything")
-
-        result = run(scenario())
-        self.assertEqual(len(calls), mcp._MAX_TOOL_SEARCH_SERVERS)
-        self.assertEqual(result["searched"], [f"svc-{index}" for index in range(mcp._MAX_TOOL_SEARCH_SERVERS)])
-        self.assertTrue(result["truncated"])
-
-    def test_search_unavailable_never_echoes_raw_exception_text(self):
-        connections = {"connections": [{"connectionId": "leaky", "status": "connected"}]}
-        raw = "Connection failed: https://user:hunter2@evil.test/mcp?api_key=abc123 Authorization: Bearer tok-123-secret"
-
-        async def get_locked(server):
-            raise RuntimeError(raw)
-
-        async def scenario():
-            with self._patch_host({"mcp.list_connections": connections}), mock.patch.object(
-                mcp._registry, "_get_locked", side_effect=get_locked
-            ):
-                return await mcp.search_tools("documents")
-
-        result = run(scenario())
-        error = result["unavailable"][0]["error"]
-        self.assertEqual(error, "RuntimeError: the connection could not be opened or searched")
-        for leaked in ("hunter2", "abc123", "tok-123-secret", "evil.test", "Bearer"):
-            self.assertNotIn(leaked, error)
-
-    def test_host_inventory_failures_never_expose_the_original_exception(self):
-        raw = (
-            "GET https://user:hunter2@sync.test/mcp?token=tok-123-secret failed; "
-            "Authorization: Bearer tok-123-secret; body password=hunter2"
-        )
-
-        async def host_request(request_type, payload):
-            raise RuntimeError(raw)
-
-        with mock.patch.object(mcp, "host_request", host_request):
-            with self.assertRaises(RuntimeError) as caught:
-                run(mcp.list_connections())
-        error = caught.exception
-        self.assertEqual(str(error), "MCP mcp.list_connections request failed")
-        self.assertIsNone(error.__cause__)
-        self.assertIsNone(error.__context__)
-        # The full formatted chain (not just str(exc)) must stay secret-free.
-        formatted = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-        for leaked in ("hunter2", "tok-123-secret", "sync.test", "Authorization", "Bearer", "password"):
-            self.assertNotIn(leaked, formatted)
-
-    def test_host_inventory_timeouts_report_a_fixed_message(self):
-        async def hanging_host_request(request_type, payload):
-            # The host never answers: the inventory's own timeout bound (the
-            # behavior under test) is what settles the call.
-            await asyncio.Event().wait()
-
-        with mock.patch.object(mcp, "host_request", hanging_host_request), mock.patch.object(
-            mcp, "_INVENTORY_TIMEOUT", 0.01
-        ):
-            with self.assertRaises(RuntimeError) as caught:
-                run(mcp.list_connections())
-        self.assertEqual(str(caught.exception), "MCP mcp.list_connections request timed out")
 
     # -- tools/list pagination ----------------------------------------------
 

@@ -11,15 +11,10 @@ Notion integrations; there are no per-service skills to read.
 
 ## Connections
 
-List the configured servers. `connectionId` is the dispatch id everywhere
-below.
-
-```python
-connections = await mcp.list_connections()
-```
-
-Each entry carries `connectionId`, `status`, `transport`, and `source`.
-`connected` means a verified MCP handshake, not just stored credentials.
+`connectionId` is the dispatch id everywhere below. The session prompt lists
+the enabled generic servers; the built-in integrations are `linear` and
+`notion`. Ask the user to run `pa mcp add` and `/mcp login <server>` to
+configure another one.
 
 ## Recommend, never connect
 
@@ -42,10 +37,9 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
   `inputSchema` with `describe_tool` and construct matching arguments.
 - `list_tools` returns the complete inventory or raises; never a silent
   partial list. Returned schemas are isolated copies; mutate them freely.
-- `search_tools` without a `connection_id` searches at most 8 connections the
-  host reports as connected and reports its scope: `searched`, `unavailable`
-  (per-connection failures as fixed, redaction-safe summaries), and
-  `truncated`.
+- `search_tools` searches one connection. It reports `searched` and
+  `truncated` (narrow the query or raise the limit when it is set); its errors
+  propagate. Search each connection separately when you need several.
 - Results are already-parsed Python (a `dict` for structured output, otherwise
   a string). No `json.loads` needed.
 
@@ -53,8 +47,8 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
 
 - `PermissionError`: the tool is excluded by the user's `enabledTools` /
   `disabledTools` policy. Don't retry; tell the user.
-- `KeyError`: the tool or connection doesn't exist. Re-check with
-  `list_tools` / `list_connections`; tools can change across sessions.
+- `KeyError`: the tool or connection doesn't exist. Re-check the server name
+  and `list_tools`; tools can change across sessions.
 - `McpDiscoveryError`: the server's tool listing couldn't complete honestly
   (broken pagination). No partial inventory is published; re-run, and ask the
   user to reconnect if it persists.
@@ -64,4 +58,4 @@ result = await mcp.call_tool("notion", "notion-search", {"query": "roadmap"})
 - `McpToolError`: the server flagged the call as an error. Surface the
   message; don't blindly retry a write that may have already happened.
 
-Credentials never appear in inventory results, tool schemas, or errors.
+Credentials never appear in tool schemas or errors.
