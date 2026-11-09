@@ -163,8 +163,14 @@ def target_environment(repo, state, ambient):
     return env
 
 
-def run_groups(groups, *, repo, state, env, deadline, jobs):
-    """Run whole-binary groups and return their ``(name, seconds)`` costs."""
+def run_groups(groups, *, repo, state, env, deadline, jobs, failures):
+    """Run whole-binary groups, recording failures instead of stopping at the first.
+
+    A failing group does not cancel the ones behind it: one red target used to
+    hide every target scheduled after it, which is how a broken main reached the
+    default branch with only the first failure visible. Return ``(name, seconds)``
+    costs; failing names are appended to ``failures``.
+    """
     timings = []
     pending = deque(groups)
     active = {}
@@ -209,8 +215,7 @@ def run_groups(groups, *, repo, state, env, deadline, jobs):
                     print(f"Test target elapsed: {name} {elapsed:.2f}s "
                           f"(exit {child.returncode})", flush=True)
                     if child.returncode:
-                        active[future] = (child, output, name, command, started)
-                        raise subprocess.CalledProcessError(child.returncode, command)
+                        failures.append((name, child.returncode, command))
         finally:
             cleanup([entry[0] for entry in active.values()])
             for _, output, _, _, _ in active.values():
@@ -241,10 +246,11 @@ def main():
     ordinary, exclusive = target_groups(metadata)
     print(f"Workspace tests: {len(ordinary)} parallel groups ({PARALLEL_SLOTS} slots), "
           f"{len(exclusive)} globally exclusive groups, then all doctests", flush=True)
+    failures = []
     timings = run_groups(ordinary, repo=repo, state=args.state_root, env=env,
-                         deadline=deadline, jobs=PARALLEL_SLOTS)
+                         deadline=deadline, jobs=PARALLEL_SLOTS, failures=failures)
     timings += run_groups(exclusive, repo=repo, state=args.state_root, env=env,
-                          deadline=deadline, jobs=1)
+                          deadline=deadline, jobs=1, failures=failures)
     doc_env = target_environment(repo, args.state_root / "doctests", env)
     run(["cargo", "test", "--locked", "--offline", "--workspace", "--doc"],
         repo=repo, env=doc_env, deadline=deadline)
@@ -253,6 +259,11 @@ def main():
         print("Slowest test targets:", flush=True)
         for name, elapsed in sorted(timings, key=lambda entry: entry[1], reverse=True)[:10]:
             print(f"  {elapsed:8.2f}s  {name}", flush=True)
+    if failures:
+        print(f"{len(failures)} test target(s) failed:", flush=True)
+        for name, code, command in failures:
+            print(f"  {name}: exit {code} ({shlex.join(command)})", flush=True)
+        raise subprocess.CalledProcessError(failures[0][1], failures[0][2])
     print("All workspace test targets and doctests passed", flush=True)
     return 0
 

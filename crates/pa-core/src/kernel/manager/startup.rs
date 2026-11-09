@@ -9,6 +9,33 @@ use super::{
     READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
 };
 
+/// Spawn the interpreter, retrying the transient `ETXTBSY` case.
+///
+/// A just-written executable can still be open for writing in another process or
+/// thread when it is executed, and `execve` answers `ETXTBSY`. That is a race, not
+/// a bad interpreter, so a short bounded retry is right; every other error returns
+/// immediately.
+async fn spawn_interpreter(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    const ATTEMPTS: u32 = 10;
+    let mut delay = std::time::Duration::from_millis(10);
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt + 1 < ATTEMPTS =>
+            {
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_millis(200));
+            }
+            other => return other,
+        }
+    }
+}
+
 impl Inner {
     /// True when a teardown (or newer start) superseded the start that
     /// captured `generation`.
@@ -178,7 +205,7 @@ impl Inner {
             command.current_dir(cwd);
         }
         command.env_clear().envs(env);
-        let child = match command.spawn() {
+        let child = match spawn_interpreter(&mut command).await {
             Ok(child) => child,
             Err(error) => {
                 // Fail a pending start promptly instead of riding out the ready timeout. The
