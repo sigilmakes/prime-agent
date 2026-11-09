@@ -94,10 +94,6 @@ pub struct AgentView {
     /// like the model picker.
     pub(crate) choice_picker: Option<crate::choice_picker::ChoicePicker>,
     pub mcp_view: Option<crate::mcp_view::McpView>,
-    /// The factory page: while set, it owns the editor dock like the
-    /// inline pickers (one panel per live factory run) — the activity
-    /// dock's factory group's destination.
-    pub factory_view: Option<crate::factory_view::FactoryView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
@@ -307,7 +303,6 @@ impl AgentView {
             fork_selector: None,
             choice_picker: None,
             mcp_view: None,
-            factory_view: None,
             heartbeats_picker: None,
             goal_panel: None,
             bash_view: None,

@@ -273,9 +273,6 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
     // Request timing: the settings half of the flag is read once here
     // (`settings` moves into the loader); the `PI_REQUEST_TIMING` half stays live.
     let request_timing_settings = settings.get_request_timing();
-    // Captured before `settings` moves into the resource loader: the
-    // factory host bridge's preflight facts (the daemon `allowedModels`
-    // pin), like the request-timing snapshot above.
     let (mcp_skill_overrides, mcp_generic_servers, built_manager) =
         mcp_gating(&settings, config.agent_dir.clone()).await?;
     let mcp_manager = config
@@ -1044,36 +1041,6 @@ impl SessionEngine {
                 drain_host_requests: true,
             }))
             .await;
-    }
-
-    /// One factory activity over this session's live kernel. Named specs resolve
-    /// in the kernel's machine library. Every child spawn enforces model access.
-    ///
-    /// # Errors
-    /// Returns an error for invalid arguments, an unavailable kernel, or a failed
-    /// kernel request. Legacy state files are never loaded by this path.
-    pub async fn factory_activity(
-        &self,
-        action: &str,
-        run_id: Option<&str>,
-        spec_id: Option<&str>,
-        timeout_ms: Option<u64>,
-    ) -> anyhow::Result<serde_json::Value> {
-        let request = super::factory_host::FactoryActivityRequest::parse(
-            action, run_id, spec_id, timeout_ms,
-        )?;
-        let manager = self
-            .provisioner
-            .manager()
-            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
-        manager
-            .factory_activity(
-                request.action,
-                request.run_id.as_deref(),
-                request.spec_id.as_deref(),
-                request.timeout_ms,
-            )
-            .await
     }
 
     /// Out-of-band kernel bash activity, scoped to this session's live kernel.

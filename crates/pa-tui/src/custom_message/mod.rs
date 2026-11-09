@@ -20,8 +20,8 @@
 //! drops unknown types instead; the live interactive path is the TUI ground
 //! truth, and the Rust engine persists those types with `display: false`.)
 //!
-//! Divergence (the operator's 2026-10-01 directive: "the factory child
-//! status notices should be like subagent messages not user messages"): the
+//! Divergence (the operator's 2026-10-01 directive: "the child status
+//! notices should be like subagent messages not user messages"): the
 //! RLM child status notices (`rlm_child_terminal_notice` /
 //! `rlm_child_failure`) render in the `agent_message` component's class —
 //! child-originated mail, attributed to the exited subagent — where the TS
@@ -175,11 +175,11 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
             )))]
         }
         // The RLM child status notices are child-originated mail — the
-        // spawned subagent's exit status (a factory's children included) —
+        // spawned subagent's exit status —
         // so they render in the same quiet, counterpart-attributed
         // `Agent message` class the children's own `agent_message` rows
-        // use (the operator's 2026-10-01 directive: "the factory child
-        // status notices should be like subagent messages not user
+        // use (the operator's 2026-10-01 directive: "the child status
+        // notices should be like subagent messages not user
         // messages"), not as turn-prompt rows. The notice text rides as
         // the row body, so nothing is lost.
         RLM_CHILD_FAILURE_CUSTOM_TYPE | RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => {
@@ -583,8 +583,8 @@ mod tests {
     }
 
     /// The RLM child status notices decode to the subagent-mail class
-    /// (the operator's 2026-10-01 directive: "the factory child status
-    /// notices should be like subagent messages not user messages"): the
+    /// (the operator's 2026-10-01 directive: "the child status notices
+    /// should be like subagent messages not user messages"): the
     /// row carries the child as its counterpart and the notice text as
     /// the body, and it never renders as a turn-prompt (injected) or
     /// user row — the class assertion is the mutation pin (routing the

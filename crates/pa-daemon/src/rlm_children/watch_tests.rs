@@ -1071,8 +1071,8 @@ async fn a_deleted_settled_child_releases_its_name_slot_and_deletes_idempotently
     let respawned = spawn_child(&sessions).await;
     assert_eq!(respawned.name, "f20-worker");
 
-    // Deleting a child whose run was cancelled (the factory's stop pass)
-    // reports the cancelled row, and a second delete of it is idempotent.
+    // Deleting a child whose run was cancelled reports the cancelled row,
+    // and a second delete of it is idempotent.
     // The cancel lands before the turn-done notification, so the respawned
     // child is provably still running when it is cut short.
     assert!(
@@ -1094,8 +1094,7 @@ async fn a_deleted_settled_child_releases_its_name_slot_and_deletes_idempotently
 /// The exit capture (the M4 seam): an unreachable child settles `error`
 /// through the give-up, but its last assistant text still lands on the row —
 /// the live read first, the durable session file second — so the parent-side
-/// reader (the factory's provisional answer) sees the child's final say, not
-/// a bare failure row.
+/// reader sees the child's final say, not a bare failure row.
 #[tokio::test(start_paused = true)]
 async fn a_failed_settle_captures_the_childs_last_assistant_text() {
     tokio::spawn(async {
@@ -1176,8 +1175,8 @@ async fn a_none_first_answer_capture_recovers_on_a_later_collect() {
 }
 
 /// The collect envelope carries the settled child's full final answer as its
-/// binding lane (the factory's output capture binds the whole fenced JSON from
-/// it), while the roster preview stays the compact form; the deleted envelope's
+/// binding lane (the output capture binds the whole fenced JSON from it), while
+/// the roster preview stays the compact form; the deleted envelope's
 /// binding lane is empty (the tombstone only keeps the preview).
 #[tokio::test]
 async fn collect_carries_the_full_answer_text_of_a_settled_child() {

@@ -386,7 +386,6 @@ class Supervisor:
                     elif name == "get_model_catalog": response["data"] = {"models": [], "configuredProviders": []}
                     elif name == "get_commands": response["data"] = {"commands": []}
                     elif name == "list_kernel_bash": response["data"] = {"commands": []}
-                    elif name == "factory_activity": response["data"] = {"activity": [], "jobs": []}
                     elif name in ("get_state", "get_connection_state"):
                         response["data"] = fixture_state(self.root, active)
                         with self.lock:

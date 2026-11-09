@@ -146,8 +146,8 @@ struct ChildRecord {
     answer_preview: Option<String>,
     /// The full final-answer text (bounded by
     /// [`ANSWER_TEXT_MAX_CHARS`]), the collect envelope's binding lane:
-    /// a consumer that extracts outputs (the factory's ports) needs the
-    /// whole fenced JSON, while the roster rows keep the compact preview.
+    /// a consumer that extracts outputs needs the whole fenced JSON, while
+    /// the roster rows keep the compact preview.
     answer_text: Option<String>,
     answer_captured: bool,
     /// A child agent message arrived since its task was admitted; the

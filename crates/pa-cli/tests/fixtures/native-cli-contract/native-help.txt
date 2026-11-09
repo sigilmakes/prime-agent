@@ -68,7 +68,6 @@ Commands:
   model     Inspect available models
   session   Manage saved sessions
   config    Configure package resources
-  factory   Share and run factory machines from the machine library
   prompt    Print the assembled system prompt with its layer breakdown
 
 Run "prime-agent help <command>" for command details.

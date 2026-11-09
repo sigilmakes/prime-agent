@@ -24,20 +24,6 @@ The harness often sends messages to the agent. These are user messages starting 
 - `websearch.run(query: str, *, max_output: int = 8192, timeout: int | None, num_results: int | None) -> str`: search the web; the `websearch` module is callable with the same arguments
 - `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise
 
-## Factory
-
-The pre-imported `rlm.factory` namespace runs child-agent state machines. Factory is disabled by default: the six async operations require `factory.enabled`; `help()` remains available. Read the `factory` skill for the library workflow and machine authoring reference.
-
-- `rlm.factory.run(spec_id: str, *, name: str | None = None)`: await a library machine launch and save the returned `run_id`. A background kernel task continues the run. A host-injected persistence adapter may also resolve stored specs.
-- `rlm.factory.status(run_id: str)`: await state, recent events, elapsed time, and usage for a known run.
-- `rlm.factory.stop(run_id: str)`: await cancellation of the run's children and stop the run.
-- `rlm.factory.resume(run_id: str)`: await resumption of a paused run.
-- `rlm.factory.graph(ref: str | None = None)`: await a live run's graph by run ID, or omit `ref` for the run collection. Library machine names alone do not resolve static graphs.
-- `rlm.factory.watch(run_id: str, timeout: float = 0.0)`: await a graph snapshot with `changed` after a shape change or bounded timeout in seconds. The default timeout returns immediately.
-- `rlm.factory.help() -> str`: return the embedded authoring reference synchronously; do not await this call.
-
-Run state lives in kernel memory, not a durable recovery store. Finish the turn after launching work; inspect it on a later turn instead of keeping a polling loop open.
-
 ## Plugins
 
 - `plugin`: the current session's active plugin exports. Discover names from the inventory, then call unary exports with keyword arguments: `await plugin.<name>.<export>(**kwargs)`. Inputs must be JSON-compatible. Commands and hooks are not Python exports. Disabled plugins have no namespace attribute or inventory entry. Streaming exports are not supported by the Python bridge.
