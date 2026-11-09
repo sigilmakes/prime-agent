@@ -1,5 +1,5 @@
-//! CRC-32 over the seq and a row's serialized bytes (the `zlib`/IEEE 802.3
-//! checksum).
+//! CRC-32 over a seq and a row's serialized bytes (the `zlib`/IEEE 802.3
+//! checksum), kept to validate the envelopes written before the log went bare.
 
 /// The IEEE polynomial, bit-reversed for the low-bit-first loop.
 const POLYNOMIAL: u32 = 0xEDB8_8320;

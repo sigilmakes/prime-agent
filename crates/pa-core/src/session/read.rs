@@ -1,4 +1,4 @@
-//! Read-only session history from validated `SessionLog` envelopes.
+//! Read-only session history from validated session-log rows.
 use pa_types::session::FileEntry;
 use std::io::{self, BufRead};
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::path::Path;
 /// Read an entire session without creating, repairing, or modifying any file.
 ///
 /// # Errors
-/// Rejects unsupported formats, invalid envelopes, ordering, checksums or rows.
+/// Rejects a torn tail, a line that is not a row, or a log with no header.
 pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
     read_entries_from(io::BufReader::new(std::fs::File::open(path)?))
 }
@@ -14,7 +14,7 @@ pub fn read_entries(path: &Path) -> io::Result<Vec<FileEntry>> {
 /// Validate an immutable session-log snapshot without opening or changing files.
 ///
 /// # Errors
-/// Rejects unsupported formats, invalid envelopes, ordering, checksums or rows.
+/// Rejects a torn tail, a line that is not a row, or a log with no header.
 pub fn read_entries_from(mut reader: impl BufRead) -> io::Result<Vec<FileEntry>> {
     let mut line = Vec::new();
     let mut seq = 0;
@@ -48,7 +48,7 @@ mod tests {
     use super::*;
     use crate::session_log::{Outcome, SessionLog};
     #[test]
-    fn reads_envelopes_and_rejects_corruption_without_repairing_source() {
+    fn reads_plain_rows_and_rejects_corruption_without_repairing_source() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("read.jsonl");
         let mut log = SessionLog::open(dir.path(), "read", std::time::Instant::now()).unwrap();
@@ -60,10 +60,10 @@ mod tests {
         assert_eq!(read_entries(&path).unwrap().len(), 1);
         let mut damaged = std::fs::read(&path).unwrap();
         let index = damaged
-            .windows(4)
-            .position(|bytes| bytes == b"/tmp")
+            .windows(6)
+            .position(|bytes| bytes == b"\"cwd\":")
             .unwrap();
-        damaged[index + 1] = b'x';
+        damaged[index] = b'#';
         std::fs::write(&path, &damaged).unwrap();
         assert!(read_entries(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), damaged);

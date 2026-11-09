@@ -14,7 +14,7 @@ pub use follower::{ReadCursor, ReadError};
 // disk at its own tests (`Disk`'s doc: real files in production,
 // fault-injected files in tests exercising the same code path).
 pub mod disk;
-mod line;
+pub(crate) mod line;
 #[cfg(test)]
 mod tests;
 
@@ -33,8 +33,8 @@ pub use line::Row;
 pub enum NotWritten {
     /// The row did not serialize to a JSON object; the disk was not touched.
     Encode(String),
-    /// `seq` is already named by another row, or lies below the log's next seq
-    /// without naming a row; nothing was written.
+    /// `seq` is not the log's next line: another row already holds it, or it
+    /// lies beyond the end; nothing was written.
     SeqConflict { seq: u64 },
     /// A first-row append found existing bytes, even an identical or torn row.
     NonEmpty,
@@ -64,9 +64,8 @@ pub enum NotWritten {
 /// What one append attempt established.
 #[derive(Debug)]
 pub enum Outcome {
-    /// The row is durable at `seq`; `ts` is the stamp this writer wrote into
-    /// the row's envelope (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
-    Committed { seq: u64, ts: String },
+    /// The row is durable and is line `seq` of the log.
+    Committed { seq: u64 },
     /// Nothing durable was written; `reason` says why.
     NotWritten { reason: NotWritten },
     /// The whole line reached the file but its barrier failed, so the row may
@@ -119,20 +118,26 @@ pub enum Error {
         last_good_seq: u64,
         truncated_bytes: u64,
     },
-    /// A complete line failed validation (envelope, checksum, or ordering).
-    /// Every row up to `after_seq` is intact and was already delivered.
-    #[error("session log line after seq {after_seq} is invalid; repair() truncates it")]
+    /// A complete line failed validation (a half-written envelope, a bad
+    /// checksum or a wrong seq in one, a line that is not a JSON object). Every
+    /// row up to `after_seq` is intact and was already delivered.
+    /// [`SessionLog::repair`] truncates it only when every line before the damage
+    /// was the 2026-10-30 envelope; on a file of rows the damage may be history
+    /// this binary did not write, so repair refuses and the rows behind it are
+    /// kept.
+    #[error("session log line after seq {after_seq} is invalid")]
     Corrupt { after_seq: u64 },
 }
 
 /// What [`SessionLog::repair`] left behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RepairReport {
-    /// Last complete, checksum-valid seq kept.
+    /// Last complete, valid row kept: the log now has this many lines.
     pub last_good_seq: u64,
     /// Bytes dropped from the tail.
     pub truncated_bytes: u64,
-    /// Complete, checksum-valid rows kept.
+    /// Complete, valid rows kept (the same number, kept distinct because the
+    /// repair report is the auditable record).
     pub rows: u64,
 }
 
@@ -187,21 +192,25 @@ impl Recover {
             lock,
         );
         log.locked(deadline, |log| {
-            let mut scan = log.scan(0, self.seq.saturating_sub(1))?;
+            let mut scan = log.scan(0, 0, self.seq.saturating_sub(1))?;
             if !scan.clean {
+                // The same rule as `repair`: this write can drop its own torn
+                // tail, never a complete line behind a bare file.
+                if !scan.droppable() {
+                    return Err(Error::Corrupt {
+                        after_seq: scan.last_seq,
+                    });
+                }
                 log.disk.truncate(&log.file, scan.good_len)?;
                 log.disk.fsync(&log.file)?;
-                scan = log.scan(0, self.seq.saturating_sub(1))?;
+                scan = log.scan(0, 0, self.seq.saturating_sub(1))?;
             }
             let found = scan.rows.into_iter().find(|row| row.seq == self.seq);
             match found {
                 Some(row) if body_matches(&row, &self.body) => {
                     // "Committed" must mean durable: take a fresh barrier.
                     log.disk.fsync(&log.file)?;
-                    Ok(Outcome::Committed {
-                        seq: self.seq,
-                        ts: row.ts,
-                    })
+                    Ok(Outcome::Committed { seq: self.seq })
                 }
                 Some(_) => Ok(Outcome::NotWritten {
                     reason: NotWritten::SeqConflict { seq: self.seq },
@@ -295,9 +304,10 @@ impl SessionLog {
     /// # Errors
     ///
     /// I/O errors from opening or reading the log; [`Error::Corrupt`] when a
-    /// complete line is invalid, in which case the rows before it are lost to
-    /// the caller and [`Self::repair`] is the recovery (use [`Self::iter_since`]
-    /// to keep the good prefix).
+    /// complete line is invalid. The rows before it are still on disk: read them
+    /// with [`Self::iter_since`], which yields them before the error. [`Self::repair`]
+    /// is the recovery only on a log whose prefix is envelopes; on a file of rows
+    /// it refuses (see [`Error::Corrupt`]).
     pub fn read_since(&self, since: u64) -> Result<Vec<Row>, Error> {
         self.iter_since(since)?.collect()
     }
@@ -321,12 +331,21 @@ impl SessionLog {
         })
     }
 
-    /// Truncate the unusable tail to the last complete, checksum-valid line,
-    /// then fsync it.
+    /// Truncate the unusable tail to the last complete, valid line, then sync
+    /// it.
+    ///
+    /// A torn tail (no terminating newline) is a write that never became a row
+    /// and is always dropped. A complete line that is not a row is dropped only
+    /// on a file the 2026-10-30 core wrote: on a bare file it may be history
+    /// this binary did not write, and truncating there would delete every row
+    /// behind it, so this returns [`Error::Corrupt`] and changes nothing. A
+    /// backed-up, explicit repair of such a file is the operator's decision, not
+    /// an open's.
     ///
     /// # Errors
     ///
-    /// [`Error::Busy`] while another writer holds the lock; I/O errors.
+    /// [`Error::Busy`] while another writer holds the lock; [`Error::Corrupt`]
+    /// for damage a bare file's repair must not touch; I/O errors.
     pub fn repair(dir: &Path, id: &str, deadline: Instant) -> Result<RepairReport, Error> {
         Self::repair_with(Arc::new(RealDisk), dir, id, deadline)
     }
@@ -360,7 +379,7 @@ impl SessionLog {
         disk.sync_dir(dir)?;
         let mut log = Self::new(disk, log_path, lock_path, file, lock);
         log.locked(deadline, |log| {
-            let scan = log.scan(0, u64::MAX)?;
+            let scan = log.scan(0, 0, u64::MAX)?;
             if !scan.clean {
                 return Err(Error::Damaged {
                     last_good_seq: scan.last_seq,
@@ -392,13 +411,23 @@ impl SessionLog {
         let mut log = Self::new(disk, log_path, lock_path, file, lock);
         log.locked(deadline, |log| {
             let len = log.file_len()?;
-            let scan = log.scan(0, u64::MAX)?;
+            let scan = log.scan(0, 0, u64::MAX)?;
             let report = RepairReport {
                 last_good_seq: scan.last_seq,
                 truncated_bytes: len - scan.good_len,
                 rows: scan.row_count,
             };
             if !scan.clean {
+                // A torn tail is a write that never became a row, so dropping
+                // it loses nothing. A complete line that is not a row may be
+                // history this binary did not write: truncating from it would
+                // delete every row behind it, so only a file the replaced core
+                // wrote is repaired that way.
+                if !scan.droppable() {
+                    return Err(Error::Corrupt {
+                        after_seq: scan.last_seq,
+                    });
+                }
                 log.disk.truncate(&log.file, scan.good_len)?;
                 log.disk.fsync(&log.file)?;
             }
@@ -474,13 +503,20 @@ impl SessionLog {
     /// The write itself; the lock is held by the caller.
     fn write_at(&mut self, pinned: Option<u64>, body: String) -> Result<Outcome, Error> {
         self.sync_tail()?;
+        // A line's seq is its position, so a pin is the log's next line and
+        // nothing else: a lower pin may name a row already there, a higher one
+        // would leave a gap the reader cannot number.
         let seq = match pinned {
             Some(seq) if seq < self.next_seq => return self.retry_outcome(seq, &body),
+            Some(seq) if seq > self.next_seq => {
+                return Ok(Outcome::NotWritten {
+                    reason: NotWritten::SeqConflict { seq },
+                })
+            }
             Some(seq) => seq,
             None => self.next_seq,
         };
-        let ts = line::now_iso8601();
-        let line = line::encode(seq, &ts, &body);
+        let line = line::encode_bare(&body);
         if line.len() > line::MAX_LINE_BYTES {
             // The reader's cap is the contract: a row it cannot read is not a
             // row. Refusing here keeps `Committed` true and keeps a later scan
@@ -513,18 +549,18 @@ impl SessionLog {
         }
         self.next_seq = seq.saturating_add(1);
         self.known_len = start + line.len() as u64;
-        Ok(Outcome::Committed { seq, ts })
+        Ok(Outcome::Committed { seq })
     }
 
     /// A retry of a seq the log already passed: committed when the body at that
     /// seq is the same row, otherwise the seq belongs to someone else.
     fn retry_outcome(&self, seq: u64, body: &str) -> Result<Outcome, Error> {
-        let scan = self.scan(0, seq.saturating_sub(1))?;
+        let scan = self.scan(0, 0, seq.saturating_sub(1))?;
         let existing = scan.rows.into_iter().find(|row| row.seq == seq);
         Ok(match existing {
             Some(row) if body_matches(&row, body) => {
                 self.disk.fsync(&self.file)?;
-                Outcome::Committed { seq, ts: row.ts }
+                Outcome::Committed { seq }
             }
             _ => Outcome::NotWritten {
                 reason: NotWritten::SeqConflict { seq },
@@ -568,15 +604,17 @@ impl SessionLog {
         if len == self.known_len {
             return Ok(Vec::new());
         }
-        let from = if len < self.known_len {
+        // Where the new bytes start, and how many complete lines precede them:
+        // the next line read is line `lines_before + 1`.
+        let (from, lines_before) = if len < self.known_len {
             // Truncated or replaced below the cursor: start over, so the caller
             // sees the rows that survived.
             self.next_seq = 1;
-            0
+            (0, 0)
         } else {
-            self.known_len
+            (self.known_len, self.next_seq - 1)
         };
-        let scan = self.scan(from, 0)?;
+        let scan = self.scan(from, lines_before, 0)?;
         if !scan.clean {
             let last_good_seq = scan.last_seq.max(self.next_seq - 1);
             if scan.corrupt {
@@ -594,35 +632,32 @@ impl SessionLog {
         Ok(scan.rows)
     }
 
-    /// Read complete, valid lines, stopping at the first bad one.
-    fn scan(&self, from: u64, since: u64) -> Result<Scan, Error> {
+    /// Read complete, valid lines from byte `from`, stopping at the first bad
+    /// one. `lines_before` is how many complete lines precede that offset: the
+    /// next line read is line `lines_before + 1`, which is also its seq.
+    fn scan(&self, from: u64, lines_before: u64, since: u64) -> Result<Scan, Error> {
         let mut scanner = Scanner::open(self.disk.as_ref(), &self.log_path, from)?;
         let mut scan = Scan {
             rows: Vec::new(),
             row_count: 0,
-            last_seq: 0,
+            last_seq: lines_before,
             good_len: from,
             clean: true,
             corrupt: false,
+            enveloped_only: true,
         };
-        while let Some(parsed) = scanner.advance()? {
-            if parsed.seq <= scan.last_seq {
-                // A complete line out of order: damage, not a torn tail.
-                scan.clean = false;
-                scan.corrupt = true;
-                break;
-            }
-            scan.last_seq = parsed.seq;
+        while let Some((format, body)) = scanner.advance(scan.last_seq)? {
+            scan.last_seq += 1;
             scan.row_count += 1;
-            if parsed.seq > since {
-                let Ok(body) = serde_json::from_str(parsed.body) else {
+            scan.enveloped_only &= format == line::Format::Envelope;
+            if scan.last_seq > since {
+                let Ok(body) = serde_json::from_str(body) else {
                     scan.clean = false;
                     scan.corrupt = true;
                     break;
                 };
                 scan.rows.push(Row {
-                    seq: parsed.seq,
-                    ts: parsed.ts.to_owned(),
+                    seq: scan.last_seq,
                     body,
                 });
             }
@@ -705,31 +740,22 @@ impl Iterator for Rows {
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.done {
-            match self.scanner.advance() {
-                Ok(Some(parsed)) => {
-                    // A terminated line that breaks the order is damage, not a
-                    // torn tail: nothing about it can be trusted.
-                    if parsed.seq <= self.last_seq {
+            match self.scanner.advance(self.last_seq) {
+                Ok(Some((_, body))) => {
+                    self.last_seq += 1;
+                    let Ok(body) = serde_json::from_str(body) else {
                         self.done = true;
                         return Some(Err(Error::Corrupt {
-                            after_seq: self.last_seq,
-                        }));
-                    }
-                    self.last_seq = parsed.seq;
-                    if parsed.seq <= self.since {
-                        continue;
-                    }
-                    let Ok(body) = serde_json::from_str(parsed.body) else {
-                        self.done = true;
-                        return Some(Err(Error::Corrupt {
-                            after_seq: self.last_seq,
+                            after_seq: self.last_seq - 1,
                         }));
                     };
-                    return Some(Ok(Row {
-                        seq: parsed.seq,
-                        ts: parsed.ts.to_owned(),
+                    let line = Row {
+                        seq: self.last_seq,
                         body,
-                    }));
+                    };
+                    if line.seq > self.since {
+                        return Some(Ok(line));
+                    }
                 }
                 Ok(None) => {
                     self.done = true;
@@ -766,6 +792,42 @@ enum End {
     Bad { terminated: bool },
 }
 
+/// What a scan found: the rows asked for, and how the file ended.
+struct Scan {
+    rows: Vec<Row>,
+    /// Complete, valid lines in the file.
+    row_count: u64,
+    /// Seq of the last complete, valid line: the line count of the good prefix.
+    last_seq: u64,
+    /// Byte offset just past the last complete, valid line.
+    good_len: u64,
+    /// Whether every line read was valid and the file ended on one.
+    clean: bool,
+    /// Whether a complete but invalid line ended the read, as opposed to a torn
+    /// tail (`terminated` in [`End::Bad`]).
+    corrupt: bool,
+    /// Whether every line read was the 2026-10-30 envelope. A file whose first
+    /// line is already bad has read no lines, so this stays true and says
+    /// nothing: such a file is not repairable (see [`Scan::droppable`]).
+    enveloped_only: bool,
+}
+
+impl Scan {
+    /// Whether the unusable tail may be dropped.
+    ///
+    /// A torn tail is a write that never became a row, so dropping it loses
+    /// nothing, in any shape. A complete line that is not a row may be history
+    /// this binary did not write: truncating from it would delete every row
+    /// behind it. Only on a file the 2026-10-30 core wrote, where the envelope's
+    /// checksum proves the line is damage, is that a repair and not a deletion.
+    /// A file whose *first* line is bad has no shape to prove it with, so it is
+    /// left for an operator: with nothing before the damage, a repair would
+    /// empty the file. That is what `row_count == 0` means here.
+    fn droppable(&self) -> bool {
+        !self.corrupt || (self.enveloped_only && self.row_count > 0)
+    }
+}
+
 /// Reads validated lines from an offset, one at a time.
 struct Scanner {
     reader: std::io::BufReader<std::fs::File>,
@@ -789,9 +851,10 @@ impl Scanner {
         })
     }
 
-    /// The next complete, valid line; `None` once the read has ended, with
-    /// [`Self::end`] saying whether that was the file's end or damage.
-    fn advance(&mut self) -> Result<Option<line::Parsed<'_>>, Error> {
+    /// The next complete, valid line's row bytes, which are line
+    /// `after_seq + 1`; `None` once the read has ended, with [`Self::end`]
+    /// saying whether that was the file's end or damage.
+    fn advance(&mut self, after_seq: u64) -> Result<Option<(line::Format, &str)>, Error> {
         use std::io::{BufRead, Read as _};
 
         if self.end != End::Open {
@@ -816,24 +879,13 @@ impl Scanner {
             return Ok(None);
         }
         self.buffer.pop();
-        let Some(parsed) = line::parse(&self.buffer) else {
+        let Some(line) = line::parse(&self.buffer, after_seq) else {
             self.end = End::Bad { terminated: true };
             return Ok(None);
         };
         self.offset += read as u64;
-        Ok(Some(parsed))
+        Ok(Some(line))
     }
-}
-
-/// One scan of the log, from the start or from a known offset.
-struct Scan {
-    rows: Vec<Row>,
-    row_count: u64,
-    last_seq: u64,
-    good_len: u64,
-    clean: bool,
-    /// The line that ended the scan was complete but invalid, not a torn tail.
-    corrupt: bool,
 }
 
 /// The two paths one session owns. The id is a single path component: it comes
