@@ -297,8 +297,6 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// The daemon roster: two catalog services (the resolved `services` cards
-/// the catalog picker renders).
 fn roster_data(id: &str) -> Value {
     json!({
         "type": "response",
@@ -306,23 +304,24 @@ fn roster_data(id: &str) -> Value {
         "command": "get_mcp_connections",
         "success": true,
         "data": {
-            "services": [
+            "connections": [
                 {
-                    "serviceId": "github",
+                    "server": "github",
                     "label": "GitHub",
-                    "connectionStatus": "not_connected",
-                    "connectable": true,
-                    "connectionIds": [],
+                    "connected": false,
+                    "usesOAuth": true,
+                    "authKind": "subscription",
+                    "transport": "http",
                 },
                 {
-                    "serviceId": "linear",
+                    "server": "linear",
                     "label": "Linear",
-                    "connectionStatus": "not_connected",
-                    "connectable": true,
-                    "connectionIds": [],
+                    "connected": false,
+                    "usesOAuth": true,
+                    "authKind": "subscription",
+                    "transport": "http",
                 },
             ],
-            "connections": [],
         },
     })
 }

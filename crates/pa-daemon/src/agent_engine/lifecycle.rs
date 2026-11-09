@@ -59,8 +59,6 @@ impl AgentSessionEngine {
         // changes.
         let mcp_cwd = std::sync::Arc::clone(&cwd);
         let mcp_agent_dir = agent_dir.clone();
-        let catalog_cwd = std::sync::Arc::clone(&cwd);
-        let catalog_agent_dir = agent_dir.clone();
         let mcp = pa_core::mcp::McpManager::new(pa_core::mcp::McpManagerOptions {
             auth_storage: pa_core::auth::AuthStorage::create_with_oauth(
                 &agent_dir,
@@ -90,20 +88,6 @@ impl AgentSessionEngine {
                 )
             }),
             begin_login: None,
-            agent_dir: Some(agent_dir),
-            get_catalog_sources: Some(Box::new(move || {
-                // Declared local service-catalog sources, re-read per resolve.
-                let catalog_cwd = catalog_cwd.read().expect("engine cwd lock").clone();
-                let settings =
-                    pa_core::settings::SettingsManager::create(&catalog_cwd, &catalog_agent_dir);
-                settings
-                    .settings()
-                    .mcp_catalog_sources
-                    .clone()
-                    .unwrap_or_default()
-            })),
-            remote_source: None,
-            probe_override: None,
         });
         // The kernel's `mcp.begin_login` host request: the worker runs the
         // OAuth login; wired before any session registers host handlers.

@@ -326,9 +326,6 @@ pub struct Settings {
     pub shell_command_prefix: Option<String>,
     pub npm_command: Option<Vec<String>>,
     pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Extra local MCP service-catalog files (~-relative allowed), merged after the
-    /// compiled built-ins; first source wins per id, and no bundled id can be shadowed.
-    pub mcp_catalog_sources: Option<Vec<String>>,
     /// Explicit plugin map, validated atomically by the session plugin manager.
     /// Retain malformed JSON values so reload cannot silently disable active plugins.
     #[serde(

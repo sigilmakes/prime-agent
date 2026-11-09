@@ -37,8 +37,6 @@ proptest = { workspace = true }
 # through pa-core.
 pa-models = { path = "../pa-models", version = "0.10.0" }
 url = "2"
-# The MCP catalog e2e seeds the fetch lane's snapshot envelope: the real
-# catalog url/scope constants keep the seeded cache byte-honest.
 # `test-util` (tokio time pause) is test-only: the mutation-drain latch test
 # drives real timeouts through the paused clock.
 tokio = { workspace = true, features = ["test-util"] }

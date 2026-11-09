@@ -596,7 +596,7 @@ fn bundled_skills_match_the_ts_packaged_set() {
     );
     assert_eq!(
         mcp_skill.description,
-        "Use external MCP services generically from Python - search the supported-service catalog, inspect the user's connections, discover live tool schemas, and call tools on any connection (Notion, Linear, Slack, and the rest of the catalog) without per-service packages."
+        "Use external MCP servers configured in `mcpServers` generically from Python - inspect the configured connections, discover live tool schemas, and call tools without per-service packages."
     );
 }
 

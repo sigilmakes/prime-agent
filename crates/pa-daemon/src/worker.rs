@@ -759,10 +759,6 @@ impl Worker {
             auth_storage: pa_core::auth::AuthStorage::create(&agent_dir),
             get_user_servers: Box::new(|| None),
             begin_login: None,
-            agent_dir: Some(agent_dir),
-            get_catalog_sources: None,
-            remote_source: None,
-            probe_override: None,
         });
         let navigation = crate::session_navigation::SessionNavigation::new(
             std::sync::Arc::clone(&engine),

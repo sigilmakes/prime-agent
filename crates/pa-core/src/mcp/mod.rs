@@ -2,34 +2,13 @@
 //! kernel; the host only gates integration skills by auth and serves `mcp.*`
 //! host requests (the OAuth flow lives in the `oauth*` submodules).
 
-mod catalog_plugin_views;
-mod catalog_schema;
-mod catalog_status_views;
-mod catalog_views;
-mod connection_store;
-mod fetch_lane;
-mod local_catalog;
 mod login;
-mod manager_catalog;
 mod oauth;
 mod oauth_callback;
 mod oauth_discovery;
 mod oauth_http;
-mod probe;
-mod remote_source;
-mod service_catalog;
-mod url_checks;
 
-pub use catalog_plugin_views::{McpCredentialView, API_KEY_CREDENTIALS};
-pub use catalog_views::{
-    mcp_credential_field_prompt_label, mcp_paste_credential, McpPasteCredential,
-};
-pub use fetch_lane::{spawn_hourly_plugins_refresh, startup_plugins_refresh};
 pub use login::{wire_begin_login, McpLoginContext, McpOAuth};
-pub use manager_catalog::{
-    install_static_token, remove_mcp_connection, McpConnectionHandles, PasteInstallInputs,
-    StaticTokenInstall,
-};
 pub use oauth::{mcp_login, mcp_refresh_token, McpLoginUi, McpOAuthConfig};
 pub use oauth_http::{OAuthHttp, OAuthHttpRequest, OAuthHttpResponse, ReqwestOAuthHttp};
 
@@ -221,11 +200,8 @@ impl AcpMcpServerConfig {
     }
 }
 
-/// A resolved integration: catalog/user entry plus auth state.
+/// A resolved integration: built-in or user entry plus auth state.
 #[derive(Debug, Clone)]
-// The mirrored TS API shape is deliberate (the booleans are the
-// product's own surface, not a refactor target).
-#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ResolvedIntegration {
     pub(crate) server: String,
     pub(crate) label: String,
@@ -233,17 +209,6 @@ pub(crate) struct ResolvedIntegration {
     pub(crate) uses_oauth: bool,
     /// True when this came from the `mcpServers` setting.
     pub(crate) user_declared: bool,
-    /// Catalog entries only: the parent service id (records keep it).
-    pub(crate) catalog_service_id: Option<String>,
-    /// Catalog token services only: the entry collects exactly ONE credential,
-    /// so a stored `mcp_static_token` under this exact id is a valid source, bound to this
-    /// endpoint.
-    pub(crate) static_token_eligible: bool,
-    /// Catalog entries only: explicitly public no-auth AND setup-ready, so
-    /// credential-free dispatch is honest.
-    pub(crate) credential_free_eligible: bool,
-    /// Ownership conflict / disabled hint for reserved names.
-    pub(crate) blocked_reason: Option<String>,
 }
 
 /// Options for constructing an [`McpManager`].
@@ -256,18 +221,6 @@ pub struct McpManagerOptions {
     pub get_user_servers: Box<dyn Fn() -> Option<HashMap<String, McpServerConfig>> + Send + Sync>,
     /// Start an interactive host-side login for a server (UI mode supplies it).
     pub begin_login: Option<BeginLoginFn>,
-    /// The agent dir: connection records and the default local source live
-    /// here. `None` in embedded hosts (in-memory records, no local source).
-    pub agent_dir: Option<std::path::PathBuf>,
-    /// Declared local service-catalog sources (settings
-    /// `mcpCatalogSources`, ~-relative allowed); re-read on refresh.
-    pub get_catalog_sources: Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>,
-    /// The remote plugins-catalog snapshot source; defaults to the disk
-    /// cache then the packaged bundle. Never fetches (the fetch lane writes).
-    pub remote_source: Option<manager_catalog::RemoteCatalogSourceFn>,
-    /// Injectable verification probe (tests); the real streamable-HTTP
-    /// handshake by default.
-    pub probe_override: Option<probe::McpEndpointProbe>,
 }
 
 /// Host-side MCP manager: auth gating, config resolution, `mcp.*` host
@@ -276,19 +229,7 @@ pub struct McpManager {
     auth_storage: Arc<tokio::sync::Mutex<AuthStorage>>,
     get_user_servers: Box<dyn Fn() -> Option<HashMap<String, McpServerConfig>> + Send + Sync>,
     begin_login: Option<BeginLoginFn>,
-    agent_dir: Option<std::path::PathBuf>,
-    get_catalog_sources: Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>,
-    remote_source: Option<manager_catalog::RemoteCatalogSourceFn>,
-    probe_override: Option<probe::McpEndpointProbe>,
     integrations: HashMap<String, ResolvedIntegration>,
-    /// The resolved service catalog (the SAME resolution feeds integrations
-    /// and the `/mcp` view).
-    service_catalog: service_catalog::McpCatalogResolution,
-    /// Whether the last resolution had a validated remote catalog snapshot:
-    /// the pinned-definition hint renders only when a snapshot can prove a
-    /// service left the catalog.
-    catalog_available: bool,
-    connection_store: std::sync::Arc<std::sync::Mutex<connection_store::McpConnectionStore>>,
     acp_servers: std::sync::Arc<std::sync::Mutex<HashMap<String, AcpMcpServerConfig>>>,
     acp_owner_id: std::sync::Mutex<Option<String>>,
 }
@@ -307,34 +248,53 @@ fn uses_oauth(config: &McpServerConfig) -> bool {
     )
 }
 
+fn oauth_credential_usable(
+    credential: Option<&crate::auth::types::AuthCredential>,
+    endpoint: &str,
+) -> bool {
+    let Some(crate::auth::types::AuthCredential::Oauth {
+        access,
+        refresh,
+        expires,
+        endpoint: Some(bound),
+        ..
+    }) = credential
+    else {
+        return false;
+    };
+    if access.is_empty() || bound != endpoint {
+        return false;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or_default();
+    *expires > now_ms || refresh.as_deref().is_some_and(|token| !token.is_empty())
+}
+
+fn http_config(url: &str, uses_oauth: bool) -> McpServerConfig {
+    McpServerConfig::Http {
+        url: url.to_string(),
+        headers: None,
+        bearer_token_env_var: None,
+        oauth: uses_oauth.then_some(true),
+        enabled: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        startup_timeout_ms: None,
+        call_timeout_ms: None,
+        client_id: None,
+        callback_port: None,
+    }
+}
+
 impl McpManager {
     pub fn new(options: McpManagerOptions) -> Self {
-        let agent_dir = options.agent_dir;
-        let connection_store = std::sync::Arc::new(std::sync::Mutex::new(match &agent_dir {
-            Some(dir) => {
-                connection_store::McpConnectionStore::open(dir.join("mcp-connections.json"))
-            }
-            None => connection_store::McpConnectionStore::in_memory(),
-        }));
-        let remote_source = options.remote_source.or_else(|| {
-            agent_dir.as_ref().map(|dir| {
-                let dir = dir.clone();
-                Box::new(move || remote_source::remote_plugins_snapshot(&dir))
-                    as manager_catalog::RemoteCatalogSourceFn
-            })
-        });
         let mut manager = Self {
             auth_storage: Arc::new(tokio::sync::Mutex::new(options.auth_storage)),
             get_user_servers: options.get_user_servers,
             begin_login: options.begin_login,
-            agent_dir,
-            get_catalog_sources: options.get_catalog_sources,
-            remote_source,
-            probe_override: options.probe_override,
             integrations: HashMap::new(),
-            service_catalog: crate::mcp::service_catalog::McpCatalogResolution::default(),
-            catalog_available: false,
-            connection_store,
             acp_servers: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             acp_owner_id: std::sync::Mutex::new(None),
         };
@@ -388,7 +348,36 @@ impl McpManager {
     }
 
     fn resolve_integrations(&mut self) {
-        self.resolve_integrations_over_catalog();
+        let mut integrations: HashMap<String, ResolvedIntegration> = HashMap::new();
+        for (server, label, url) in BUILTIN_MCP_CATALOG {
+            integrations.insert(
+                (*server).to_string(),
+                ResolvedIntegration {
+                    server: (*server).to_string(),
+                    label: (*label).to_string(),
+                    config: http_config(url, true),
+                    uses_oauth: true,
+                    user_declared: false,
+                },
+            );
+        }
+        let user_servers = (self.get_user_servers)().unwrap_or_default();
+        for (server, config) in user_servers {
+            if get_catalog_entry(&server).is_some() {
+                continue;
+            }
+            integrations.insert(
+                server.clone(),
+                ResolvedIntegration {
+                    server: server.clone(),
+                    label: server,
+                    uses_oauth: uses_oauth(&config),
+                    user_declared: true,
+                    config,
+                },
+            );
+        }
+        self.integrations = integrations;
     }
 
     /// Whether ACP server configs owned by `owner_id` may be released.
@@ -457,14 +446,7 @@ impl McpManager {
 
     /// True when valid credentials exist for the integration (drives enablement).
     fn is_authed(&self, integration: &ResolvedIntegration) -> bool {
-        if integration.blocked_reason.is_some() {
-            return false;
-        }
         if !integration.config.is_enabled() {
-            return false;
-        }
-        // A bundled catalog service owns its name; a shadowing user entry is dead by design.
-        if integration.user_declared && self.is_reserved_server_name(&integration.server) {
             return false;
         }
         if matches!(integration.config, McpServerConfig::Stdio { .. }) {
@@ -478,35 +460,16 @@ impl McpManager {
         else {
             unreachable!("stdio handled above");
         };
+        if let Some(env_var) = bearer_token_env_var {
+            return std::env::var(env_var).is_ok_and(|value| !value.trim().is_empty());
+        }
         let all = self.auth_storage_blocking_snapshot();
         let credential = all
             .get(&provider_id(&integration.server))
             .and_then(|value| {
                 serde_json::from_value::<crate::auth::types::AuthCredential>(value.clone()).ok()
             });
-        if !integration.user_declared && !integration.uses_oauth {
-            // Catalog entry without OAuth: credential-free dispatch ONLY for an explicitly public
-            // no-auth, setup-ready descriptor; a token service. Everything else fails closed.
-            if integration.credential_free_eligible {
-                return true;
-            }
-            if integration.static_token_eligible {
-                return super::mcp::catalog_views::mcp_static_token_usable(
-                    credential.as_ref(),
-                    url,
-                )
-                .is_ok();
-            }
-            return false;
-        }
-        if let Some(env_var) = bearer_token_env_var {
-            // The configured env var is the ONLY credential source: when it is unset, a stale OAuth
-            // credential must never authorize dispatch.
-            return std::env::var(env_var).is_ok_and(|value| !value.trim().is_empty());
-        }
-        // ONE shared grant-usability rule (with the view states): typed
-        // oauth, non-empty access, endpoint binding, no expired-no-refresh.
-        super::mcp::catalog_views::oauth_grant_usable(credential.as_ref(), url).is_ok()
+        oauth_credential_usable(credential.as_ref(), url)
     }
 
     fn auth_storage_blocking_snapshot(&self) -> serde_json::Map<String, Value> {
@@ -534,10 +497,6 @@ impl McpManager {
             ),
             get_user_servers: Box::new(move || Some(user_servers.clone())),
             begin_login: None,
-            agent_dir: Some(agent_dir.to_path_buf()),
-            get_catalog_sources: None,
-            remote_source: None,
-            probe_override: None,
         });
         (
             manager.get_disabled_builtin_skill_overrides(),
@@ -572,34 +531,6 @@ impl McpManager {
         manager: &Arc<std::sync::Mutex<Self>>,
         handlers: &mut HostRequestHandlers,
     ) {
-        /// The default when absent, a positive integer check, then a clamp to the maximum.
-        fn bounded_limit(
-            value: Option<&Value>,
-            default_limit: usize,
-            max_limit: usize,
-        ) -> Result<usize, anyhow::Error> {
-            let Some(value) = value else {
-                return Ok(default_limit);
-            };
-            let number = value
-                .as_u64()
-                .or_else(|| {
-                    value
-                        .as_f64()
-                        .filter(|number| number.fract() == 0.0)
-                        .map(|number| number as u64)
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!("mcp host request limit must be a positive integer")
-                })?;
-            if number < 1 {
-                return Err(anyhow::anyhow!(
-                    "mcp host request limit must be a positive integer"
-                ));
-            }
-            Ok(number.min(max_limit as u64) as usize)
-        }
-
         let (auth, acp_servers, acp_servers_for_config, begin_login) = {
             let manager = manager.lock().unwrap();
             (
@@ -676,24 +607,6 @@ impl McpManager {
                     let Some(integration) = integration else {
                         return Ok(json!({}));
                     };
-                    if !integration.user_declared {
-                        // A catalog service: the kernel dispatches it through disabled/blocked
-                        // entries never dispatch.
-                        if integration.blocked_reason.is_some() {
-                            return Ok(json!({}));
-                        }
-                        let mut config = serde_json::to_value(&integration.config)
-                            .map_err(anyhow::Error::new)?;
-                        if integration.static_token_eligible {
-                            if let Value::Object(map) = &mut config {
-                                map.insert("credentialSource".to_string(), json!("static-token"));
-                            }
-                        }
-                        return Ok(config);
-                    }
-                    if get_catalog_entry(&server).is_some() {
-                        return Ok(json!({}));
-                    }
                     serde_json::to_value(&integration.config).map_err(anyhow::Error::new)
                 })
             }),
@@ -721,125 +634,6 @@ impl McpManager {
                 }),
             );
         }
-        let manager = std::sync::Arc::clone(manager);
-        let manager_for_plugins = std::sync::Arc::clone(&manager);
-        handlers.register(
-            "mcp.list_plugins",
-            host_handler(move |payload| {
-                let manager = std::sync::Arc::clone(&manager_for_plugins);
-                Box::pin(async move {
-                    let status = payload.data.get("connectionStatus");
-                    let status = match status {
-                        None => None,
-                        Some(Value::String(status)) => Some(status.clone()),
-                        Some(_) => {
-                            return Err(anyhow::anyhow!(
-                                "mcp.list_plugins connectionStatus must be a string"
-                            ));
-                        }
-                    };
-                    if let Some(status) = status.as_deref() {
-                        if !matches!(
-                            status,
-                            "connected"
-                                | "pending"
-                                | "not_connected"
-                                | "setup_required"
-                                | "disabled"
-                                | "error"
-                        ) {
-                            return Err(anyhow::anyhow!(
-                                "mcp.list_plugins received an unknown connectionStatus: {status}"
-                            ));
-                        }
-                    }
-                    let limit = bounded_limit(payload.data.get("limit"), 50, 200)?;
-                    let cursor = match payload.data.get("cursor") {
-                        None => 0,
-                        Some(Value::String(cursor)) => {
-                            crate::mcp::catalog_plugin_views::decode_plugin_cursor(Some(cursor))
-                                .map_err(anyhow::Error::msg)?
-                        }
-                        Some(_) => {
-                            return Err(anyhow::anyhow!(
-                                "mcp.list_plugins received an invalid cursor"
-                            ));
-                        }
-                    };
-                    // The views read the auth store through a blocking
-                    // snapshot; keep that off the async runtime.
-                    let views = tokio::task::spawn_blocking(move || {
-                        let manager = manager.lock().unwrap();
-                        manager.service_catalog_views()
-                    })
-                    .await
-                    .map_err(|error| anyhow::anyhow!("MCP inventory read failed: {error}"))?;
-                    let views = match status.as_deref() {
-                        Some(status) => {
-                            crate::mcp::catalog_plugin_views::filter_plugin_views_by_status(
-                                &views, status,
-                            )
-                        }
-                        None => views,
-                    };
-                    let (plugins, next_cursor) =
-                        crate::mcp::catalog_plugin_views::page_plugin_views(&views, cursor, limit);
-                    let next_cursor = match next_cursor {
-                        Some(next) => json!(next),
-                        None => Value::Null,
-                    };
-                    Ok(json!({ "plugins": plugins, "nextCursor": next_cursor }))
-                })
-            }),
-        );
-        let manager_for_search = std::sync::Arc::clone(&manager);
-        handlers.register(
-            "mcp.search_plugins",
-            host_handler(move |payload| {
-                let manager = std::sync::Arc::clone(&manager_for_search);
-                Box::pin(async move {
-                    let query = payload
-                        .data
-                        .get("query")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .unwrap_or_default()
-                        .to_string();
-                    if query.is_empty() {
-                        return Err(anyhow::anyhow!(
-                            "mcp.search_plugins requires a non-empty query"
-                        ));
-                    }
-                    let limit = bounded_limit(payload.data.get("limit"), 10, 50)?;
-                    let views = tokio::task::spawn_blocking(move || {
-                        let manager = manager.lock().unwrap();
-                        manager.service_catalog_views()
-                    })
-                    .await
-                    .map_err(|error| anyhow::anyhow!("MCP inventory read failed: {error}"))?;
-                    let plugins = crate::mcp::catalog_plugin_views::search_plugin_views(
-                        &views, &query, limit,
-                    );
-                    Ok(json!({ "plugins": plugins, "nextCursor": Value::Null }))
-                })
-            }),
-        );
-        handlers.register(
-            "mcp.list_connections",
-            host_handler(move |_payload| {
-                let manager = std::sync::Arc::clone(&manager);
-                Box::pin(async move {
-                    let connections = tokio::task::spawn_blocking(move || {
-                        let manager = manager.lock().unwrap();
-                        let acp_servers = manager.get_acp_servers();
-                        manager.service_catalog_connection_views(&acp_servers)
-                    })
-                    .await
-                    .map_err(|error| anyhow::anyhow!("MCP inventory read failed: {error}"))?;
-                    Ok(json!({ "connections": connections }))
-                })
-            }),
-        );
     }
 
     /// Session-scoped servers supplied by the active ACP client.
@@ -851,26 +645,14 @@ impl McpManager {
         self.acp_servers.lock().unwrap().values().cloned().collect()
     }
 
-    /// Enabled servers available through the generic kernel API: user- declared plus connected
-    /// catalog services.
+    /// Enabled user-declared servers available through the generic kernel API.
     pub fn get_enabled_persistent_generic_servers(&self) -> Vec<String> {
         let mut servers: Vec<String> = self
             .integrations
             .values()
             .filter(|integration| {
-                // Ownership/id checks first: `is_authed` reads the auth
-                // store and must not run for filtered-out integrations.
-                is_generic_server_name(&integration.server)
-                    && if integration.user_declared {
-                        get_catalog_entry(&integration.server).is_none()
-                    } else {
-                        // Catalog services: connected and not legacy
-                        // builtins (their ids resolve through skills).
-                        integration.catalog_service_id.is_some()
-                            && self
-                                .service_descriptor(&integration.server)
-                                .is_some_and(|service| !service.legacy_builtin)
-                    }
+                integration.user_declared
+                    && is_generic_server_name(&integration.server)
                     && self.is_authed(integration)
             })
             .map(|integration| integration.server.clone())
@@ -995,10 +777,6 @@ mod tests {
             auth_storage: test_auth_storage(),
             get_user_servers: Box::new(move || user_servers.clone()),
             begin_login: None,
-            agent_dir: None,
-            get_catalog_sources: None,
-            remote_source: None,
-            probe_override: None,
         })
     }
 
@@ -1018,27 +796,28 @@ mod tests {
         }
     }
 
+    fn stdio_config(command: &str) -> McpServerConfig {
+        McpServerConfig::Stdio {
+            command: command.to_string(),
+            args: None,
+            cwd: None,
+            env: None,
+            enabled: None,
+            enabled_tools: None,
+            disabled_tools: None,
+            startup_timeout_ms: None,
+            call_timeout_ms: None,
+        }
+    }
+
     #[test]
     fn connection_roster_covers_builtins_and_user_servers() {
         let mut user_servers = HashMap::new();
-        user_servers.insert(
-            "fixture-echo".to_string(),
-            McpServerConfig::Stdio {
-                command: "python3".to_string(),
-                args: None,
-                cwd: None,
-                env: None,
-                enabled: None,
-                enabled_tools: None,
-                disabled_tools: None,
-                startup_timeout_ms: None,
-                call_timeout_ms: None,
-            },
-        );
+        user_servers.insert("fixture-echo".to_string(), stdio_config("python3"));
         let manager = manager_with(Some(user_servers));
         let roster = manager.connection_roster();
         let names: Vec<&str> = roster.iter().map(|entry| entry.server.as_str()).collect();
-        assert_eq!(names, vec!["fixture-echo", "linear", "notion", "slack"]);
+        assert_eq!(names, vec!["fixture-echo", "linear", "notion"]);
         let fixture = &roster[0];
         assert!(fixture.connected);
         assert!(fixture.generic);
@@ -1054,32 +833,6 @@ mod tests {
         assert!(!linear.user_declared);
         assert_eq!(linear.auth_kind, "subscription");
         assert_eq!(linear.transport, "http");
-        // An OAuth-bearing user server keeps the TS auth-kind cell.
-        let mut oauth_servers = HashMap::new();
-        oauth_servers.insert(
-            "hooked".to_string(),
-            http_config("https://hooked.example/mcp", Some(true), None),
-        );
-        let manager = manager_with(Some(oauth_servers));
-        let roster = manager.connection_roster();
-        let hooked = roster
-            .iter()
-            .find(|entry| entry.server == "hooked")
-            .expect("hooked");
-        assert_eq!(hooked.auth_kind, "subscription");
-        assert!(!hooked.connected, "no stored credentials yet");
-        let mut env_servers = HashMap::new();
-        env_servers.insert(
-            "search".to_string(),
-            http_config("https://search.example/mcp", None, Some("SEARCH_TOKEN")),
-        );
-        let manager = manager_with(Some(env_servers));
-        let roster = manager.connection_roster();
-        let search = roster
-            .iter()
-            .find(|entry| entry.server == "search")
-            .expect("search");
-        assert_eq!(search.auth_kind, "api key");
     }
 
     #[test]
@@ -1094,30 +847,20 @@ mod tests {
             ]
         );
         let status = manager.list_status();
-        assert_eq!(status.len(), 3);
+        assert_eq!(status.len(), 2);
         let linear = status.iter().find(|row| row.server == "linear").unwrap();
         assert!(!linear.enabled);
         assert!(linear.uses_oauth);
-        assert!(manager.get_enabled_persistent_generic_servers().is_empty());
+        assert_eq!(
+            manager.get_enabled_persistent_generic_servers(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn stdio_and_env_token_servers_are_enabled() {
         let mut user_servers = HashMap::new();
-        user_servers.insert(
-            "toolchain".to_string(),
-            McpServerConfig::Stdio {
-                command: "npx".to_string(),
-                args: Some(vec!["-y".to_string(), "server".to_string()]),
-                cwd: None,
-                env: None,
-                enabled: None,
-                enabled_tools: None,
-                disabled_tools: None,
-                startup_timeout_ms: None,
-                call_timeout_ms: None,
-            },
-        );
+        user_servers.insert("toolchain".to_string(), stdio_config("npx"));
         user_servers.insert(
             "search".to_string(),
             http_config("https://search.example/mcp", None, Some("SEARCH_TOKEN")),
@@ -1125,16 +868,24 @@ mod tests {
         let manager = manager_with(Some(user_servers));
         let generic = manager.get_enabled_persistent_generic_servers();
         assert!(generic.contains(&"toolchain".to_string()));
-        // The env-var server stays disabled until SEARCH_TOKEN is set in the
-        // environment (bearer-token auth requires the token at hand).
         assert!(!generic.contains(&"search".to_string()));
-        // Catalog overrides by users are not enableable.
-        let mut override_servers = HashMap::new();
-        override_servers.insert(
+    }
+
+    #[test]
+    fn user_servers_cannot_reserve_builtin_names() {
+        let mut user_servers = HashMap::new();
+        user_servers.insert(
             "linear".to_string(),
-            http_config("https://evil.example/mcp", None, None),
+            http_config("https://evil.example/mcp", Some(true), None),
         );
-        let manager = manager_with(Some(override_servers));
+        let manager = manager_with(Some(user_servers));
+        let linear = manager
+            .connection_roster()
+            .into_iter()
+            .find(|entry| entry.server == "linear")
+            .expect("linear");
+        assert!(!linear.user_declared);
+        assert_eq!(linear.label, "Linear");
         assert!(!manager
             .get_enabled_persistent_generic_servers()
             .contains(&"linear".to_string()));
@@ -1191,16 +942,6 @@ mod tests {
             },
         );
         let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(Some(user_servers))));
-        let gating_manager = Arc::clone(&manager);
-        let enabled = tokio::task::spawn_blocking(move || {
-            gating_manager
-                .lock()
-                .unwrap()
-                .get_enabled_persistent_generic_servers()
-        })
-        .await
-        .unwrap();
-        assert_eq!(enabled, vec!["fixture-echo".to_string()]);
         let mut handlers = HostRequestHandlers::default();
         McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
@@ -1234,7 +975,6 @@ mod tests {
             cwd: "/tmp".to_string(),
             env: HashMap::new(),
         }];
-
         manager
             .lock()
             .unwrap()
@@ -1255,208 +995,5 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "mcp.config requires a server");
         assert!(handlers.get("mcp.begin_login").is_none());
-    }
-
-    #[tokio::test]
-    async fn list_plugins_host_handler_pages_filters_and_validates() {
-        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(None)));
-        let mut handlers = HostRequestHandlers::default();
-        McpManager::register_host_handlers(&manager, &mut handlers);
-        let list_plugins = handlers.get("mcp.list_plugins").expect("wired").clone();
-        // Default page: the first 50 plugin cards, and the real catalog is present.
-        let page = list_plugins(crate::kernel::shared::HostRequestPayload { data: json!({}) })
-            .await
-            .unwrap();
-        assert!(page["plugins"].as_array().expect("plugins").len() > 1);
-        assert!(
-            page["plugins"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["serviceId"] == json!("linear")),
-            "the compiled builtin catalog services page"
-        );
-        let filtered = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "connectionStatus": "connected" }),
-        })
-        .await
-        .unwrap();
-        assert!(
-            filtered["plugins"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|entry| entry["connectionStatus"] == json!("connected")),
-            "every filtered row carries the requested status"
-        );
-        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "connectionStatus": "maybe" }),
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "mcp.list_plugins received an unknown connectionStatus: maybe"
-        );
-        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "connectionStatus": 7 }),
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "mcp.list_plugins connectionStatus must be a string"
-        );
-        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "cursor": "not-digits" }),
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "mcp.list_plugins received an invalid cursor"
-        );
-        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "limit": 0 }),
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "mcp host request limit must be a positive integer"
-        );
-        let clamped = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "limit": 1000 }),
-        })
-        .await
-        .unwrap();
-        assert!(
-            clamped["plugins"].as_array().unwrap().len() <= 200,
-            "the host clamps the page size to its maximum"
-        );
-        // A limit under the catalog size pages with a cursor.
-        let total = page["plugins"].as_array().unwrap().len();
-        if total > 2 {
-            let first = list_plugins(crate::kernel::shared::HostRequestPayload {
-                data: json!({ "limit": 2 }),
-            })
-            .await
-            .unwrap();
-            let next_cursor = first["nextCursor"]
-                .as_str()
-                .expect("a cursor when more exist");
-            assert_eq!(next_cursor, "2");
-            let second = list_plugins(crate::kernel::shared::HostRequestPayload {
-                data: json!({ "limit": 2, "cursor": next_cursor }),
-            })
-            .await
-            .unwrap();
-            assert_ne!(
-                second["plugins"][0]["serviceId"], first["plugins"][0]["serviceId"],
-                "the next page starts where the cursor left off"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn search_plugins_host_handler_searches_and_validates() {
-        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(None)));
-        let mut handlers = HostRequestHandlers::default();
-        McpManager::register_host_handlers(&manager, &mut handlers);
-        let search = handlers.get("mcp.search_plugins").expect("wired").clone();
-        let result = search(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "query": "linear" }),
-        })
-        .await
-        .unwrap();
-        let plugins = result["plugins"].as_array().expect("plugins");
-        assert!(plugins
-            .iter()
-            .any(|entry| entry["serviceId"] == json!("linear")));
-        assert_eq!(result["nextCursor"], serde_json::Value::Null);
-        for bad in [json!(["query", ""]), json!({}), json!({ "query": "   " })] {
-            let error = search(crate::kernel::shared::HostRequestPayload { data: bad })
-                .await
-                .unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "mcp.search_plugins requires a non-empty query"
-            );
-        }
-        let error = search(crate::kernel::shared::HostRequestPayload {
-            data: json!({ "query": "linear", "limit": -3 }),
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "mcp host request limit must be a positive integer"
-        );
-    }
-
-    #[tokio::test]
-    async fn list_connections_host_handler_serves_the_inventory() {
-        let mut user_servers = HashMap::new();
-        user_servers.insert(
-            "fixture-echo".to_string(),
-            McpServerConfig::Stdio {
-                command: "python3".to_string(),
-                args: Some(vec!["fixtures/mcp_echo_server.py".to_string()]),
-                cwd: None,
-                env: None,
-                enabled: None,
-                enabled_tools: None,
-                disabled_tools: None,
-                startup_timeout_ms: None,
-                call_timeout_ms: None,
-            },
-        );
-        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(Some(user_servers))));
-        manager
-            .lock()
-            .unwrap()
-            .replace_acp_servers(
-                &[AcpMcpServerConfig::Stdio {
-                    name: "session-tool".to_string(),
-                    command: "run".to_string(),
-                    args: vec![],
-                    cwd: "/tmp".to_string(),
-                    env: HashMap::new(),
-                }],
-                "client-a",
-            )
-            .unwrap();
-        let mut handlers = HostRequestHandlers::default();
-        McpManager::register_host_handlers(&manager, &mut handlers);
-        let list_connections = handlers.get("mcp.list_connections").expect("wired").clone();
-        let result =
-            list_connections(crate::kernel::shared::HostRequestPayload { data: json!({}) })
-                .await
-                .unwrap();
-        let connections = result["connections"].as_array().expect("connections");
-        let mut ids = Vec::new();
-        for entry in connections {
-            assert!(entry["connectionId"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty()));
-            assert!(entry["status"].as_str().is_some());
-            assert!(entry["transport"].as_str().is_some());
-            ids.push(entry["connectionId"].as_str().unwrap().to_string());
-        }
-        let mut sorted_ids = ids.clone();
-        sorted_ids.sort();
-        assert_eq!(ids, sorted_ids, "connection rows sort by connectionId");
-        assert!(ids.contains(&"fixture-echo".to_string()));
-        assert!(ids.contains(&"session-tool".to_string()));
-        let acp_row = connections
-            .iter()
-            .find(|entry| entry["connectionId"] == json!("session-tool"))
-            .expect("the acp row");
-        assert_eq!(acp_row["status"], json!("connected"));
-        assert_eq!(acp_row["transport"], json!("stdio"));
-        assert_eq!(acp_row["source"], json!("acp"));
-        for entry in connections {
-            assert_ne!(entry["status"], json!("setup_required"));
-        }
     }
 }

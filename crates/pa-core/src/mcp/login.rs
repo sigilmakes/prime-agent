@@ -339,10 +339,6 @@ mod tests {
             ),
             get_user_servers: Box::new(move || user_servers.clone()),
             begin_login: None,
-            agent_dir: None,
-            get_catalog_sources: None,
-            remote_source: None,
-            probe_override: None,
         });
         Arc::new(Mutex::new(manager))
     }
@@ -459,7 +455,14 @@ mod tests {
             seen: Mutex::default(),
         });
         let agent = tempfile::tempdir().unwrap();
-        let manager = manager(agent.path(), None, http.clone());
+        let manager = manager(
+            agent.path(),
+            Some(HashMap::from([(
+                "slack".to_string(),
+                oauth_http_server("https://mcp.slack.com/mcp"),
+            )])),
+            http.clone(),
+        );
         let ui = PasteUi {
             auth_url: Arc::default(),
         };

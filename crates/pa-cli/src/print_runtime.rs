@@ -2041,64 +2041,6 @@ mod tests {
             "the rewrite withdrew the old server from the live integrations"
         );
     }
-
-    /// Local service-catalog sources reach the catalog resolution; dropping the declaration
-    /// withdraws the entry on the next resolve.
-    #[test]
-    fn print_mode_mcp_manager_resolves_declared_catalog_sources() {
-        let home = tempfile::TempDir::new().unwrap();
-        let agent_dir = home.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let catalog = home.path().join("local-catalog.json");
-        std::fs::write(
-            &catalog,
-            serde_json::json!({
-                "version": 1,
-                "entries": [{
-                    "server": "my-local", "service": "my-local", "label": "My Local",
-                    "url": "https://my-local.example/mcp", "aliases": [],
-                    "transport": { "type": "http", "url": "https://my-local.example/mcp" },
-                    "auth": { "strategy": "oauth", "clientRegistration": "dynamic" },
-                    "setup": { "status": "ready" },
-                    "verification": { "status": "unverified" },
-                    "legacyBuiltin": false,
-                    "provenance": [{ "source": "user" }]
-                }]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let settings = |sources: &[&str]| {
-            serde_json::json!({
-                "mcpCatalogSources": sources
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .to_string()
-        };
-        std::fs::write(
-            agent_dir.join("settings.json"),
-            settings(&[&catalog.display().to_string()]),
-        )
-        .unwrap();
-        let mut manager = crate::mcp_login::cli_mcp_manager(home.path(), &agent_dir);
-        let my_local = manager
-            .service_descriptors()
-            .iter()
-            .find(|service| service.service_id == "my-local")
-            .expect("declared source entry resolved");
-        assert!(my_local.local_source);
-        std::fs::write(agent_dir.join("settings.json"), settings(&[])).unwrap();
-        manager.refresh();
-        assert!(
-            !manager
-                .service_descriptors()
-                .iter()
-                .any(|service| service.service_id == "my-local"),
-            "the dropped source no longer resolves"
-        );
-    }
 }
 
 #[cfg(test)]

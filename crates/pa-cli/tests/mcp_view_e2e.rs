@@ -10,10 +10,10 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the `/mcp` service catalog view: a
-//! settings-declared stdio MCP server (the committed echo fixture) must
-//! appear in the daemon's roster and service cards, answered from local
-//! state (no kernel round-trip), and the headless TUI must render it.
+//! End-to-end verifier for the `/mcp` connections view: a settings-declared
+//! stdio MCP server (the committed echo fixture) must appear in the daemon's
+//! roster, answered from local state (no kernel round-trip), and the headless
+//! TUI must render it.
 #![cfg(unix)]
 
 use std::io::Write as _;
@@ -378,35 +378,10 @@ async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
         .expect("linear entry");
     assert_eq!(linear.get("connected"), Some(&json!(false)));
     assert_eq!(linear.get("authKind"), Some(&json!("subscription")));
-    // The fixture's user-declared card ranks connected-first (TS `buildPluginViews`).
-    let services = data
-        .get("services")
-        .and_then(Value::as_array)
-        .expect("services array");
-    let fixture_card = services
-        .iter()
-        .find(|service| service.get("serviceId").and_then(Value::as_str) == Some("fixture-echo"))
-        .expect("fixture-echo card");
-    assert_eq!(
-        fixture_card.get("connectionStatus"),
-        Some(&json!("connected")),
-        "the user stdio card: {fixture_card}"
-    );
-    assert_eq!(fixture_card.get("source"), Some(&json!("user")));
-    assert_eq!(
-        fixture_card.get("connectionIds"),
-        Some(&json!(["fixture-echo"])),
-        "the account id joins the card: {fixture_card}"
-    );
-    assert_eq!(
-        services[0].get("serviceId"),
-        Some(&json!("fixture-echo")),
-        "connected cards lead (TS rank): {services:?}"
-    );
 }
 
 /// The TUI surface: the headless client opens `/mcp`, the inline view
-/// renders the catalog, Esc closes it, and Enter dispatches the login.
+/// renders the roster, Esc closes it, and Enter dispatches the login.
 #[tokio::test]
 async fn mcp_view_lists_the_configured_mock_connection() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -456,7 +431,7 @@ async fn mcp_view_lists_the_configured_mock_connection() {
         "status rendered:\n{rendered}"
     );
     assert!(
-        rendered.contains("Enter manage accounts \u{b7} Esc close"),
+        rendered.contains("Enter reconnect \u{b7} Esc close"),
         "key hint rendered:\n{rendered}"
     );
     // The live tool listing is gone: no kernel ever boots for the view.
@@ -520,7 +495,7 @@ async fn get_mcp_connections_answers_instantly_mid_turn() {
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(5),
-        "mid-turn get_mcp_connections took {elapsed:?}: the catalog open must be instant (the TS picker reads local state; the old handler waited out the session-build bound and froze the open mid-turn)"
+        "mid-turn get_mcp_connections took {elapsed:?}: the view open must be instant (the picker reads local state; the old handler waited out the session-build bound and froze the open mid-turn)"
     );
     // The roster answered with the connected fixture (local state).
     let connections = data
