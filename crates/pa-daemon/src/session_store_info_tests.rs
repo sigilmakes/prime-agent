@@ -209,10 +209,7 @@ pub(super) fn append_rows(path: &Path, rows: &[Value]) {
 fn reencode(content: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replacement.jsonl");
-    let rows: Vec<Value> = content
-        .lines()
-        .map(|line| crate::test_rows::row_of(line))
-        .collect();
+    let rows: Vec<Value> = content.lines().map(crate::test_rows::row_of).collect();
     append_rows(&path, &rows);
     fs::read_to_string(path).unwrap()
 }

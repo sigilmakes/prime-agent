@@ -349,14 +349,6 @@ return {
             }
         }
 
-        fn project(&self, settings: &Value) {
-            std::fs::write(
-                self.cwd.join(".prime/agent/settings.json"),
-                settings.to_string(),
-            )
-            .unwrap();
-        }
-
         async fn catalog(&self) -> Vec<Value> {
             let response = self.worker.dispatch("get_commands", &json!({})).await;
             assert!(response.success, "{response:?}");
@@ -488,11 +480,16 @@ return {
             .as_str()
             .unwrap()
             .contains("replacement"));
-        std::fs::write(fixture.agent.join("settings.json"), json!({
-            "enableBuiltinSkills":false,
-            "bundledSkills":{"websearch":false},
-            "plugins":{"counter":{"enabled":false}}
-        }).to_string()).unwrap();
+        std::fs::write(
+            fixture.agent.join("settings.json"),
+            json!({
+                "enableBuiltinSkills":false,
+                "bundledSkills":{"websearch":false},
+                "plugins":{"counter":{"enabled":false}}
+            })
+            .to_string(),
+        )
+        .unwrap();
         let history = fixture.rows();
         let disabled = fixture.worker.dispatch("reload", &json!({})).await;
         assert!(
