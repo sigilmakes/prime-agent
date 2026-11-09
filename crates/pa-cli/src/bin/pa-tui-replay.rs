@@ -134,7 +134,7 @@ fn replay() -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn loads_validated_session_log_and_rejects_raw_or_corrupt_rows() {
+    fn loads_plain_jsonl_rows_and_rejects_a_torn_tail() {
         use pa_core::session_log::{Outcome, SessionLog};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("replay.jsonl");
@@ -159,7 +159,12 @@ mod tests {
         std::fs::write(&path, &corrupt).unwrap();
         assert!(pa_core::session::read::read_entries(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        // Plain JSONL is the format, not a rejected shape: the same two rows
+        // written by hand load exactly as the core writes them.
         std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
-        assert!(pa_core::session::read::read_entries(&path).is_err());
+        assert_eq!(
+            pa_core::session::read::read_entries(&path).unwrap().len(),
+            2
+        );
     }
 }

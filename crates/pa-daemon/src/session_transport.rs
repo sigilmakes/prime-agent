@@ -600,12 +600,14 @@ pub(crate) fn open_error(error: session_log::Error) -> LogWireError {
             ),
         },
         session_log::Error::Io(error) => error.into(),
-        session_log::Error::Damaged { last_good_seq, .. }
-        | session_log::Error::Corrupt {
-            after_seq: last_good_seq,
-            ..
-        } => LogWireError::Refused(anyhow::anyhow!(
-            "the session log is unusable after seq {last_good_seq}; repair is the recovery"
+        session_log::Error::Damaged { last_good_seq, .. } => LogWireError::Refused(anyhow::anyhow!(
+            "the session log is damaged after seq {last_good_seq}; reopening repairs the torn tail"
+        )),
+        // Repair refuses a complete bad line on a log whose prefix is rows: the
+        // rows behind it may be history this binary did not write, so cutting
+        // there is an operator's decision, not a retry's.
+        session_log::Error::Corrupt { after_seq } => LogWireError::Refused(anyhow::anyhow!(
+            "the session log is unusable after seq {after_seq}; repair refuses to cut this log, so it needs an operator"
         )),
     }
 }

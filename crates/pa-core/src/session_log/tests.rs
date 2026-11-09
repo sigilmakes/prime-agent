@@ -1,5 +1,6 @@
 //! The required behavior list from the session-log spec, one test per item.
 
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
@@ -32,6 +33,23 @@ fn committed_seq(outcome: &Outcome) -> Option<u64> {
 
 fn log_path(dir: &Path) -> std::path::PathBuf {
     dir.join(format!("{ID}.jsonl"))
+}
+
+/// Write `rows` the way the 2026-10-30 core wrote them: one envelope per line,
+/// seq equal to the line number, CRC over the seq and the row's exact bytes.
+fn write_enveloped(path: &Path, rows: &[serde_json::Value]) {
+    let mut text = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        let seq = index as u64 + 1;
+        let body = serde_json::to_string(row).unwrap();
+        writeln!(
+            text,
+            "{{\"seq\":{seq},\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{body}}}",
+            super::line::checksum_of(seq, &body)
+        )
+        .unwrap();
+    }
+    std::fs::write(path, text).unwrap();
 }
 
 type FsyncHook = Box<dyn Fn(&File) -> io::Result<()> + Send + Sync>;
@@ -128,8 +146,12 @@ fn append_and_read_round_trip() {
     let rows = log.read_since(0).unwrap();
     assert_eq!(rows.iter().map(|row| row.seq).collect::<Vec<_>>(), [1, 2]);
     assert_eq!(rows[0].body, row(1));
-    assert_eq!(rows[0].ts.len(), 24, "YYYY-MM-DDTHH:MM:SS.mmmZ");
-    assert!(rows[0].ts.ends_with('Z'));
+    // The line on disk is the row itself: no envelope, no checksum, no second
+    // timestamp. Any JSONL reader sees the same objects this reader returns.
+    assert_eq!(
+        std::fs::read_to_string(log_path(temp.path())).unwrap(),
+        format!("{}\n{}\n", row(1), row(2))
+    );
 
     let tail = log.read_since(1).unwrap();
     assert_eq!(tail.len(), 1);
@@ -384,26 +406,38 @@ fn a_duplicate_retry_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
     let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
     assert_eq!(
-        committed_seq(&log.append_at(7, &row(7), deadline())),
-        Some(7)
+        committed_seq(&log.append_at(1, &row(1), deadline())),
+        Some(1)
     );
     assert_eq!(
-        committed_seq(&log.append_at(7, &row(7), deadline())),
-        Some(7)
+        committed_seq(&log.append_at(1, &row(1), deadline())),
+        Some(1)
     );
     let rows = log.read_since(0).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].seq, 7);
+    assert_eq!(rows[0].seq, 1);
 
-    let taken = log.append_at(7, &row(99), deadline());
+    let taken = log.append_at(1, &row(99), deadline());
     assert!(
         matches!(
             taken,
             Outcome::NotWritten {
-                reason: NotWritten::SeqConflict { seq: 7 }
+                reason: NotWritten::SeqConflict { seq: 1 }
             }
         ),
         "a different row at the same seq is not a retry: {taken:?}"
+    );
+    // A pin past the end is not a place a line can go: a row's seq is its
+    // position, so a gap is unrepresentable rather than silently numbered.
+    let past_the_end = log.append_at(3, &row(3), deadline());
+    assert!(
+        matches!(
+            past_the_end,
+            Outcome::NotWritten {
+                reason: NotWritten::SeqConflict { seq: 3 }
+            }
+        ),
+        "a pin past the end leaves an unnumberable line: {past_the_end:?}"
     );
     assert_eq!(log.read_since(0).unwrap().len(), 1);
 }
@@ -412,17 +446,20 @@ fn a_duplicate_retry_is_idempotent() {
 fn a_flipped_byte_stops_the_read_and_is_reported_by_repair() {
     let temp = tempfile::tempdir().unwrap();
     let path = log_path(temp.path());
-    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
-    for n in 1..=3u64 {
-        assert_eq!(committed_seq(&log.append(&row(n), deadline())), Some(n));
-    }
+    // An enveloped file is the one whose repair may drop a bad line: the CRC
+    // proves the damage, and its rows all come from the core that wrote it.
+    write_enveloped(&path, &[row(1), row(2), row(3)]);
+    let log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
 
+    // The `"` that closes the second row's `kind` value: a flip there breaks the
+    // envelope's checksum and the JSON.
     let mut bytes = std::fs::read(&path).unwrap();
     let target = bytes
         .windows(6)
         .position(|window| window == br#""n":2}"#)
         .expect("the second row's body")
-        + 4;
+        - 2;
+    assert_eq!(bytes[target], b'"', "the quote that closes `test`");
     bytes[target] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
 
@@ -444,7 +481,10 @@ fn a_flipped_byte_stops_the_read_and_is_reported_by_repair() {
 }
 
 #[test]
-fn a_flipped_seq_is_caught_by_the_checksum() {
+fn a_byte_flip_inside_a_string_is_the_damage_a_bare_line_cannot_show() {
+    // The envelope's checksum caught this; a bare line does not. Stated as a
+    // test so the loss stays visible: a flip that leaves valid JSON is read as
+    // that different row, and only `repair` can never learn it happened.
     let temp = tempfile::tempdir().unwrap();
     let path = log_path(temp.path());
     let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
@@ -452,18 +492,74 @@ fn a_flipped_seq_is_caught_by_the_checksum() {
         assert_eq!(committed_seq(&log.append(&row(n), deadline())), Some(n));
     }
 
-    // The last row's seq, raised past every later seq: the order still
-    // increases, so only the checksum can catch it.
     let mut bytes = std::fs::read(&path).unwrap();
     let target = bytes
-        .windows(8)
-        .position(|window| window == br#""seq":3,"#)
-        .expect("the third row's seq")
-        + 6;
-    assert_eq!(bytes[target], b'3');
-    bytes[target] = b'5';
+        .windows(6)
+        .position(|window| window == br#""n":2}"#)
+        .expect("the second row's body")
+        + 4;
+    bytes[target] = b'9';
     std::fs::write(&path, &bytes).unwrap();
 
+    let rows = log.read_since(0).unwrap();
+    assert_eq!(rows.len(), 3, "all three lines are still valid JSON");
+    assert_eq!(
+        rows[1].body,
+        row(9),
+        "and the flipped row reads as its new text"
+    );
+}
+
+#[test]
+fn a_legacy_envelope_log_loads_and_its_seq_must_match_its_position() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let envelope = |seq: u64| {
+        let body = serde_json::to_string(&row(seq)).unwrap();
+        format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{body}}}\n",
+            super::line::checksum_of(seq, &body)
+        )
+    };
+    // The shape the 2026-10-30 core wrote: one envelope per line, seq equal to
+    // the line number, CRC over the seq and the row's exact bytes.
+    std::fs::write(
+        &path,
+        format!("{}{}{}", envelope(1), envelope(2), envelope(3)),
+    )
+    .unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    let rows = log.read_since(0).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(rows[2].body, row(3));
+    // The writer has one shape now: the next line is the row, even here. The
+    // reader accepts both, so the file still reads back as four rows.
+    assert_eq!(committed_seq(&log.append(&row(4), deadline())), Some(4));
+    let appended = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        appended.lines().last(),
+        Some(row(4).to_string().as_str()),
+        "an append writes the row itself"
+    );
+    assert_eq!(
+        log.read_since(0)
+            .unwrap()
+            .iter()
+            .map(|row| row.seq)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
+
+    // The same three lines with one seq moved off its position: damage, because
+    // a bare line's seq is only ever its position.
+    std::fs::write(
+        &path,
+        format!("{}{}{}", envelope(1), envelope(2), envelope(5)),
+    )
+    .unwrap();
     assert!(matches!(
         log.read_since(0),
         Err(Error::Corrupt { after_seq: 2 })
@@ -474,6 +570,238 @@ fn a_flipped_seq_is_caught_by_the_checksum() {
             .last_good_seq,
         2
     );
+}
+
+#[test]
+fn a_new_file_is_bare_and_its_lines_are_the_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    for n in 1..=3u64 {
+        assert_eq!(committed_seq(&log.append(&row(n), deadline())), Some(n));
+    }
+    let text = std::fs::read_to_string(log_path(temp.path())).unwrap();
+    let mut expected = String::new();
+    for n in 1..=3u64 {
+        writeln!(expected, "{}", row(n)).unwrap();
+    }
+    assert_eq!(text, expected);
+}
+
+#[test]
+fn a_partial_envelope_appended_by_a_foreign_writer_is_corrupt_not_a_row() {
+    // A line that names any part of the envelope is judged as an envelope. A
+    // half-written one must never be read as a row of its own.
+    for partial in [
+        "{\"seq\":3,\"row\":{\"kind\":\"test\",\"n\":3}}",
+        "{\"ts\":\"2026-10-30T04:00:00.000Z\",\"row\":{\"kind\":\"test\",\"n\":3}}",
+        "{\"seq\":3,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"00000000\",\"row\":{\"kind\":\"test\",\"n\":3},\"x\":1}",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = log_path(temp.path());
+        let log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+        drop(log);
+        std::fs::write(&path, format!("{}\n{}\n", row(1), partial)).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            matches!(
+                SessionLog::open(temp.path(), ID, deadline()),
+                Err(Error::Damaged {
+                    last_good_seq: 1,
+                    ..
+                })
+            ),
+            "{partial}"
+        );
+        // And nothing is repaired behind the caller's back.
+        assert!(matches!(
+            SessionLog::repair(temp.path(), ID, deadline()),
+            Err(Error::Corrupt { after_seq: 1 })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{partial}");
+    }
+}
+
+#[test]
+fn a_wrong_seq_envelope_is_rejected_wherever_it_is_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let body = serde_json::to_string(&row(2)).unwrap();
+    let envelope = format!(
+        "{{\"seq\":3,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{body}}}\n",
+        super::line::checksum_of(3, &body)
+    );
+    std::fs::write(&path, &envelope).unwrap();
+
+    // The line-level decoder knows it should be line one.
+    assert!(super::Row::decode(envelope.trim_end().as_bytes(), 0).is_err());
+    // The log reader agrees: the first line is damage, not a row.
+    assert!(matches!(
+        SessionLog::open(temp.path(), ID, deadline()),
+        Err(Error::Damaged {
+            last_good_seq: 0,
+            ..
+        })
+    ));
+    // Nothing before the damage, so nothing may be truncated.
+    assert!(matches!(
+        SessionLog::repair(temp.path(), ID, deadline()),
+        Err(Error::Corrupt { after_seq: 0 })
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), envelope.as_bytes());
+}
+
+#[test]
+fn every_append_writes_the_row_itself() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let body = serde_json::to_string(&row(1)).unwrap();
+    let envelope = format!(
+        "{{\"seq\":1,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{body}}}\n",
+        super::line::checksum_of(1, &body)
+    );
+    // Over a legacy envelope the new line is a row: the writer has one shape,
+    // and the reader accepts both, so the file still reads.
+    std::fs::write(&path, &envelope).unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        format!("{envelope}{}\n", row(2))
+    );
+    drop(log);
+
+    // A bare file gains a bare line, as it always did.
+    std::fs::write(&path, format!("{}\n", row(1))).unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        format!("{}\n{}\n", row(1), row(2))
+    );
+}
+
+#[test]
+fn a_foreign_line_does_not_change_what_the_next_append_writes() {
+    // Another writer may append either shape after this handle opened: an old
+    // binary writes envelopes, this one writes rows. The append that follows
+    // adopts those lines for numbering and writes a row regardless; nothing
+    // reads the foreign line's shape to decide the next line's.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    let body = serde_json::to_string(&row(2)).unwrap();
+    let foreign = format!(
+        "{{\"seq\":2,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{body}}}\n",
+        super::line::checksum_of(2, &body)
+    );
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(foreign.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    assert_eq!(committed_seq(&log.append(&row(3), deadline())), Some(3));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text,
+        format!("{}\n{foreign}{}\n", row(1), row(3)),
+        "the foreign line is kept and the next line is a row"
+    );
+    assert_eq!(
+        log.read_since(0)
+            .unwrap()
+            .iter()
+            .map(|row| row.seq)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
+fn a_row_may_not_carry_a_reserved_name() {
+    // The reader judges a line that names seq/ts/crc/row as an envelope, so a
+    // row carrying one would be committed and then be unreadable — taking the
+    // rest of the log with it. The writer refuses before the disk is touched.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    let before = std::fs::read(&path).unwrap();
+    for reserved in ["seq", "ts", "crc", "row"] {
+        let mut body = serde_json::json!({"type": "test", "n": 2});
+        body[reserved] = serde_json::json!(null);
+        assert!(
+            matches!(
+                log.append(&body, deadline()),
+                Outcome::NotWritten {
+                    reason: NotWritten::Encode(_)
+                }
+            ),
+            "{reserved}"
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+    assert_eq!(log.read_since(0).unwrap().len(), 1, "the log still reads");
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
+}
+
+#[test]
+fn a_file_holding_both_shapes_reads() {
+    // A row followed by an envelope is what an append by this binary to a legacy
+    // file produces. Both lines carry their position the same way — the first by
+    // being line one, the second by declaring it — so the file reads.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let body = serde_json::to_string(&row(2)).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{{\"seq\":2,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{body}}}\n",
+            row(1),
+            super::line::checksum_of(2, &body)
+        ),
+    )
+    .unwrap();
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(
+        log.read_since(0)
+            .unwrap()
+            .iter()
+            .map(|row| row.seq)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(committed_seq(&log.append(&row(3), deadline())), Some(3));
+    assert_eq!(log.read_since(0).unwrap().len(), 3);
+}
+
+#[test]
+fn a_corrupt_first_envelope_line_is_left_for_an_operator() {
+    // With nothing before the damage there is no anchor: a repair would empty
+    // the file, and the file's shape is unknown. Refused, not truncated.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let body = serde_json::to_string(&row(1)).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{{\"seq\":1,\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"00000000\",\"row\":{body}}}\n"
+        ),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        SessionLog::open(temp.path(), ID, deadline()),
+        Err(Error::Damaged {
+            last_good_seq: 0,
+            ..
+        })
+    ));
+    assert!(matches!(
+        SessionLog::repair(temp.path(), ID, deadline()),
+        Err(Error::Corrupt { after_seq: 0 })
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
 #[test]
@@ -636,14 +964,82 @@ fn an_append_behind_a_corrupt_tail_is_refused_with_its_own_reason() {
         ),
         "a complete bad line is Corrupt, not a torn tail: {outcome:?}"
     );
-    // The refusal is still a refusal: the log is untouched until repair.
+    // The refusal is still a refusal, and repair refuses too: this file is
+    // bare, so a complete line that is not a row may be history this binary did
+    // not write, and truncating there would take everything behind it.
+    assert!(matches!(
+        SessionLog::repair(temp.path(), ID, deadline()),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
+    // And the log still reads as damage at the same line, never as three rows.
+    assert!(matches!(
+        log.read_since(0),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
+}
+
+#[test]
+fn a_damaged_bare_file_is_never_truncated_by_open_or_repair() {
+    // Nineteen logs on the live disk are bare and carry a complete line that is
+    // not JSON, with up to 18 MB of history behind the first one.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    // A bare log whose fourth line is not a row, with a good row behind it.
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n{{\"kind\":\"test\",\"n\":3,\"cut\n{}\n",
+            row(1),
+            row(2),
+            row(4)
+        ),
+    )
+    .unwrap();
+    let damaged = std::fs::read(&path).unwrap();
+
+    assert!(
+        matches!(
+            SessionLog::open(temp.path(), ID, deadline()),
+            Err(Error::Damaged {
+                last_good_seq: 2,
+                ..
+            })
+        ),
+        "open reports the damage without touching it"
+    );
+    assert!(matches!(
+        SessionLog::repair(temp.path(), ID, deadline()),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        damaged,
+        "neither open nor repair wrote anything"
+    );
+}
+
+#[test]
+fn a_torn_tail_on_a_bare_file_is_still_repaired() {
+    // A torn tail is a write that never became a row: dropping it loses nothing,
+    // whatever shape the file has.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    let good = std::fs::metadata(&path).unwrap().len();
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"{\"kind\":\"test\",").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let torn = std::fs::metadata(&path).unwrap().len() - good;
+
     assert_eq!(
         SessionLog::repair(temp.path(), ID, deadline())
             .unwrap()
-            .last_good_seq,
-        2
+            .truncated_bytes,
+        torn
     );
-    assert_eq!(committed_seq(&log.append(&row(4), deadline())), Some(3));
+    assert_eq!(committed_seq(&log.append(&row(2), deadline())), Some(2));
 }
 
 #[test]
@@ -750,16 +1146,16 @@ fn refresh_reports_damage_the_way_an_append_does() {
         follower.refresh(deadline()),
         Err(Error::Corrupt { after_seq: 2 })
     ));
-    assert_eq!(
-        SessionLog::repair(temp.path(), ID, deadline())
-            .unwrap()
-            .last_good_seq,
-        2
-    );
-    assert_eq!(
-        committed_seq(&follower.append(&row(3), deadline())),
-        Some(3)
-    );
+    // A bare file is not repaired from a complete bad line, so the cursor cannot
+    // move past it either: the caller has to act, not the core.
+    assert!(matches!(
+        SessionLog::repair(temp.path(), ID, deadline()),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
+    assert!(matches!(
+        follower.refresh(deadline()),
+        Err(Error::Corrupt { after_seq: 2 })
+    ));
 }
 
 #[test]
@@ -926,4 +1322,40 @@ fn a_first_append_never_adopts_a_rivals_bytes() {
         }
     ));
     assert_eq!(std::fs::read(log_path(dir.path())).unwrap(), torn);
+}
+
+#[test]
+fn recover_does_not_truncate_a_bare_files_complete_bad_line() {
+    // `recover` resolves this process's own undecided append. A complete line
+    // that is not a row is not that append: it may be history this binary did
+    // not write, so recover refuses exactly where repair does.
+    let temp = tempfile::tempdir().unwrap();
+    let path = log_path(temp.path());
+    let mut log = SessionLog::open(temp.path(), ID, deadline()).unwrap();
+    assert_eq!(committed_seq(&log.append(&row(1), deadline())), Some(1));
+    drop(log);
+
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"{\"kind\":\"test\",\"cut\n").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let before = std::fs::read(&path).unwrap();
+
+    let recover = super::Recover {
+        disk: Arc::new(RealDisk),
+        log_path: path.clone(),
+        lock_path: temp.path().join(format!("{ID}.lock")),
+        seq: 2,
+        body: serde_json::to_string(&row(2)).unwrap(),
+        cause: io::Error::other("test"),
+    };
+    assert!(matches!(
+        recover.recover(deadline()),
+        Err(Error::Corrupt { after_seq: 1 })
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "nothing was truncated"
+    );
 }

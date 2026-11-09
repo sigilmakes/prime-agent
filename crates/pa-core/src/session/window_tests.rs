@@ -1032,3 +1032,77 @@ fn append_fixture(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> io::
     }
     Ok(())
 }
+
+/// Write `body` the way the 2026-10-30 core did, letting the caller choose each
+/// line's declared seq so a test can move one off its position.
+fn write_enveloped(path: &Path, body: &str, seq_of: impl Fn(usize) -> u64) {
+    let lines: Vec<String> = body
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let seq = seq_of(index);
+            format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{line}}}",
+                crate::session_log::line::checksum_of(seq, line)
+            )
+        })
+        .collect();
+    std::fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
+/// The backwards walk knows byte offsets, not line numbers, so it cannot prove
+/// a line's absolute position. What it can check is that neighbouring envelope
+/// lines agree: a line that declares a seq which is not one less than the line
+/// below it is refused.
+#[test]
+fn a_wrong_seq_envelope_is_refused_by_the_backwards_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wrong-seq.jsonl");
+    let body = fixture();
+
+    write_enveloped(&path, &body, |index| index as u64 + 1);
+    assert!(
+        WindowedSessionStore::open(&path).unwrap().is_some(),
+        "a consistently numbered envelope file opens"
+    );
+
+    // Line two declares seven while line three still declares three: no
+    // uniform shift, so the neighbours disagree and the walk refuses it.
+    write_enveloped(
+        &path,
+        &body,
+        |index| {
+            if index == 1 {
+                7
+            } else {
+                index as u64 + 1
+            }
+        },
+    );
+    assert!(
+        WindowedSessionStore::open(&path).is_err(),
+        "neighbouring envelopes that disagree are refused"
+    );
+}
+
+/// A file holding both shapes is what an append by this binary to a legacy file
+/// produces, and both shapes carry their position the same way, so it reads.
+#[test]
+fn a_file_holding_both_shapes_reads_backwards() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed.jsonl");
+    let body = fixture();
+    let mut lines = body.lines();
+    let header = lines.next().unwrap();
+    let mut text = vec![header.to_owned()];
+    // The header stays bare; every row after it is enveloped.
+    for (offset, line) in lines.enumerate() {
+        let seq = offset as u64 + 2;
+        text.push(format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-30T04:00:00.000Z\",\"crc\":\"{:08x}\",\"row\":{line}}}",
+            crate::session_log::line::checksum_of(seq, line)
+        ));
+    }
+    std::fs::write(&path, text.join("\n") + "\n").unwrap();
+    assert!(WindowedSessionStore::open(&path).unwrap().is_some());
+}

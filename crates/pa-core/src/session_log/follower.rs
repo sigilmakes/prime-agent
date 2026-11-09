@@ -57,7 +57,7 @@ impl SessionLog {
     ///
     /// # Errors
     /// [`ReadError::Replaced`] when the previous row no longer exists unchanged;
-    /// [`ReadError::Log`] for lock, I/O, checksum, ordering or torn-tail errors.
+    /// [`ReadError::Log`] for lock, I/O, row or torn-tail errors.
     /// Neither failure advances the caller's cursor.
     pub fn read_tail(
         &mut self,
@@ -81,38 +81,35 @@ impl SessionLog {
         let mut position = cursor.clone();
         let mut rows = Vec::new();
         let mut first = true;
-        let mut previous_seq = 0;
+        // `cursor.start` is the offset of the cursor's own last row, which the
+        // scan re-reads to prove it is still there, so that row's seq is the
+        // line number the first read must confirm.
+        let mut previous_seq = cursor
+            .last
+            .as_ref()
+            .map_or(0, |row| row.seq.saturating_sub(1));
         loop {
             let start = scanner.offset;
-            let Some(parsed) = scanner.advance()? else {
+            let Some((_, body)) = scanner.advance(previous_seq)? else {
                 break;
             };
             let row = Row {
-                seq: parsed.seq,
-                ts: parsed.ts.to_owned(),
-                body: serde_json::from_str(parsed.body).map_err(|_| Error::Corrupt {
+                seq: previous_seq + 1,
+                body: serde_json::from_str(body).map_err(|_| Error::Corrupt {
                     after_seq: previous_seq,
                 })?,
             };
             if first {
                 first = false;
                 if let Some(expected) = &cursor.last {
-                    if row.seq != expected.seq
-                        || row.ts != expected.ts
-                        || row.body != expected.body
-                        || scanner.offset != cursor.end
-                    {
+                    // The boundary is one row plus its byte offset: the same
+                    // body at the same place is the same history.
+                    if row.body != expected.body || scanner.offset != cursor.end {
                         return Err(replaced());
                     }
                     previous_seq = row.seq;
                     continue;
                 }
-            }
-            if row.seq <= previous_seq {
-                return Err(Error::Corrupt {
-                    after_seq: previous_seq,
-                }
-                .into());
             }
             previous_seq = row.seq;
             position.start = start;
@@ -199,7 +196,12 @@ mod tests {
         let tail_start = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
         bytes[tail_start] = b'!';
         std::fs::write(&path, bytes).unwrap();
-        SessionLog::repair(dir.path(), "regrowth", deadline()).unwrap();
+        // The operator's repair: a bare file is never truncated by the core, so
+        // the file is cut back to its first line by hand.
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(tail_start as u64).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
         let mut rival = SessionLog::open(dir.path(), "regrowth", deadline()).unwrap();
         rival.append(
             &json!({"n":"replacement row is longer than original"}),

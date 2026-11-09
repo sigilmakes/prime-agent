@@ -310,18 +310,29 @@ impl WindowedSessionStore {
         // not `model` (the leaf's).
         let mut boundary_model = None;
         let mut header = None;
-        let mut newer_seq = None;
-        while let Some(envelope) = reader.next()? {
-            let row = crate::session_log::Row::decode(&envelope, 0)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            if newer_seq.is_some_and(|newer| row.seq >= newer) {
+        // This walk reads backwards, so it knows each line's byte offset and not
+        // its number; a seq is a position, which is exactly what this reader
+        // cannot supply. Neighbouring envelope lines must still agree, each one
+        // less than the line below, which catches a line moved inside a run of
+        // envelopes. A bare row makes no such claim and there is no line below it
+        // to anchor, so the chain ends there and the next envelope starts a new
+        // one. A file may hold both shapes: this is a local consistency check, not
+        // proof of a line's absolute position.
+        let mut sequence = crate::session_log::line::BackwardsSequence::default();
+        while let Some(raw) = reader.next()? {
+            let Some((seq, body)) = crate::session_log::line::parse_unpositioned(&raw) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "session log sequence is not increasing",
+                    "session log row is not a JSON object",
+                ));
+            };
+            if sequence.accept(seq).is_err() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session log rows do not descend by one",
                 ));
             }
-            newer_seq = Some(row.seq);
-            let line = serde_json::to_vec(&row.body)?;
+            let line = serde_json::to_vec(&serde_json::from_str::<serde_json::Value>(body)?)?;
             let Ok(text) = std::str::from_utf8(&line) else {
                 return Ok(None);
             };
