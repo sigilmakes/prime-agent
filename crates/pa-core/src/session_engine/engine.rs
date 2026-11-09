@@ -342,7 +342,6 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         "optchat.",
         Arc::new(super::optchat::OptChatServices::new(
             wiring.session.clone(),
-            &plugins.host(),
             optchat_artifacts,
         )),
     );

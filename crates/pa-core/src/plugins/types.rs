@@ -88,15 +88,13 @@ pub enum PluginError {
     Interrupted,
 }
 
-/// JSON-only request at the async capability seam. One host belongs to one session.
-/// The adapter must authorize operations, use explicit private runtime paths, and
-/// honor cancellation. The host also drops its future on cancellation/retirement.
+/// JSON-only request at the async capability seam. The adapter is already scoped to
+/// its session and operation namespace, so a call carries no plugin identity.
+/// The adapter must honor cancellation; the host drops its future on
+/// cancellation/retirement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilityRequest {
-    pub session: String,
-    pub plugin: String,
-    pub generation: Uuid,
-    /// Stable across capability calls in one callback, distinct from its generation.
+    /// Stable across capability calls in one callback, distinct per invocation.
     pub invocation: Uuid,
     pub operation: String,
     pub input: Value,
@@ -106,7 +104,6 @@ pub struct CapabilityRequest {
 pub type CapabilityFuture = Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
 
 /// Adapter for explicitly supplied host operations (for example auxiliary inference).
-/// No default filesystem, network, credentials, providers, or session access exists.
 /// Implementations must not block in `call` or retain authority after cancellation.
 pub trait HostCapabilities: Send + Sync + 'static {
     fn call(&self, request: CapabilityRequest, cancellation: CancellationToken)

@@ -85,7 +85,6 @@ fn route(
     // this invocation, or supply another explicit endpoint/credential to native IO.
     let lease = capabilities
         .prepare_delegate(
-            &target,
             ProviderTarget {
                 api_key: options.api_key.clone(),
                 model: ai_model,

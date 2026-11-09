@@ -14,8 +14,8 @@ return {
             while true do count = count + 1 end
         end, mode = "streaming"},
         {name = "environment", run = function(input, ctx)
-            return {io = io ~= nil, os = os ~= nil, package = package ~= nil,
-                require = require ~= nil, loadfile = loadfile ~= nil}
+            return {io = io ~= nil, os = os ~= nil, load = load ~= nil,
+                print = print ~= nil, dofile = dofile ~= nil, debug = debug ~= nil}
         end},
         {name = "retain", run = function(input, ctx)
             retained = ctx

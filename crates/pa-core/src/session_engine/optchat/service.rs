@@ -3,7 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError, Weak},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use anyhow::{bail, Context};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::tree::{Cache, Merge, Tree, View, MAX_MERGE_INPUT_BYTES, MAX_PLAN_REPLY_BYTES};
 use crate::{
-    plugins::{CapabilityFuture, CapabilityRequest, Contribution, HostCapabilities, PluginHost},
+    plugins::{CapabilityFuture, CapabilityRequest, HostCapabilities},
     session::manager::SessionManager,
 };
 
@@ -26,7 +26,6 @@ struct Stored {
     source_hash: String,
     branch: Option<String>,
     /// Creator identity is provenance, never authority for a restored cache.
-    creator_generation: String,
     creator_invocation: String,
     cache_only: bool,
 }
@@ -41,17 +40,16 @@ struct Draft {
 }
 #[derive(Default)]
 struct State {
-    drafts: HashMap<(Uuid, Uuid), Draft>,
+    drafts: HashMap<Uuid, Draft>,
     revision: u64,
     last_prepared: Option<View>,
     cache: Cache,
 }
 
 /// Explicitly wired per session, with private plugin-owned artifact storage. No
-/// ambient home discovery and no reference cycle through the plugin host.
+/// ambient home discovery.
 pub(crate) struct OptChatServices {
     session: Arc<tokio::sync::Mutex<SessionManager>>,
-    host: Weak<PluginHost>,
     path: Option<PathBuf>,
     state: Arc<Mutex<State>>,
 }
@@ -59,28 +57,14 @@ pub(crate) struct OptChatServices {
 impl OptChatServices {
     pub(crate) fn new(
         session: Arc<tokio::sync::Mutex<SessionManager>>,
-        host: &Arc<PluginHost>,
         artifact_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             session,
-            host: Arc::downgrade(host),
             path: artifact_dir.map(|root| root.join("plugins/optchat/tree-v1.json")),
             state: Arc::default(),
         }
     }
-}
-
-fn target(host: &PluginHost, request: &CapabilityRequest) -> anyhow::Result<Contribution> {
-    if request.plugin != "optchat" {
-        bail!("OptChat capabilities belong to the optchat plugin");
-    }
-    host.snapshot()
-        .contributions
-        .iter()
-        .find(|target| target.plugin == request.plugin && target.generation == request.generation)
-        .cloned()
-        .context("OptChat plugin generation retired")
 }
 
 // A conservative byte/token upper bound, not a tokenizer claim. The exact
@@ -192,7 +176,6 @@ impl HostCapabilities for OptChatServices {
         cancellation: CancellationToken,
     ) -> CapabilityFuture {
         let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let path = self.path.clone();
         let state = Arc::clone(&self.state);
         Box::pin(async move {
@@ -200,9 +183,7 @@ impl HostCapabilities for OptChatServices {
                 if cancellation.is_cancelled() {
                     bail!("cancelled");
                 }
-                let host = host.upgrade().context("session plugin host ended")?;
-                let current = target(&host, &request)?;
-                let key = (request.generation, request.invocation);
+                let key = request.invocation;
                 match request.operation.as_str() {
                     "optchat.begin" => {
                         let budget = request.input["budget_bytes"]
@@ -216,12 +197,10 @@ impl HostCapabilities for OptChatServices {
                         let summary_bytes = usize::try_from(
                             request.input["summary_bytes"].as_u64().unwrap_or(512),
                         )?;
-                        let (snapshot, branch) = {
+                        let (session_id, snapshot, branch) = {
                             let guard = session.lock().await;
-                            if guard.get_session_id() != request.session {
-                                bail!("OptChat session mismatch");
-                            }
                             (
+                                guard.get_session_id().to_owned(),
                                 guard.history_snapshot(),
                                 guard.get_leaf_id().map(str::to_owned),
                             )
@@ -245,20 +224,15 @@ impl HostCapabilities for OptChatServices {
                                 ..Default::default()
                             }
                         };
-                        let tree = Tree::new(
-                            &request.session,
-                            history,
-                            branch,
-                            stored.cache,
-                            summary_bytes,
-                        )?;
+                        let tree =
+                            Tree::new(&session_id, history, branch, stored.cache, summary_bytes)?;
                         tree.validate_projection()?;
                         let source_hash = tree.source_hash().to_owned();
                         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
                         // Remove cancelled/retired drafts; bound concurrent preparation state.
-                        guard.drafts.retain(|(generation, _), draft| {
-                            *generation == request.generation && !draft.cancellation.is_cancelled()
-                        });
+                        guard
+                            .drafts
+                            .retain(|_, draft| !draft.cancellation.is_cancelled());
                         if guard.drafts.len() >= 8 {
                             bail!("OptChat preparation slots busy");
                         }
@@ -343,7 +317,6 @@ impl HostCapabilities for OptChatServices {
                             cache: draft.tree.cache().clone(),
                             source_hash: draft.tree.source_hash().to_owned(),
                             branch: draft.tree.branch().map(str::to_owned),
-                            creator_generation: request.generation.to_string(),
                             creator_invocation: request.invocation.to_string(),
                             cache_only: true,
                         };
@@ -354,34 +327,40 @@ impl HostCapabilities for OptChatServices {
                         })
                         .await??;
                         let guard = session.lock().await;
-                        if guard.get_session_id() != request.session
-                            || guard.get_leaf_id() != draft.expected_leaf.as_deref()
-                        {
+                        if guard.get_leaf_id() != draft.expected_leaf.as_deref() {
                             bail!(
                                 "OptChat canonical branch changed during preparation; retry required"
                             );
                         }
-                        let result = host.with_current_contributions(&[&current], || -> anyhow::Result<Value> {
-                            if cancellation.is_cancelled() { bail!("cancelled"); }
+                        let result = (|| -> anyhow::Result<Value> {
+                            if cancellation.is_cancelled() {
+                                bail!("cancelled");
+                            }
                             let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
-                            if guard.revision != draft.revision { bail!("OptChat cache revision changed; retry required"); }
-                            if let Some(prepared) = &prepared { prepared.publish()?; }
-                            if cancellation.is_cancelled() { bail!("cancelled; valid source-linked cache retained without active publication"); }
+                            if guard.revision != draft.revision {
+                                bail!("OptChat cache revision changed; retry required");
+                            }
+                            if let Some(prepared) = &prepared {
+                                prepared.publish()?;
+                            }
+                            if cancellation.is_cancelled() {
+                                bail!("cancelled; valid source-linked cache retained without active publication");
+                            }
                             guard.revision += 1;
                             guard.cache = draft.tree.cache().clone();
                             guard.last_prepared = Some(view.clone());
-                            Ok(json!({"text":view.text,"bytes":view.bytes,"entries":view.entries,
-                                "source_hash":view.source_hash,"spans":view.spans}))
-                        })??;
+                            Ok(
+                                json!({"text":view.text,"bytes":view.bytes,"entries":view.entries,
+                                "source_hash":view.source_hash,"spans":view.spans}),
+                            )
+                        })()?;
                         Ok(result)
                     }
                     "optchat.zoom" | "optchat.search" => {
-                        let (snapshot, branch) = {
+                        let (session_id, snapshot, branch) = {
                             let guard = session.lock().await;
-                            if guard.get_session_id() != request.session {
-                                bail!("OptChat session mismatch");
-                            }
                             (
+                                guard.get_session_id().to_owned(),
                                 guard.history_snapshot(),
                                 guard.get_leaf_id().map(str::to_owned),
                             )
@@ -400,8 +379,7 @@ impl HostCapabilities for OptChatServices {
                         };
                         // Recall validates all source-linked cache nodes, independently of
                         // the current model budget. No canonical source is stored in cache.
-                        let tree =
-                            Tree::new(&request.session, history, branch, stored.cache, 16_384)?;
+                        let tree = Tree::new(&session_id, history, branch, stored.cache, 16_384)?;
                         let limit = usize::try_from(request.input["limit"].as_u64().unwrap_or(32))?;
                         if request.operation == "optchat.zoom" {
                             let id = request.input["id"].as_str().context("recall id required")?;

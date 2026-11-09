@@ -1,7 +1,7 @@
 //! Invocation-owned native inference and explicit HTTP transport capabilities.
 //!
-//! No credentials, provider targets, or URLs are discovered. Handles are fenced by
-//! session, plugin and generation. Their opening invocation owns cancellation.
+//! No credentials, provider targets, or URLs are discovered. Handle lifetimes stay
+//! inside this session's adapter; their opening invocation owns cancellation.
 //! Reading pulls one item at a time; this adapter does not spawn an event pump.
 
 use std::{
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::provider_adapter::{stream_once, ProviderTarget};
-use crate::plugins::{CapabilityFuture, CapabilityRequest, Contribution, HostCapabilities};
+use crate::plugins::{CapabilityFuture, CapabilityRequest, HostCapabilities};
 
 const MAX_HANDLES: usize = 32;
 const MAX_DELEGATES: usize = 32;
@@ -26,27 +26,7 @@ const MAX_VALUE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_HTTP_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Clone, PartialEq, Eq)]
-struct Owner {
-    session: String,
-    plugin: String,
-    generation: Uuid,
-    invocation: Option<Uuid>,
-}
-
-impl From<&CapabilityRequest> for Owner {
-    fn from(request: &CapabilityRequest) -> Self {
-        Self {
-            session: request.session.clone(),
-            plugin: request.plugin.clone(),
-            generation: request.generation,
-            invocation: Some(request.invocation),
-        }
-    }
-}
-
 struct Delegate {
-    owner: Owner,
     target: ProviderTarget,
     context: LlmContext,
     options: StreamRequestOptions,
@@ -84,7 +64,6 @@ impl Drop for DelegateLease {
 }
 
 struct Entry {
-    owner: Owner,
     cancel: CancellationToken,
     stream: tokio::sync::Mutex<Transport>,
     is_inference: bool,
@@ -162,14 +141,13 @@ impl InferenceCapabilities {
         }
     }
 
-    /// Bind a typed request to exactly one contribution. The returned guard must
-    /// outlive its plugin invocation. No authentication lookup occurs here.
+    /// Bind a typed request to one plugin invocation. The returned guard must
+    /// outlive that invocation. No authentication lookup occurs here.
     ///
     /// # Errors
     /// Returns an error when too many request leases remain live.
     pub fn prepare_delegate(
         &self,
-        contribution: &Contribution,
         target: ProviderTarget,
         context: LlmContext,
         options: StreamRequestOptions,
@@ -188,12 +166,6 @@ impl InferenceCapabilities {
         delegates.insert(
             id.clone(),
             Arc::new(Delegate {
-                owner: Owner {
-                    session: self.shared.session.clone(),
-                    plugin: contribution.plugin.clone(),
-                    generation: contribution.generation,
-                    invocation: None,
-                },
                 target,
                 context,
                 options,
@@ -209,14 +181,8 @@ impl InferenceCapabilities {
         })
     }
 
-    fn insert(
-        &self,
-        owner: Owner,
-        cancel: CancellationToken,
-        transport: Transport,
-    ) -> Result<String, String> {
+    fn insert(&self, cancel: CancellationToken, transport: Transport) -> Result<String, String> {
         let entry = Arc::new(Entry {
-            owner,
             cancel: cancel.clone(),
             is_inference: matches!(transport, Transport::Inference(_)),
             stream: tokio::sync::Mutex::new(transport),
@@ -258,9 +224,6 @@ impl InferenceCapabilities {
         request: CapabilityRequest,
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
-        if request.session != self.shared.session {
-            return Err("native capability session mismatch".into());
-        }
         if cancellation.is_cancelled() {
             return Err("native capability cancelled".into());
         }
@@ -271,27 +234,7 @@ impl InferenceCapabilities {
         {
             return Err("native capability input exceeds limit".into());
         }
-        let owner = Owner::from(&request);
         match request.operation.as_str() {
-            "native.json.decode" => {
-                let input: JsonDecode =
-                    serde_json::from_value(request.input).map_err(|error| error.to_string())?;
-                if input.text.len() > MAX_VALUE_BYTES {
-                    return Err("native JSON text exceeds limit".into());
-                }
-                serde_json::from_str(&input.text)
-                    .map_err(|error| format!("invalid native JSON: {error}"))
-            }
-            "native.json.encode" => {
-                let input: JsonEncode =
-                    serde_json::from_value(request.input).map_err(|error| error.to_string())?;
-                let text =
-                    serde_json::to_string(&input.value).map_err(|error| error.to_string())?;
-                if text.len() > MAX_VALUE_BYTES {
-                    return Err("native JSON text exceeds limit".into());
-                }
-                Ok(Value::String(text))
-            }
             "native.inference.open" => {
                 let input: InferenceOpen =
                     serde_json::from_value(request.input).map_err(|error| error.to_string())?;
@@ -306,12 +249,8 @@ impl InferenceCapabilities {
                         .lock()
                         .map_err(|_| "delegate lock poisoned")?;
                     let delegate = delegates.get(&id).ok_or("unknown native request lease")?;
-                    if delegate.owner.session != owner.session
-                        || delegate.owner.plugin != owner.plugin
-                        || delegate.owner.generation != owner.generation
-                        || delegate.cancel.is_cancelled()
-                    {
-                        return Err("native request lease owner mismatch or retired".into());
+                    if delegate.cancel.is_cancelled() {
+                        return Err("native request lease cancelled".into());
                     }
                     delegates.remove(&id)
                 } else {
@@ -429,7 +368,7 @@ impl InferenceCapabilities {
                 } else {
                     opening.await?
                 };
-                let id = self.insert(owner, cancel, Transport::Inference(stream))?;
+                let id = self.insert(cancel, Transport::Inference(stream))?;
                 cancel_on_error.disarm();
                 Ok(json!({"handle":id}))
             }
@@ -486,7 +425,7 @@ impl InferenceCapabilities {
                     eof: false,
                     total: 0,
                 };
-                let id = self.insert(owner, cancellation.child_token(), Transport::Http(stream))?;
+                let id = self.insert(cancellation.child_token(), Transport::Http(stream))?;
                 Ok(json!({"handle":id,"status":status,"headers":headers}))
             }
             "native.inference.next"
@@ -504,9 +443,6 @@ impl InferenceCapabilities {
                     .get(&input.handle)
                     .cloned()
                     .ok_or("unknown native stream handle")?;
-                if entry.owner != owner {
-                    return Err("native stream owner mismatch".into());
-                }
                 let inference = request.operation.starts_with("native.inference.");
                 if inference != entry.is_inference {
                     return Err("native stream transport mismatch".into());
@@ -599,18 +535,6 @@ struct InferenceOptions {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JsonDecode {
-    text: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JsonEncode {
-    value: Value,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HandleInput {
     handle: String,
 }
@@ -662,7 +586,11 @@ impl SseFrame {
         if frame.data.is_empty() {
             return None;
         }
-        Some(json!({"data":frame.data.join("\n"),"event":frame.event,"id":frame.id}))
+        let data = frame.data.join("\n");
+        // Lua carries JSON as tables; the host hands the frame body over already
+        // parsed when it is JSON, so plugins never decode wire text themselves.
+        let body: Option<Value> = serde_json::from_str(&data).ok();
+        Some(json!({"data":data,"json":body,"event":frame.event,"id":frame.id}))
     }
 }
 
@@ -831,29 +759,13 @@ fn event_value(event: pa_agent::stream::AssistantMessageEvent) -> Result<Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{ContributionKind, InvocationMode};
     use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn contribution() -> Contribution {
-        Contribution {
-            plugin: "delegate".into(),
-            generation: Uuid::new_v4(),
-            kind: ContributionKind::Export,
-            name: "test".into(),
-            description: String::new(),
-            mode: InvocationMode::Streaming,
-            context_data: crate::plugins::ContextDataMode::Json,
-        }
-    }
-
-    fn request(owner: &Contribution, operation: &str, input: Value) -> CapabilityRequest {
+    fn request(operation: &str, input: Value) -> CapabilityRequest {
         CapabilityRequest {
-            session: "session".into(),
-            plugin: owner.plugin.clone(),
-            generation: owner.generation,
-            invocation: owner.generation,
+            invocation: Uuid::new_v4(),
             operation: operation.into(),
             input,
         }
@@ -919,72 +831,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_helpers_parse_sse_data_and_reject_malformed_input() {
+    async fn sse_frames_hand_lua_parsed_json_instead_of_wire_text() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let value = json!({"delta":"wire ✓","nested":[1,true,null]});
-        let text = backend
-            .call(
-                request(&owner, "native.json.encode", json!({"value":value})),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
         let (url, job) = server(
-            format!("data: {}\n\n", text.as_str().unwrap()).into_bytes(),
+            format!("data: {value}\n\ndata: {{broken\n\n").into_bytes(),
             "text/event-stream",
         )
         .await;
         let opened = backend
             .call(
-                request(
-                    &owner,
-                    "native.http.open",
-                    json!({"url":url,"format":"sse"}),
-                ),
+                request("native.http.open", json!({"url":url,"format":"sse"})),
                 CancellationToken::new(),
             )
             .await
             .unwrap();
         let next = backend
             .call(
-                request(
-                    &owner,
-                    "native.http.next",
-                    json!({"handle":opened["handle"]}),
-                ),
+                request("native.http.next", json!({"handle":opened["handle"]})),
                 CancellationToken::new(),
             )
             .await
             .unwrap();
-        assert_eq!(
-            backend
-                .call(
-                    request(
-                        &owner,
-                        "native.json.decode",
-                        json!({"text":next["event"]["data"]})
-                    ),
-                    CancellationToken::new()
-                )
-                .await
-                .unwrap(),
-            value
-        );
-        assert!(backend
+        assert_eq!(next["event"]["json"], value);
+        assert_eq!(next["event"]["data"], value.to_string());
+        let malformed = backend
             .call(
-                request(&owner, "native.json.decode", json!({"text":"{broken"})),
-                CancellationToken::new()
+                request("native.http.next", json!({"handle":opened["handle"]})),
+                CancellationToken::new(),
             )
             .await
-            .is_err());
+            .unwrap();
+        assert!(malformed["event"]["json"].is_null());
+        assert_eq!(malformed["event"]["data"], "{broken");
         backend
             .call(
-                request(
-                    &owner,
-                    "native.http.close",
-                    json!({"handle":opened["handle"]}),
-                ),
+                request("native.http.close", json!({"handle":opened["handle"]})),
                 CancellationToken::new(),
             )
             .await
@@ -1009,14 +891,13 @@ mod tests {
             ),
         )]);
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let invocation = CancellationToken::new();
-        let opened = backend.call(request(&owner, "native.inference.open", json!({"model":registration.get_model(),"apiKey":"explicit-only","context":LlmContext::default()})), invocation.clone()).await.unwrap();
+        let opened = backend.call(request("native.inference.open", json!({"model":registration.get_model(),"apiKey":"explicit-only","context":LlmContext::default()})), invocation.clone()).await.unwrap();
         let work = async {
             loop {
                 let next = backend
                     .call(
-                        request(&owner, "native.inference.next", opened.clone()),
+                        request("native.inference.next", opened.clone()),
                         invocation.child_token(),
                     )
                     .await
@@ -1028,7 +909,7 @@ mod tests {
             }
             let result = backend
                 .call(
-                    request(&owner, "native.inference.result", opened),
+                    request("native.inference.result", opened),
                     invocation.child_token(),
                 )
                 .await
@@ -1067,7 +948,6 @@ mod tests {
         .inference_input(&adapter, &CancellationToken::new())
         .unwrap();
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let instructions = LlmContext {
             system_prompt: Some("current instructions".into()),
             ..LlmContext::default()
@@ -1088,7 +968,6 @@ mod tests {
             let allowed = context.messages.is_empty() && model.is_none();
             let lease = super::super::provider_adapter::with_native_input(raw.clone(), async {
                 backend.prepare_delegate(
-                    &owner,
                     target(),
                     LlmContext::default(),
                     StreamRequestOptions::default(),
@@ -1107,7 +986,7 @@ mod tests {
             }
             let opened = backend
                 .call(
-                    request(&owner, "native.inference.open", input),
+                    request("native.inference.open", input),
                     CancellationToken::new(),
                 )
                 .await;
@@ -1116,14 +995,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_delegate_is_single_use_fenced_and_pull_based() {
+    async fn typed_delegate_is_single_use_and_pull_based() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let pulls = Arc::new(AtomicUsize::new(0));
         let closed = CancellationToken::new();
         let lease = backend
             .prepare_delegate(
-                &owner,
                 target(),
                 LlmContext::default(),
                 StreamRequestOptions::default(),
@@ -1131,18 +1008,9 @@ mod tests {
             )
             .unwrap();
         let input = json!({"request":lease.id()});
-        let mut foreign = owner.clone();
-        foreign.generation = Uuid::new_v4();
-        assert!(backend
-            .call(
-                request(&foreign, "native.inference.open", input.clone()),
-                CancellationToken::new()
-            )
-            .await
-            .is_err());
         let opened = backend
             .call(
-                request(&owner, "native.inference.open", input.clone()),
+                request("native.inference.open", input.clone()),
                 CancellationToken::new(),
             )
             .await
@@ -1150,34 +1018,15 @@ mod tests {
         assert_eq!(pulls.load(Ordering::SeqCst), 0);
         assert!(backend
             .call(
-                request(&owner, "native.inference.open", input),
+                request("native.inference.open", input),
                 CancellationToken::new()
             )
             .await
             .is_err());
         let handle = json!({"handle":opened["handle"]});
-        let mut wrong_session = request(&owner, "native.inference.next", handle.clone());
-        wrong_session.session = "another".into();
-        assert!(backend
-            .call(wrong_session, CancellationToken::new())
-            .await
-            .is_err());
-        assert!(backend
-            .call(
-                request(&foreign, "native.inference.next", handle.clone()),
-                CancellationToken::new()
-            )
-            .await
-            .is_err());
-        let mut other_invocation = request(&owner, "native.inference.next", handle.clone());
-        other_invocation.invocation = Uuid::new_v4();
-        assert!(backend
-            .call(other_invocation, CancellationToken::new())
-            .await
-            .is_err());
         let next = backend
             .call(
-                request(&owner, "native.inference.next", handle.clone()),
+                request("native.inference.next", handle.clone()),
                 CancellationToken::new(),
             )
             .await
@@ -1192,7 +1041,7 @@ mod tests {
         assert_eq!(
             backend
                 .call(
-                    request(&owner, "native.inference.result", handle.clone()),
+                    request("native.inference.result", handle.clone()),
                     CancellationToken::new()
                 )
                 .await
@@ -1205,7 +1054,7 @@ mod tests {
             .unwrap();
         assert!(backend
             .call(
-                request(&owner, "native.inference.next", handle),
+                request("native.inference.next", handle),
                 CancellationToken::new()
             )
             .await
@@ -1215,12 +1064,10 @@ mod tests {
     #[tokio::test]
     async fn dropping_a_read_future_cancels_its_open_transport() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let pulls = Arc::new(AtomicUsize::new(0));
         let closed = CancellationToken::new();
         let lease = backend
             .prepare_delegate(
-                &owner,
                 target(),
                 LlmContext::default(),
                 StreamRequestOptions::default(),
@@ -1229,17 +1076,13 @@ mod tests {
             .unwrap();
         let opened = backend
             .call(
-                request(
-                    &owner,
-                    "native.inference.open",
-                    json!({"request":lease.id()}),
-                ),
+                request("native.inference.open", json!({"request":lease.id()})),
                 CancellationToken::new(),
             )
             .await
             .unwrap();
         let mut read = backend.call(
-            request(&owner, "native.inference.next", opened),
+            request("native.inference.next", opened),
             CancellationToken::new(),
         );
         assert!(futures::poll!(&mut read).is_pending());
@@ -1253,11 +1096,9 @@ mod tests {
     #[tokio::test]
     async fn close_interrupts_an_active_reader_and_session_drop_closes_idle_streams() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let closed = CancellationToken::new();
         let lease = backend
             .prepare_delegate(
-                &owner,
                 target(),
                 LlmContext::default(),
                 StreamRequestOptions::default(),
@@ -1266,23 +1107,19 @@ mod tests {
             .unwrap();
         let opened = backend
             .call(
-                request(
-                    &owner,
-                    "native.inference.open",
-                    json!({"request":lease.id()}),
-                ),
+                request("native.inference.open", json!({"request":lease.id()})),
                 CancellationToken::new(),
             )
             .await
             .unwrap();
         let mut read = backend.call(
-            request(&owner, "native.inference.next", opened.clone()),
+            request("native.inference.next", opened.clone()),
             CancellationToken::new(),
         );
         assert!(futures::poll!(&mut read).is_pending());
         backend
             .call(
-                request(&owner, "native.inference.close", opened),
+                request("native.inference.close", opened),
                 CancellationToken::new(),
             )
             .await
@@ -1295,7 +1132,6 @@ mod tests {
         let closed = CancellationToken::new();
         let lease = backend
             .prepare_delegate(
-                &owner,
                 target(),
                 LlmContext::default(),
                 StreamRequestOptions::default(),
@@ -1304,11 +1140,7 @@ mod tests {
             .unwrap();
         backend
             .call(
-                request(
-                    &owner,
-                    "native.inference.open",
-                    json!({"request":lease.id()}),
-                ),
+                request("native.inference.open", json!({"request":lease.id()})),
                 CancellationToken::new(),
             )
             .await
@@ -1322,11 +1154,9 @@ mod tests {
     #[tokio::test]
     async fn invocation_cancellation_closes_idle_inference() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let closed = CancellationToken::new();
         let lease = backend
             .prepare_delegate(
-                &owner,
                 target(),
                 LlmContext::default(),
                 StreamRequestOptions::default(),
@@ -1336,11 +1166,7 @@ mod tests {
         let invocation = CancellationToken::new();
         backend
             .call(
-                request(
-                    &owner,
-                    "native.inference.open",
-                    json!({"request":lease.id()}),
-                ),
+                request("native.inference.open", json!({"request":lease.id()})),
                 invocation.clone(),
             )
             .await
@@ -1384,7 +1210,6 @@ mod tests {
     #[tokio::test]
     async fn explicit_http_json_and_sse_cross_host_capabilities() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         for (format, content_type, body, expected) in [
             (
                 "json",
@@ -1397,16 +1222,16 @@ mod tests {
                 "text/event-stream",
                 b":comment\r\nevent: delta\r\nid: 7\r\ndata: first\r\ndata: second\r\n\r\n"
                     .to_vec(),
-                json!({"event":"delta","id":"7","data":"first\nsecond"}),
+                json!({"event":"delta","id":"7","data":"first\nsecond","json":null}),
             ),
         ] {
             let (url, job) = server(body, content_type).await;
-            let opened = backend.call(request(&owner, "native.http.open", json!({"url":url,"method":"GET","headers":{"x-explicit":"only"},"format":format})), CancellationToken::new()).await.unwrap();
+            let opened = backend.call(request("native.http.open", json!({"url":url,"method":"GET","headers":{"x-explicit":"only"},"format":format})), CancellationToken::new()).await.unwrap();
             let handle = json!({"handle":opened["handle"]});
             assert_eq!(opened["status"], 200);
             let next = backend
                 .call(
-                    request(&owner, "native.http.next", handle.clone()),
+                    request("native.http.next", handle.clone()),
                     CancellationToken::new(),
                 )
                 .await
@@ -1415,7 +1240,7 @@ mod tests {
             assert_eq!(
                 backend
                     .call(
-                        request(&owner, "native.http.next", handle.clone()),
+                        request("native.http.next", handle.clone()),
                         CancellationToken::new()
                     )
                     .await
@@ -1424,7 +1249,7 @@ mod tests {
             );
             backend
                 .call(
-                    request(&owner, "native.http.close", handle),
+                    request("native.http.close", handle),
                     CancellationToken::new(),
                 )
                 .await
@@ -1440,18 +1265,13 @@ mod tests {
     #[tokio::test]
     async fn oversized_sse_frame_errors_and_revokes_handle() {
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let mut body = b"data: ".to_vec();
         body.extend(vec![b'x'; MAX_FRAME_BYTES + 1]);
         body.extend_from_slice(b"\n\n");
         let (url, job) = server(body, "text/event-stream").await;
         let opened = backend
             .call(
-                request(
-                    &owner,
-                    "native.http.open",
-                    json!({"url":url,"format":"sse"}),
-                ),
+                request("native.http.open", json!({"url":url,"format":"sse"})),
                 CancellationToken::new(),
             )
             .await
@@ -1459,7 +1279,7 @@ mod tests {
         let handle = json!({"handle":opened["handle"]});
         assert!(backend
             .call(
-                request(&owner, "native.http.next", handle.clone()),
+                request("native.http.next", handle.clone()),
                 CancellationToken::new()
             )
             .await
@@ -1467,7 +1287,7 @@ mod tests {
             .contains("exceeds limit"));
         assert!(backend
             .call(
-                request(&owner, "native.http.next", handle),
+                request("native.http.next", handle),
                 CancellationToken::new()
             )
             .await
@@ -1501,13 +1321,11 @@ mod tests {
         registration.set_responses(vec![response.clone(), response.clone(), response]);
         let model = registration.get_model();
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         for mode in ["explicit", "delegate"] {
             let lease = if mode == "delegate" {
                 Some(
                     backend
                         .prepare_delegate(
-                            &owner,
                             ProviderTarget {
                                 model: model.clone(),
                                 api_key: Some("test-only".into()),
@@ -1532,7 +1350,7 @@ mod tests {
             );
             let opened = backend
                 .call(
-                    request(&owner, "native.inference.open", input),
+                    request("native.inference.open", input),
                     CancellationToken::new(),
                 )
                 .await
@@ -1542,7 +1360,7 @@ mod tests {
             let result = tokio::time::timeout(
                 Duration::from_secs(3),
                 backend.call(
-                    request(&owner, "native.inference.result", opened.clone()),
+                    request("native.inference.result", opened.clone()),
                     CancellationToken::new(),
                 ),
             )
@@ -1552,7 +1370,7 @@ mod tests {
             assert_eq!(result["content"][0]["text"], text);
             backend
                 .call(
-                    request(&owner, "native.inference.close", opened),
+                    request("native.inference.close", opened),
                     CancellationToken::new(),
                 )
                 .await
@@ -1597,11 +1415,9 @@ mod tests {
         model.provider = "bounded-local".into();
         model.base_url = format!("{}/v1", url.strip_suffix("/explicit").unwrap());
         let backend = InferenceCapabilities::new("session".into());
-        let owner = contribution();
         let opened = backend
             .call(
                 request(
-                    &owner,
                     "native.inference.open",
                     json!({
                         "model":model,"apiKey":"local-only","context":LlmContext::default()
@@ -1614,7 +1430,7 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(3),
             backend.call(
-                request(&owner, "native.inference.result", opened.clone()),
+                request("native.inference.result", opened.clone()),
                 CancellationToken::new(),
             ),
         )
@@ -1625,7 +1441,7 @@ mod tests {
         assert_eq!(result["stopReason"], "stop");
         backend
             .call(
-                request(&owner, "native.inference.close", opened),
+                request("native.inference.close", opened),
                 CancellationToken::new(),
             )
             .await

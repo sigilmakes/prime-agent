@@ -23,7 +23,6 @@ struct State {
 /// Reconcile is atomic for the whole desired set. Loading happens outside registry locks;
 /// concurrent reconciles use optimistic revision checks, never overwrite newer commits.
 pub struct PluginHost {
-    session: String,
     capabilities: Arc<dyn HostCapabilities>,
     reserved_commands: BTreeSet<String>,
     state: Mutex<State>,
@@ -35,12 +34,10 @@ impl PluginHost {
     /// are not hard-coded here: optional plugin policy must be able to move out of core.
     #[must_use]
     pub fn new(
-        session: String,
         capabilities: Arc<dyn HostCapabilities>,
         reserved_commands: impl IntoIterator<Item = String>,
     ) -> Self {
         Self {
-            session,
             capabilities,
             reserved_commands: reserved_commands.into_iter().collect(),
             state: Mutex::new(State::default()),
@@ -268,7 +265,6 @@ impl PluginHost {
             Arc::clone(&generation),
             contribution.clone(),
             input,
-            self.session.clone(),
             Arc::clone(&self.capabilities),
             cancellation.clone(),
             sender,

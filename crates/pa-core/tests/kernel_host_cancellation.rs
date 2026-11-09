@@ -75,7 +75,6 @@ async fn per_call_cancellation_drops_native_plugin_work_without_retiring_generat
     let (dropped_tx, mut dropped) = mpsc::unbounded_channel();
     let writes = Arc::new(AtomicUsize::new(0));
     let host = Arc::new(PluginHost::new(
-        "cancel-test".into(),
         Arc::new(Gate {
             started: started_tx,
             dropped: dropped_tx,
