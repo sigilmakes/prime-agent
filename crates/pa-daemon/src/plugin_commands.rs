@@ -285,7 +285,7 @@ return {
             let agent = dir.path().join("agent");
             std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
             std::fs::create_dir_all(&agent).unwrap();
-            std::fs::write(cwd.join("counter.lua"), SOURCE).unwrap();
+            std::fs::write(agent.join("counter.lua"), SOURCE).unwrap();
             std::fs::write(agent.join("settings.json"), json!({
                 "enableBuiltinSkills":false,
                 "bundledSkills":{"websearch":false},
@@ -457,7 +457,11 @@ return {
             .into_iter()
             .find(|entry| entry["name"] == "count")
             .unwrap();
-        fixture.project(&json!({"plugins":{"counter":{"config":{"value":"replacement"}}}}));
+        std::fs::write(fixture.agent.join("settings.json"), json!({
+            "enableBuiltinSkills":false,
+            "bundledSkills":{"websearch":false},
+            "plugins":{"counter":{"enabled":true,"path":"counter.lua","config":{"value":"replacement"}}}
+        }).to_string()).unwrap();
         let before = fixture.rows();
         let core_before = fixture.core.session.entries().await;
         let reload = fixture.command("/plugins reload", None).await;
@@ -484,8 +488,11 @@ return {
             .as_str()
             .unwrap()
             .contains("replacement"));
-        fixture
-            .project(&json!({"plugins":{"counter":{"enabled":false},"harness":{"enabled":false}}}));
+        std::fs::write(fixture.agent.join("settings.json"), json!({
+            "enableBuiltinSkills":false,
+            "bundledSkills":{"websearch":false},
+            "plugins":{"counter":{"enabled":false}}
+        }).to_string()).unwrap();
         let history = fixture.rows();
         let disabled = fixture.worker.dispatch("reload", &json!({})).await;
         assert!(
@@ -610,7 +617,7 @@ return {
         for mode in ["generic", "failed", "projected", "malformed"] {
             let fixture = Fixture::new().await;
             std::fs::write(
-                fixture.cwd.join("counter.lua"),
+                fixture.agent.join("counter.lua"),
                 r"
 return {commands={{name='later',run=function(input,ctx)
  return ctx.call('jobs.enqueue',{hook='later',input={mode=input.args}})
@@ -733,7 +740,7 @@ end}}}
     async fn failed_reload_keeps_the_last_good_inventory_and_manager_reports_diagnostic() {
         let fixture = Fixture::new().await;
         let before = fixture.catalog().await;
-        std::fs::write(fixture.cwd.join("counter.lua"), "invalid Lua !").unwrap();
+        std::fs::write(fixture.agent.join("counter.lua"), "invalid Lua !").unwrap();
         let reload = fixture.command("/reload", None).await;
         assert!(!reload.success, "{reload:?}");
         assert_eq!(fixture.catalog().await, before);
