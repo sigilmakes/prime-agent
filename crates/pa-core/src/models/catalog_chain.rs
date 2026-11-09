@@ -79,10 +79,8 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
     let dir = agent_dir.to_path_buf();
     tokio::spawn(async move {
-        let mut registry = super::registry::ModelRegistry::create(
-            AuthStorage::create(&dir),
-            dir.join("models.json"),
-        );
+        let mut registry =
+            super::registry::ModelRegistry::create_for_agent_dir(AuthStorage::create(&dir), &dir);
         registry
             .refresh_available_models_with_trigger(crate::models::RefreshTrigger::Startup)
             .await;
@@ -115,9 +113,9 @@ pub fn spawn_hourly_refresh(agent_dir: &Path) {
         interval.tick().await;
         loop {
             interval.tick().await;
-            let mut registry = super::registry::ModelRegistry::create(
+            let mut registry = super::registry::ModelRegistry::create_for_agent_dir(
                 AuthStorage::create(&dir),
-                dir.join("models.json"),
+                &dir,
             );
             registry
                 .refresh_available_models_with_trigger(crate::models::RefreshTrigger::Hourly)

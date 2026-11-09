@@ -175,14 +175,8 @@ fn digest(value: &[u8]) -> String {
 impl ResolvedSource {
     fn identity(&self) -> String {
         digest(
-            &serde_json::to_vec(&(
-                &self.id,
-                &self.provider,
-                self.format,
-                &self.url,
-                &self.unknown_models,
-            ))
-            .expect("source identity is serializable"),
+            &serde_json::to_vec(&(&self.id, &self.provider, self.format, &self.url))
+                .expect("source identity is serializable"),
         )
     }
 

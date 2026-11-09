@@ -36,6 +36,10 @@ pub const MAX_PROVIDER_FACT_BYTES: usize = 1024 * 1024;
 pub struct ProviderFact {
     pub plugin: String,
     pub name: String,
+    /// Resolved chunk path, used by registry publication guards. It is not fact
+    /// content, so it never participates in the revision digest.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,7 +122,7 @@ impl ManifestCatalog {
                 let config_bytes = serde_json::to_vec(&entry.config).unwrap_or_default();
                 let config_digest = digest(&config_bytes);
                 let key = CacheKey {
-                    path: resolved,
+                    path: resolved.clone(),
                     plugin: name.clone(),
                 };
                 if let Some(cached) = fact_cache()
@@ -132,7 +136,7 @@ impl ManifestCatalog {
                     providers.extend(cached.facts.iter().cloned());
                     continue;
                 }
-                let facts = extract(name, &source_text, &entry.config)?;
+                let facts = extract(name, &source_text, &entry.config, Some(&resolved))?;
                 fact_cache()
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -167,6 +171,18 @@ impl ManifestCatalog {
         }
         Self::load(agent_dir, settings.plugins.as_ref())
     }
+
+    /// Load the global plugin facts for an agent directory. This is the single
+    /// settings-reading path for session-free consumers: the manager opens the
+    /// agent-scoped document, and the merged settings drop project-scope plugin
+    /// entries before the fact pass runs.
+    ///
+    /// # Errors
+    /// Returns an error for the same conditions as [`Self::from_settings`].
+    pub fn from_agent_dir(agent_dir: &Path) -> Result<Self, PluginError> {
+        let manager = crate::settings::SettingsManager::create(agent_dir, agent_dir);
+        Self::from_settings(agent_dir, manager.settings())
+    }
 }
 
 fn revision(providers: &[ProviderFact]) -> u64 {
@@ -183,6 +199,7 @@ fn extract(
     name: &str,
     source_text: &str,
     config: &Value,
+    source_path: Option<&Path>,
 ) -> Result<Vec<ProviderFact>, PluginError> {
     let source = PluginSource {
         name: name.into(),
@@ -207,7 +224,7 @@ fn extract(
             let Value::Object(fields) = value else {
                 unreachable!("a table converts to an object");
             };
-            facts.push(ProviderFact::from_fields(name, &path, fields)?);
+            facts.push(ProviderFact::from_fields(name, &path, fields, source_path)?);
         }
         Ok(facts)
     })();
@@ -399,6 +416,7 @@ impl ProviderFact {
         plugin: &str,
         path: &str,
         mut fields: Map<String, Value>,
+        source_path: Option<&Path>,
     ) -> Result<Self, PluginError> {
         let name = match fields.remove("name") {
             Some(Value::String(name)) => name,
@@ -423,6 +441,7 @@ impl ProviderFact {
         Ok(Self {
             plugin: plugin.to_owned(),
             name,
+            source_path: source_path.map(Path::to_path_buf),
             url: string_field(&mut fields, "url", plugin, path)?,
             protocol: string_field(&mut fields, "protocol", plugin, path)?,
             auth: fields.remove("auth"),

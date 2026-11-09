@@ -900,3 +900,72 @@ async fn protocol_headers_do_not_authorize_unconfigured_provider_discovery() {
     assert!(requests[0].contains("x-api-key: fixture-key"));
     assert!(requests[0].contains("anthropic-version: 2023-06-01"));
 }
+
+fn write_fact_plugin(agent_dir: &Path, base: &str, context: u64) {
+    std::fs::create_dir_all(agent_dir.join("plugins")).unwrap();
+    std::fs::write(
+        agent_dir.join("plugins/gateway.lua"),
+        format!(
+            r#"return {{providers = {{
+              {{name = "gateway", url = "{base}/v1", protocol = "openai", auth = "none",
+               defaults = {{reasoning = false}}, limits = {{context = {context}}}}}
+            }}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"plugins":{"gateway":{"enabled":true,"path":"plugins/gateway.lua"}}}).to_string(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_defaults_change_keeps_the_last_good_discovery_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let server = Loopback::start(HashMap::from([(
+        "/v1/models".into(),
+        Reply::json(json!({"data":[{"id":"fact-model"}]})),
+    )]))
+    .await;
+    write_fact_plugin(&agent_dir, &server.base, 32_768);
+    let mut registry = ModelRegistry::create_for_agent_dir(auth(json!({})), &agent_dir);
+    assert!(registry.get_error().is_none(), "{:?}", registry.get_error());
+    registry
+        .refresh_catalog_sources(Some(&selected("gateway")))
+        .await;
+    assert!(registry
+        .get_all()
+        .iter()
+        .any(|model| model.provider == "gateway" && model.id == "fact-model"));
+
+    // A fact-only defaults change must not change the discovery cache identity.
+    write_fact_plugin(&agent_dir, &server.base, 65_536);
+    let mut fresh = ModelRegistry::create_for_agent_dir(auth(json!({})), &agent_dir);
+    assert!(fresh
+        .get_all()
+        .iter()
+        .any(|model| model.provider == "gateway" && model.id == "fact-model"));
+
+    // A failed refresh retains that last-good projection instead of dropping it.
+    server.routes.lock().unwrap().insert(
+        "/v1/models".into(),
+        Reply {
+            status: 500,
+            body: json!({}),
+            gate: None,
+        },
+    );
+    fresh
+        .refresh_catalog_sources(Some(&selected("gateway")))
+        .await;
+    assert!(
+        fresh
+            .get_all()
+            .iter()
+            .any(|model| model.provider == "gateway" && model.id == "fact-model"),
+        "the last-good snapshot survives a failed refresh after defaults change"
+    );
+}

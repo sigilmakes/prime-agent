@@ -23,8 +23,7 @@ pub(crate) fn session_fallback_with_headers(
     session_api_key: Option<String>,
 ) -> ResolvedAuxiliaryModel {
     let auth = crate::auth::AuthStorage::create(&context.agent_dir);
-    let mut registry =
-        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    let mut registry = crate::models::ModelRegistry::create_for_agent_dir(auth, &context.agent_dir);
     let resolved = registry.get_api_key_and_headers(session_model, session_model.headers.as_ref());
     ResolvedAuxiliaryModel {
         model: session_model.clone(),
@@ -89,8 +88,7 @@ pub fn resolve_auxiliary_model(
     // The TS find runs over the authenticated, non-stale catalog
     // (`_authenticatedRlmModels`); the registry's set is the same filter.
     let auth = crate::auth::AuthStorage::create(&context.agent_dir);
-    let mut registry =
-        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    let mut registry = crate::models::ModelRegistry::create_for_agent_dir(auth, &context.agent_dir);
     registry.load_private_authorization_from_cache();
     let model = registry
         .get_rlm_searchable_models()
@@ -145,8 +143,7 @@ pub(crate) fn resolve_selected_auxiliary_model(
         return Err(unavailable());
     }
     let auth = crate::auth::AuthStorage::create(&context.agent_dir);
-    let mut registry =
-        crate::models::ModelRegistry::create(auth, context.agent_dir.join("models.json"));
+    let mut registry = crate::models::ModelRegistry::create_for_agent_dir(auth, &context.agent_dir);
     registry.load_private_authorization_from_cache();
     let model = registry
         .get_rlm_searchable_models()

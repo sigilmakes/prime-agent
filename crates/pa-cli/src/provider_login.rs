@@ -343,10 +343,8 @@ impl ProviderAuth {
             }
 
             // The API-key model providers.
-            let registry = ModelRegistry::create(
-                provider.auth_storage(),
-                provider.agent_dir.join("models.json"),
-            );
+            let registry =
+                ModelRegistry::create_for_agent_dir(provider.auth_storage(), &provider.agent_dir);
             let built_in_provider_ids: std::collections::HashSet<String> =
                 pa_ai::models_generated::get_providers()
                     .into_iter()
@@ -361,6 +359,10 @@ impl ProviderAuth {
             providers.dedup();
             for provider_id in providers {
                 if !is_api_key_login_provider(&provider_id, &built_in_provider_ids) {
+                    continue;
+                }
+                // A keyless provider has no credential to paste or store.
+                if registry.is_keyless_provider(&provider_id) {
                     continue;
                 }
                 let (credential, status) = provider.credential_status(&provider_id);

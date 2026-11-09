@@ -352,7 +352,9 @@ pub(crate) fn build_headers(
         conversation_id,
         &mut headers,
     );
-    headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
+    if compat.send_authorization {
+        headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
+    }
     headers
 }
 
@@ -362,6 +364,29 @@ mod tests {
     use crate::models::clamp_thinking_level;
     use crate::models_generated;
     use crate::types::{Message, StreamOptions, UserMessage, UserMessageContent};
+
+    #[test]
+    fn keyless_compat_omits_the_bearer_authorization_header() {
+        let mut model = models_generated::get_model("openai", "gpt-4")
+            .expect("the catalog carries an openai model")
+            .clone();
+        model.compat = Some(crate::types::ModelCompat::from_kind(
+            crate::types::CompatKind::OpenAiCompletions(Box::new(
+                crate::types::OpenAiCompletionsCompat {
+                    send_authorization: Some(false),
+                    ..Default::default()
+                },
+            )),
+        ));
+        let compat = crate::providers::openai_completions::get_compat(&model);
+        let headers = build_headers(&model, "", None, None, &compat, None);
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+            "a keyless endpoint must not receive a bearer header: {headers:?}"
+        );
+    }
 
     /// TS #2497 pin: the provider layer owns no Prime Inference team lookup — a prime-inference
     /// request with `PRIME_TEAM_ID` set and no caller header carries no `X-Prime-Team-ID` (the auth

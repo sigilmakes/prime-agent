@@ -132,6 +132,16 @@ pub struct ModelOverride {
     pub compat: Option<serde_json::Value>,
 }
 
+/// Hard caps a provider fact places on projected catalogue metadata.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderLimits {
+    #[serde(alias = "contextWindow")]
+    pub context: Option<u64>,
+    #[serde(alias = "max_tokens")]
+    pub max_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderConfig {
@@ -145,6 +155,9 @@ pub struct ProviderConfig {
     pub models: Option<Vec<ModelDefinition>>,
     pub model_overrides: Option<BTreeMap<String, ModelOverride>>,
     pub discovery: Option<DiscoveryConfig>,
+    /// Keyless providers authorize requests without a token.
+    pub keyless: bool,
+    pub limits: Option<ProviderLimits>,
 }
 
 /// Explicit authorization to list models from a locally selected endpoint.

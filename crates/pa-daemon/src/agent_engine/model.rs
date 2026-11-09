@@ -93,7 +93,7 @@ impl AgentSessionEngine {
         };
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         registry.load_private_authorization_from_cache();
         let refreshed = registry
             .get_all()
@@ -253,7 +253,7 @@ impl AgentSessionEngine {
         };
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         registry.load_private_authorization_from_cache();
         let restored = pa_core::models::find_session_model_with_readiness_wait(
             &mut registry,
@@ -336,7 +336,7 @@ impl AgentSessionEngine {
     fn resolve_registry_model_unchecked(&self) -> anyhow::Result<Model> {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         // A fresh registry gates private Prime Inference models out until the
         // async authorization refresh runs; adopt the on-disk cache so
         // create-time resolution can pick the session's private model.
@@ -527,7 +527,7 @@ impl AgentSessionEngine {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let store_healthy = auth.load_error().is_none();
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         // The credential check runs AFTER the resolution: the registry's
         // lookup may OAuth-refresh and store a fresh token, so a check
@@ -555,7 +555,7 @@ impl AgentSessionEngine {
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+            pa_core::models::ModelRegistry::create_for_agent_dir(auth, &self.config.agent_dir);
         registry
             .get_api_key_and_headers(model, model.headers.as_ref())
             .api_key

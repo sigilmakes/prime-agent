@@ -38,7 +38,7 @@ pub(crate) fn run(argv: &[String], parsed: &Args) -> Result<i32, String> {
             let agent_dir = crate::config::get_agent_dir();
             let auth = pa_core::auth::AuthStorage::create(&agent_dir);
             let mut registry =
-                pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                pa_core::models::ModelRegistry::create_for_agent_dir(auth, &agent_dir);
             Ok(registry.refresh_catalogs().await)
         })
     })();
