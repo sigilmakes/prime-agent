@@ -8,20 +8,9 @@ use sha2::Digest as _;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-struct NoCapabilities;
-impl HostCapabilities for NoCapabilities {
-    fn call(
-        &self,
-        _request: CapabilityRequest,
-        _cancel: CancellationToken,
-    ) -> crate::plugins::CapabilityFuture {
-        Box::pin(async { Err("no default capabilities".into()) })
-    }
-}
 struct Fixture {
     _dir: tempfile::TempDir,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
-    host: Arc<PluginHost>,
     service: OptChatServices,
     request: CapabilityRequest,
     path: std::path::PathBuf,
@@ -37,22 +26,11 @@ impl Fixture {
         }
         session.flush_now().unwrap();
         let artifact = session.get_session_artifact_dir().unwrap();
-        let host = Arc::new(PluginHost::new(
-            Arc::new(NoCapabilities),
-            Vec::<String>::new(),
-        ));
-        host.reconcile(vec![PluginSource {
-            name: "optchat".into(),
-            source: "return {exports={{name='status',run=function()return {} end}}}".into(),
-            config: json!({}),
-        }])
-        .unwrap();
         let session = Arc::new(tokio::sync::Mutex::new(session));
         let service = OptChatServices::new(session.clone(), Some(artifact.clone()));
         Self {
             _dir: dir,
             session,
-            host,
             service,
             request: CapabilityRequest {
                 invocation: uuid::Uuid::new_v4(),

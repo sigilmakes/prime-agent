@@ -867,6 +867,13 @@ async fn public_text_tree_two_round_native_http_preserves_current_executed_tool_
     use tokio::io::AsyncWriteExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let mut ai = model();
+    ai.base_url = format!("http://{address}/v1");
+    let native = super::super::provider_adapter::real_stream_fn(
+        Some("isolated-loopback-fixture-only".into()),
+        ai.clone(),
+    );
+    let f = Fixture::with_main(32, ai, Some(native)).await;
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
         for round in 0..2 {
@@ -903,13 +910,6 @@ async fn public_text_tree_two_round_native_http_preserves_current_executed_tool_
         }
         requests
     });
-    let mut ai = model();
-    ai.base_url = format!("http://{address}/v1");
-    let native = super::super::provider_adapter::real_stream_fn(
-        Some("isolated-loopback-fixture-only".into()),
-        ai.clone(),
-    );
-    let f = Fixture::with_main(32, ai, Some(native)).await;
     let tool = Arc::new(LiveTextTool(std::sync::atomic::AtomicUsize::new(0)));
     f.engine.session.agent().set_tools(vec![tool.clone()]).await;
     tokio::time::timeout(
