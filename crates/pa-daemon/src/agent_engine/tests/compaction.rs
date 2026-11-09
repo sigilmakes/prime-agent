@@ -94,7 +94,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
     let source: Vec<serde_json::Value> = std::str::from_utf8(&prefix)
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["row"].clone())
+        .map(|line| crate::test_rows::row_of(line))
         .collect();
     let source_ids: Vec<_> = source
         .iter()
@@ -133,7 +133,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
     let suffix: Vec<serde_json::Value> = std::str::from_utf8(&durable[prefix.len()..])
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["row"].clone())
+        .map(|line| crate::test_rows::row_of(line))
         .collect();
     let [row] = suffix.as_slice() else {
         panic!("one exact archive suffix")
@@ -173,7 +173,7 @@ fn no_retained_boundary_native_archive_is_acked_and_cold_restored_by_the_real_ow
         let bootstrap: Vec<serde_json::Value> = std::str::from_utf8(&cold_bytes[durable.len()..])
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["row"].clone())
+            .map(|line| crate::test_rows::row_of(line))
             .collect();
         let service_tier = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir)
             .get_default_service_tier();

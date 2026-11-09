@@ -23,6 +23,9 @@
     clippy::struct_field_names
 )]
 pub mod acp;
+#[cfg(test)]
+pub(crate) mod test_rows;
+
 pub mod agent_engine;
 pub mod agent_message_broadcast;
 pub mod agent_message_ingest;

@@ -507,7 +507,7 @@ fn cold_real_owner_preserves_legacy_custom_rows_as_generic_custom_rows() {
     let source_values: Vec<Value> = std::str::from_utf8(&source)
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
+        .map(|line| crate::test_rows::row_of(line))
         .collect();
     drop(producer);
     let reopened = crate::session_store::SessionFile::open(&path).unwrap();
@@ -643,7 +643,7 @@ fn cold_real_owner_preserves_legacy_custom_rows_as_generic_custom_rows() {
     let suffix: Vec<Value> = std::str::from_utf8(&physical[source.len()..])
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
+        .map(|line| crate::test_rows::row_of(line))
         .collect();
     let [user, assistant] = suffix.as_slice() else {
         panic!("only the accepted User and ACKed Assistant may append")

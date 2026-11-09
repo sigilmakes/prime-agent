@@ -211,7 +211,7 @@ fn reencode(content: &str) -> String {
     let path = dir.path().join("replacement.jsonl");
     let rows: Vec<Value> = content
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
+        .map(|line| crate::test_rows::row_of(line))
         .collect();
     append_rows(&path, &rows);
     fs::read_to_string(path).unwrap()
