@@ -709,6 +709,10 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
         None => timing_stream_fn,
     };
     let persistence = Arc::clone(&wiring.session);
+    let tool_stages = super::plugin_stages::ToolStageHooks::new(
+        plugins.host(),
+        plugins.context_session_id().to_owned(),
+    );
     let agent = Agent::new(AgentOptions {
         before_event: Some(Arc::new(move |event, _signal| {
             let persistence = Arc::clone(&persistence);
@@ -722,6 +726,10 @@ async fn create_session_inner(mut config: SessionEngineConfig) -> anyhow::Result
             messages: initial_messages,
         },
         stream_fn: Some(agent_stream_fn),
+        // Plugin tool stages dispatch only their own hook names from the
+        // current snapshot; an empty inventory returns the untouched behavior.
+        before_tool_call: Some(tool_stages.before_tool_call()),
+        after_tool_call: Some(tool_stages.after_tool_call()),
         // The session conversion rules apply at the loop's LLM boundary
         // (TS `convertToLlm`): bookkeeping rows drop. Active plugin context
         // arrives through explicit contributions.
