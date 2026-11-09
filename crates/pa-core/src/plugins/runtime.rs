@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -49,59 +49,103 @@ fn validate_fields(table: &Table, allowed: &[&str]) -> Result<(), PluginError> {
     Ok(())
 }
 
+/// One evaluated declaration chunk plus its private VM. The initialization
+/// instruction deadline stays installed: callers walk bounded declarations, not
+/// arbitrary Lua, and remove the hook once their pass completes.
+pub(super) struct EvaluatedChunk {
+    pub lua: Lua,
+    pub declaration: Table,
+}
+
+/// Build the plugin VM and evaluate one declarative chunk. There are no host
+/// capabilities in this VM; only the chunk, its owned `config`, and `null` exist.
+pub(super) fn evaluate(source: &PluginSource) -> Result<EvaluatedChunk, PluginError> {
+    if source.source.len() > 1024 * 1024 {
+        return Err(PluginError::Invalid(format!(
+            "plugin {name}: source exceeds 1 MiB",
+            name = source.name
+        )));
+    }
+    // Trusted local plugins, not a hostile-code security sandbox. All external
+    // operations still require an explicit host capability; no ambient IO/package libs.
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        LuaOptions::default(),
+    )
+    .map_err(lua_error)?;
+    lua.set_memory_limit(16 * 1024 * 1024).map_err(lua_error)?;
+    for name in ["dofile", "loadfile", "load", "print", "warn"] {
+        lua.globals()
+            .set(name, mlua::Value::Nil)
+            .map_err(lua_error)?;
+    }
+    lua.globals().set("null", lua.null()).map_err(lua_error)?;
+    // Serialize into this VM before activation. Lua mutations cannot change the
+    // desired JSON retained for reconciliation or any other generation's config.
+    let config = lua.to_value(&source.config).map_err(lua_error)?;
+    lua.globals().set("config", config).map_err(lua_error)?;
+    // Initialization is declarative and cannot await. Bound accidental busy loops.
+    let instructions = AtomicUsize::new(0);
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(1000),
+        move |_, _| {
+            if instructions.fetch_add(1000, Ordering::Relaxed) >= 1_000_000 {
+                return Err(mlua::Error::RuntimeError(
+                    "initialization instruction budget exceeded".into(),
+                ));
+            }
+            Ok(VmState::Continue)
+        },
+    )
+    .map_err(lua_error)?;
+    let declaration: Table = lua
+        .load(&source.source)
+        .set_name(&source.name)
+        .eval()
+        .map_err(lua_error)?;
+    validate_fields(
+        &declaration,
+        &[
+            "exports",
+            "commands",
+            "hooks",
+            "context_strategies",
+            "compactors",
+            "providers",
+        ],
+    )?;
+    Ok(EvaluatedChunk { lua, declaration })
+}
+
+/// Dense declaration arrays share one shape: 1..=128 table entries.
+pub(super) fn dense_array(entries: &Table, field: &str) -> Result<Vec<Table>, PluginError> {
+    let mut indexed = Vec::new();
+    for entry in entries.clone().pairs::<usize, Table>() {
+        let (index, entry) = entry.map_err(lua_error)?;
+        if index == 0 || index > 128 {
+            return Err(PluginError::Invalid(
+                "declarations must be dense arrays of at most 128 callbacks".into(),
+            ));
+        }
+        indexed.push((index, entry));
+    }
+    indexed.sort_by_key(|(index, _)| *index);
+    if indexed
+        .iter()
+        .map(|(index, _)| *index)
+        .ne(1..=indexed.len())
+    {
+        return Err(PluginError::Invalid(format!(
+            "{field} declarations must be dense arrays"
+        )));
+    }
+    Ok(indexed.into_iter().map(|(_, entry)| entry).collect())
+}
+
 impl Generation {
     pub fn load(source: &PluginSource) -> Result<Self, PluginError> {
-        if source.source.len() > 1024 * 1024 {
-            return Err(PluginError::Invalid("source exceeds 1 MiB".into()));
-        }
-        // Trusted local plugins, not a hostile-code security sandbox. All external
-        // operations still require an explicit host capability; no ambient IO/package libs.
-        let lua = Lua::new_with(
-            StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
-            LuaOptions::default(),
-        )
-        .map_err(lua_error)?;
-        lua.set_memory_limit(16 * 1024 * 1024).map_err(lua_error)?;
-        for name in ["dofile", "loadfile", "load", "print", "warn"] {
-            lua.globals()
-                .set(name, mlua::Value::Nil)
-                .map_err(lua_error)?;
-        }
-        lua.globals().set("null", lua.null()).map_err(lua_error)?;
-        // Serialize into this VM before activation. Lua mutations cannot change the
-        // desired JSON retained for reconciliation or any other generation's config.
-        let config = lua.to_value(&source.config).map_err(lua_error)?;
-        lua.globals().set("config", config).map_err(lua_error)?;
-        // Initialization is declarative and cannot await. Bound accidental busy loops.
-        let instructions = AtomicUsize::new(0);
-        lua.set_hook(
-            HookTriggers::new().every_nth_instruction(1000),
-            move |_, _| {
-                if instructions.fetch_add(1000, Ordering::Relaxed) >= 1_000_000 {
-                    return Err(mlua::Error::RuntimeError(
-                        "initialization instruction budget exceeded".into(),
-                    ));
-                }
-                Ok(VmState::Continue)
-            },
-        )
-        .map_err(lua_error)?;
-        let declaration: Table = lua
-            .load(&source.source)
-            .set_name(&source.name)
-            .eval()
-            .map_err(lua_error)?;
-        validate_fields(
-            &declaration,
-            &[
-                "exports",
-                "commands",
-                "hooks",
-                "context_strategies",
-                "compactors",
-                "providers",
-            ],
-        )?;
+        let EvaluatedChunk { lua, declaration } = evaluate(source)?;
+
         let id = Uuid::new_v4();
         let mut callbacks = BTreeMap::new();
         for (field, kind) in [
@@ -115,15 +159,7 @@ impl Generation {
             let Some(entries) = declaration.get::<Option<Table>>(field).map_err(lua_error)? else {
                 continue;
             };
-            let mut indices = BTreeSet::new();
-            for entry in entries.pairs::<usize, Table>() {
-                let (index, entry) = entry.map_err(lua_error)?;
-                if index == 0 || index > 128 {
-                    return Err(PluginError::Invalid(
-                        "declarations must be dense arrays of at most 128 callbacks".into(),
-                    ));
-                }
-                indices.insert(index);
+            for entry in dense_array(&entries, field)? {
                 validate_fields(
                     &entry,
                     &["name", "description", "mode", "context_data", "run"],
@@ -195,11 +231,6 @@ impl Generation {
                         "duplicate {field} callback {name}"
                     )));
                 }
-            }
-            if indices.iter().copied().ne(1..=indices.len()) {
-                return Err(PluginError::Invalid(
-                    "declarations must be dense arrays".into(),
-                ));
             }
         }
         lua.remove_hook();

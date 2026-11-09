@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 
 use super::load::from_value_lenient;
-use super::merge::{deep_merge, migrate};
+use super::merge::{deep_merge, merge_scopes, migrate};
 use super::storage::{SettingsScope, SettingsStorage};
 use super::types::{
     QueueModeSetting, Settings, ThinkingLevelSetting, TransportSetting, UpdateChannel,
@@ -48,7 +48,7 @@ impl SettingsManager {
             load_scope(storage.as_ref(), SettingsScope::Global, &mut errors);
         let (project, _, project_load_error) =
             load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
-        let merged = deep_merge(&global, &project);
+        let merged = merge_scopes(&global, &project);
         Self {
             storage,
             global,
@@ -148,7 +148,7 @@ impl SettingsManager {
         self.global_load_error = global_load_error;
         self.project_load_error = project_load_error;
         self.errors = errors;
-        self.merged = deep_merge(&self.global, &self.project);
+        self.merged = merge_scopes(&self.global, &self.project);
         Ok(())
     }
 
@@ -403,7 +403,7 @@ impl SettingsManager {
             "packages",
             &serde_json::Value::Array(packages),
         );
-        self.merged = deep_merge(&self.global, &self.project);
+        self.merged = merge_scopes(&self.global, &self.project);
     }
 
     pub fn set_project_packages(&mut self, packages: Vec<serde_json::Value>) {
@@ -417,7 +417,7 @@ impl SettingsManager {
             "packages",
             &serde_json::Value::Array(packages),
         );
-        self.merged = deep_merge(&self.global, &self.project);
+        self.merged = merge_scopes(&self.global, &self.project);
     }
 
     /// Replace one resource-path array (`skills`/`prompts`/`themes`) in the global settings file.
@@ -435,7 +435,7 @@ impl SettingsManager {
             field,
             &serde_json::Value::Array(array),
         );
-        self.merged = deep_merge(&self.global, &self.project);
+        self.merged = merge_scopes(&self.global, &self.project);
     }
 
     /// Replace one resource-path array in the project settings file.
@@ -457,7 +457,7 @@ impl SettingsManager {
             field,
             &serde_json::Value::Array(array),
         );
-        self.merged = deep_merge(&self.global, &self.project);
+        self.merged = merge_scopes(&self.global, &self.project);
     }
 
     /// Write one field into a scope's file, merging with the current on-disk document
@@ -821,7 +821,7 @@ impl SettingsManager {
     /// Write the global scope back (project scope is host-written, not
     /// user-set), then re-derive the effective settings.
     fn save_global(&mut self, fields: &[&'static str]) -> Result<()> {
-        self.merged = deep_merge(&self.global, &self.project);
+        self.merged = merge_scopes(&self.global, &self.project);
         self.pending_global_fields.extend(fields.iter().copied());
         if let Some(message) = &self.global_load_error {
             self.errors.push(SettingsError {

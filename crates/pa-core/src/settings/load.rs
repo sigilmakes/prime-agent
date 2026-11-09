@@ -1,9 +1,11 @@
 //! Lenient settings loading: wrong-typed fields load as `None` (TS
 //! access-time typecheck semantics), never a load error.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
-use super::types::Settings;
+use super::types::{PluginEntry, Settings};
 
 /// Known settings keys (the TS Settings interface, camelCase wire form).
 /// Wrong-typed values for these load as unset; unknown keys are preserved.
@@ -69,7 +71,17 @@ pub fn from_value_lenient(value: &Value) -> Settings {
         return Settings::default();
     };
     let mut map = serde_json::Map::new();
+    let mut malformed_plugins = None;
     for (key, field) in obj {
+        // A typed plugin map cannot keep an invalid entry. Retain the raw field so
+        // plugin reload rejects it instead of silently disabling every plugin.
+        if key == "plugins"
+            && !field.is_null()
+            && serde_json::from_value::<BTreeMap<String, PluginEntry>>(field.clone()).is_err()
+        {
+            malformed_plugins = Some(field.clone());
+            continue;
+        }
         // Re-parse per field: a bad-typed field drops out instead of failing the document.
         let mut single = serde_json::Map::new();
         single.insert(key.clone(), field.clone());
@@ -86,7 +98,7 @@ pub fn from_value_lenient(value: &Value) -> Settings {
                 for (k, v) in merged_obj {
                     // Partial serializations emit explicit nulls for every unset field; a null must
                     // not erase a value collected from an earlier partial.
-                    if v.is_null() && !(key == "plugins" && k == "plugins") {
+                    if v.is_null() {
                         continue;
                     }
                     map.insert(k.clone(), v.clone());
@@ -94,7 +106,11 @@ pub fn from_value_lenient(value: &Value) -> Settings {
             }
         }
     }
-    serde_json::from_value::<Settings>(Value::Object(map)).unwrap_or_default()
+    let mut settings = serde_json::from_value::<Settings>(Value::Object(map)).unwrap_or_default();
+    if let Some(raw) = malformed_plugins {
+        settings.extra.insert("plugins".into(), raw);
+    }
+    settings
 }
 
 #[cfg(test)]
@@ -123,12 +139,28 @@ mod tests {
     }
 
     #[test]
-    fn malformed_plugin_null_survives_lenient_unrelated_fields() {
+    fn typed_plugins_load_and_null_is_unset() {
         let settings = from_value_lenient(&serde_json::json!({
-            "plugins":null,"defaultProvider":42
+            "plugins": {
+                "alpha": {"enabled": true, "path": "alpha.lua", "config": {"count": 1}}
+            },
+            "defaultProvider": 42
         }));
-        assert_eq!(settings.plugins, Some(Value::Null));
+        let plugins = settings.plugins.expect("typed plugin map");
+        assert_eq!(plugins["alpha"].enabled, Some(true));
+        assert_eq!(plugins["alpha"].config, serde_json::json!({"count": 1}));
         assert_eq!(settings.default_provider, None);
+
+        let settings = from_value_lenient(&serde_json::json!({"plugins": null}));
+        assert_eq!(settings.plugins, None);
+    }
+
+    #[test]
+    fn malformed_plugin_map_stays_visible_as_raw_data() {
+        let raw = serde_json::json!({"alpha": {"enabled": true, "unknown": 1}});
+        let settings = from_value_lenient(&serde_json::json!({"plugins": raw}));
+        assert_eq!(settings.plugins, None);
+        assert_eq!(settings.extra.get("plugins"), Some(&raw));
     }
 
     #[test]

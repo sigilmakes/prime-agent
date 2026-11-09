@@ -1,28 +1,56 @@
 //! Deep-merge and migration.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
-use super::types::Settings;
+use super::types::{PluginEntry, Settings};
+
+/// Merge project scope onto the global scope. Plugin entries stay global-only:
+/// a cloned repository's `.prime/agent/settings.json` must not execute Lua.
+#[must_use]
+pub fn merge_scopes(global: &Settings, project: &Settings) -> Settings {
+    let mut merged = deep_merge(global, project);
+    merged.plugins.clone_from(&global.plugins);
+    // A malformed plugin map is retained in `extra` for a loud reload failure.
+    // Project scope must not be able to inject one either.
+    let malformed_plugins = global.extra.get("plugins").cloned();
+    merged.extra.remove("plugins");
+    if let Some(raw) = malformed_plugins {
+        merged.extra.insert("plugins".into(), raw);
+    }
+    merged
+}
 
 /// Deep merge: overrides win; nested objects merge recursively; arrays and scalars replace.
 pub fn deep_merge(base: &Settings, overrides: &Settings) -> Settings {
     let mut base_value = serde_json::to_value(base).unwrap_or_default();
     let overrides_value = serde_json::to_value(overrides).unwrap_or_default();
     merge_values(&mut base_value, &overrides_value);
-    serde_json::from_value(base_value).unwrap_or_default()
+    // A malformed plugin map lives in `extra` and cannot pass the typed field.
+    // Keep it out of the typed round-trip, then restore it as raw data.
+    let malformed_plugins = base_value
+        .get("plugins")
+        .filter(|value| {
+            !value.is_null()
+                && serde_json::from_value::<BTreeMap<String, PluginEntry>>((*value).clone())
+                    .is_err()
+        })
+        .cloned();
+    if malformed_plugins.is_some() {
+        base_value.as_object_mut().unwrap().remove("plugins");
+    }
+    let mut merged: Settings = serde_json::from_value(base_value).unwrap_or_default();
+    if let Some(raw) = malformed_plugins {
+        merged.extra.insert("plugins".into(), raw);
+    }
+    merged
 }
 
 fn merge_values(base: &mut Value, overrides: &Value) {
     match (base, overrides) {
         (Value::Object(base_obj), Value::Object(overrides_obj)) => {
             for (key, value) in overrides_obj {
-                // Plugin JSON preserves explicit null (including malformed map/config
-                // replacements), so reload can reject it without retiring active work.
-                if key == "plugins" {
-                    let existing = base_obj.entry(key.clone()).or_insert(Value::Null);
-                    merge_plugin_values(existing, value);
-                    continue;
-                }
                 // `null` means the key is unset (TS documents omit undefined
                 // keys); it must never override a real value.
                 if value.is_null() {
@@ -43,17 +71,6 @@ fn merge_values(base: &mut Value, overrides: &Value) {
                 *base_slot = value.clone();
             }
         }
-    }
-}
-
-fn merge_plugin_values(base: &mut Value, overrides: &Value) {
-    match (base, overrides) {
-        (Value::Object(base), Value::Object(overrides)) => {
-            for (key, value) in overrides {
-                merge_plugin_values(base.entry(key.clone()).or_insert(Value::Null), value);
-            }
-        }
-        (base, value) => *base = value.clone(),
     }
 }
 
@@ -119,28 +136,81 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn plugin_merge_distinguishes_absence_from_explicit_null() {
-        let base: Settings = serde_json::from_value(json!({
-            "plugins":{"alpha":{"enabled":true,"path":"alpha.lua","config":{"keep":true,"nullable":1}}}
-        })).unwrap();
-        let empty = deep_merge(&base, &Settings::default());
-        assert_eq!(empty.plugins, base.plugins);
-        let overrides: Settings = serde_json::from_value(json!({
-            "plugins":{"alpha":{"config":{"nullable":null}}}
+    fn project_plugins_are_dropped_but_other_project_fields_merge() {
+        let global: Settings = serde_json::from_value(json!({
+            "theme": "prime",
+            "plugins": {
+                "alpha": {
+                    "enabled": true,
+                    "path": "alpha.lua",
+                    "config": {"keep": true}
+                }
+            }
         }))
         .unwrap();
-        assert_eq!(
-            deep_merge(&base, &overrides).plugins,
-            Some(json!({
-                "alpha":{"enabled":true,"path":"alpha.lua","config":{"keep":true,"nullable":null}}
-            }))
+        let project: Settings = serde_json::from_value(json!({
+            "theme": "dark",
+            "plugins": {
+                "alpha": {"enabled": true, "path": "evil.lua"},
+                "beta": {"enabled": true, "path": "beta.lua"}
+            }
+        }))
+        .unwrap();
+        let merged = merge_scopes(&global, &project);
+        assert_eq!(merged.theme.as_deref(), Some("dark"));
+        let plugins = merged.plugins.unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins["alpha"], global.plugins.unwrap()["alpha"]);
+        assert!(!plugins.contains_key("beta"));
+    }
+
+    #[test]
+    fn malformed_plugin_raw_survives_merge_without_losing_other_fields() {
+        let mut global = Settings {
+            theme: Some("prime".into()),
+            ..Settings::default()
+        };
+        global.extra.insert(
+            "plugins".into(),
+            json!({"alpha": {"enabled": true, "unknown": 1}}),
         );
-        let malformed: Settings = serde_json::from_value(json!({"plugins":null})).unwrap();
-        assert_eq!(deep_merge(&base, &malformed).plugins, Some(Value::Null));
+        let merged = deep_merge(&global, &Settings::default());
+        assert_eq!(merged.theme.as_deref(), Some("prime"));
+        assert_eq!(merged.extra.get("plugins"), global.extra.get("plugins"));
+        assert_eq!(merged.plugins, None);
+    }
+
+    #[test]
+    fn project_scope_cannot_inject_a_malformed_plugin_map() {
+        let global: Settings = serde_json::from_value(json!({
+            "plugins": {"alpha": {"enabled": true, "path": "alpha.lua"}}
+        }))
+        .unwrap();
+        let mut project: Settings = Settings::default();
+        project.extra.insert(
+            "plugins".into(),
+            json!({"evil": {"enabled": true, "path": "evil.lua"}}),
+        );
+        let merged = merge_scopes(&global, &project);
+        assert_eq!(merged.plugins, global.plugins);
+        assert!(merged.extra.get("plugins").is_none());
+    }
+
+    #[test]
+    fn settings_without_plugins_merge_to_no_entries() {
         assert_eq!(
             deep_merge(&Settings::default(), &Settings::default()).plugins,
             None
         );
+        let global: Settings = serde_json::from_value(json!({
+            "plugins": {"alpha": {"enabled": true, "path": "alpha.lua"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            merge_scopes(&global, &Settings::default()).plugins,
+            global.plugins
+        );
+        assert_eq!(merge_scopes(&Settings::default(), &global).plugins, None);
     }
 
     #[test]

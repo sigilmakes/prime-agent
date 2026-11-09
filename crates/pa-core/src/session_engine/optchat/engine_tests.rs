@@ -45,6 +45,15 @@ struct Fixture {
     original: Vec<FileEntry>,
 }
 impl Fixture {
+    fn configure(&self, value: &Value) {
+        let path = self.agent_dir.join("settings.json");
+        let mut document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for (key, entry) in value.as_object().unwrap() {
+            document[key] = entry.clone();
+        }
+        std::fs::write(path, document.to_string()).unwrap();
+    }
     async fn new(count: usize) -> Self {
         Self::with_main(count, model(), None).await
     }
@@ -58,7 +67,7 @@ impl Fixture {
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(cwd.join("summarizer.lua"), SUMMARIZER).unwrap();
+        std::fs::write(agent_dir.join("summarizer.lua"), SUMMARIZER).unwrap();
         let settings = json!({"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
           "contextStrategy":"optchat/tree","auxiliaryModel":"tree-summarizer/default",
           "plugins":{"optchat":{"enabled":true,"config":{"budget_bytes":4096,"summary_bytes":128,"model":"tree-summarizer/chosen"}},
@@ -292,7 +301,7 @@ async fn public_engine_failed_summary_keeps_previous_view_and_journal() {
     }
     let before = std::fs::read(&f.journal).unwrap();
     std::fs::write(
-        f.cwd.join("summarizer.lua"),
+        f.agent_dir.join("summarizer.lua"),
         SUMMARIZER.replace("if config.fail then", "if true then"),
     )
     .unwrap();
@@ -533,7 +542,7 @@ async fn public_engine_cancelled_or_retired_auxiliary_work_cannot_publish() {
             .unwrap()
             .set_capability_delegate("test.", Arc::new(Arc::clone(&gate)));
         std::fs::write(
-            f.cwd.join("summarizer.lua"),
+            f.agent_dir.join("summarizer.lua"),
             SUMMARIZER.replace("local text=", "ctx.call('test.hold',{}); local text="),
         )
         .unwrap();
@@ -549,7 +558,7 @@ async fn public_engine_cancelled_or_retired_auxiliary_work_cannot_publish() {
             .await
             .unwrap();
         if retire {
-            let replacement = f.cwd.join("optchat-replacement.lua");
+            let replacement = f.agent_dir.join("optchat-replacement.lua");
             std::fs::write(
                 &replacement,
                 format!(
@@ -558,7 +567,7 @@ async fn public_engine_cancelled_or_retired_auxiliary_work_cannot_publish() {
                 ),
             )
             .unwrap();
-            std::fs::write(f.cwd.join(".prime/agent/settings.json"),json!({"plugins":{"optchat":{"enabled":true,"path":"optchat-replacement.lua","config":{"budget_bytes":4096,"summary_bytes":128,"model":"tree-summarizer/chosen"}}}}).to_string()).unwrap();
+            f.configure(&json!({"plugins":{"optchat":{"enabled":true,"path":"optchat-replacement.lua","config":{"budget_bytes":4096,"summary_bytes":128,"model":"tree-summarizer/chosen"}}}}));
             f.engine.reload_plugins().await.unwrap();
             assert!(
                 tokio::time::timeout(std::time::Duration::from_secs(5), task)
@@ -681,11 +690,7 @@ async fn public_explicit_selection_disable_and_resume_never_fall_back() {
         .iter()
         .all(|entry| !matches!(entry, FileEntry::Compaction { .. })));
     let cached = std::fs::read(&f.cache).unwrap();
-    std::fs::write(
-        f.cwd.join(".prime/agent/settings.json"),
-        json!({"plugins":{"optchat":{"enabled":false}}}).to_string(),
-    )
-    .unwrap();
+    f.configure(&json!({"plugins":{"optchat":{"enabled":false}}}));
     f.engine.reload_plugins().await.unwrap();
     assert!(f.export("optchat", "status", json!({})).await.is_err());
     assert!(!f
@@ -776,7 +781,7 @@ async fn public_failed_tree_selection_preserves_rolling_authority_and_history() 
     let previous = f.engine.session.agent().state().await.messages;
     let journal = std::fs::read(&f.journal).unwrap();
     std::fs::write(
-        f.cwd.join("summarizer.lua"),
+        f.agent_dir.join("summarizer.lua"),
         SUMMARIZER.replace("if config.fail then", "if true then"),
     )
     .unwrap();

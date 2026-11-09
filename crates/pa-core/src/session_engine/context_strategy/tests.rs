@@ -34,7 +34,7 @@ impl Fixture {
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(cwd.join("policy.lua"), source).unwrap();
+        std::fs::write(agent.join("policy.lua"), source).unwrap();
         std::fs::write(agent.join("settings.json"),json!({"enableBuiltinSkills":false,"prewarmIpythonKernel":false,
             "contextStrategy":strategy,"plugins":{"policy":{"enabled":true,"path":"policy.lua"}},"compaction":{"keepRecentTokens":0}}).to_string()).unwrap();
         let model:pa_types::ai::Model=serde_json::from_value(json!({"id":"test","name":"Test","api":"test","provider":"test","baseUrl":"http://127.0.0.1:9/v1","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":100_000,"maxTokens":100})).unwrap();
@@ -83,7 +83,7 @@ impl Fixture {
         json!({"rows":self.engine.session.entries().await,"view":self.engine.session.agent().state().await.messages})
     }
     async fn change(&self, source: &str) {
-        std::fs::write(self.cwd.join("policy.lua"), source).unwrap();
+        std::fs::write(self.agent.join("policy.lua"), source).unwrap();
         self.engine.reload_plugins().await.unwrap();
     }
 }
@@ -1137,7 +1137,7 @@ async fn explicit_disable_removes_contributions_and_refuses_model_work_until_exp
     let f = Fixture::new(SWITCHABLE, "policy/view", true).await;
     let before = f.state().await;
     let snapshot = f.engine.session.plugins.as_ref().unwrap().host().snapshot();
-    std::fs::write(f.cwd.join("policy.lua"), "invalid Lua !").unwrap();
+    std::fs::write(f.agent.join("policy.lua"), "invalid Lua !").unwrap();
     assert!(f.engine.reload_plugins().await.is_err());
     assert_eq!(f.state().await, before);
     assert_eq!(
@@ -1151,7 +1151,7 @@ async fn explicit_disable_removes_contributions_and_refuses_model_work_until_exp
             .revision,
         snapshot.revision
     );
-    std::fs::write(f.cwd.join("policy.lua"), SWITCHABLE).unwrap();
+    std::fs::write(f.agent.join("policy.lua"), SWITCHABLE).unwrap();
     policy_enabled(&f, false);
     f.engine.reload_plugins().await.unwrap();
     assert!(!f
@@ -1211,7 +1211,7 @@ async fn explicit_disable_removes_contributions_and_refuses_model_work_until_exp
         ),
         "default_context/rolling"
     );
-    assert!(f.cwd.join("policy.lua").is_file());
+    assert!(f.agent.join("policy.lua").is_file());
 }
 
 async fn gated_selection(f: &Fixture) -> (Arc<Gate>, tokio::task::JoinHandle<anyhow::Result<()>>) {
@@ -1453,7 +1453,7 @@ async fn explicit_disable_is_not_blocked_by_an_unrelated_invalid_enabled_replace
     );
     let f = Fixture::new(&source, "policy/view", true).await;
     let before = f.state().await;
-    std::fs::write(f.cwd.join("broken.lua"), "invalid Lua !").unwrap();
+    std::fs::write(f.agent.join("broken.lua"), "invalid Lua !").unwrap();
     let path = f.agent.join("settings.json");
     let mut settings: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1513,7 +1513,7 @@ async fn explicit_startup_strategy_errors_do_not_select_rolling_or_commit_a_choi
         settings["contextStrategy"] = json!(requested);
         std::fs::write(path, settings.to_string()).unwrap();
         std::fs::write(
-            f.cwd.join("policy.lua"),
+            f.agent.join("policy.lua"),
             if requested == "policy/view" {
                 "invalid Lua !"
             } else {
@@ -1600,13 +1600,13 @@ async fn invalid_settings_preserve_last_valid_sources_but_removing_a_source_reti
         .host()
         .snapshot()
         .revision;
-    let mut null_entry: Value = serde_json::from_str(&original).unwrap();
-    null_entry["plugins"]["policy"] = Value::Null;
+    let mut null_config: Value = serde_json::from_str(&original).unwrap();
+    null_config["plugins"]["policy"]["config"] = Value::Null;
     let mut invalid_name: Value = serde_json::from_str(&original).unwrap();
     invalid_name["plugins"]["not-valid-python"] = json!({"enabled":true,"path":"policy.lua"});
     for invalid in [
         "{".to_owned(),
-        null_entry.to_string(),
+        null_config.to_string(),
         invalid_name.to_string(),
     ] {
         std::fs::write(&path, invalid).unwrap();
@@ -1646,7 +1646,7 @@ async fn invalid_settings_preserve_last_valid_sources_but_removing_a_source_reti
         .context_selection()
         .is_err());
     assert_eq!(f.state().await, before);
-    assert!(f.cwd.join("policy.lua").exists());
+    assert!(f.agent.join("policy.lua").exists());
 }
 
 #[tokio::test]
@@ -1696,7 +1696,7 @@ async fn mixed_reload_retires_disabled_a_and_keeps_the_last_valid_enabled_b_gene
     let mut settings: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     std::fs::write(
-        f.cwd.join("existing.lua"),
+        f.agent.join("existing.lua"),
         "return {exports={{name='keep',run=function()return 'old B' end}}}",
     )
     .unwrap();
@@ -1713,7 +1713,7 @@ async fn mixed_reload_retires_disabled_a_and_keeps_the_last_valid_enabled_b_gene
         .clone();
     settings["plugins"]["policy"]["enabled"] = json!(false);
     std::fs::write(path, settings.to_string()).unwrap();
-    std::fs::write(f.cwd.join("existing.lua"), "invalid Lua !").unwrap();
+    std::fs::write(f.agent.join("existing.lua"), "invalid Lua !").unwrap();
     let error = f.engine.reload_plugins().await.unwrap_err().to_string();
     assert!(error.contains("applied") && error.contains("rejected"));
     let snapshot = host.snapshot();
@@ -1886,7 +1886,7 @@ async fn large_legacy_callback_fails_explicitly_and_builtin_name_override_keeps_
     let source = r"return {context_strategies={{name='rolling',run=function(input)
       assert(type(input.messages)=='table' and input.messages[1].content=='UNIQUE BODY')
       return {messages=input.messages} end}}}";
-    std::fs::write(f.cwd.join("override.lua"), source).unwrap();
+    std::fs::write(f.agent.join("override.lua"), source).unwrap();
     let mut settings: Value =
         serde_json::from_str(&std::fs::read_to_string(f.agent.join("settings.json")).unwrap())
             .unwrap();
