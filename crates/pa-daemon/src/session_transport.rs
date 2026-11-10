@@ -1520,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn review_external_repair_cannot_leave_removed_rows_in_serving_fold() {
+    fn an_external_repair_of_a_damaged_bare_log_changes_nothing() {
         let dir = temp_dir("review-repair");
         let (mut store, path) = fresh_log_session(&dir, "review-repair");
         store
@@ -1546,28 +1546,27 @@ mod tests {
             .0
             + 1;
         bytes[last_line] = b'!';
-        std::fs::write(&log_path, bytes).unwrap();
-        let report = SessionLog::repair(&dir, "review-repair", deadline()).unwrap();
-        assert_eq!(report.last_good_seq, 2);
-        let refusal = store
-            .persist_entry(
-                "message",
-                json!({"message":{"role":"user","content":"after repair"}}),
-            )
-            .expect_err("stale live fold requires reopen");
-        assert!(format!("{refusal:#}").contains("reopen"));
-        let mut store = SessionFile::open(&path).unwrap();
-        store
-            .persist_entry(
-                "message",
-                json!({"message":{"role":"user","content":"after repair"}}),
-            )
-            .unwrap();
-        let replay = SessionFile::open(&path).unwrap();
+        std::fs::write(&log_path, &bytes).unwrap();
+        let refusal = SessionLog::repair(&dir, "review-repair", deadline())
+            .expect_err("a damaged bare row is the operator's call, not an open's");
         assert_eq!(
-            serde_json::to_value(store.entries()).unwrap(),
-            serde_json::to_value(replay.entries()).unwrap(),
-            "repair must reject or rebuild a stale live fold"
+            format!("{refusal}"),
+            "session log line after seq 2 is invalid",
+            "repair must name the damage it refused"
+        );
+        assert_eq!(
+            std::fs::read(&log_path).unwrap(),
+            bytes,
+            "repair must not truncate a file of rows"
+        );
+        assert_eq!(
+            store.entries().len(),
+            2,
+            "the live fold keeps what it committed"
+        );
+        assert!(
+            SessionFile::open(&path).is_err(),
+            "a cold reader still refuses the damaged line"
         );
     }
 

@@ -199,10 +199,11 @@ pub(super) fn append_rows(path: &Path, rows: &[Value]) {
     )
     .unwrap();
     for row in rows {
-        assert!(matches!(
-            log.append(row, crate::session_transport::deadline()),
-            pa_core::session_log::Outcome::Committed { .. }
-        ));
+        let outcome = log.append(row, crate::session_transport::deadline());
+        assert!(
+            matches!(outcome, pa_core::session_log::Outcome::Committed { .. }),
+            "fixture row must commit: {outcome:?} row={row}"
+        );
     }
 }
 
