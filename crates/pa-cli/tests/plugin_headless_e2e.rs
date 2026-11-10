@@ -21,6 +21,20 @@ return {
 }
 ";
 
+/// Deep-merge `overrides` into `base`: objects merge, scalars and arrays replace.
+fn merge(base: &mut Value, overrides: &Value) {
+    if let (Some(base), Some(overrides)) = (base.as_object_mut(), overrides.as_object()) {
+        for (key, value) in overrides {
+            if value.is_null() {
+                continue;
+            }
+            merge(base.entry(key.clone()).or_insert(Value::Null), value);
+        }
+        return;
+    }
+    *base = overrides.clone();
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     cwd: PathBuf,
@@ -38,7 +52,8 @@ impl Fixture {
         for path in [&cwd, &agent, &runtime] {
             std::fs::create_dir_all(path).unwrap();
         }
-        std::fs::write(cwd.join("fixture.lua"), PLUGIN).unwrap();
+        // A relative plugin path resolves against the agent dir, not the project.
+        std::fs::write(agent.join("fixture.lua"), PLUGIN).unwrap();
         std::fs::write(agent.join("settings.json"), json!({
             "enableBuiltinSkills":false,
             "plugins":{"fixture":{"enabled":true,"path":"fixture.lua","config":{"value":"global"}}}
@@ -54,10 +69,17 @@ impl Fixture {
         fixture
     }
 
+    /// Override plugin settings where they can take effect.
+    ///
+    /// A project's `.prime/agent/settings.json` cannot configure or disable a
+    /// plugin — a cloned repository must not execute Lua — so plugin fixtures
+    /// write the agent scope and merge, keeping the entry's path.
     fn settings(&self, value: &Value) {
-        let dir = self.cwd.join(".prime/agent");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("settings.json"), value.to_string()).unwrap();
+        let path = self.agent.join("settings.json");
+        let mut current: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        merge(&mut current, value);
+        std::fs::write(path, current.to_string()).unwrap();
     }
 
     fn command(&self) -> Command {

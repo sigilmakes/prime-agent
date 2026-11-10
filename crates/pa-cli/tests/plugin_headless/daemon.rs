@@ -224,7 +224,7 @@ fn real_supervisor_worker_discovers_invokes_reloads_and_retires_lua_commands() {
         "value=config.value",
         "value=config.value,source='replacement'",
     );
-    std::fs::write(fixture.cwd.join("fixture.lua"), &replacement_source).unwrap();
+    std::fs::write(fixture.agent.join("fixture.lua"), &replacement_source).unwrap();
     fixture.settings(&json!({"plugins":{"fixture":{"config":{"value":"replacement"}}}}));
     checked(
         &mut wire,
@@ -255,7 +255,7 @@ fn real_supervisor_worker_discovers_invokes_reloads_and_retires_lua_commands() {
     assert_eq!(value["value"], "replacement");
     assert_eq!(value["source"], "replacement");
     // Invalid replacement must fail closed and preserve the last-good live generation.
-    std::fs::write(fixture.cwd.join("fixture.lua"), "return {").unwrap();
+    std::fs::write(fixture.agent.join("fixture.lua"), "return {").unwrap();
     let invalid = wire.request(
         "invalid",
         &json!({"type":"plugin_command",
