@@ -15,6 +15,7 @@
 //! conclusion; a raced suspend stalls behind the mode lock).
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;

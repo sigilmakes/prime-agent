@@ -35,6 +35,7 @@
 //! venv); like `kernel_stop_revive.rs`, these tests skip (with a note) on
 //! machines without a live install so the suite stays hermetic elsewhere.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -49,6 +49,7 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 http = "1"
 
 [dev-dependencies]
+pa-test-scratch = { path = "../pa-test-scratch" }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 # Wire tests only: the WS handshake accept key (SHA-1 of key + GUID); the
 # same version the graph resolves for tokio-tungstenite's rustls chain.

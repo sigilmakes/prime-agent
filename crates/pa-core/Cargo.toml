@@ -48,6 +48,7 @@ ignore = "0.4"
 mlua = { version = "0.11.4", features = ["lua54", "vendored", "async", "send", "serialize"] }
 
 [dev-dependencies]
+pa-test-scratch = { path = "../pa-test-scratch" }
 tempfile = "3"
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

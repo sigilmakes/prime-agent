@@ -19,6 +19,7 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 #[path = "support/personalization_env.rs"]
 mod personalization_env;
 

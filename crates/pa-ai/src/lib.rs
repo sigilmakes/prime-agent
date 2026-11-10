@@ -7,6 +7,9 @@
 //! `result_large_err` are allowed crate-wide rather than boxing payloads.
 #![allow(clippy::large_enum_variant, clippy::result_large_err)]
 
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub mod compaction;
 pub mod env_api_keys;
 pub mod models;

@@ -13,6 +13,7 @@
 //! reports it through `onUnavailableSkills`; the session-level row rides
 //! the next admitted turn. The kernel Python is ambient; skipped if absent.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 

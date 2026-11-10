@@ -13,6 +13,7 @@
 //! handler responses and the compaction scheduling boundary are asserted.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::{Path, PathBuf};
 
 use pa_agent::scripted::{tool_call_turn_steps, ScriptStep, ScriptedProvider, ScriptedTurn};

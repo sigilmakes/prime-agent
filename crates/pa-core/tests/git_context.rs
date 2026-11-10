@@ -11,6 +11,7 @@
 //! Git context parity tests: fixture git repos drive `capture_git_context` (TS `captureGitContext`)
 //! and the session git-state lifecycle (TS `SessionManager.recordGitStateIfChanged`).
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::Path;
 
 use pa_core::session::manager::{capture_git_context, SessionManager};

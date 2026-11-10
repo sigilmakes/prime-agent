@@ -4,6 +4,7 @@
 //! a `TMPDIR` pointing at a plain file - the real bind path failing).
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -232,6 +233,10 @@ fn worker_stderr_lands_in_the_per_worker_log_and_prunes_retention() {
 
 #[test]
 fn never_ready_worker_failure_carries_the_captured_stderr_tail() {
+    // The injected `TMPDIR` below must stay short enough that the worker's socket probe still
+    // fits `sun_path`: past 103 bytes the daemon relocates under `/tmp` and the injection
+    // stops biting. The process scratch root is too deep for that budget, so this fixture
+    // keeps its own short directory in `/tmp` and removes it on drop.
     let dir = tempfile::Builder::new()
         .prefix("ws-")
         .tempdir_in("/tmp")

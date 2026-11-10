@@ -15,6 +15,7 @@
 //! stop it — nor any other live daemon on the machine.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

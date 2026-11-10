@@ -5,6 +5,7 @@
 //! The real runtime `SessionLease` owns the actual persisted session file before
 //! append ownership is raised and until all model/event/history/disk checks finish.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

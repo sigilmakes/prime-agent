@@ -8,6 +8,7 @@ use pa_daemon::protocol::command_active_session_id;
 use pa_daemon::protocol::command_type_name;
 use pa_daemon::protocol::parse_daemon_command_line;
 use pa_daemon::protocol::KNOWN_COMMAND_TYPES;
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 
 /// TS `DAEMON_COMMAND_TYPES` in declaration order, minus the removed
 /// `wait_for_headless_completion` (modes/daemon/daemon-supervisor.ts).

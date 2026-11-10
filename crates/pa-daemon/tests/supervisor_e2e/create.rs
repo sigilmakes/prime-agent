@@ -240,7 +240,7 @@ fn create_with_continue_recent_is_refused() {
 /// or override must still win.
 #[test]
 fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
-    let dir = tempfile::tempdir_in("/tmp").expect("temp dir");
+    let dir = tempfile::tempdir().expect("temp dir");
     let project = dir.path().join("project ! saved");
     let override_dir = dir.path().join("override");
     let agent_dir = dir.path().join("agent");
@@ -354,7 +354,7 @@ fn cold_reopen_uses_saved_cwd_unless_explicitly_overridden() {
 
 #[test]
 fn missing_saved_cwd_requires_an_explicit_fallback() {
-    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
     let saved = dir.path().join("missing.jsonl");
@@ -403,7 +403,7 @@ fn missing_saved_cwd_requires_an_explicit_fallback() {
 #[ignore = "requires PRIME_AGENT_KERNEL_PYTHON with the kernel runtime installed"]
 fn cold_reopen_python_kernel_uses_saved_cwd_and_explicit_override() {
     assert!(std::env::var_os("PRIME_AGENT_KERNEL_PYTHON").is_some());
-    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("saved-project");
     let override_dir = dir.path().join("override");
     let agent_dir = dir.path().join("agent");

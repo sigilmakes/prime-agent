@@ -9,6 +9,7 @@ members = [
     "crates/pa-daemon",
     "crates/pa-tui",
     "crates/pa-cli",
+    "crates/pa-test-scratch",
 ]
 
 # Crossterm 0.28.1's kitty support check holds the process-wide event reader

@@ -3,6 +3,9 @@
 //! compiled in; it can never introduce a transport or change what a
 //! request sends. Depends on pa-ai and pa-types; nothing above pa-agent.
 
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub mod bundled;
 pub mod cache;
 pub mod compat;

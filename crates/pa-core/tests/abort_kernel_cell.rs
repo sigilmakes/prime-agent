@@ -13,6 +13,7 @@
 //! cell writes `started` and `finished` markers around its sleep, so the abort lands mid-cell.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::{Path, PathBuf};
 
 use pa_agent::scripted::{tool_call_turn_steps, ScriptedProvider, ScriptedTurn};

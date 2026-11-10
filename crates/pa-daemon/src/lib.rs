@@ -22,6 +22,9 @@
     clippy::struct_excessive_bools,
     clippy::struct_field_names
 )]
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub mod acp;
 #[cfg(test)]
 pub(crate) mod test_rows;

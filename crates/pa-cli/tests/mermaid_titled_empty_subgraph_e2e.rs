@@ -20,6 +20,7 @@
 //! taking turns.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::{
     io::Write as _,
     path::{Path, PathBuf},

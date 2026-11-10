@@ -111,7 +111,7 @@ async fn shutdown_flushes_child_usage_before_closing_canonical_authority() {
     let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let (worker, path, server) = accounting_worker(dir.path()).await;
     let children = child_with_usage(&worker, dir.path()).await;
     children
@@ -157,7 +157,7 @@ async fn close_refuses_to_discard_owed_usage_after_source_conflict() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for command in ["shutdown", "kill"] {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let (worker, path, server) = accounting_worker(dir.path()).await;
         let children = child_with_usage(&worker, dir.path()).await;
         children
@@ -203,7 +203,7 @@ async fn close_keeps_accounting_reachable_until_child_source_can_be_read() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for command in ["shutdown", "kill"] {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let (worker, path, server) = accounting_worker(dir.path()).await;
         let children = child_with_usage(&worker, dir.path()).await;
         children

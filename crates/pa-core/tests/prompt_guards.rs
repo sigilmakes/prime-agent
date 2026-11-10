@@ -12,6 +12,7 @@
 //! is byte-identical across sessions) and tool surface (the core layer's documented tools match the
 //! real registered surface; a tool change without a prompt update fails here).
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::BTreeSet;
 use std::path::Path;
 

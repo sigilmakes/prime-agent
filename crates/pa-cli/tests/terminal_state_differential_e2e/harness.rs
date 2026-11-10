@@ -13,7 +13,8 @@
 //! The pty harness: the recording mock terminal, the termios differential,
 //! the mock supervisor, and the child-mode plumbing (this binary
 //! re-executed under the pty as the product under test).
-
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;

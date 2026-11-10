@@ -12,6 +12,7 @@
 //! `kernel-state.dill` snapshot, and a resumed session prewarms from the snapshot alone so its
 //! first `ipython` call sees the old variables. The kernel Python is ambient; skipped if absent.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

@@ -2,6 +2,7 @@
 //! bounds, the 8 MiB cap (header AND streaming), redirect refusal, `ETag`
 //! round-trip, and the 304 path.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 mod common;
 
 use common::{not_modified, ok_json, redirect, status};

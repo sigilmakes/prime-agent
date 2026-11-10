@@ -21,6 +21,7 @@
 )]
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};

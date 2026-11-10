@@ -16,6 +16,7 @@ use pa_core::{
         PluginHost, PluginSource,
     },
 };
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,

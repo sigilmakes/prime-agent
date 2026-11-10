@@ -1,3 +1,4 @@
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 mod common;
 
 #[tokio::test]

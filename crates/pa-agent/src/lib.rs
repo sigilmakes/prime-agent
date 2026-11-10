@@ -2,6 +2,9 @@
 //! throughout and converts to LLM-bound [`types::Message`] values only at
 //! the model call boundary.
 
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub mod abort;
 pub mod agent;
 pub mod agent_loop;

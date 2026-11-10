@@ -17,6 +17,7 @@
 //! reads/writes); the test is skipped when the TS binary is not installed.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;

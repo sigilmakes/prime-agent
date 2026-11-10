@@ -1,6 +1,7 @@
 //! Real CLI subprocesses and a supervisor/worker over private paths and local providers only.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use serde_json::{json, Value};
 
 #[path = "plugin_headless/daemon.rs"]

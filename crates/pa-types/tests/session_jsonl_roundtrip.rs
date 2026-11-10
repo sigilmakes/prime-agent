@@ -4,6 +4,7 @@
 //! un-tagged user text blocks and unknown entry types). Live sessions are opt-in with
 //! `PA_TYPES_LIVE_SESSIONS=1`; the default run is hermetic.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use pa_types::session::FileEntry;
 use serde_json::Value;
 use std::path::PathBuf;

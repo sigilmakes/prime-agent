@@ -1,5 +1,7 @@
 //! Persistent session regression: log reads and appends preserve opaque metadata.
+
 use pa_core::session::manager::SessionManager;
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use pa_types::session::{FileEntry, GitContext};
 use serde_json::{json, Value};
 use std::path::Path;

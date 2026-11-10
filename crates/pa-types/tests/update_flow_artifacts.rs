@@ -2,6 +2,7 @@
 //! example,
 //! the intent/status/marker artifacts, and the watchdog/transition tables.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::Path;
 
 use pa_types::daemon::update_flow::{

@@ -16,6 +16,7 @@
 //! frames are checked against the TS capture corpus
 //! (`crates/pa-daemon/testdata/acp`).
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};

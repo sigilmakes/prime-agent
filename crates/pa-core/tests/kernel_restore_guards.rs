@@ -13,6 +13,7 @@
 //! keeps the on-disk payload the fresher copy.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

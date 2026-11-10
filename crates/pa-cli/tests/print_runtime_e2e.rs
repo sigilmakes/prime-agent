@@ -14,6 +14,7 @@
 //! HOME, and the scripted faux provider drive the complete pipeline from
 //! CLI parse to headless terminal selection, deterministically.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::process::Command;
 
 fn run(args: &[&str], script: &serde_json::Value) -> (String, String, i32) {

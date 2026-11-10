@@ -18,6 +18,8 @@
 
 // This binary's routes use a subset of the shared module's surface,
 // so the rest is deliberately dead here.
+
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 #[path = "terminal_state_differential_e2e/harness.rs"]
 #[allow(dead_code)]
 mod harness;

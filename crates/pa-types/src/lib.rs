@@ -6,6 +6,9 @@
 //! Every wire struct carries a `#[serde(flatten)] rest: JsonMap` catch-all, so unmodeled fields
 //! survive a parse/serialize round trip: the re-parsed JSON must equal the original.
 
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub mod ai;
 pub mod compaction;
 pub mod daemon;

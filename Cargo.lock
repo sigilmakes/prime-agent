@@ -1559,6 +1559,7 @@ name = "pa-agent"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "pa-test-scratch",
  "serde",
  "serde_json",
  "thiserror",
@@ -1577,6 +1578,7 @@ dependencies = [
  "hex",
  "hmac",
  "http",
+ "pa-test-scratch",
  "pa-types",
  "rand 0.8.8",
  "rcgen",
@@ -1616,6 +1618,7 @@ dependencies = [
  "pa-ai",
  "pa-core",
  "pa-daemon",
+ "pa-test-scratch",
  "pa-tui",
  "pa-types",
  "rsa",
@@ -1650,6 +1653,7 @@ dependencies = [
  "pa-agent",
  "pa-ai",
  "pa-models",
+ "pa-test-scratch",
  "pa-types",
  "png",
  "proptest",
@@ -1684,6 +1688,7 @@ dependencies = [
  "pa-ai",
  "pa-core",
  "pa-models",
+ "pa-test-scratch",
  "pa-types",
  "proptest",
  "serde",
@@ -1705,6 +1710,7 @@ dependencies = [
  "hex",
  "hmac",
  "pa-ai",
+ "pa-test-scratch",
  "pa-types",
  "rcgen",
  "reqwest",
@@ -1719,6 +1725,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pa-test-scratch"
+version = "0.10.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pa-tui"
 version = "0.10.0"
 dependencies = [
@@ -1729,6 +1742,7 @@ dependencies = [
  "ignore",
  "mmdflux",
  "notify",
+ "pa-test-scratch",
  "pa-types",
  "proptest",
  "ratatui",
@@ -1751,6 +1765,7 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "libc",
+ "pa-test-scratch",
  "regex",
  "serde",
  "serde_json",

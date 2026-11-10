@@ -1,5 +1,6 @@
 //! Nix owns installation and rollback. Refuse before any installer I/O.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::process::Command;
 
 use pa_core::update::installer::{run_bundled_installer, run_installer_from, InstallerOutput};

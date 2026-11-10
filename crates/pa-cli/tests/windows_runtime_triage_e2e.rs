@@ -37,6 +37,7 @@
 //! everything else - the scripted engine, the headless TUI driver, the
 //! store reads - is platform-neutral product code.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};

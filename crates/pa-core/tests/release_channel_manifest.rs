@@ -12,6 +12,7 @@
 //! the promote job's real step code against a fixture tree, and prove the emitted manifest parses
 //! with the exact reader while the named archives exist with the digests it claims.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -6,6 +6,7 @@
 use pa_models::pinning::{parse_provider_model_catalog, PinnedTemplates};
 use pa_models::schema::{parse_model_catalog, InvalidEntries};
 use pa_models::transports;
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use serde_json::Value;
 
 const FIXTURE: &str = include_str!("fixtures/catalog.v1.json");

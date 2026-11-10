@@ -3,6 +3,7 @@
 //! checking normal turns, parallel tool calls, tool errors, mid-turn failures
 //! with retry, abort, and max-iteration stops.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;

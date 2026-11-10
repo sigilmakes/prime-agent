@@ -1,5 +1,6 @@
 //! Dedicated binary: Codex WSS is the first process-default TLS client.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::sync::Arc;
 use std::time::Duration;
 

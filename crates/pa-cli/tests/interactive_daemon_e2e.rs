@@ -15,6 +15,7 @@
 //! `script` seam is the faux provider contract; the product never sets it.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::fmt::Write as _;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};

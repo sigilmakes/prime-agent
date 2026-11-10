@@ -594,7 +594,7 @@ async fn accounting_refusal_fixture(
 ) {
     let dir = tempfile::Builder::new()
         .prefix("pa-close-")
-        .tempdir_in("/tmp")
+        .tempdir()
         .unwrap();
     let socket_path = dir.path().join("w.sock");
     let supervisor = Arc::new(
