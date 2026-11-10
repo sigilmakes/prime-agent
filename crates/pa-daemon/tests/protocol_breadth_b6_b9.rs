@@ -714,6 +714,45 @@ fn wave_b9_session_navigation_wire_shapes() {
     assert_eq!(response["success"], false, "{response}");
 }
 
+/// Cancel `admission_id` once the dispatcher has registered it. TS registers an admission at
+/// parse time; this port registers in the dispatch task, so a cancel that lands in that window
+/// answers "unknown" and is retried here instead of racing one fixed sleep. Responses that
+/// arrive before the cancel's own response are appended to `lines`.
+fn cancel_owned_admission(
+    client: &mut Client,
+    session_id: &str,
+    admission_id: &str,
+    lines: &mut std::collections::VecDeque<serde_json::Value>,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let id = format!("cancel-{admission_id}-{attempt}");
+        client.send_command(
+            &id,
+            &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": admission_id, "cancelOwned": true }),
+        );
+        // The cancelled wait's failure response may land before the cancel's own response
+        // (the dropped queue item settles the wait), so the read buffers instead of dropping.
+        let (response, buffered) = client.read_response_and_lines(&id);
+        lines.extend(buffered);
+        if response["data"] == json!({ "status": "owned" }) {
+            return response;
+        }
+        assert_eq!(
+            response["data"],
+            json!({ "status": "unknown" }),
+            "{response}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the admission never registered: {response}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn wave_b9_prompt_admission_wire_shapes() {
     let _serial = serial_lock();
@@ -782,21 +821,11 @@ fn wave_b9_prompt_admission_wire_shapes() {
         "p-2",
         &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "queued behind", "admissionId": "adm-1" }),
     );
-    // Give the admitted prompt's route its start: TS registers an admission at parse
-    // time; this port registers in the dispatch task, so the cancel must not race it.
-    std::thread::sleep(Duration::from_millis(100));
-
-    // The queued prompt committed at admission: cancelOwned withdraws
-    // that item without aborting the unrelated slow turn.
-    client.send_command(
-        "c-1",
-        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1", "cancelOwned": true }),
-    );
-    // The cancelled wait's failure response may land before the cancel's own response
-    // (the dropped queue item settles the wait), so the read buffers instead of dropping.
-    let (response, mut lines) = client.read_response_and_lines("c-1");
+    // The queued prompt committed at admission: cancelOwned withdraws that item without
+    // aborting the unrelated slow turn.
+    let mut lines = std::collections::VecDeque::new();
+    let response = cancel_owned_admission(&mut client, &session_id, "adm-1", &mut lines);
     assert_eq!(response["success"], true, "{response}");
-    assert_eq!(response["data"], json!({ "status": "owned" }));
     // The cancelled prompt_and_wait fails its wait (the dropped queue item
     // never completes).
     let response = match lines
