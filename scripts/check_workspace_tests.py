@@ -156,6 +156,9 @@ def target_environment(repo, state, ambient):
     kernel.parent.mkdir(parents=True, exist_ok=True)
     kernel.symlink_to(Path(ambient["PRIME_AGENT_KERNEL_PYTHON"]).parent.parent,
                       target_is_directory=True)
+    # pa-test-scratch would otherwise nest a root under TMPDIR and spend `sun_path` budget the
+    # socket fixtures need. This target already owns `TMPDIR`, so hand it back verbatim.
+    env["PA_TEST_SCRATCH_ROOT"] = env["TMPDIR"]
     env.update({key: ambient[key] for key in (
         "PRIME_AGENT_KERNEL_PYTHON", "PA_E2E_KERNEL_PYTHON",
     )})
