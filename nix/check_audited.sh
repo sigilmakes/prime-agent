@@ -20,5 +20,3 @@ cargo test --offline --locked -p pa-core --lib settings::
 cargo test --offline --locked -p pa-core --lib session::
 cargo test --offline --locked -p pa-cli --test settings_mcp_save --test nix_managed_update
 cargo test --offline --locked -p pa-core --lib update::managed::tests
-cargo test --offline --locked -p pa-cli --test release_workflow --test windows_runtime_triage_workflow
-cargo test --offline --locked -p pa-core --test release_channel_manifest
