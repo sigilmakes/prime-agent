@@ -1,0 +1,1 @@
+- The product is now Weave and the CLI binary is `wv` (version 0.1.0). Installers, update paths, and release assets use `share/weave`, `.weave-install`, and `wv-*`; an existing Prime Agent install must rerun the installer.
