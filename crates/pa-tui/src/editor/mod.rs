@@ -967,7 +967,7 @@ mod tests {
         let children = Some(vec!["@wv/a.rs".to_string(), "@wv/b.rs".to_string()]);
         // Tab on the open menu applies the directory item.
         let (_base, mut e) = at_editor();
-        for ch in "@prime-ag".chars() {
+        for ch in "@wv".chars() {
             e.handle_input(&ch.to_string());
         }
         assert_eq!(settled_menu(&mut e), Some(vec!["@wv/".to_string()]));
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(settled_menu(&mut e), children);
         // Tab before the menu opens applies the single match inline.
         let (_base, mut e) = at_editor();
-        for ch in "@prime-ag".chars() {
+        for ch in "@wv".chars() {
             e.handle_input(&ch.to_string());
         }
         e.handle_input("tab");
