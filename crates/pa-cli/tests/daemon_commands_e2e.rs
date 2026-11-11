@@ -280,6 +280,13 @@ fn stderr(output: &Output) -> String {
 
 /// Replace volatile tokens (ages, hex ids, uuids, timestamps) so outputs compare equal.
 fn normalize(text: &str) -> String {
+    // The fork renamed the product and binary; compare the command surface,
+    // not the brand. The TS reference still says prime-agent / Prime Agent.
+    let text = text
+        .replace("prime-agent", "<bin>")
+        .replace("wv", "<bin>")
+        .replace("Prime Agent", "<product>")
+        .replace("Weave", "<product>");
     text.split('\n')
         .map(|line| {
             line.split_whitespace()
