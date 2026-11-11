@@ -1,4 +1,6 @@
 //! Synthetic-provider regressions for summary request controls and cancellation.
+
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::time::Duration;
 
 use pa_core::session_engine::branch_summarization::{

@@ -38,7 +38,7 @@ impl HostCapabilities for NoCapabilities {
 }
 
 fn host(plugins: &[(&str, &str)]) -> Arc<PluginHost> {
-    let host = PluginHost::new("hook-test".into(), Arc::new(NoCapabilities), []);
+    let host = PluginHost::new(Arc::new(NoCapabilities), []);
     host.reconcile(
         plugins
             .iter()

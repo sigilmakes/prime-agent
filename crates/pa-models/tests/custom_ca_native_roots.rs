@@ -2,6 +2,7 @@
 // Windows use system keystores; this fixture must never modify a real keystore.
 #![cfg(all(target_family = "unix", not(target_vendor = "apple")))]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 mod common;
 
 #[tokio::test]

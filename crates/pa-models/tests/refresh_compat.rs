@@ -3,6 +3,7 @@
 //! silently, malformed entries skip, failures keep state unchanged,
 //! hourly gating + coalescing hold, and scopes isolate accounts.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 mod common;
 
 use std::sync::Arc;

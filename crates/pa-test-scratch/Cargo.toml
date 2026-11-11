@@ -1,0 +1,10 @@
+[package]
+name = "pa-test-scratch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Test-only: a private TMPDIR per test binary, removed when the binary exits."
+
+[dependencies]
+libc = "0.2"

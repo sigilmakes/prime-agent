@@ -15,6 +15,9 @@
 
 // Internal ported modules are crate-private: the only public API is the
 // runtime boundary below (see crates/pa-cli/README.md).
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 #[cfg(test)]
 pub(crate) mod test_support {
     /// The faux provider registers process-globally. Every pa-cli test module

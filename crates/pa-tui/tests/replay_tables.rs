@@ -18,6 +18,7 @@
 // The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use pa_tui::session::{JsonlSessionStream, SessionStream};
 use pa_tui::theme::{ColorMode, Theme};
 use pa_tui::view::AgentView;

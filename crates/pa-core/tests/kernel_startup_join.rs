@@ -5,6 +5,7 @@
 
 use pa_core::kernel::cancellation::AbortSignal;
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 

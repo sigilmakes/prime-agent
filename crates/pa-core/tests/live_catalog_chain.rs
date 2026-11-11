@@ -15,6 +15,7 @@
 //! `internal/*` models, the catalog-repo (layer A) entries, and live pricing; without credentials
 //! the compiled fallback serves unchanged. Everything runs against a scripted loopback server.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 mod common;
 
 use std::collections::HashMap;

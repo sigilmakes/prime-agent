@@ -1,5 +1,7 @@
 //! Regression for count-hook yields with concurrent same-VM invocations.
+
 use pa_core::plugins::*;
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;

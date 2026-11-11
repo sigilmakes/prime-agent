@@ -199,20 +199,18 @@ pub(super) fn append_rows(path: &Path, rows: &[Value]) {
     )
     .unwrap();
     for row in rows {
-        assert!(matches!(
-            log.append(row, crate::session_transport::deadline()),
-            pa_core::session_log::Outcome::Committed { .. }
-        ));
+        let outcome = log.append(row, crate::session_transport::deadline());
+        assert!(
+            matches!(outcome, pa_core::session_log::Outcome::Committed { .. }),
+            "fixture row must commit: {outcome:?} row={row}"
+        );
     }
 }
 
 fn reencode(content: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replacement.jsonl");
-    let rows: Vec<Value> = content
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap()["row"].clone())
-        .collect();
+    let rows: Vec<Value> = content.lines().map(crate::test_rows::row_of).collect();
     append_rows(&path, &rows);
     fs::read_to_string(path).unwrap()
 }

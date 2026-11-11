@@ -27,6 +27,7 @@
 //!   that open and succeeds instead of erroring.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -255,12 +256,10 @@ from mcp.server.mcpserver import MCPServer
 
 server = MCPServer("settle-fixture")
 
-
 @server.tool()
 def echo(text: str) -> str:
     """Echo the text back."""
     return text
-
 
 server.run()
 "#

@@ -27,6 +27,7 @@
 //! The battery source file's three scenario tests are asserted by name, so
 //! the workflow and the battery it claims to run cannot drift apart.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::fs;
 use std::path::PathBuf;
 

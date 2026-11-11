@@ -16,6 +16,7 @@
 //! the provisioner usable, so a settled child's kernel releases without ending the session. The
 //! kernel Python is ambient product state; skipped when absent.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

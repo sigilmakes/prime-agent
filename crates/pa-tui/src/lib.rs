@@ -22,6 +22,9 @@
 // without changing behavior.
 #![allow(clippy::unnecessary_wraps)]
 
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub mod agents_view;
 pub mod agents_view_forest;
 pub mod agents_view_search;

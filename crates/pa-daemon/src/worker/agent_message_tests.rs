@@ -447,11 +447,9 @@ async fn clear_queue_bounces_recovered_agent_messages_to_their_senders() {
 
 #[cfg(unix)]
 async fn assert_clear_queue_bounces(restore_queue: bool) {
-    // Unix sockets must fit SUN_LEN even when the runner's TMPDIR is deep.
-    let temp = tempfile::Builder::new()
-        .prefix("pa-am-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    // The process scratch root is short enough for `SUN_LEN`, and it is removed when the test
+    // binary exits, so a fixture no one drops cannot outlive the run.
+    let temp = tempfile::Builder::new().prefix("pa-am-").tempdir().unwrap();
     let dir = temp.path();
     let socket = dir.join("supervisor.sock");
     let (sends, _server) = crate::worker::tests::fake_supervisor(&socket);

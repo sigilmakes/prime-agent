@@ -2,6 +2,7 @@
 // loader on non-Apple Unix, so the fixture never touches a real keystore.
 #![cfg(all(target_family = "unix", not(target_vendor = "apple")))]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 mod common;
 
 #[tokio::test]

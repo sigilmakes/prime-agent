@@ -111,6 +111,41 @@ enum PaneBarrier {
     Gone { needle: String, deadline: Instant },
 }
 
+impl PaneBarrier {
+    /// Whether `frames` (every frame captured so far) already meets the condition.
+    fn holds(&self, frames: Option<&[String]>) -> bool {
+        frames.is_some_and(|frames| match self {
+            Self::Render {
+                needle, baseline, ..
+            } => frames
+                .get(*baseline..)
+                .unwrap_or_default()
+                .iter()
+                .any(|frame| frame.contains(needle.as_str())),
+            Self::Gone { needle, .. } => !frames
+                .last()
+                .is_some_and(|frame| frame.contains(needle.as_str())),
+        })
+    }
+
+    fn deadline(&self) -> Instant {
+        match self {
+            Self::Render { deadline, .. } | Self::Gone { deadline, .. } => *deadline,
+        }
+    }
+}
+
+/// Sleep until the armed barrier's deadline; pending while none is armed.
+async fn barrier_deadline(barrier: Option<&PaneBarrier>) {
+    match barrier {
+        Some(armed) => {
+            let left = armed.deadline().saturating_duration_since(Instant::now());
+            tokio::time::sleep(left).await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// Draw the mounted onboarding screen and drive it until a key decides, the exit keys quit,
 /// or the optional background flow settles. Each iteration draws first and waits after — a
 /// deciding key that is already queued still leaves the mounted frame captured.
@@ -123,31 +158,6 @@ async fn drive_onboarding_pane(
 ) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
     let mut barrier: Option<PaneBarrier> = None;
     loop {
-        if let Some(armed) = barrier.take() {
-            let satisfied = drive
-                .renderer
-                .headless_frames()
-                .is_some_and(|frames| match &armed {
-                    PaneBarrier::Render {
-                        needle, baseline, ..
-                    } => frames
-                        .get(*baseline..)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|frame| frame.contains(needle.as_str())),
-                    PaneBarrier::Gone { needle, .. } => !frames
-                        .last()
-                        .is_some_and(|frame| frame.contains(needle.as_str())),
-                });
-            let expired = match &armed {
-                PaneBarrier::Render { deadline, .. } | PaneBarrier::Gone { deadline, .. } => {
-                    Instant::now() > *deadline
-                }
-            };
-            if !satisfied && !expired {
-                barrier = Some(armed);
-            }
-        }
         view.onboarding = Some(screen);
         match drive.renderer {
             Renderer::Terminal { .. } => {
@@ -168,7 +178,20 @@ async fn drive_onboarding_pane(
         let Some(mut pane) = view.onboarding.take() else {
             unreachable!("the pane mounts at the top of every iteration");
         };
+        // The frame just painted may satisfy an armed barrier; re-check here because nothing else
+        // wakes the select for a condition the paint itself met.
+        if barrier
+            .as_ref()
+            .is_some_and(|armed| armed.holds(drive.renderer.headless_frames()))
+        {
+            barrier = None;
+        }
         tokio::select! {
+            // A barrier parked behind a condition that never arrives must still pop at its
+            // deadline: the tick that used to wake this loop is gone.
+            () = barrier_deadline(barrier.as_ref()) => {
+                barrier = None;
+            }
             maybe_input = drive.ui_rx.recv(), if barrier.is_none() => {
                 // Without this arm the always-ready `recv()` spins the redraw loop hot.
                 let Some(input) = maybe_input else {
@@ -669,5 +692,74 @@ mod tests {
         );
         assert!(cancel.cancelled());
         assert_eq!(done_rx.try_recv(), Ok(()));
+    }
+
+    /// Drive a fresh onboarding pane until the queued timing marker is consumed; the marker's
+    /// rejection is the witness that the input batch moved past whatever preceded it.
+    async fn marker_consumed_behind(barrier: UiInput) -> String {
+        let (_auth_tx, mut auth_rx) = mpsc::unbounded_channel();
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        ui_tx.send(barrier).expect("queued barrier");
+        let (timing_tx, _timing_rx) = std::sync::mpsc::channel();
+        ui_tx
+            .send(UiInput::Timestamp(timing_tx))
+            .expect("queued marker");
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        let mut renderer = Renderer::Headless {
+            width: 80,
+            height: 24,
+            frames: Vec::new(),
+            renders: 0,
+            replay_bytes: Vec::new(),
+        };
+        let exit_guard = ExitGuard::new();
+        let mut headless_done = false;
+        let mut drive = PaneDrive {
+            ui_rx: &mut ui_rx,
+            renderer: &mut renderer,
+            exit_guard: &exit_guard,
+            keybindings: KeybindingsManager::new(),
+            auth_panel_rx: &mut auth_rx,
+            headless_done: &mut headless_done,
+        };
+        let mut osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_onboarding_pane(
+                &mut view,
+                &mut drive,
+                crate::onboarding::OnboardingScreen::new(),
+                None,
+                &mut osc_sink,
+            ),
+        )
+        .await
+        .expect("the barrier releases")
+        .err()
+        .expect("onboarding rejects session timing markers")
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_barrier_the_first_paint_satisfies_releases_the_queued_batch() {
+        let error = marker_consumed_behind(UiInput::WaitRender {
+            needle: "Welcome to PRIME Agent".to_string(),
+            timeout_ms: 5_000,
+        })
+        .await;
+        assert_eq!(error, "headless timing markers require an attached session");
+    }
+
+    #[tokio::test]
+    async fn a_barrier_no_frame_satisfies_pops_at_its_deadline() {
+        let error = marker_consumed_behind(UiInput::WaitRender {
+            needle: "a frame this pane never paints".to_string(),
+            timeout_ms: 50,
+        })
+        .await;
+        assert_eq!(error, "headless timing markers require an attached session");
     }
 }

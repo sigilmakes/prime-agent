@@ -44,13 +44,10 @@ fn native_replay_matches_the_read_only_sdk_row_for_row() {
 
 #[test]
 fn damaged_native_rows_are_refused_without_repair() {
-    for damage in [
-        "blank",
-        "malformed",
-        "unterminated",
-        "invalid-utf8",
-        "checksum",
-    ] {
+    // A same-length edit is not damage any more: a bare row carries no
+    // checksum, so its bytes are its own and nothing can tell it from an
+    // original. Only shapes that are not a row at all are refused.
+    for damage in ["blank", "malformed", "unterminated", "invalid-utf8"] {
         let (_dir, path) = fixture();
         let mut bytes = std::fs::read(&path).unwrap();
         match damage {
@@ -60,10 +57,6 @@ fn damaged_native_rows_are_refused_without_repair() {
                 bytes.pop();
             }
             "invalid-utf8" => bytes.extend_from_slice(b"\xff\xfe\n"),
-            "checksum" => {
-                let text = String::from_utf8(bytes).unwrap();
-                bytes = text.replace("one", "bad").into_bytes();
-            }
             _ => unreachable!(),
         }
         std::fs::write(&path, &bytes).unwrap();

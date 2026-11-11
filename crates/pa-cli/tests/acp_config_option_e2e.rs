@@ -24,6 +24,7 @@
 //! the worker's own wire commands, with a models.json fixture in the
 //! agent dir for discovery.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};

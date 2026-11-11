@@ -33,6 +33,7 @@
 //! scripts need (python 3.12: the merge step unpacks with
 //! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it).
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};

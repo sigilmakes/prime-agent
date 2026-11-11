@@ -17,6 +17,7 @@
 //! second surface under a seeded store and asserts a sub-second round trip.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -177,12 +178,10 @@ fn append_session_rows(path: &Path, content: &str) {
         .expect("open fixture session log");
     for line in content.lines().filter(|line| !line.is_empty()) {
         let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+        let outcome = log.append(&row, deadline);
         assert!(
-            matches!(
-                log.append(&row, deadline),
-                pa_core::session_log::Outcome::Committed { .. }
-            ),
-            "fixture row must be durable"
+            matches!(outcome, pa_core::session_log::Outcome::Committed { .. }),
+            "fixture row must be durable: {outcome:?}"
         );
     }
 }
@@ -276,7 +275,6 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     let agent_dir = dir.path().join("agent");
     let session_dir = pa_daemon::paths::sessions_dir(&agent_dir).expect("native session directory");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    let supervisor = spawn_supervisor(dir.path());
 
     // The multi-hundred-message transcript, written directly (the
     // operator-scale attach snapshot ships the whole history).
@@ -322,6 +320,9 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
         }
         append_session_rows(&transcript_path, &content);
     }
+    // Seed before the supervisor starts: its boot scan walks this directory, and a scan that
+    // reaches a half-seeded transcript takes the writer's lock mid-seed.
+    let supervisor = spawn_supervisor(dir.path());
     let script = serde_json::json!({ "responses": [
         { "text": "hello from scripted", "delayMs": 20 },
     ] });

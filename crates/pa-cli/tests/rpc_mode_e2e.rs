@@ -15,6 +15,7 @@
 //! faux provider: protocol contract, core command set, daemon-mode
 //! errors, and the stdin-close lifecycle.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};

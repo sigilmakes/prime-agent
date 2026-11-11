@@ -1,4 +1,5 @@
-//! Reader tests use real checksummed logs, not legacy JSONL fixtures.
+//! Reader tests write logs with the real writer; a bare row is the only
+//! shape it produces, and the reader also folds the replaced envelope.
 
 use super::*;
 use pa_core::session_log::{Outcome, SessionLog};
@@ -118,29 +119,45 @@ fn log_reader_ignores_a_torn_append_without_mutating_or_locking() {
 }
 
 #[test]
-fn log_reader_rejects_corruption_and_legacy_rows_without_repair() {
+fn log_reader_cannot_tell_an_edited_bare_row_from_an_original_one() {
     let dir = tempfile::tempdir().unwrap();
     let (_log, path) = fixture(dir.path(), "reader");
     let bytes = fs::read_to_string(&path).unwrap();
-    fs::write(&path, bytes.replace("first prompt", "false prompt")).unwrap();
-    assert!(read_session_info(&path).is_none());
-    assert!(list_sessions(dir.path()).is_empty());
-    fs::write(&path, "{\"type\":\"session\",\"id\":\"old\",\"cwd\":\"/old\",\"timestamp\":\"2026-01-01T00:00:00Z\"}\n").unwrap();
-    assert!(read_session_info(&path).is_none());
-    assert!(read_session_header(&path).is_none());
-    assert!(list_sessions(dir.path()).is_empty());
+    let edited = bytes.replace("first prompt", "false prompt");
+    assert_ne!(edited, bytes, "the edit must land on the file");
+    fs::write(&path, &edited).unwrap();
+    let info = read_session_info(&path).expect("a bare row carries no checksum to break");
+    assert!(info.all_messages_text.contains("false prompt"));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        edited.as_bytes(),
+        "reading repairs nothing"
+    );
 }
 
 #[test]
-fn log_reader_rejects_repeated_sequence_even_with_a_valid_checksum() {
+fn log_reader_refuses_a_malformed_line_and_leaves_the_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let (_log, path) = fixture(dir.path(), "reader");
-    let bytes = fs::read_to_string(&path).unwrap();
-    let last = bytes.lines().last().unwrap();
-    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    writeln!(writer, "{last}").unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"{not json}\n");
+    fs::write(&path, &bytes).unwrap();
     assert!(read_session_info(&path).is_none());
     assert!(list_sessions(dir.path()).is_empty());
+    assert_eq!(fs::read(&path).unwrap(), bytes, "no implicit repair");
+}
+
+#[test]
+fn log_reader_folds_a_legacy_bare_log_without_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.jsonl");
+    let header = "{\"type\":\"session\",\"id\":\"old\",\"cwd\":\"/old\",\"timestamp\":\"2026-01-01T00:00:00Z\"}\n";
+    fs::write(&path, header).unwrap();
+    let info = read_session_info(&path).expect("a bare header needs no envelope");
+    assert_eq!(info.id, "old");
+    assert_eq!(info.message_count, 0);
+    assert_eq!(list_sessions(dir.path()).len(), 1);
+    assert_eq!(fs::read(&path).unwrap(), header.as_bytes());
 }
 
 #[test]

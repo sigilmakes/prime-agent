@@ -29,6 +29,7 @@ name = "pa-tui-replay"
 path = "src/bin/pa-tui-replay.rs"
 
 [dev-dependencies]
+pa-test-scratch = { path = "../pa-test-scratch" }
 tempfile = "3"
 base64 = "0.22"
 # The release-workflow test parses the CI workflow YAML and builds fixture

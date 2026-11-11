@@ -19,6 +19,9 @@
 //! Public API: the tool-definition contract; subsystem internals are `pub(crate)`.
 //! `SessionEngine` (message in -> events out) is the future facade.
 
+// A test binary's own TMPDIR: fixtures the suite leaves behind die with the process.
+#[cfg(test)]
+use pa_test_scratch as _;
 pub(crate) mod tools;
 
 // Tool-definition contract.

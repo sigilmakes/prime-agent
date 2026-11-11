@@ -4,6 +4,7 @@
 //! survive the same window.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::Write as _;
 use std::os::unix::net::UnixListener;
 use std::path::Path;

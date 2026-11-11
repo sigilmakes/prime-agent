@@ -3,6 +3,7 @@
 // Kernel manager futures follow the crate's existing integration-test disposition.
 #![allow(clippy::large_futures)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;

@@ -1,6 +1,7 @@
 //! Production catalog startup runs in env-cleared child processes. A counted,
 //! non-forwarding proxy fences every non-loopback destination, even under mutation.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};

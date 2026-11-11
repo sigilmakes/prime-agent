@@ -1189,9 +1189,12 @@ mod tests {
     }
 
     fn temp_socket(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("pa-herdr-{tag}-{}", uuid::Uuid::new_v4()));
+        // The `sun_path` budget is shared with the runner's `TMPDIR`, so the fixture name stays
+        // short: the tag plus eight hex digits is unique enough for one test binary.
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir().join(format!("pa-h{tag}{}", &unique[..8]));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("herdr.sock")
+        dir.join("h.sock")
     }
 
     fn pane_env(socket_path: &std::path::Path, pane_id: &str) -> BTreeMap<String, String> {

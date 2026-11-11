@@ -1,5 +1,6 @@
 //! Typed reported failures keep their payload and normal loop semantics.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pa_agent::abort::AbortSignal;

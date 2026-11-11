@@ -12,5 +12,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+pa-test-scratch = { path = "../pa-test-scratch" }
+
 [lints]
 workspace = true

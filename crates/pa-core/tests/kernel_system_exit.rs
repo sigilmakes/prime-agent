@@ -14,6 +14,7 @@
 //! must stay typed, because the ipython tool's wait/kill recovery branches on it.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

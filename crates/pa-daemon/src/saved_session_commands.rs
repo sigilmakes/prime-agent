@@ -1105,7 +1105,7 @@ mod tombstone_usage_tests {
     fn a_non_regular_session_path_captures_nothing() {
         let root = tempfile::Builder::new()
             .prefix("pd-")
-            .tempdir_in("/tmp")
+            .tempdir()
             .expect("short owned socket fixture directory");
         let agent_dir = root.path().join("agent");
         let sessions_dir = agent_dir.join("sessions");

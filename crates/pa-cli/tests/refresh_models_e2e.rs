@@ -1,6 +1,7 @@
 //! One-shot refresh never starts a daemon or a session. All state is fixture-local.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;

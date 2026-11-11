@@ -12,6 +12,7 @@
 //! config flag boots its kernel at creation (so a compaction with no `ipython` use still lands the
 //! `ipython_state` notice); a depth-1 subagent session keeps the lazy first-call start.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

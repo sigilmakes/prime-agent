@@ -14,6 +14,7 @@
 //! and reported), and the RLM bootstrap surface against the TS contract.
 #![cfg(unix)]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;

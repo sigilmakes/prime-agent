@@ -23,6 +23,7 @@
 )]
 #![cfg(target_os = "linux")]
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -256,6 +257,30 @@ fn session_state(session_file: &Path) -> String {
     state
 }
 
+/// Who the lease file still names, for a refusal nobody expected: the pid's state, argv, and the
+/// lease owner it was launched with.
+fn holder_report(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .unwrap_or("unreadable")
+        .to_string();
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+        .unwrap_or_default();
+    let owner = std::fs::read(format!("/proc/{pid}/environ"))
+        .ok()
+        .and_then(|environ| {
+            environ
+                .split(|byte| *byte == 0)
+                .filter_map(|entry| std::str::from_utf8(entry).ok())
+                .find(|entry| entry.starts_with("PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID="))
+                .map(str::to_string)
+        });
+    format!("pid {pid} state {state} cmdline {cmdline:?} owner {owner:?}")
+}
+
 #[test]
 fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -322,8 +347,18 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     );
     assert_eq!(session_state(&session_file), "archived");
 
-    let lease = pa_daemon::lease::acquire_runtime_session_lease(&session_file, &agent_dir)
-        .expect("the dead worker's lease must be reclaimable");
+    let lease = match pa_daemon::lease::acquire_runtime_session_lease(&session_file, &agent_dir) {
+        Ok(lease) => lease,
+        Err(error) => {
+            let holder = error
+                .downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
+                .and_then(|refusal| refusal.holder_pid);
+            panic!(
+                "the dead worker's lease must be reclaimable: {error} (holder: {})",
+                holder.map_or_else(|| "unreported".to_string(), holder_report)
+            );
+        }
+    };
     drop(lease);
     let reopened = client.request(
         "reopen",

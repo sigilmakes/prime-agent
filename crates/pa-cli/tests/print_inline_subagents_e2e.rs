@@ -15,6 +15,7 @@
 //! full in-process tree — spawn, child reply turns, the #2270 quiescence
 //! wait, the depth gate, and the exit disposal.
 
+use pa_test_scratch as _; // a private TMPDIR for this test binary, deleted on exit
 use std::path::{Path, PathBuf};
 
 /// One isolated print run: a hermetic HOME + agent dir, the faux script
