@@ -55,7 +55,7 @@ def verify(incoming):
             check(len(decoders) == len(files) == 1,
                   f"{directory}: Linux requires exactly one decoder")
             decoder = decoders[0]
-            expected = f"prime-agent-{manifest['version'].removeprefix('v')}-{binary['platform']}.debug.gz"
+            expected = f"wv-{manifest['version'].removeprefix('v')}-{binary['platform']}.debug.gz"
             check(decoder["target"] == target and decoder["file"] == expected
                   and files[0].name == expected,
                   f"{directory}: decoder name/target mismatch")
@@ -66,7 +66,7 @@ def verify(incoming):
             check(sums.count(f"{decoder['sha256']}  {expected}") == 1,
                   f"{directory}: decoder missing from SHA256SUMS")
             with tarfile.open(directory / binary["file"], "r:gz") as tar:
-                members = [m for m in tar.getmembers() if m.name == "prime-agent"]
+                members = [m for m in tar.getmembers() if m.name == "wv"]
                 check(len(members) == 1 and members[0].isfile(),
                       f"{directory}: no unique installed ELF")
                 installed = tar.extractfile(members[0]).read()

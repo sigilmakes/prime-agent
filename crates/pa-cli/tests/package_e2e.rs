@@ -448,7 +448,7 @@ fn ts_binary() -> Option<PathBuf> {
         return path.exists().then_some(path);
     }
     let found = Command::new("which")
-        .arg("prime-agent")
+        .arg("wv")
         .output()
         .ok()
         .filter(|out| out.status.success())?;
@@ -530,7 +530,7 @@ fn package_manager_corpus_matches_ts_binary() {
         eprintln!("SKIPPED: TS prime-agent binary not installed");
         return;
     };
-    let rust_bin = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let rust_bin = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let fixtures = make_fixtures();
 
     let base = std::env::temp_dir().join(format!("pa-package-e2e-{}", std::process::id()));

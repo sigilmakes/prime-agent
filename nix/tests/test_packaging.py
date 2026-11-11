@@ -39,7 +39,7 @@ class PackagingTests(unittest.TestCase):
     def test_artifact_mutants_reject_endpoints_callbacks_and_trace_auth(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            binary = root / "prime-agent"
+            binary = root / "wv"
             binary.write_bytes(b"\x7fELF clean payload")
             self.assertEqual(privacy.artifact_errors(root), [])
             for marker in privacy.FORBIDDEN:
@@ -54,7 +54,7 @@ class PackagingTests(unittest.TestCase):
             package.mkdir()
             executable = root / "executable"
             executable.write_bytes(b"agent-analytics/events")
-            (package / "prime-agent").symlink_to(executable)
+            (package / "wv").symlink_to(executable)
             self.assertTrue(privacy.artifact_errors(package))
 
     def test_source_mutants_reject_reporter_wiring_but_allow_compatibility_keys(self):

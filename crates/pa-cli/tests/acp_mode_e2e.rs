@@ -219,7 +219,7 @@ fn daemon_attached_command(
     socket: &std::path::Path,
     args: &[&str],
 ) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(args)
         .arg("--daemon-socket")
@@ -300,7 +300,7 @@ const TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Assert a settled turn's stop reason, printing the whole response
 /// envelope on mismatch: an `internal_error`'s failure text (the
-/// `prime-agent turn failed: <failure>` message) is otherwise lost — the
+/// `wv turn failed: <failure>` message) is otherwise lost — the
 /// `stopReason: null` arms of `assert_eq!` show only the null.
 fn assert_end_turn(response: &Value) {
     assert_eq!(
@@ -330,8 +330,8 @@ fn acp_initialize_matches_the_ts_golden() {
     // ACP MCP server admission is served, so the http capability is advertised.
     assert_eq!(capabilities["mcpCapabilities"], json!({ "http": true }));
     let info = &result["agentInfo"];
-    assert_eq!(info["name"], "prime-agent");
-    assert_eq!(info["title"], "Prime Agent");
+    assert_eq!(info["name"], "wv");
+    assert_eq!(info["title"], "Weave");
     assert_eq!(
         result["_meta"],
         json!({ "ai.primeintellect.prime-agent": {} })
@@ -526,7 +526,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
     assert_eq!(response["error"]["code"], -32603);
     assert_eq!(
         response["error"]["data"]["details"],
-        "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"
+        "Weave ACP mode hosts one session per connection; start another wv process for a second session"
     );
 
     // Unknown method (ts-errors.jsonl).
@@ -658,7 +658,7 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     assert_eq!(second_response["error"]["message"], "Internal error");
     assert_eq!(
         second_response["error"]["data"]["details"],
-        "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"
+        "Weave ACP mode hosts one session per connection; start another wv process for a second session"
     );
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
@@ -881,7 +881,7 @@ fn acp_mode_daemon_unreachable_exits_1_without_fallback() {
     );
     assert!(
         stderr.contains(&format!(
-            "Timed out waiting for the Prime Agent Rust daemon to start on selected socket {}.",
+            "Timed out waiting for the Weave Rust daemon to start on selected socket {}.",
             socket.display()
         )),
         "the daemon never became reachable: {stderr}"
@@ -2021,7 +2021,7 @@ fn kernel_python() -> Option<std::path::PathBuf> {
     None
 }
 
-/// The namespaced prime-agent payload of one session/update frame.
+/// The namespaced wv payload of one session/update frame.
 fn update_meta(frame: &Value) -> &Value {
     &frame["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]
 }
@@ -2358,7 +2358,7 @@ fn acp_daemon_attached_close_stop_failure_fences_the_session() {
     let (refused_response, _) = client.wait_response(refused, TIMEOUT);
     assert_eq!(
         refused_response["error"]["data"]["details"],
-        "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session",
+        "Weave ACP mode hosts one session per connection; start another wv process for a second session",
         "the close-failed session keeps the single-session slot: {refused_response}"
     );
 

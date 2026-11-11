@@ -1,4 +1,4 @@
-//! The managed install-root layout: `bin/prime-agent` and `bin/previous` symlinks into
+//! The managed install-root layout: `bin/wv` and `bin/previous` symlinks into
 //! `releases/<version>-<platform>-<sha256>/`, the `.managed` marker, and the `.activation-state`
 //! rollback pointer. Divergence: the release payload is the Rust asset list, never the TS one.
 
@@ -77,12 +77,12 @@ impl Installation {
     }
 }
 
-/// The marker file proving the root belongs to the Prime Agent installer layout.
-pub const MANAGED_MARKER: &str = "prime-agent-native-v1";
+/// The marker file proving the root belongs to the Weave installer layout.
+pub const MANAGED_MARKER: &str = "weave-native-v1";
 
 /// The payload every staged release must carry.
 pub const RELEASE_ASSETS: &[&str] = &[
-    "prime-agent",
+    "wv",
     "prime-agent-runtime",
     "skills",
     "LICENSE",
@@ -90,7 +90,7 @@ pub const RELEASE_ASSETS: &[&str] = &[
 ];
 
 /// The launcher symlink names under `<root>/bin/`.
-pub const CURRENT_LAUNCHER: &str = "prime-agent";
+pub const CURRENT_LAUNCHER: &str = "wv";
 pub const PREVIOUS_LAUNCHER: &str = "previous";
 
 /// Read the install root of `executable`'s managed layout: the executable resolves
@@ -98,7 +98,7 @@ pub const PREVIOUS_LAUNCHER: &str = "previous";
 #[must_use]
 pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     let resolved = executable.canonicalize().ok()?;
-    // The resolved executable is <root>/releases/<name>/prime-agent: walk up
+    // The resolved executable is <root>/releases/<name>/wv: walk up
     // through the release directory to `releases`, then one more level.
     let releases = resolved.parent()?.parent()?;
     if !releases.ends_with("releases") {
@@ -113,7 +113,7 @@ pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
 }
 
 /// Parse one launcher's symlink into a validated [`InstallTarget`]: the
-/// link must point at `../releases/<version>-<platform>-<sha256>/prime-agent`,
+/// link must point at `../releases/<version>-<platform>-<sha256>/wv`,
 /// the payload must exist, and `.archive-sha256` must match the recorded digest.
 fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
     let launcher = root.join("bin").join(link);
@@ -126,7 +126,7 @@ fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
         )
     })?;
     let release_dir = root.join("releases").join(release_directory_name(&target));
-    let executable = release_dir.join("prime-agent");
+    let executable = release_dir.join("wv");
     validate_release_dir(&release_dir, &target.sha256)?;
     Ok(InstallTarget {
         root: root.to_path_buf(),
@@ -143,10 +143,8 @@ fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
 /// same shape; `None` for anything that is not a managed release name).
 #[must_use]
 pub fn release_version_of(directory_name: &str) -> Option<String> {
-    parse_release_link(Path::new(&format!(
-        "../releases/{directory_name}/prime-agent"
-    )))
-    .map(|link| link.version)
+    parse_release_link(Path::new(&format!("../releases/{directory_name}/wv")))
+        .map(|link| link.version)
 }
 
 /// The `releases/` directory name of a parsed link (`<version>-<platform>-<sha256>`).
@@ -213,15 +211,15 @@ struct ReleaseLink {
     sha256: String,
 }
 
-/// Parse `../releases/<version>-<platform>-<sha256>/prime-agent` (TS `NATIVE_RELEASE_DIRECTORY`):
+/// Parse `../releases/<version>-<platform>-<sha256>/wv` (TS `NATIVE_RELEASE_DIRECTORY`):
 /// strip the digest from the right, then match the longest known platform suffix (the TS layout
 /// allows an optional 6-character build id after the digest, which must be accepted too).
 fn parse_release_link(target: &Path) -> Option<ReleaseLink> {
     let text = target.to_str()?;
-    if !text.starts_with("../releases/") || !text.ends_with("/prime-agent") {
+    if !text.starts_with("../releases/") || !text.ends_with("/wv") {
         return None;
     }
-    let directory = &text["../releases/".len()..text.len() - "/prime-agent".len()];
+    let directory = &text["../releases/".len()..text.len() - "/wv".len()];
     let digest_start = directory.rfind('-')?;
     let mut sha256 = &directory[digest_start + 1..];
     if sha256.len() > 64 + 1 + 6 {
@@ -280,7 +278,7 @@ pub(super) fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> 
     Ok(())
 }
 
-/// Read the active installation (`bin/prime-agent`). Falls back to
+/// Read the active installation (`bin/wv`). Falls back to
 /// `bin/previous` when the active link is missing (the coordinator's
 /// rollback planning path).
 ///
@@ -335,7 +333,7 @@ pub fn read_rollback_installation(root: &Path) -> Result<Installation> {
     let base_url = std::fs::read_to_string(release_dir.join(".install-source"))?
         .trim()
         .to_string();
-    let executable = release_dir.join("prime-agent");
+    let executable = release_dir.join("wv");
     Ok(Installation {
         target: InstallTarget {
             root: root.to_path_buf(),
@@ -374,7 +372,7 @@ mod tests {
         std::fs::write(root.join(".managed"), MANAGED_MARKER).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(
-            format!("../releases/{release}/prime-agent"),
+            format!("../releases/{release}/wv"),
             root.join("bin").join(link),
         )
         .unwrap();
@@ -391,7 +389,7 @@ mod tests {
         assert_eq!(installation.base_url, "https://example.com");
         assert!(installation
             .executable()
-            .ends_with("releases/0.2.0-linux-x64-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/prime-agent"));
+            .ends_with("releases/0.2.0-linux-x64-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/wv"));
         assert_eq!(installation.target.platform, "linux-x64");
     }
 
@@ -417,7 +415,7 @@ mod tests {
         std::fs::write(
             root.join(".activation-state"),
             format!(
-                "../releases/0.2.0-linux-x64-{new_sha}/prime-agent\n../releases/0.1.0-linux-x64-{old_sha}/prime-agent\n"
+                "../releases/0.2.0-linux-x64-{new_sha}/wv\n../releases/0.1.0-linux-x64-{old_sha}/wv\n"
             ),
         )
         .unwrap();
@@ -441,7 +439,7 @@ mod tests {
         let release = format!("0.1.0-linux-x64-{}", "a".repeat(64));
         let release_dir = dir.path().join(&release);
         std::fs::create_dir_all(&release_dir).unwrap();
-        let exe = release_dir.join("prime-agent");
+        let exe = release_dir.join("wv");
         std::fs::write(&exe, "binary").unwrap();
         let running = running_release(&exe).unwrap();
         assert_eq!(running.version, "0.1.0");
@@ -449,7 +447,7 @@ mod tests {
         // A hand-named dogfood directory is not a managed release name.
         let dogfood = dir.path().join("0.10.0-rust-64f66e3d");
         std::fs::create_dir_all(&dogfood).unwrap();
-        let stray = dogfood.join("prime-agent");
+        let stray = dogfood.join("wv");
         std::fs::write(&stray, "binary").unwrap();
         assert!(running_release(&stray).is_err());
     }
@@ -465,16 +463,11 @@ mod tests {
     #[test]
     fn parses_release_link_shapes_only() {
         assert!(parse_release_link(Path::new(
-            "../releases/1.2.3-linux-x64-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/prime-agent"
+            "../releases/1.2.3-linux-x64-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/wv"
         ))
         .is_some());
-        assert!(
-            parse_release_link(Path::new("../releases/1.2.3-other-thing/prime-agent")).is_none()
-        );
-        assert!(parse_release_link(Path::new("/opt/somewhere/else/prime-agent")).is_none());
-        assert!(
-            parse_release_link(Path::new("../releases/1.2.3-linux-x64-short/prime-agent"))
-                .is_none()
-        );
+        assert!(parse_release_link(Path::new("../releases/1.2.3-other-thing/wv")).is_none());
+        assert!(parse_release_link(Path::new("/opt/somewhere/else/wv")).is_none());
+        assert!(parse_release_link(Path::new("../releases/1.2.3-linux-x64-short/wv")).is_none());
     }
 }

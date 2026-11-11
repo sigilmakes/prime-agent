@@ -1,6 +1,6 @@
 # Environments, Evaluations & Training
 
-verifiers is Prime Intellect's Python library for LLM environments: packages that expose `load_environment` and bundle datasets, rollout logic, and reward rubrics. Environments power evaluations (local and hosted) and RL training (Hosted Training or self-managed prime-rl).
+verifiers is Prime Intellect's Python library for LLM environments: packages that expose `load_environment` and bundle datasets, rollout logic, and reward rubrics. Environments are used by evaluations (local and hosted) and RL training (Hosted Training or self-managed prime-rl).
 
 Live docs: `verifiers/overview.md`, `tutorials-environments/getting-started.md`, `hosted-training/getting-started.md`, `prime-rl/overview.md` under https://docs.primeintellect.ai/ (append `.md` for raw markdown). Source: https://github.com/PrimeIntellect-ai/verifiers and https://github.com/PrimeIntellect-ai/prime-rl
 

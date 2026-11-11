@@ -1,9 +1,8 @@
-# Daily Prime Agent stats
+# Daily Weave stats
 
-The GitHub Actions workflow `Prime Agent daily stats` prepares a report at 9 AM
+The daily stats GitHub Actions workflow prepares a report at 9 AM
 America/Los_Angeles, including daylight saving changes. GitHub may start scheduled
-runs late. The report covers the previous completed **UTC day**, matching the
-[Prime Agent Overview dashboard](https://eu.posthog.com/project/22174/dashboard/999378).
+runs late. The report covers the previous completed **UTC day**.
 
 It reports DAU, WAU, MAU, token usage, completed runs, and run success rate. Daily
 values compare with yesterday and the same weekday last week. WAU compares with

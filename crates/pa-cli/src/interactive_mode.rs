@@ -42,7 +42,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         .context("build the interactive runtime")?;
     runtime.block_on(async {
         ensure_daemon_running(&tui_options.socket_path, &tui_options.cwd).await?;
-        // `prime-agent agents` and bare `--resume` open the agents view
+        // `wv agents` and bare `--resume` open the agents view
         // (TS `agentsViewRequested`); the view then opens sessions, and a
         // session exits back into the view until the user exits it. TS gates
         // the explicit `agents` request on completed onboarding (a fresh
@@ -372,7 +372,7 @@ fn build_tui_options(
                 config.agent_dir.clone(),
             )),
         )),
-        // `/update`: the same body `prime-agent update` runs, output
+        // `/update`: the same body `wv update` runs, output
         // captured — the TUI stays mounted.
         update_commands: Some(pa_tui::update_command::UpdateCommandsHandle(
             std::sync::Arc::new(crate::client_update::ClientUpdate),

@@ -627,25 +627,25 @@ fn at_item_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<St
 #[test]
 fn at_directory_scope_lists_its_children() {
     let base = tempfile::TempDir::new().expect("temp dir");
-    std::fs::create_dir_all(base.path().join("prime-agent/src")).expect("mkdir");
+    std::fs::create_dir_all(base.path().join("wv/src")).expect("mkdir");
     for file in [
-        "prime-agent/src/lib.rs",
-        "prime-agent/README.md",
-        "prime-agent/Cargo.toml",
-        "prime-agent/.env",
+        "wv/src/lib.rs",
+        "wv/README.md",
+        "wv/Cargo.toml",
+        "wv/.env",
         "other.md",
     ] {
         std::fs::write(base.path().join(file), "x").expect("write");
     }
     let provider = provider(base.path().to_str().expect("utf8"));
     assert_eq!(
-        at_item_values(&provider, "@prime-agent/"),
+        at_item_values(&provider, "@wv/"),
         [
-            "@prime-agent/src/",
-            "@prime-agent/README.md",
-            "@prime-agent/Cargo.toml",
-            "@prime-agent/src/lib.rs",
-            "@prime-agent/.env",
+            "@wv/src/",
+            "@wv/README.md",
+            "@wv/Cargo.toml",
+            "@wv/src/lib.rs",
+            "@wv/.env",
         ]
     );
 }

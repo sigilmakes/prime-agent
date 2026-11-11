@@ -42,7 +42,7 @@ pub fn load_theme(name: &str) -> Theme {
     match crate::theme::load_named_theme(name, mode) {
         Ok(theme) => theme,
         Err(error) => {
-            eprintln!("Prime Agent: {error:#}; using prime theme.");
+            eprintln!("Weave: {error:#}; using prime theme.");
             Theme::builtin("prime", mode)
         }
     }

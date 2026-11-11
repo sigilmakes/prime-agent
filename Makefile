@@ -49,7 +49,7 @@ hooks-check:
 # These are intentional, manual source builds; no upstream release scripts,
 # binary downloads, npm commands, tag creation, or publishing steps.
 package:
-	nix build --no-update-lock-file .#prime-agent
+	nix build --no-update-lock-file .#weave
 
 package-check:
 	nix flake check --no-update-lock-file
@@ -79,7 +79,7 @@ windows-msvc-cross:
 
 audit-build:
 	@command -v cargo-auditable >/dev/null 2>&1 || { echo 'cargo-auditable unavailable; enter a Nix shell that provides it' >&2; exit 1; }
-	cargo auditable build --release --locked -p pa-cli --bin prime-agent
+	cargo auditable build --release --locked -p pa-cli --bin wv
 
 .PHONY: help check fmt-check lint typecheck test hooks-check package package-check \
 	workspace-check deny windows-cross windows-msvc-cross audit-build

@@ -182,7 +182,7 @@ fn ts_row_order(a: &ProviderRow, b: &ProviderRow) -> std::cmp::Ordering {
 
 /// Subscription requests identify as Claude Code, which may violate Anthropic's terms; an API key
 /// avoids the risk (#2645).
-const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Weave identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
 
 /// The provider auth surface against one daemon's shared directories.
 #[derive(Clone)]

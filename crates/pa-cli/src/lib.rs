@@ -10,7 +10,7 @@
     clippy::cast_precision_loss
 )]
 
-//! pa-cli: the `prime-agent` binary. The argument surface, command routing,
+//! pa-cli: the `wv` binary. The argument surface, command routing,
 //! help output, and validation are faithful ports of the TypeScript product.
 
 // Internal ported modules are crate-private: the only public API is the
@@ -60,7 +60,7 @@ pub(crate) mod sessions_table_format;
 pub(crate) mod subscription_login;
 
 /// The runtime boundary: everything a mode-runner crate implements to plug
-/// into the `prime-agent` binary, plus the entry point that drives it.
+/// into the `wv` binary, plus the entry point that drives it.
 pub use mode::{AppMode, MissingSubsystem, RunOptions, Runtime, UnavailableRuntime};
 pub(crate) mod piped_stdin;
 pub(crate) mod print_boundary;

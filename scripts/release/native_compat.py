@@ -1,8 +1,9 @@
-"""Preserve the archive contract enforced by shipped TypeScript installers.
+"""Archive-shape checks shared by the release gates.
 
-The old installer validates these files before invoking the executable. Keep
-authentic assets so its installed-release validation and rollback continue to
-work; the Rust executable uses its own renderer and image implementation.
+The legacy TypeScript installer validated its own archive contract before
+invoking the executable. This build ships under the wv name, so that installer
+is not a supported path for new archives; the authentic assets are kept for
+the shared layout and the manual-repair installer.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ COMPAT_ASSETS = (
     "PHOTON-LICENSE.md",
 )
 REQUIRED_NATIVE_FILES = (
-    "prime-agent", "package.json", "install.sh",
+    "wv", "package.json", "install.sh",
     "prime-agent-runtime/pyproject.toml", "prime-agent-runtime/src/rlm/repl.py",
     *COMPAT_ASSETS,
 )
@@ -37,7 +38,6 @@ def stage_native_compat(staging: Path) -> list[str]:
         target = staging / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ASSET_DIR / name, target)
-    # This file is validated, not executed, by the already-running TS installer.
     # Ship the maintained Rust installer so manual repair uses current code.
     shutil.copyfile(ASSET_DIR.parents[2] / "install-rust.sh", staging / "install.sh")
     return ["theme", "export-html", "photon_rs_bg.wasm", "PHOTON-LICENSE.md", "install.sh"]
@@ -59,7 +59,7 @@ def validate_compatibility_archive(path: Path) -> None:
             if member.name in members:
                 raise ValueError(f"duplicate member in compatibility archive: {member.name}")
             members[member.name] = member
-        windows = "prime-agent.exe" in members
+        windows = "wv.exe" in members
         required = ("package.json",) if windows else REQUIRED_NATIVE_FILES
         for name in required:
             member = members.get(name)

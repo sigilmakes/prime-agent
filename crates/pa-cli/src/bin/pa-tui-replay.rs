@@ -26,10 +26,7 @@ use pa_tui::theme::{ColorMode, Theme};
 use pa_tui::view::AgentView;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "pa-tui-replay",
-    about = "Replay a prime-agent session in the TUI"
-)]
+#[command(name = "pa-tui-replay", about = "Replay a wv session in the TUI")]
 struct Args {
     /// Path to the session JSONL file (defaults to the newest session).
     session: Option<String>,

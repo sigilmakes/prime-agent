@@ -1,6 +1,6 @@
 """Installed Rust privacy gate: real RPC create/turn/EOF/resume/turn/EOF.
 
-Run with an explicit installed prime-agent executable. The loopback provider uses
+Run with an explicit installed wv executable. The loopback provider uses
 real OpenAI-compatible HTTP, not PRIME_AGENT_FAUX_SCRIPT (which bypasses reporting
 wiring). Legacy opt-ins and dummy trace credentials deliberately remain enabled.
 Only stdlib is needed. No user daemon, credentials, or kernel venv are used.
@@ -342,11 +342,11 @@ def run_lifecycle(binary, timeout=60):
     # wrapper-owned runtime setup. Never discover a binary on the user's PATH.
     binary = Path(os.path.abspath(binary))
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise AssertionError(f"not an executable installed prime-agent path: {binary}")
+        raise AssertionError(f"not an executable installed wv path: {binary}")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive")
     deadline = time.monotonic() + timeout
-    with tempfile.TemporaryDirectory(prefix="prime-privacy-") as raw, loopback_server() as server:
+    with tempfile.TemporaryDirectory(prefix="weave-privacy-") as raw, loopback_server() as server:
         home = Path(raw)
         home.chmod(0o700)
         env = isolated_environment(home, server.url)
@@ -434,7 +434,7 @@ def run_lifecycle(binary, timeout=60):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path, help="explicit installed prime-agent executable")
+    parser.add_argument("binary", type=Path, help="explicit installed wv executable")
     parser.add_argument("--timeout", type=float, default=60, help="whole lifecycle deadline in seconds")
     args = parser.parse_args()
     try:

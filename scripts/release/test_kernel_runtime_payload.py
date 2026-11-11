@@ -37,11 +37,11 @@ class KernelRuntimePayloadTest(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("payload")
-            (root / "prime-agent").chmod(0o755)
-            package_release.validate(root, "0.10.0", "prime-agent")
+            (root / "wv").chmod(0o755)
+            package_release.validate(root, "0.10.0", "wv")
             (root / "prime-agent-runtime/uv.lock").unlink()
             with self.assertRaisesRegex(SystemExit, "uv.lock"):
-                package_release.validate(root, "0.10.0", "prime-agent")
+                package_release.validate(root, "0.10.0", "wv")
 
 
 if __name__ == "__main__":

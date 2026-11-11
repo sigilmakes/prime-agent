@@ -424,7 +424,7 @@ mod tests {
     fn default_prompt_is_layered_with_static_prefix_first() {
         let breakdown = system_prompt_breakdown(&base_options());
         let prompt = &breakdown.assembled;
-        assert!(prompt.starts_with("# prime-agent harness"));
+        assert!(prompt.starts_with("# weave harness"));
         assert_eq!(breakdown.segments[0].kind, SegmentKind::Static);
         assert_eq!(breakdown.segments[0].name, "core");
         let names: Vec<&str> = breakdown
@@ -489,7 +489,7 @@ mod tests {
         assert!(prompt.contains("## AGENTS.md\n\nRule one."));
         assert!(prompt.contains("Working directory: /w"));
         assert!(prompt.contains("Current date: "));
-        assert!(!prompt.contains("# prime-agent harness"));
+        assert!(!prompt.contains("# weave harness"));
         assert!(!prompt.contains("Tier-2 guidance."));
     }
 

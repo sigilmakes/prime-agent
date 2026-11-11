@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = (Get-Location).Path
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-channel-fallback-{0}" -f [Guid]::NewGuid().ToString('N'))
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("weave-channel-fallback-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 
 # The Python interpreter for the local http server (the install e2e's pattern).
@@ -20,10 +20,10 @@ $platform = 'win32-x64'
 # is a placeholder exe (the install only checks the payload exists).
 $payload = Join-Path $scratch 'payload'
 New-Item -ItemType Directory -Path $payload | Out-Null
-Set-Content -LiteralPath (Join-Path $payload 'prime-agent.exe') -Value 'stub payload for the channel-fallback regression test'
-$artifactFile = "prime-agent-$betaVersion-$platform.tar.gz"
+Set-Content -LiteralPath (Join-Path $payload 'wv.exe') -Value 'stub payload for the channel-fallback regression test'
+$artifactFile = "wv-$betaVersion-$platform.tar.gz"
 $artifact = Join-Path $scratch $artifactFile
-& tar -czf $artifact -C $payload prime-agent.exe
+& tar -czf $artifact -C $payload wv.exe
 if ($LASTEXITCODE -ne 0) { throw 'the stub artifact build failed (tar)' }
 $artifactSha = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLower()
 
@@ -114,7 +114,7 @@ try {
             $run.Lines | Write-Host
             throw "$selection must refuse the missing stable artifact"
         }
-        if (Test-Path (Join-Path $prefix 'share\prime-agent\prime-agent.exe')) {
+        if (Test-Path (Join-Path $prefix 'share\weave\wv.exe')) {
             throw "$selection unexpectedly published a payload"
         }
     }
@@ -126,11 +126,11 @@ try {
         $runBeta.Lines | Write-Host
         throw 'the explicit beta install failed'
     }
-    $marker = Get-Content -LiteralPath (Join-Path $prefixBeta 'share\prime-agent\.prime-agent-install') -Raw
+    $marker = Get-Content -LiteralPath (Join-Path $prefixBeta 'share\weave\.weave-install') -Raw
     if ($marker -ne "install-rust.sh channel beta`nversion $betaVersion") { throw "unexpected beta marker: $marker" }
 
     # Publish stable and verify the production default selects its artifact.
-    $stableFile = "prime-agent-$stableVersion-$platform.tar.gz"
+    $stableFile = "wv-$stableVersion-$platform.tar.gz"
     $stableDir = Join-Path $channel "releases\v$stableVersion"
     New-Item -ItemType Directory -Path $stableDir -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $releaseDir $artifactFile) -Destination (Join-Path $stableDir $stableFile)
@@ -143,10 +143,10 @@ try {
         $runStable.Lines | Write-Host
         throw 'the default stable install failed'
     }
-    $marker = Get-Content -LiteralPath (Join-Path $prefixStable 'share\prime-agent\.prime-agent-install') -Raw
+    $marker = Get-Content -LiteralPath (Join-Path $prefixStable 'share\weave\.weave-install') -Raw
     if ($marker -ne "install-rust.sh channel stable`nversion $stableVersion") { throw "unexpected stable marker: $marker" }
     foreach ($prefix in @($prefixBeta, $prefixStable)) {
-        if (-not (Test-Path (Join-Path $prefix 'share\prime-agent\prime-agent.exe') -PathType Leaf)) { throw "missing payload in $prefix" }
+        if (-not (Test-Path (Join-Path $prefix 'share\weave\wv.exe') -PathType Leaf)) { throw "missing payload in $prefix" }
     }
 
     Write-Host "WIN_CHANNEL_SELECTION default=$stableVersion explicit-beta=$betaVersion; missing stable artifacts refused"

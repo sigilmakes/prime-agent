@@ -48,7 +48,7 @@ const MAX_VISIBLE: usize = 15;
 /// filter, and selection behavior are shared).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectorKind {
-    /// The resource-configuration modal (`prime-agent config`): checkbox
+    /// The resource-configuration modal (`wv config`): checkbox
     /// semantics, Space toggles.
     ResourceConfig,
     /// The `/effort` picker: single-select semantics, Enter applies.

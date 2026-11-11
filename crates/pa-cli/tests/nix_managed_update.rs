@@ -60,7 +60,7 @@ async fn nix_ownership_blocks_cli_and_both_direct_installer_boundaries() {
             "https://example.invalid",
         ],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        let output = Command::new(env!("CARGO_BIN_EXE_wv"))
             .args(&arguments)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())

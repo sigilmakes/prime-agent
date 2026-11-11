@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Same allocator cap as the prime-agent binary: large transient phases
+    // Same allocator cap as the wv binary: large transient phases
     // (session loads, attach snapshots) must not leave per-arena high-water
     // pages resident.
     pa_types::memory_release::cap_thread_arenas();

@@ -1,8 +1,8 @@
-{ pkgs, compiled, prime-agent }:
+{ pkgs, compiled, weave }:
 
 {
-    inherit prime-agent;
-    static = pkgs.runCommand "prime-agent-downstream-static" {
+    inherit weave;
+    static = pkgs.runCommand "weave-downstream-static" {
         nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.actionlint pkgs.shellcheck ];
         src = pkgs.lib.cleanSource ../.;
     } ''

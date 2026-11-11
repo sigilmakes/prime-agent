@@ -1,4 +1,4 @@
-//! `prime-agent prompt`: dump the fully-assembled effective system prompt with
+//! `wv prompt`: dump the fully-assembled effective system prompt with
 //! its per-layer breakdown, without a provider call or persisted session.
 
 use pa_core::resources::{load_resources, ResourceLoaderOptions};
@@ -48,7 +48,7 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
         Err(help_request) if help_request.is_empty() => return 0,
         Err(error) => {
             eprintln!("Error: {error}");
-            eprintln!("Run `prime-agent help prompt` for usage.");
+            eprintln!("Run `wv help prompt` for usage.");
             return 1;
         }
     };
@@ -174,7 +174,7 @@ fn assemble_breakdown(
 }
 
 fn print_text(breakdown: &pa_core::prompts::SystemPromptBreakdown) {
-    println!("# prime-agent system prompt breakdown");
+    println!("# weave system prompt breakdown");
     println!();
     println!("cached prefix (static layers, byte-stable across sessions):");
     for segment in &breakdown.segments {
@@ -267,7 +267,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (breakdown, errors) = assemble_breakdown(dir.path(), Some("mock/mock-1")).unwrap();
         assert!(errors.is_empty());
-        assert!(breakdown.assembled.starts_with("# prime-agent harness"));
+        assert!(breakdown.assembled.starts_with("# weave harness"));
         assert!(breakdown
             .assembled
             .contains("Recursive agent depth: 0 (root)"));

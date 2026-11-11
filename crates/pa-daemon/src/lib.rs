@@ -1,4 +1,4 @@
-//! Session supervisor, worker processes, and wire protocol for Prime Agent:
+//! Session supervisor, worker processes, and wire protocol for Weave:
 //! the supervisor spawns one worker process per active session, supervises
 //! restarts with backoff, and routes clients; sessions persist as
 //! append-only JSONL in the same layout as the TS product.

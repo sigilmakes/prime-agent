@@ -407,7 +407,7 @@ impl SessionUi {
                     view.working = None;
                     match reason.as_str() {
                         "shutdown" => self.error_row(
-                            "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                            "The Weave daemon shut down while this window was attached. The session transcript remains saved; restart Weave and reopen it from Agents View.",
                             view,
                         ),
                         "replaced" => self.error_row(
@@ -454,7 +454,7 @@ impl SessionUi {
                             .join(", ");
                         view.push_entry(crate::chat::ChatEntry::Status {
                             text: format!(
-                                "Prime Agent is updating — restarting the daemon (about {}s). {} will resume automatically.",
+                                "Weave is updating — restarting the daemon (about {}s). {} will resume automatically.",
                                 update.est_seconds.max(1),
                                 if names.is_empty() { "Your session".to_string() } else { names }
                             ),

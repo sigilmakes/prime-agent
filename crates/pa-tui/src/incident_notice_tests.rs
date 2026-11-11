@@ -46,7 +46,7 @@ fn supervisor_start_line(base_ms: i64, minutes_ago: i64, generation: &str) -> In
         (
             "msg",
             serde_json::json!(format!(
-                "Prime Agent daemon supervisor {generation} listening on {DAEMON_SOCKET}"
+                "Weave daemon supervisor {generation} listening on {DAEMON_SOCKET}"
             )),
         ),
         ("socketPath", serde_json::json!(DAEMON_SOCKET)),
@@ -287,7 +287,7 @@ fn skips_the_old_bridge_when_a_rotation_makes_it_the_live_logs_own_generation() 
     let start = serde_json::json!({
         "ts": ts_ago(BASE_MS, 600 * 60_000),
         "component": "coding-agent.daemon-supervisor",
-        "msg": format!("Prime Agent daemon supervisor e14de15c listening on {DAEMON_SOCKET}"),
+        "msg": format!("Weave daemon supervisor e14de15c listening on {DAEMON_SOCKET}"),
         "socketPath": DAEMON_SOCKET,
         "pid": 15026,
     })

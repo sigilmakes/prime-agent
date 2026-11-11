@@ -26,7 +26,7 @@ use crate::supervisor::Supervisor;
 pub(crate) const UPDATE_RESTORE_CLIENT_ID: &str = "update-restore";
 
 /// TS `UPDATE_RESTART_CONTINUATION_PROMPT`, verbatim (spec §10.5).
-pub(crate) const UPDATE_RESTART_CONTINUATION_PROMPT: &str = "Prime Agent restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
+pub(crate) const UPDATE_RESTART_CONTINUATION_PROMPT: &str = "Weave restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
 
 /// How long a client attach queues behind an in-flight restore pass (spec §10.4).
 const RESTORE_ATTACH_WAIT_MS: u64 = 120_000;
@@ -583,7 +583,7 @@ where
         if origin == Some(row.active_session_id.as_str()) {
             commands.push(("append_custom_message", json!({ "message": {
                 "customType": "prime-agent.update_complete",
-                "content": format!("[update-complete]\n\nPrime Agent updated to v{version}. This daemon session was restored after the update."),
+                "content": format!("[update-complete]\n\nWeave updated to v{version}. This daemon session was restored after the update."),
                 "display": true,
                 "details": { "version": version },
             }})));
@@ -829,7 +829,7 @@ impl Supervisor {
             .map(|(session_file, message)| {
                 format!(
                     "Session {selector} failed to restore: {message}. The session file is at \
-                     {session_file} — run `prime-agent attach` to resume it manually."
+                     {session_file} — run `wv attach` to resume it manually."
                 )
             })
     }
@@ -952,7 +952,7 @@ mod tests {
                         "append_custom_message",
                         json!({ "message": {
                             "customType": "prime-agent.update_complete",
-                            "content": "[update-complete]\n\nPrime Agent updated to v1.0.0. This daemon session was restored after the update.",
+                            "content": "[update-complete]\n\nWeave updated to v1.0.0. This daemon session was restored after the update.",
                             "display": true, "details": { "version": "1.0.0" }
                         }})
                     ),

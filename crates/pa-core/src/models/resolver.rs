@@ -389,7 +389,7 @@ pub fn resolve_cli_model(
             provider = Some(p);
         } else {
             result.error = Some(format!(
-                "Unknown provider \"{cli_provider}\". Use \"prime-agent model list\" to see available providers/models."
+                "Unknown provider \"{cli_provider}\". Use \"wv model list\" to see available providers/models."
             ));
             return result;
         }
@@ -504,7 +504,7 @@ pub fn resolve_cli_model(
         None => cli_model.to_string(),
     };
     result.error = Some(format!(
-        "Model \"{display}\" not found. Use \"prime-agent model list\" to see available models."
+        "Model \"{display}\" not found. Use \"wv model list\" to see available models."
     ));
     result
 }

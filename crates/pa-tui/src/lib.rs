@@ -1,4 +1,4 @@
-//! Terminal UI for Prime Agent.
+//! Terminal UI for Weave.
 //!
 //! Rust port of the TS reference TUI (packages/tui) plus the interactive agent view
 //! from `coding-agent/src/modes/interactive`. Components render styled lines;

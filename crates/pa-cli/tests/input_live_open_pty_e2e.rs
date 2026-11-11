@@ -104,7 +104,7 @@ fn typing_echoes_while_the_session_open_is_stalled() {
 
     // The startup chrome (the new chat's brand splash) paints first: the
     // surface is mounted and in raw mode by then.
-    harness.wait_from_start("prime agent", "the startup chrome painted");
+    harness.wait_from_start("weave", "the startup chrome painted");
 
     // Type while the open is still stalled. The echo must land inside the
     // echo deadline — far inside the attach's stall window.

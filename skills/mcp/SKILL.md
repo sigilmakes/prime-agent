@@ -13,14 +13,14 @@ Notion integrations; there are no per-service skills to read.
 
 `connectionId` is the dispatch id everywhere below. The session prompt lists
 the enabled generic servers; the built-in integrations are `linear` and
-`notion`. Ask the user to run `pa mcp add` and `/mcp login <server>` to
+`notion`. Ask the user to run `wv mcp add` and `/mcp login <server>` to
 configure another one.
 
 ## Recommend, never connect
 
 If a task would benefit from an unconfigured server, name it (for example
 "Connecting Notion would let me search your workspace directly") and tell the
-user to run `pa mcp add` and `/mcp login <server>`. Never install anything,
+user to run `wv mcp add` and `/mcp login <server>`. Never install anything,
 open a browser, use credentials, or request extra scopes from this module.
 
 ## Discover, then call

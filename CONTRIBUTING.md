@@ -1,43 +1,51 @@
-# Contributing to Prime Agent
+# Contributing to Weave
 
-Thanks for your interest in contributing to Prime Agent! Prime Agent is developed in public, and we welcome bug reports, feature requests, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
+Weave runs on user machines and can execute code with the user's permissions. Read
+[AGENTS.md](AGENTS.md) before contributing; it holds the engineering, testing, and
+merge rules for this repository.
 
-With the influx of agent-generated contributions, we do not review unsolicited pull requests or use public Issues as the initial intake queue. While we are open to contributions by agents, you are responsible for your code and must understand how it interacts with the entire project.
+## Start with an issue
 
-## Start with a Discussion
+Use the [Forgejo issue tracker](https://mnemosyne.sigilzero.dev/sigilzero/weave/issues)
+and search it before opening a new issue. For a bug, include the `wv --version`
+output, your platform, the command you ran, and the expected and actual results.
+Keep the report reproducible. Never share API keys, tokens, private prompts,
+transcripts, or other sensitive information.
 
-Choose the category that best matches what you want to share:
+Report security vulnerabilities privately to the maintainers instead of posting
+them publicly.
 
-- [General discussion or question](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general)
-- [Bug report](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports)
-- [Feature request](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests)
+An existing issue does not mean an external pull request is wanted. Ask in the
+issue before starting substantial work; maintainers may decline changes that do
+not fit the project.
 
-Search existing Discussions before creating a new one. Include enough detail for someone else to understand and reproduce the problem, but do not share API keys, tokens, private prompts, or other sensitive information.
+## Pull requests
 
-For security vulnerabilities, report them privately to the maintainers instead of posting publicly.
+If a maintainer invites a pull request, open it against `main` on Mnemosyne:
+<https://mnemosyne.sigilzero.dev/sigilzero/weave/pulls>. GitHub is a mirror; push
+only to `origin`.
 
-## Issues
+- Keep one logical change per pull request. Do not mix unrelated refactors or
+  dependency changes into it.
+- Follow AGENTS.md and the existing conventions.
+- Explain the scope and how you validated the change.
+- Add or update tests for behavioral changes. Bug fixes need a regression test
+  that fails without the fix.
+- User-visible changes need the parity-diff evidence described in
+  [AGENTS.md](AGENTS.md).
+- State ownership compliance for crate changes as [AGENTS.md](AGENTS.md) requires.
 
-GitHub Issues track work that maintainers have accepted and intend to investigate or implement. A maintainer may create an Issue from a Discussion when the scope is clear and the work fits the roadmap. An existing Issue does not automatically mean that an external pull request is wanted. Wait for a maintainer to invite implementation before starting substantial work.
+Run the gates before requesting review:
 
-Issues opened by unapproved contributors are automatically closed and redirected to Discussions. To contribute, share interest in Discussions or corresponding issues, and maintainers can invite implementation for requested work.
+```bash
+make check
+nix flake check --no-update-lock-file
+```
 
-## Pull Requests and Trusted Contributors
+Use `nix develop --no-update-lock-file` for the pinned tools. Keep test state
+isolated and never use live user credentials.
 
-Prime Agent runs on user machines and can execute code with the user's permissions. We therefore limit pull requests to maintainers and trusted contributors who have been explicitly vouched for. Maintainers may vouch for someone after they have consistently demonstrated a useful understanding of the project through Discussions, issue investigation, testing, documentation, or other collaboration. There is no separate application process and no guarantee that participation will result in approval.
+## Commits
 
-Pull requests from unvouched contributors are automatically closed. If you are interested in contributing code, begin with a Discussion and work with the maintainers on the problem first.
-
-## Preparing an Approved Pull Request
-
-If a maintainer has invited a pull request:
-
-1. Keep the change focused on the accepted Issue or Discussion.
-2. Follow the repository's development rules and existing conventions.
-3. Add or update tests for behavioral changes.
-4. Run the relevant checks locally and describe the validation in the pull request.
-5. Avoid unrelated refactors or dependency changes.
-
-Development rules, setup, and commands for this branch are documented in [AGENTS.md](AGENTS.md) and the Makefile gate targets (`make check`, `make deny`, `make windows-cross`).
-
-Maintainers may close a pull request that changes scope, cannot be validated safely, or no longer fits the project roadmap.
+Never set git identity for commits to this repository and never add
+`Co-authored-by` trailers; [AGENTS.md](AGENTS.md) explains both rules.

@@ -100,7 +100,7 @@ async fn engine_runs_tool_loop_and_persists() {
 
     // The system prompt is the layered assembly: static core layer
     // first, dynamic tail after.
-    assert!(engine.system_prompt.starts_with("# prime-agent harness"));
+    assert!(engine.system_prompt.starts_with("# weave harness"));
     assert!(engine
         .system_prompt
         .contains("Recursive agent depth: 0 (root)"));

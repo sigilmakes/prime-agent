@@ -117,7 +117,7 @@ pub async fn plan(
     // name the same release (a launcher pointing elsewhere selected an obsolete
     // train over newer code).
     let running = running_release_anchor().map_err(|error| {
-        anyhow!("This binary does not run from a managed release directory: {error:#}. Update from a binary installed by the Prime Agent installer.")
+        anyhow!("This binary does not run from a managed release directory: {error:#}. Update from a binary installed by the Weave installer.")
     })?;
     // The directory's version and the binary's own report must agree:
     // a release directory named around a binary it lacks is inconsistent.

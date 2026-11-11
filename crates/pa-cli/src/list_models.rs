@@ -1,4 +1,4 @@
-//! `prime-agent model list [search]`: the models catalog table — registry
+//! `wv model list [search]`: the models catalog table — registry
 //! refresh, fuzzy search, and the columns rendered.
 
 use crate::mode::RunOptions;

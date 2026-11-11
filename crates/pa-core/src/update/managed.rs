@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-const NIX_INSTRUCTION: &str = "Prime Agent is managed by Nix. Run `cd /config && just update-prime`, then review and deploy the source pin through /config. Self-update and rollback are disabled.";
+const NIX_INSTRUCTION: &str = "Weave is managed by Nix. Run `cd /config && just update-prime`, then review and deploy the source pin through /config. Self-update and rollback are disabled.";
 
 /// Explain why mutation through the upstream installer is forbidden.
 /// Both client surfaces and installer boundaries consult this before any I/O.
@@ -28,21 +28,15 @@ mod tests {
     #[test]
     fn nix_owner_and_store_payloads_refuse_self_update_without_prefix_collisions() {
         assert_eq!(
-            refusal(Some("nix"), Some(Path::new("/opt/prime-agent"))),
+            refusal(Some("nix"), Some(Path::new("/opt/wv"))),
             Some(NIX_INSTRUCTION)
         );
         assert_eq!(
-            refusal(
-                None,
-                Some(Path::new("/nix/store/hash-prime/bin/prime-agent"))
-            ),
+            refusal(None, Some(Path::new("/nix/store/hash-prime/bin/wv"))),
             Some(NIX_INSTRUCTION)
         );
-        assert_eq!(
-            refusal(None, Some(Path::new("/nix/storefront/prime-agent"))),
-            None
-        );
-        assert_eq!(refusal(None, Some(Path::new("/opt/prime-agent"))), None);
+        assert_eq!(refusal(None, Some(Path::new("/nix/storefront/wv"))), None);
+        assert_eq!(refusal(None, Some(Path::new("/opt/wv"))), None);
         assert_eq!(refusal(None, None), None);
     }
 }

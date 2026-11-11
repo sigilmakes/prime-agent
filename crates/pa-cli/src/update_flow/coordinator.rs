@@ -183,7 +183,7 @@ async fn drive(
         .set_state(UpdateState::Stopped)
         .map_err(PhaseFailure::after_stop)?;
     // `Activating`: validate the staged candidate BEFORE the swap, then record
-    // `.activation-state` and repoint `bin/prime-agent` (spec §7).
+    // `.activation-state` and repoint `bin/wv` (spec §7).
     writer
         .lock()
         .await
@@ -302,7 +302,7 @@ async fn finish_failure(
         Ok(root) => root,
         Err(error) => {
             fail_hard(format!(
-                "The rollback is unavailable ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+                "The rollback is unavailable ({error}); the update failed ({reason}). Sessions persist on disk - wv attach recovers them."
             ))
             .await;
             return Ok(());
@@ -312,7 +312,7 @@ async fn finish_failure(
         Ok(previous) => previous,
         Err(error) => {
             fail_hard(format!(
-                "No valid previous release to roll back to ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+                "No valid previous release to roll back to ({error}); the update failed ({reason}). Sessions persist on disk - wv attach recovers them."
             ))
             .await;
             return Ok(());
@@ -325,7 +325,7 @@ async fn finish_failure(
         Ok(target) => target,
         Err(error) => {
             fail_hard(format!(
-                    "The rollback launcher is missing ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+                    "The rollback launcher is missing ({error}); the update failed ({reason}). Sessions persist on disk - wv attach recovers them."
                 ))
                 .await;
             return Ok(());
@@ -333,7 +333,7 @@ async fn finish_failure(
     };
     if let Err(error) = swap::restore_previous(&root, &previous_target) {
         fail_hard(format!(
-            "The rollback repoint failed ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            "The rollback repoint failed ({error}); the update failed ({reason}). Sessions persist on disk - wv attach recovers them."
         ))
         .await;
         return Ok(());
@@ -348,7 +348,7 @@ async fn finish_failure(
     ) {
         writer.lock().await.set_state(UpdateState::Failed)?;
         writer.lock().await.set_message(Some(format!(
-            "The rollback supervisor could not spawn ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            "The rollback supervisor could not spawn ({error}); the update failed ({reason}). Sessions persist on disk - wv attach recovers them."
         )))?;
         return Ok(());
     }
@@ -359,13 +359,13 @@ async fn finish_failure(
         writer.lock().await.set_counts(counts)?;
         writer.lock().await.set_state(UpdateState::Complete)?;
         writer.lock().await.set_message(Some(format!(
-            "Rolled back to the previous Prime Agent version ({reason})"
+            "Rolled back to the previous Weave version ({reason})"
         )))?;
         Ok(())
     } else {
         writer.lock().await.set_state(UpdateState::Failed)?;
         writer.lock().await.set_message(Some(format!(
-            "The rollback supervisor did not greet within its boot budget; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            "The rollback supervisor did not greet within its boot budget; the update failed ({reason}). Sessions persist on disk - wv attach recovers them."
         )))?;
         Ok(())
     }
@@ -385,7 +385,7 @@ fn activation_plan() -> Result<ActivationPlan> {
     let candidate_dir = std::env::var(UPDATE_CANDIDATE_DIR_ENV)
         .context("the coordinator was spawned without a staged candidate")?;
     let candidate_dir = PathBuf::from(candidate_dir);
-    let executable = candidate_dir.join("prime-agent");
+    let executable = candidate_dir.join("wv");
     let root = super::activation_root()?;
     let directory_name = candidate_dir
         .file_name()
@@ -396,7 +396,7 @@ fn activation_plan() -> Result<ActivationPlan> {
         .context("the staged release directory name does not carry a version")?;
     Ok(ActivationPlan {
         current_target: swap::launcher_target(&root, pa_core::update::install::CURRENT_LAUNCHER)?,
-        candidate_target: format!("../releases/{directory_name}/prime-agent"),
+        candidate_target: format!("../releases/{directory_name}/wv"),
         executable,
         version,
         root,

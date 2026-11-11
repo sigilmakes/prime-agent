@@ -272,7 +272,7 @@ impl Inner {
             crate::kernel::bootstrap::invalidate_runtime_probe_cache();
             return Err(anyhow!(
                 "Kernel runtime speaks protocol {protocol}, expected {REPL_PROTOCOL_VERSION}. \
-                 Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent."
+                 Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this wv."
             ));
         }
         {

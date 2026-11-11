@@ -249,7 +249,7 @@ fn spawn_watchdog(state: &Arc<GuardState>) {
 /// process with code 0 (the exit is deliberate, not a crash).
 fn force_quit() -> ! {
     crate::exit_restore::restore_terminal();
-    eprintln!("Prime Agent: shutdown stalled; forced exit.");
+    eprintln!("Weave: shutdown stalled; forced exit.");
     std::process::exit(0)
 }
 

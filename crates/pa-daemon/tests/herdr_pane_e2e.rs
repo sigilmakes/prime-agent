@@ -320,13 +320,13 @@ fn the_session_reports_its_payload_pane_across_the_lifecycle() {
     let params = &report["params"];
     assert_eq!(params["pane_id"], "w1:payload");
     assert_eq!(params["source"], "herdr:pi");
-    assert_eq!(params["agent"], "prime-agent");
+    assert_eq!(params["agent"], "wv");
     assert_eq!(params["state"], "idle");
     assert!(params.get("message").is_none(), "idle carries no message");
     assert_eq!(params["agent_session_path"], session_file);
     assert_eq!(
         params["resume_argv"],
-        json!(["prime-agent", "--resume", session_file])
+        json!(["wv", "--resume", session_file])
     );
     assert!(params["seq"].as_u64().expect("seq") > 0);
     assert_no_boot_pane(&requests, "w1:payload");

@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
         puts("%s");
         return 0;
     }
-    puts("prime-agent (test fixture)");
+    puts("wv (test fixture)");
     return 0;
 }
 '''
@@ -117,12 +117,12 @@ class ContinuousFixture:
 
         source = root / "resolver.c"
         source.write_text(VERSION_RESOLVER_C % version)
-        self.raw = root / "bin" / "cargo-prime-agent"
+        self.raw = root / "bin" / "cargo-wv"
         self.raw.parent.mkdir()
         subprocess.run(["gcc", "-g", "-Wl,--build-id", "-o", str(self.raw),
                         str(source)], check=True)
-        self.binary = root / "bin" / "prime-agent"
-        self.decoder = root / "bin" / f"prime-agent-{version}-{HOST_ALIAS}.debug.gz"
+        self.binary = root / "bin" / "wv"
+        self.decoder = root / "bin" / f"wv-{version}-{HOST_ALIAS}.debug.gz"
         split = run_cli(SPLITTER, ["--binary", str(self.raw), "--shipped",
                                    str(self.binary), "--out", str(self.binary.parent),
                                    "--version", version, "--target", HOST_TARGET])
@@ -154,7 +154,7 @@ class ContinuousFixture:
         # fixture mirrors that layout.
         if target.endswith("-unknown-linux-gnu"):
             shutil.copyfile(self.decoder,
-                            out_dir / f"prime-agent-{self.version}-{HOST_ALIAS}.debug.gz")
+                            out_dir / f"wv-{self.version}-{HOST_ALIAS}.debug.gz")
         return out_dir
 
     def artifact_dir(self, out_dir: Path, target: str = HOST_TARGET) -> Path:
@@ -162,12 +162,12 @@ class ContinuousFixture:
         places one directory per artifact when a run has more than one)."""
         dist = out_dir / f"artifacts-{target}"
         dist.mkdir()
-        archive = out_dir / f"prime-agent-{self.version}-{TARGET_ALIASES[target]}.tar.gz"
+        archive = out_dir / f"wv-{self.version}-{TARGET_ALIASES[target]}.tar.gz"
         shutil.move(str(archive), str(dist / archive.name))
         for name in ("SHA256SUMS", "manifest.json"):
             shutil.move(str(out_dir / name), str(dist / name))
         if target.endswith("-unknown-linux-gnu"):
-            decoder = out_dir / f"prime-agent-{self.version}-{HOST_ALIAS}.debug.gz"
+            decoder = out_dir / f"wv-{self.version}-{HOST_ALIAS}.debug.gz"
             shutil.move(str(decoder), str(dist / decoder.name))
         return dist
 
@@ -217,7 +217,7 @@ class TheProvenanceCase(RestampTestCase):
             result.stderr)
 
     def test_a_tampered_archive_is_refused(self):
-        archive = self.incoming / f"artifacts-{HOST_TARGET}" / f"prime-agent-9.9.9-{HOST_ALIAS}.tar.gz"
+        archive = self.incoming / f"artifacts-{HOST_TARGET}" / f"wv-9.9.9-{HOST_ALIAS}.tar.gz"
         data = bytearray(archive.read_bytes())
         data[-1] ^= 0xFF
         archive.write_bytes(bytes(data))
@@ -241,7 +241,7 @@ class TheRestampCase(RestampTestCase):
 
     def restamped_assertions(self, out: Path, version: str):
         target_dir = out / f"artifacts-{HOST_TARGET}"
-        archive = target_dir / f"prime-agent-{version}-{HOST_ALIAS}.tar.gz"
+        archive = target_dir / f"wv-{version}-{HOST_ALIAS}.tar.gz"
         self.assertTrue(archive.is_file(), "the restamped archive is renamed to the version")
         manifest = json.loads((target_dir / "manifest.json").read_text())
         self.assertEqual(manifest["version"], f"v{version}")
@@ -254,10 +254,10 @@ class TheRestampCase(RestampTestCase):
                                     .read_text())["binaries"][0]["executableSha256"])
         sums = {line.split()[1]: line.split()[0]
                 for line in (target_dir / "SHA256SUMS").read_text().splitlines() if line.strip()}
-        decoder_name = f"prime-agent-{version}-{HOST_ALIAS}.debug.gz"
+        decoder_name = f"wv-{version}-{HOST_ALIAS}.debug.gz"
         self.assertEqual(set(sums), {archive.name, decoder_name})
         # The decoder's bytes are the continuous build's, only renamed.
-        old_decoder = self.incoming / f"artifacts-{HOST_TARGET}" / f"prime-agent-9.9.9-{HOST_ALIAS}.debug.gz"
+        old_decoder = self.incoming / f"artifacts-{HOST_TARGET}" / f"wv-9.9.9-{HOST_ALIAS}.debug.gz"
         self.assertEqual(digest(target_dir / decoder_name), digest(old_decoder))
         self.assertEqual(manifest["decoders"][0]["file"], decoder_name)
         # The inner runtime version manifest is what the update flow reads.
@@ -294,7 +294,7 @@ class TheRestampCase(RestampTestCase):
                         self.incoming / f"artifacts-{DARWIN_TARGET}")
         result, out = self.restamp(version="9.9.9-beta.7")
         target_dir = out / f"artifacts-{DARWIN_TARGET}"
-        archive = target_dir / f"prime-agent-9.9.9-beta.7-{DARWIN_ALIAS}.tar.gz"
+        archive = target_dir / f"wv-9.9.9-beta.7-{DARWIN_ALIAS}.tar.gz"
         self.assertTrue(archive.is_file())
         manifest = json.loads((target_dir / "manifest.json").read_text())
         self.assertEqual(manifest["version"], "v9.9.9-beta.7")
@@ -313,10 +313,10 @@ class TheRestampCase(RestampTestCase):
         staging = self.root / "sneak"
         staging.mkdir()
         target = self.incoming / f"artifacts-{HOST_TARGET}"
-        archive = target / f"prime-agent-9.9.9-{HOST_ALIAS}.tar.gz"
+        archive = target / f"wv-9.9.9-{HOST_ALIAS}.tar.gz"
         with tarfile.open(archive) as tar:
             tar.extractall(staging)
-        malicious = staging / "prime-agent-9.9.9-evil.tar.gz"
+        malicious = staging / "wv-9.9.9-evil.tar.gz"
         with tarfile.open(malicious, "w:gz") as tar:
             info = tarfile.TarInfo("../escaped-payload")
             payload = b"outside the staging tree"
@@ -340,10 +340,10 @@ class TheRestampCase(RestampTestCase):
     def test_repacking_is_deterministic(self):
         _, first = self.restamp(version="9.9.9-beta.3")
         first_archive = digest(first / f"artifacts-{HOST_TARGET}" /
-                               f"prime-agent-9.9.9-beta.3-{HOST_ALIAS}.tar.gz")
+                               f"wv-9.9.9-beta.3-{HOST_ALIAS}.tar.gz")
         _, second = self.restamp(version="9.9.9-beta.3")
         second_archive = digest(second / f"artifacts-{HOST_TARGET}" /
-                                f"prime-agent-9.9.9-beta.3-{HOST_ALIAS}.tar.gz")
+                                f"wv-9.9.9-beta.3-{HOST_ALIAS}.tar.gz")
         self.assertEqual(first_archive, second_archive)
 
     def test_a_foreign_payload_is_refused(self):
@@ -352,13 +352,13 @@ class TheRestampCase(RestampTestCase):
         # the integrity gate fires before the payload gate ever matters.
         staging = self.root / "sneak"
         staging.mkdir()
-        archive = self.incoming / f"artifacts-{HOST_TARGET}" / f"prime-agent-9.9.9-{HOST_ALIAS}.tar.gz"
+        archive = self.incoming / f"artifacts-{HOST_TARGET}" / f"wv-9.9.9-{HOST_ALIAS}.tar.gz"
         with tarfile.open(archive) as tar:
             tar.extractall(staging)
         (staging / "EXTRA").write_text("unexpected\n")
         entries = sorted(p.name for p in staging.iterdir())
         from assemble_artifacts import pack_tarball
-        rebuilt = staging / f"prime-agent-9.9.9-{HOST_ALIAS}.tar.gz"
+        rebuilt = staging / f"wv-9.9.9-{HOST_ALIAS}.tar.gz"
         pack_tarball(staging, rebuilt, entries)
         shutil.move(str(rebuilt), str(archive))
         result, _ = self.restamp(expect=1)

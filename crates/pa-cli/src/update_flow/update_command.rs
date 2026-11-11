@@ -1,4 +1,4 @@
-//! The `prime-agent update` driver: the invoking CLI's phases (spec §4
+//! The `wv update` driver: the invoking CLI's phases (spec §4
 //! `Acquire`..`Staged`) plus the spawn of the detached coordinator and the
 //! status tail. The terminal status drives the printed report and the exit
 //! code.
@@ -34,7 +34,7 @@ pub struct UpdateCommandOptions {
     pub source: Option<String>,
 }
 
-/// `prime-agent update`: plan, stage, spawn the coordinator, and relay its
+/// `wv update`: plan, stage, spawn the coordinator, and relay its
 /// terminal status. Returns the process exit code.
 ///
 /// # Errors
@@ -48,7 +48,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     let socket_path = pa_daemon::socket::default_daemon_socket_path();
     let install_root = super::activation_root().map_err(|_| {
         anyhow::anyhow!(
-            "This compiled application is not owned by the Prime Agent installer. Update it using its original installer."
+            "This compiled application is not owned by the Weave installer. Update it using its original installer."
         )
     })?;
     let update_id = pa_types::daemon::update_flow::UpdateId::from(uuid::Uuid::now_v7().to_string());
@@ -117,8 +117,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
                 base_url.as_str(),
             )?;
             let _ = std::fs::remove_file(&archive);
-            super::swap::validate_candidate(&release_dir.join("prime-agent"), &version).await?;
-            (release_dir.join("prime-agent"), release_dir)
+            super::swap::validate_candidate(&release_dir.join("wv"), &version).await?;
+            (release_dir.join("wv"), release_dir)
         }
         Ok(UpdatePlan::Direct {
             version,
@@ -127,8 +127,8 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             // `Staged` directly: `plan_direct` already staged the payload;
             // the probe below re-checks the binary's `--version`.
             writer.set_state(UpdateState::Staged)?;
-            super::swap::validate_candidate(&candidate_dir.join("prime-agent"), &version).await?;
-            (candidate_dir.join("prime-agent"), candidate_dir)
+            super::swap::validate_candidate(&candidate_dir.join("wv"), &version).await?;
+            (candidate_dir.join("wv"), candidate_dir)
         }
         Ok(UpdatePlan::Rollback {
             coordinator_exe,

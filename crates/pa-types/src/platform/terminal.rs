@@ -145,7 +145,7 @@ pub fn ensure_cooked_tty() -> TtyCooked {
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const attrs) } != 0 {
         let _ = io::Write::write_all(
             &mut io::stderr(),
-            b"Prime Agent: a raw terminal could not be repaired.\n",
+            b"Weave: a raw terminal could not be repaired.\n",
         );
         return TtyCooked::Unavailable;
     }

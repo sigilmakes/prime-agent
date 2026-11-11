@@ -38,15 +38,15 @@ class PushValidation(unittest.TestCase):
         cases = [
             ("upstream", hooks.ORIGIN_URL), ("github", hooks.ORIGIN_URL),
             ("scratch", hooks.ORIGIN_URL), (hooks.ORIGIN_URL, hooks.ORIGIN_URL),
-            ("origin", "git@github.com:sigilzero/prime-agent.git"),
+            ("origin", "git@github.com:sigilzero/weave.git"),
             ("origin", "https://github.com/PrimeIntellect-ai/prime-agent.git"),
             ("origin", "ssh://git@mnemosyne.sigilzero.dev/other/prime-agent.git"),
-            ("origin", "ssh://git@mnemosyne.sigilzero.dev/sigilzero/prime-agent.git/extra"),
-            ("origin", "https://mnemosyne.sigilzero.dev.evil/sigilzero/prime-agent.git"),
-            ("origin", "https://mnemosyne.sigilzero.dev@evil/sigilzero/prime-agent.git"),
-            ("origin", "https://evil/mnemosyne.sigilzero.dev/sigilzero/prime-agent.git"),
+            ("origin", "ssh://git@mnemosyne.sigilzero.dev/sigilzero/weave.git/extra"),
+            ("origin", "https://mnemosyne.sigilzero.dev.evil/sigilzero/weave.git"),
+            ("origin", "https://mnemosyne.sigilzero.dev@evil/sigilzero/weave.git"),
+            ("origin", "https://evil/mnemosyne.sigilzero.dev/sigilzero/weave.git"),
             ("origin", "file:///tmp/prime-agent.git"),
-            ("origin", "ssh://git@mnemosyne.sigilzero.dev:2222/sigilzero/prime-agent.git"),
+            ("origin", "ssh://git@mnemosyne.sigilzero.dev:2222/sigilzero/weave.git"),
             ("origin", hooks.ORIGIN_URL + "\n"), ("origin", ""),
         ]
         for remote, url in cases:

@@ -40,7 +40,7 @@ impl DaemonClient {
     pub(crate) fn connect(socket_path: &Path) -> Result<Self> {
         Self::connect_raw(socket_path).map_err(|error| {
             anyhow!(
-                "Failed to connect to the Prime Agent daemon: {}. {}",
+                "Failed to connect to the Weave daemon: {}. {}",
                 node_connect_error(&error, socket_path),
                 endpoint_details(socket_path)
             )
@@ -87,7 +87,7 @@ impl DaemonClient {
         let protocol = daemon_protocol(&hello)?;
         if protocol.version < DAEMON_PROTOCOL_VERSION {
             return Err(anyhow!(
-                "The running Prime Agent daemon does not support {command_type}."
+                "The running Weave daemon does not support {command_type}."
             ));
         }
         self.request_id += 1;
@@ -179,7 +179,7 @@ impl DaemonClient {
                         .map(|reason| format!(" Reason: {reason}."))
                         .unwrap_or_default();
                     return Err(anyhow!(
-                        "Connection to the Prime Agent daemon closed.{reason} {}",
+                        "Connection to the Weave daemon closed.{reason} {}",
                         endpoint_details(&self.socket_path)
                     ));
                 }
@@ -221,9 +221,9 @@ enum Operation<'a> {
 impl Operation<'_> {
     fn wait_description(&self) -> String {
         match self {
-            Operation::Handshake => "waiting for the Prime Agent daemon handshake".to_string(),
+            Operation::Handshake => "waiting for the Weave daemon handshake".to_string(),
             Operation::Command(command_type) => {
-                format!("waiting for the Prime Agent daemon response to \"{command_type}\"")
+                format!("waiting for the Weave daemon response to \"{command_type}\"")
             }
         }
     }
@@ -311,7 +311,7 @@ mod tests {
         let error = DaemonClient::connect(&socket).unwrap_err();
         let text = error.to_string();
         assert!(
-            text.starts_with("Failed to connect to the Prime Agent daemon: connect ENOENT "),
+            text.starts_with("Failed to connect to the Weave daemon: connect ENOENT "),
             "{text}"
         );
         assert!(text.contains("Socket: "), "{text}");
@@ -344,7 +344,7 @@ mod tests {
         let error = client.request(list_command("daemon_1")).unwrap_err();
         let text = error.to_string();
         assert!(
-            text.starts_with("Connection to the Prime Agent daemon closed. Reason: shutdown."),
+            text.starts_with("Connection to the Weave daemon closed. Reason: shutdown."),
             "{text}"
         );
         assert!(text.contains("Socket: "), "{text}");

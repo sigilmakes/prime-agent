@@ -90,7 +90,7 @@ fn next_spinner_deadline(started: Instant, now: Instant) -> Instant {
 /// daemon update restart (TS #2391) instead of failing the open hard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionOpenRoute {
-    /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single attempt.
+    /// The CLI's open (`wv`, `--resume`, `--attach`): a single attempt.
     Cli,
     /// The agents view's open: waits through the update-restart window and retries.
     AgentsView,
@@ -1698,19 +1698,19 @@ async fn run_interactive_surface(
                             // The daemon never came back within the reconnect timeout — the
                             // saved-transcript close (the session file survives on disk).
                             session.note(
-                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                "The Weave daemon shut down while this window was attached. The session transcript remains saved; restart Weave and reopen it from Agents View.",
                                 &mut view,
                             );
                         }
                         RecoveryKind::Lost => {
                             session.note(
-                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                "could not reconnect to the daemon within 10 minutes — run `wv attach` to resume.",
                                 &mut view,
                             );
                         }
                         RecoveryKind::Update => {
                             session.note(
-                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `wv attach` to resume.",
                                 &mut view,
                             );
                         }
@@ -1766,19 +1766,19 @@ async fn run_interactive_surface(
                             // The daemon never came back within the reconnect timeout — the
                             // saved-transcript close (the session file survives on disk).
                             session.note(
-                                "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+                                "The Weave daemon shut down while this window was attached. The session transcript remains saved; restart Weave and reopen it from Agents View.",
                                 &mut view,
                             );
                         }
                         RecoveryKind::Lost => {
                             session.note(
-                                "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                                "could not reconnect to the daemon within 10 minutes — run `wv attach` to resume.",
                                 &mut view,
                             );
                         }
                         RecoveryKind::Update => {
                             session.note(
-                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                                "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `wv attach` to resume.",
                                 &mut view,
                             );
                         }
@@ -1841,7 +1841,7 @@ async fn run_interactive_surface(
                                     }
                                 } else {
                                     session.note(
-                                        &format!("reattach after the update failed: {error:#} — run `prime-agent attach` to resume"),
+                                        &format!("reattach after the update failed: {error:#} — run `wv attach` to resume"),
                                         &mut view,
                                     );
                                     session.dirty = true;

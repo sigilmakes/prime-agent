@@ -93,7 +93,7 @@ async fn probe_daemon(socket_path: &Path) -> Result<DaemonProbe> {
 
 fn refuse_peer(socket_path: &Path, reason: &str) -> anyhow::Error {
     anyhow!(
-        "The Prime Agent Rust client cannot use the peer on selected socket {}: {reason}. No shutdown or replacement was attempted. Select a separate private socket with --daemon-socket, or use the matching client for that runtime.",
+        "The Weave Rust client cannot use the peer on selected socket {}: {reason}. No shutdown or replacement was attempted. Select a separate private socket with --daemon-socket, or use the matching client for that runtime.",
         socket_path.display()
     )
 }
@@ -110,7 +110,7 @@ pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Resu
     if matches!(probe_daemon(socket_path).await?, DaemonProbe::Current) {
         return Ok(());
     }
-    let exe = std::env::current_exe().context("resolve the prime-agent executable")?;
+    let exe = std::env::current_exe().context("resolve the wv executable")?;
     ensure_daemon_running_with(&exe, socket_path, spawn_cwd).await
 }
 
@@ -136,7 +136,7 @@ pub async fn ensure_daemon_running_with(
         }
         if Instant::now() > deadline {
             return Err(anyhow!(
-                "Timed out waiting for the Prime Agent Rust daemon to start on selected socket {}. Check the selected socket and daemon diagnostics, then retry.",
+                "Timed out waiting for the Weave Rust daemon to start on selected socket {}. Check the selected socket and daemon diagnostics, then retry.",
                 socket_path.display()
             ));
         }
@@ -166,6 +166,6 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
     pa_core::platform::process::set_new_process_group(&mut command);
     command
         .spawn()
-        .with_context(|| format!("spawn the Prime Agent daemon on {}", socket_path.display()))?;
+        .with_context(|| format!("spawn the Weave daemon on {}", socket_path.display()))?;
     Ok(())
 }

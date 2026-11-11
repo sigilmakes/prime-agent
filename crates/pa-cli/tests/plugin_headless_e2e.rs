@@ -84,7 +84,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
         command.env_clear();
         for name in ["PATH", "LD_LIBRARY_PATH", "PI_PACKAGE_DIR"] {
             if let Some(value) = std::env::var_os(name) {

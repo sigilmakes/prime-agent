@@ -1,8 +1,8 @@
-prime-agent - AI coding assistant with a Python REPL tool
+wv - AI coding assistant with a Python REPL tool
 
 Usage:
-  prime-agent [options] [@files...] [message...]
-  prime-agent <command> [args...]
+  wv [options] [@files...] [message...]
+  wv <command> [args...]
 
 Options:
 Run options:
@@ -70,4 +70,4 @@ Commands:
   config    Configure package resources
   prompt    Print the assembled system prompt with its layer breakdown
 
-Run "prime-agent help <command>" for command details.
+Run "wv help <command>" for command details.

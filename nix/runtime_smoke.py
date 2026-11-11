@@ -9,7 +9,7 @@ import tempfile
 
 
 def smoke(binary: Path, version: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="prime-installed-smoke-") as raw:
+    with tempfile.TemporaryDirectory(prefix="weave-installed-smoke-") as raw:
         home = Path(raw)
         home.chmod(0o700)
         agent = home / "agent"
@@ -46,7 +46,7 @@ def smoke(binary: Path, version: str) -> None:
             return result.stdout
 
         assert run(["--version"]).strip() == version
-        assert "prime-agent" in run(["--help"])
+        assert "wv" in run(["--help"])
         refusal = subprocess.run(
             [str(binary), "update", "--check"], cwd=home, env=env,
             text=True, capture_output=True, timeout=15, check=False,

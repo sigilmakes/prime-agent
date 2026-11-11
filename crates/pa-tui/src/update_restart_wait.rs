@@ -18,7 +18,7 @@ pub(crate) const DAEMON_UPDATE_RESTART_OPEN_RETRY_MS: u64 = 500;
 
 /// The notice a waited-through open surfaces (TS `updateRestartWaitNotice`).
 pub(crate) const DAEMON_UPDATE_RESTART_WAIT_NOTICE: &str =
-    "Waited for the Prime Agent daemon update restart to finish before opening this agent";
+    "Waited for the Weave daemon update restart to finish before opening this agent";
 
 /// True when an open failure is part of the normal update-restart
 /// window: the preparing-restart rejection, transport failures while
@@ -44,10 +44,10 @@ pub(crate) fn is_update_restart_transient_error(error: &anyhow::Error) -> bool {
             }
         }
         let text = cause.to_string();
-        text.starts_with("Connection to the Prime Agent daemon closed")
+        text.starts_with("Connection to the Weave daemon closed")
             || text.starts_with("the daemon connection closed")
             || text.starts_with("the daemon connection is closed")
-            || text.starts_with("Failed to connect to the Prime Agent daemon")
+            || text.starts_with("Failed to connect to the Weave daemon")
             || is_daemon_transport_timeout(&text)
     })
 }
@@ -58,7 +58,7 @@ pub(crate) fn is_update_restart_deadline_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .to_string()
-            .starts_with("The Prime Agent daemon did not finish its update restart within")
+            .starts_with("The Weave daemon did not finish its update restart within")
     })
 }
 
@@ -76,9 +76,9 @@ fn is_daemon_transport_timeout(text: &str) -> bool {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    tail.starts_with("connecting to the prime agent daemon")
-        || tail.starts_with("waiting for the prime agent daemon handshake")
-        || tail.starts_with("waiting for the prime agent daemon response")
+    tail.starts_with("connecting to the weave daemon")
+        || tail.starts_with("waiting for the weave daemon handshake")
+        || tail.starts_with("waiting for the weave daemon response")
 }
 
 /// The bounded wait's failure, carrying the last error for diagnosis.
@@ -91,7 +91,7 @@ fn update_restart_deadline_error(
         None => "none yet".to_string(),
     };
     anyhow!(
-        "The Prime Agent daemon did not finish its update restart within {} seconds. Try opening this agent again once the update finishes. Last error: {}",
+        "The Weave daemon did not finish its update restart within {} seconds. Try opening this agent again once the update finishes. Last error: {}",
         wait_ms / 1000,
         last
     )
@@ -260,17 +260,14 @@ mod tests {
     #[tokio::test]
     async fn retries_every_restart_transient_failure_and_reports_the_wait() {
         let transient_failures: Vec<(&str, anyhow::Error)> = vec![
-            (
-                "the preparing rejection",
-                preparing_rejection(),
-            ),
+            ("the preparing rejection", preparing_rejection()),
             (
                 "connect refused",
-                anyhow!("Failed to connect to the Prime Agent daemon. Socket: /s."),
+                anyhow!("Failed to connect to the Weave daemon. Socket: /s."),
             ),
             (
                 "closed",
-                anyhow!("Connection to the Prime Agent daemon closed. Socket: /s."),
+                anyhow!("Connection to the Weave daemon closed. Socket: /s."),
             ),
             (
                 "pending-fail closed",
@@ -280,21 +277,22 @@ mod tests {
                 "pre-handshake closed",
                 anyhow!("the daemon connection closed before the handshake"),
             ),
-            (
-                "dead writer",
-                anyhow!("the daemon connection is closed"),
-            ),
+            ("dead writer", anyhow!("the daemon connection is closed")),
             (
                 "response timeout",
-                anyhow!("Timed out after 30000ms waiting for the Prime Agent daemon response. Socket: /s."),
+                anyhow!(
+                    "Timed out after 30000ms waiting for the Weave daemon response. Socket: /s."
+                ),
             ),
             (
                 "connect timeout",
-                anyhow!("Timed out after 5000ms connecting to the Prime Agent daemon. Socket: /s."),
+                anyhow!("Timed out after 5000ms connecting to the Weave daemon. Socket: /s."),
             ),
             (
                 "handshake timeout",
-                anyhow!("Timed out after 5000ms waiting for the Prime Agent daemon handshake. Socket: /s."),
+                anyhow!(
+                    "Timed out after 5000ms waiting for the Weave daemon handshake. Socket: /s."
+                ),
             ),
             (
                 "unknown session",
@@ -373,7 +371,7 @@ mod tests {
         assert!(
             deadline_error
                 .to_string()
-                .starts_with("The Prime Agent daemon did not finish its update restart within"),
+                .starts_with("The Weave daemon did not finish its update restart within"),
             "the deadline error is actionable: {deadline_error}"
         );
         assert!(
@@ -402,11 +400,11 @@ mod tests {
     #[test]
     fn the_transport_timeout_shapes_classify_exactly() {
         for text in [
-            "Timed out after 5000ms connecting to the Prime Agent daemon. Socket: /s.",
-            "Timed out after 5000ms waiting for the Prime Agent daemon handshake. Socket: /s.",
-            "Timed out after 30000ms waiting for the Prime Agent daemon response. Socket: /s.",
-            "Timed out after 30000ms waiting for the Prime Agent daemon response to \"create\".",
-            "timed out after 30000ms waiting for the Prime Agent daemon response",
+            "Timed out after 5000ms connecting to the Weave daemon. Socket: /s.",
+            "Timed out after 5000ms waiting for the Weave daemon handshake. Socket: /s.",
+            "Timed out after 30000ms waiting for the Weave daemon response. Socket: /s.",
+            "Timed out after 30000ms waiting for the Weave daemon response to \"create\".",
+            "timed out after 30000ms waiting for the Weave daemon response",
         ] {
             assert!(is_daemon_transport_timeout(text), "{text}");
             assert!(
@@ -421,7 +419,7 @@ mod tests {
             "Timed out after ms connecting"
         ));
         assert!(!is_daemon_transport_timeout(
-            "Timed out after 5x00ms connecting to the Prime Agent daemon"
+            "Timed out after 5x00ms connecting to the Weave daemon"
         ));
     }
 
@@ -432,7 +430,7 @@ mod tests {
         assert!(
             deadline
                 .to_string()
-                .starts_with("The Prime Agent daemon did not finish its update restart within"),
+                .starts_with("The Weave daemon did not finish its update restart within"),
             "{deadline}"
         );
         assert!(deadline.to_string().contains("Last error:"));
@@ -447,7 +445,7 @@ mod tests {
         assert_eq!(DAEMON_UPDATE_RESTART_OPEN_WAIT_MS, 240_000);
         assert_eq!(
             DAEMON_UPDATE_RESTART_WAIT_NOTICE,
-            "Waited for the Prime Agent daemon update restart to finish before opening this agent"
+            "Waited for the Weave daemon update restart to finish before opening this agent"
         );
         assert_eq!(
             pa_types::daemon::UPDATE_RESTART_PREPARING_MESSAGE,

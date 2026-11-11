@@ -53,10 +53,10 @@ pub(crate) struct DaemonStateRoot {
 /// protection silently disappears at uid 0.
 pub(crate) const NEVER_TOUCH_SOCKET_DIRS: &[&str] = &[
     "/tmp/prime-agent-1000",
-    "/tmp/mission-tmp/prime-agent-1000",
+    "/tmp/mission-tmp/wv-1000",
     "/tmp/mission-daemon",
     "/tmp/prime-agent-0",
-    "/tmp/mission-tmp/prime-agent-0",
+    "/tmp/mission-tmp/wv-0",
 ];
 
 pub(crate) fn is_never_touch(path: &Path) -> bool {
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn a_scan_rooted_on_a_never_touch_dir_surfaces_no_listeners() {
         // The ambient mission daemon's workers listen under these dirs, owned
-        // by real `prime-agent` processes: root matching alone would find them.
+        // by real `wv` processes: root matching alone would find them.
         for dir in NEVER_TOUCH_SOCKET_DIRS {
             let dir = *dir;
             let root = DaemonStateRoot {

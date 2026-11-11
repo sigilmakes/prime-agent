@@ -90,7 +90,7 @@ fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
 
 async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
     // Flag > env > default: the same `PRIME_AGENT_DAEMON_SOCKET` contract
-    // as every other mode (the `prime-agent` launcher written by
+    // as every other mode (the `wv` launcher written by
     // install-rust.sh pins that env, so the ACP path must honor it or it
     // would target the TypeScript default socket and treat the schema
     // mismatch as a stale daemon).
@@ -1368,7 +1368,7 @@ fn stored_session_cwd(
 
 pub(crate) fn render_selector_error(error: &SessionSelectorError) -> String {
     format!(
-        "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
+        "{}.{}\nOpen Weave and press left-arrow to browse sessions.",
         error.message(),
         error.suggestion().unwrap_or_default()
     )

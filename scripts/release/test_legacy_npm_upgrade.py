@@ -74,7 +74,7 @@ def exercise(args, root: Path) -> dict:
         # curl/reinstall/bridge invocation is permitted before this assertion.
         # Some earliest clients never relaunch; their explicit opt-in case
         # verifies activation through the next ordinary version command.
-        native = Path(env['PRIME_AGENT_RUST_PREFIX']) / 'bin/prime-agent'
+        native = Path(env['PRIME_AGENT_RUST_PREFIX']) / 'bin/wv'
         activated_during_update = native.is_file()
         if not activated_during_update and not args.allow_deferred_activation:
             diagnostic = subprocess.run(['node', str(cli), '--version'], env=env, cwd=env['HOME'], capture_output=True, text=True, timeout=180)

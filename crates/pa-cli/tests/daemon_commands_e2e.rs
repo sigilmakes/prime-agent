@@ -10,33 +10,33 @@
 )]
 
 //! End-to-end daemon-command tests: spawn the real `pa-daemon` supervisor on a
-//! temp socket, drive `prime-agent` list/stop/rename against it, and diff the
+//! temp socket, drive `wv` list/stop/rename against it, and diff the
 //! output against goldens captured from the installed TS `prime-agent` binary.
 //! A second test gives each CLI a private TS counterpart at its own product default.
 //!
 //! Goldens (captured from the live TS binary, protocol 7):
 //!
 //! ```text
-//! $ prime-agent list            # one live session named "research"
+//! $ wv list            # one live session named "research"
 //! name      id            status  age  model                         messages  clients
 //! research  b72ad7009b11  idle    3s   prime-inference/z-ai/glm-5.3  0         0
 //!
-//! $ prime-agent list           # no live sessions
+//! $ wv list           # no live sessions
 //! No active agents.
 //!
-//! $ prime-agent list --all     # no saved sessions
+//! $ wv list --all     # no saved sessions
 //! No agents.
 //!
-//! $ prime-agent stop <id>
+//! $ wv stop <id>
 //! ok
 //!
-//! $ prime-agent rename <id> gamma
+//! $ wv rename <id> gamma
 //! Renamed 0f04b31cb2b6 to gamma
 //!
-//! $ prime-agent schedule add gamma "every 5 minutes" -- "do the thing"
+//! $ wv schedule add gamma "every 5 minutes" -- "do the thing"
 //! Scheduled 0451e5a9-951c-457b-ae76-ea3142ea5d25 next=2026-09-16T18:36:59.287Z
 //!
-//! $ prime-agent schedule list
+//! $ wv schedule list
 //! 0451e5a9-951c-457b-ae76-ea3142ea5d25 active next=9/16/2026, 6:36:59 PM last=- runs=0 schedule="every 5 minutes" prompt="do the thing"
 //! ```
 #![cfg(unix)]
@@ -67,12 +67,12 @@ const SCRUB_ENV: [&str; 10] = [
     "PRIME_AGENT_DAEMON_SOCKET",
 ];
 
-/// Locate the built `pa-daemon` binary next to this crate's `prime-agent`
+/// Locate the built `pa-daemon` binary next to this crate's `wv`
 /// binary (cargo builds the tested crate's bins only).
 fn daemon_binary() -> PathBuf {
-    let profile_dir = Path::new(env!("CARGO_BIN_EXE_prime-agent"))
+    let profile_dir = Path::new(env!("CARGO_BIN_EXE_wv"))
         .parent()
-        .expect("profile directory of the prime-agent binary")
+        .expect("profile directory of the wv binary")
         .to_path_buf();
     let daemon = profile_dir.join("pa-daemon");
     assert!(
@@ -90,13 +90,13 @@ fn ts_binary() -> Option<PathBuf> {
         let path = PathBuf::from(path);
         return path.exists().then_some(path);
     }
-    let probe = Command::new("prime-agent")
+    let probe = Command::new("wv")
         .arg("--version")
         .output()
         .ok()?
         .status
         .success()
-        .then(|| PathBuf::from("prime-agent"));
+        .then(|| PathBuf::from("wv"));
     probe
 }
 
@@ -463,7 +463,7 @@ impl CliPair {
     }
 }
 
-// Rust end-to-end: pa-daemon + prime-agent
+// Rust end-to-end: pa-daemon + wv
 
 #[test]
 fn rust_daemon_cli_commands_end_to_end() {
@@ -472,7 +472,7 @@ fn rust_daemon_cli_commands_end_to_end() {
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let socket = dir.path().join("daemon.sock");
-    let cli = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let cli = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let daemon = spawn_daemon(&daemon_binary(), &socket, &agent_dir);
     let socket_str = socket.to_string_lossy().to_string();
 
@@ -699,7 +699,7 @@ fn cli_connect_error_matches_ts_golden() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let missing = dir.path().join("missing.sock");
-    let cli = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let cli = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let output = run_cli(
         &cli,
         dir.path(),
@@ -714,7 +714,7 @@ fn cli_connect_error_matches_ts_golden() {
 
     let text = stderr(&output).trim_end().to_string();
     let expected_prefix = format!(
-        "Error: Failed to connect to the Prime Agent daemon: connect ENOENT {missing}. Socket: {missing}. Daemon log: ",
+        "Error: Failed to connect to the Weave daemon: connect ENOENT {missing}. Socket: {missing}. Daemon log: ",
         missing = missing.display()
     );
     assert!(
@@ -754,26 +754,26 @@ fn schedule_usage_errors_and_valid_invocations() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
-    let cli = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let cli = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let rotated_socket = dir.path().join("bogus.sock");
     let rotated_socket = rotated_socket.to_str().expect("socket path");
 
     let usage_shapes = [
         (
             vec!["schedule", "cancel"],
-            "Error: Usage: prime-agent schedule cancel <job-id>\n",
+            "Error: Usage: wv schedule cancel <job-id>\n",
         ),
         (
             vec!["schedule", "cancel", "a", "b"],
-            "Error: Usage: prime-agent schedule cancel <job-id>\n",
+            "Error: Usage: wv schedule cancel <job-id>\n",
         ),
         (
             vec!["schedule", "list", "--bogus-flag"],
-            "Error: Usage: prime-agent schedule list [--all] [agent] [--json]\n",
+            "Error: Usage: wv schedule list [--all] [agent] [--json]\n",
         ),
         (
             vec!["--daemon-socket", rotated_socket, "schedule", "list"],
-            "Error: Usage: prime-agent schedule list [--all] [agent] [--json]\n",
+            "Error: Usage: wv schedule list [--all] [agent] [--json]\n",
         ),
         (
             vec![
@@ -783,7 +783,7 @@ fn schedule_usage_errors_and_valid_invocations() {
                 "cancel",
                 "id",
             ],
-            "Error: Usage: prime-agent schedule cancel <job-id>\n",
+            "Error: Usage: wv schedule cancel <job-id>\n",
         ),
     ];
     for (args, golden) in usage_shapes {
@@ -808,7 +808,7 @@ fn schedule_usage_errors_and_valid_invocations() {
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let err = stderr(&out);
         assert!(
-            err.starts_with("Error: Failed to connect to the Prime Agent daemon:"),
+            err.starts_with("Error: Failed to connect to the Weave daemon:"),
             "{args:?}: {err}"
         );
     }
@@ -980,7 +980,7 @@ fn ts_daemon_differential_cli_output() {
     // SCRUB_ENV removes the gate's inherited Rust override before either CLI.
     // Do not mutate the test process's TMPDIR or alias either live endpoint.
     let uid = pa_core::platform::process::current_user_id();
-    let ts_socket = dir.path().join(format!("prime-agent-{uid}/daemon.sock"));
+    let ts_socket = dir.path().join(format!("wv-{uid}/daemon.sock"));
     let rust_socket = dir
         .path()
         .join(format!("prime-agent-rust-{uid}/daemon.sock"));
@@ -998,7 +998,7 @@ fn ts_daemon_differential_cli_output() {
         "Rust selected-default reachability"
     );
     assert!(ts_socket.starts_with(dir.path()) && rust_socket.starts_with(dir.path()));
-    let rust = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let rust = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let pair = CliPair {
         ts: ts.clone(),
         rust: rust.clone(),

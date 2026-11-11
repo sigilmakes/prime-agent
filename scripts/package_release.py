@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Assemble the prime-agent release artifact (kernel packaging).
+"""Assemble the Weave (wv) release artifact (kernel packaging).
 
 Ports the TS release packaging (scripts/assemble-release-archives.mjs +
 packages/coding-agent/scripts/copy-binary-assets.mjs) to this repo's layout:
 
-  <out-dir>/prime-agent-<version>-<platform>/     staged exe-adjacent layout
-  <out-dir>/prime-agent-<version>-<platform>.tar.gz
+  <out-dir>/wv-<version>-<platform>/     staged exe-adjacent layout
+  <out-dir>/wv-<version>-<platform>.tar.gz
   <out-dir>/binaries.json                          release manifest (version pin)
   <out-dir>/SHA256SUMS                             integrity sums for the artifacts
 
 The staged layout is the exe-adjacent packaging the binary resolves at
 runtime (PI_PACKAGE_DIR override, else the directory of the executable):
 
-  prime-agent            the binary (mode 755; prime-agent.exe on win32-x64)
+  wv                     the binary (mode 755; wv.exe on win32-x64)
   package.json           version manifest ({"version": <version>, piConfig})
   README.md
   LICENSE
@@ -89,7 +89,7 @@ EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
 # must carry its manifest and the REPL entry point, and the bundled catalog
 # assets must sit beside the executable.
 REQUIRED_FILES = (
-    "prime-agent",
+    "wv",
     "package.json",
     "README.md",
     "LICENSE",
@@ -111,7 +111,7 @@ def parse_args(argv):
     parser.add_argument("--binary", type=Path, help="stage this binary instead of building")
     parser.add_argument("--decoder", type=Path, help="separate Linux decoder for --binary")
     parser.add_argument("--skip-build", action="store_true",
-                        help="reuse target/release/prime-agent (prime-agent.exe on"
+                        help="reuse target/release/wv (wv.exe on"
                              " win32-x64) without building")
     parser.add_argument("--out-dir", type=Path, help="output directory (default: target/release-package)")
     parser.add_argument("--platform", help="platform tag (default: derived from this machine)")
@@ -153,12 +153,12 @@ def release_platform():
 
 
 def binary_name_for_platform(tag):
-    """The staged binary name for one platform tag: `prime-agent.exe` on
+    """The staged binary name for one platform tag: `wv.exe` on
     win32-x64 (the name Cargo's MSVC linker emits and the installer's
-    `.exe`-aware layout expects), `prime-agent` everywhere else — the same
+    `.exe`-aware layout expects), `wv` everywhere else — the same
     naming rule the release pipeline applies
     (`scripts/release/assemble_artifacts.py` `binary_name_for_target`)."""
-    return "prime-agent.exe" if tag == "win32-x64" else "prime-agent"
+    return "wv.exe" if tag == "win32-x64" else "wv"
 
 
 def include_path(relative, extra_excluded_names=frozenset(), extra_excluded_suffixes=()):
@@ -244,11 +244,11 @@ def stage(root, binary, version, stage_dir, catalog_assets, binary_name):
     (stage_dir / "package.json").write_text(
         json.dumps(
             {
-                "name": "prime-agent",
+                "name": "wv",
                 "version": version,
-                "description": "Prime Agent: the RLM coding agent (Rust build)",
-                "bin": {"prime-agent": binary_name},
-                "piConfig": {"name": "prime-agent", "configDir": ".prime/agent"},
+                "description": "Weave: the RLM coding agent (Rust build)",
+                "bin": {"wv": binary_name},
+                "piConfig": {"name": "wv", "configDir": ".prime/agent"},
             },
             indent=2,
         )
@@ -261,7 +261,7 @@ def validate(stage_dir, version, binary_name):
         if not (stage_dir / name).is_dir():
             raise SystemExit(f"error: missing binary asset directory: {name}")
     for name in REQUIRED_FILES:
-        path = stage_dir / (binary_name if name == "prime-agent" else name)
+        path = stage_dir / (binary_name if name == "wv" else name)
         if not path.is_file():
             raise SystemExit(f"error: missing binary asset: {path.name}")
     if not os.access(stage_dir / binary_name, os.X_OK):
@@ -285,7 +285,7 @@ def pin_version(binary, stage_dir, version, binary_name):
             env={**os.environ, "PI_PACKAGE_DIR": empty},
         )
     if probe.returncode != 0:
-        raise SystemExit(f"error: prime-agent --version failed: {probe.stderr.strip()}")
+        raise SystemExit(f"error: wv --version failed: {probe.stderr.strip()}")
     compiled = probe.stdout.strip()
     if compiled != version:
         raise SystemExit(
@@ -346,7 +346,7 @@ def main(argv=None):
     binary_name = binary_name_for_platform(tag)
     out_dir = (args.out_dir or root / "target" / "release-package").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    stage_dir = out_dir / f"prime-agent-{version}-{tag}"
+    stage_dir = out_dir / f"wv-{version}-{tag}"
 
     if args.binary:
         binary = args.binary.resolve()
@@ -370,14 +370,14 @@ def main(argv=None):
             raise SystemExit(f"error: unsupported Linux platform: {tag}")
         if not args.binary:
             shipped_dir = root / "target" / "release" / "dist"
-            shipped = shipped_dir / "prime-agent"
+            shipped = shipped_dir / "wv"
             target = targets[tag]
             subprocess.run([sys.executable, str(ROOT / "scripts/release/split_debug.py"),
                             "--binary", str(binary), "--shipped", str(shipped),
                             "--out", str(shipped_dir), "--version", version,
                             "--target", target], cwd=ROOT, check=True)
             binary = shipped
-            args.decoder = shipped_dir / f"prime-agent-{version}-{tag}.debug.gz"
+            args.decoder = shipped_dir / f"wv-{version}-{tag}.debug.gz"
         if args.decoder is None:
             raise SystemExit("error: Linux --binary requires --decoder from split_debug.py")
         if debug_sections(binary):

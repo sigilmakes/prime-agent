@@ -1,4 +1,4 @@
-//! `prime-agent session export <file> [output]`: the HTML export of a saved
+//! `wv session export <file> [output]`: the HTML export of a saved
 //! session file (the export itself is pa-core's `export_from_file`).
 
 use crate::args::Args;

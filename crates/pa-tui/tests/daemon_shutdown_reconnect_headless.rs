@@ -409,7 +409,7 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
     // TS #2458's waiting row: the announced closing armed the bounded shutdown recovery (not the
     // hiccup loop).
     assert!(
-        all.contains("the Prime Agent daemon shut down; waiting for it to come back"),
+        all.contains("the Weave daemon shut down; waiting for it to come back"),
         "the shutdown recovery armed at the notice:\n{all}"
     );
     let equal_banner = format!(
@@ -439,7 +439,7 @@ fn an_announced_shutdown_reconnects_when_the_daemon_comes_back() {
         "the reattach reached the successor by durable id: {requests:?}"
     );
     assert!(
-        !all.contains("The Prime Agent daemon shut down while this window was attached"),
+        !all.contains("The Weave daemon shut down while this window was attached"),
         "the expiry row must not appear when the daemon came back:\n{all}"
     );
 }

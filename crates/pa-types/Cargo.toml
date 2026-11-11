@@ -3,7 +3,7 @@ name = "pa-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared domain and wire types for Prime Agent."
+description = "Shared domain and wire types for Weave."
 
 [dependencies]
 serde = { workspace = true }

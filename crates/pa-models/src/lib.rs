@@ -1,4 +1,4 @@
-//! Live model catalog subsystem for Prime Agent.
+//! Live model catalog subsystem for Weave.
 //! Everything the catalog can do is select among transports the client
 //! compiled in; it can never introduce a transport or change what a
 //! request sends. Depends on pa-ai and pa-types; nothing above pa-agent.

@@ -1,6 +1,6 @@
 # Compute & Storage
 
-Prime Intellect aggregates GPU capacity across providers: rent single GPU pods on demand or deploy multi-node clusters, with persistent network-attached storage.
+Rent single-GPU pods or deploy multi-node clusters, with persistent network-attached storage.
 
 Live docs: `cli-reference/check-gpu-availability.md`, `cli-reference/provision-gpu.md`, `cli-reference/managing-disks.md`, `tutorials-multi-node-cluster/deploy-multi-node.md`, `tutorials-storage/create-persistent-storage.md` under https://docs.primeintellect.ai/
 
@@ -14,13 +14,13 @@ prime availability list --gpu-type H100_80GB   # filter by GPU type
 ## Pods (single instances)
 
 ```bash
-prime config set-ssh-key-path   # one-time: SSH key for pod access (generate on the dashboard profile page)
+prime config set-ssh-key-path   # one-time: SSH key for pod access (generate it in the web console)
 prime pods create               # interactive provisioning from availability data
 prime pods list
 prime pods ssh <pod-id>
 ```
 
-Pods support custom Docker images (`tutorials-on-demand-cloud/deploy-custom-docker-image.md`). Monitor, terminate, and inspect pods from the CLI or the dashboard.
+Pods support custom Docker images (`tutorials-on-demand-cloud/deploy-custom-docker-image.md`). Monitor, terminate, and inspect pods from the CLI or the web console.
 
 ## Multi-Node Clusters
 

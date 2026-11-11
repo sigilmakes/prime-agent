@@ -160,8 +160,7 @@ pub(crate) fn run_shutdown_all(json: bool, force: bool, root: &DaemonStateRoot) 
                 .map(|daemon| {
                     (
                         daemon.socket_path.display().to_string(),
-                        r#"confirmation required; use "prime-agent shutdown --force --json""#
-                            .to_string(),
+                        r#"confirmation required; use "wv shutdown --force --json""#.to_string(),
                     )
                 })
                 .collect();
@@ -172,7 +171,7 @@ pub(crate) fn run_shutdown_all(json: bool, force: bool, root: &DaemonStateRoot) 
             // The public-command wrapper turns the throw into the standard `Error: …`
             // failure (stderr + exit 1); only reachable once there are daemons to stop.
             eprintln!(
-                "Error: Shutdown requires confirmation in an interactive terminal. Use \"prime-agent shutdown --force\"."
+                "Error: Shutdown requires confirmation in an interactive terminal. Use \"wv shutdown --force\"."
             );
             1
         }

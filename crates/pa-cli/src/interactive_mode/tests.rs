@@ -550,7 +550,7 @@ fn fork_startup_selection_reports_the_ts_contracts() {
         "unexpected error: {rendered}"
     );
     assert!(
-        rendered.contains("Open prime-agent and press left-arrow to browse sessions."),
+        rendered.contains("Open Weave and press left-arrow to browse sessions."),
         "unexpected error: {rendered}"
     );
 }

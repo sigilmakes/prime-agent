@@ -1,5 +1,6 @@
 
 /target
+/result
 /bin/
 __pycache__/
 steer-queue-runs/

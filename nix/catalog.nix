@@ -13,7 +13,7 @@ let
         hash = "sha256-Uir8FHGDQgg4dFF+AEDDj5t6Ex6/zYTDrZ54h5YFc3w=";
     };
 in
-runCommand "prime-agent-catalog-${builtins.substring 0 12 revision}" {
+runCommand "weave-catalog-${builtins.substring 0 12 revision}" {
     nativeBuildInputs = [ python3 ];
 } ''
     mkdir -p "$out"

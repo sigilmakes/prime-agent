@@ -6,7 +6,7 @@
 //! need to give you an easy way to test things"): three scripted TUI
 //! scenarios that boot the freshly-built binary against a real daemon and
 //! assert the Windows-reported breakages stay fixed. The workflow
-//! `.github/workflows/windows-runtime-triage.yml` runs this battery on
+//! The Windows runtime triage runbook runs this battery on
 //! windows-2022 for Windows-touched PRs and nightly on main, and uploads
 //! the captured pane dumps (`WINDOWS_RUNTIME_TRIAGE_DUMP_DIR`) as run
 //! artifacts the fleet can read.
@@ -50,7 +50,7 @@ use pa_tui::interactive::{
 use serde_json::{json, Map, Value};
 
 /// The daemon supervisor spawned as the freshly-built binary
-/// (`CARGO_BIN_EXE_prime-agent --mode daemon`).
+/// (`CARGO_BIN_EXE_wv --mode daemon`).
 struct Supervisor {
     child: Child,
     socket: PathBuf,
@@ -115,7 +115,7 @@ fn daemon_endpoint(dir: &Path) -> PathBuf {
             .map(|stamp| stamp.as_nanos())
             .unwrap_or_default();
         PathBuf::from(format!(
-            r"\\.\pipe\prime-agent-triage-{}-{unique}",
+            r"\\.\pipe\wv-triage-{}-{unique}",
             std::process::id()
         ))
     }
@@ -128,7 +128,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = daemon_endpoint(dir);
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(["--mode", "daemon", "--daemon-socket"])
         .arg(&socket)
@@ -179,7 +179,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
             Ok(())
         });
     }
-    let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    let child = command.spawn().expect("spawn wv --mode daemon");
     Supervisor { child, socket }
 }
 

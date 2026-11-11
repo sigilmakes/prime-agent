@@ -1,4 +1,4 @@
-//! Daemon incident notices for the agents view: reuse the `prime-agent
+//! Daemon incident notices for the agents view: reuse the `wv
 //! incident` classifier (`pa_types::incident`) to surface one collapsed,
 //! dismissible notice line (worker crash, command-timeout burst, or an
 //! update restart).
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Recent-log window, matching the `prime-agent incident` default.
+/// Recent-log window, matching the `wv incident` default.
 pub const INCIDENT_NOTICE_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Initial tail bound: incidents older than the tail bytes are simply not seen.
@@ -25,7 +25,7 @@ pub const INCIDENT_NOTICE_MAX_WINDOW_ENTRIES: usize = 20_000;
 pub const INCIDENT_NOTICE_POLL_INTERVAL_MS: u64 = 30_000;
 
 /// The pointer to the full timeline.
-pub const INCIDENT_NOTICE_POINTER: &str = "— run prime-agent incident for the timeline";
+pub const INCIDENT_NOTICE_POINTER: &str = "— run wv incident for the timeline";
 
 const NEWLINE_BYTE: u8 = 0x0a;
 

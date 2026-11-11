@@ -204,7 +204,7 @@ impl SessionUi {
                         epoch,
                         heartbeats: Vec::new(),
                         fetch_error: Some(
-                            "timed out waiting for the Prime Agent daemon response".to_string(),
+                            "timed out waiting for the Weave daemon response".to_string(),
                         ),
                     });
                 }

@@ -352,13 +352,13 @@ impl DaemonClient {
         .await
         .map_err(|_| {
             anyhow!(
-                "Timed out after {CONNECT_TIMEOUT_MS}ms connecting to the Prime Agent daemon. Socket: {}.",
+                "Timed out after {CONNECT_TIMEOUT_MS}ms connecting to the Weave daemon. Socket: {}.",
                 socket_path.display()
             )
         })?
         .with_context(|| {
             format!(
-                "Failed to connect to the Prime Agent daemon. Socket: {}.",
+                "Failed to connect to the Weave daemon. Socket: {}.",
                 socket_path.display()
             )
         })?;
@@ -440,7 +440,7 @@ impl DaemonClient {
             .map_err(|_| {
                 reader_task.abort();
                 anyhow!(
-                    "Timed out after {HELLO_TIMEOUT_MS}ms waiting for the Prime Agent daemon handshake. Socket: {}.",
+                    "Timed out after {HELLO_TIMEOUT_MS}ms waiting for the Weave daemon handshake. Socket: {}.",
                     socket_path.display()
                 )
             })?
@@ -685,13 +685,13 @@ impl DaemonClient {
             // The reader task died before resolving this request: the
             // connection was already gone.
             Ok(Err(_)) => Err(anyhow!(
-                "Connection to the Prime Agent daemon closed. Socket: {}.",
+                "Connection to the Weave daemon closed. Socket: {}.",
                 self.socket_path.display()
             )),
             Err(_) => {
                 self.shared.pending.lock().unwrap().remove(&id);
                 Err(anyhow!(
-                    "Timed out after {timeout_ms}ms waiting for the Prime Agent daemon response. Socket: {}.",
+                    "Timed out after {timeout_ms}ms waiting for the Weave daemon response. Socket: {}.",
                     self.socket_path.display()
                 ))
             }
@@ -750,9 +750,9 @@ impl DaemonClient {
             )
         {
             if name == "plugin_command" {
-                return Err(anyhow!("The running Prime Agent daemon cannot execute native plugin commands; restart or update it and try again."));
+                return Err(anyhow!("The running Weave daemon cannot execute native plugin commands; restart or update it and try again."));
             }
-            return Err(anyhow!("The running Prime Agent daemon cannot refresh models; restart or update it and try again."));
+            return Err(anyhow!("The running Weave daemon cannot refresh models; restart or update it and try again."));
         }
         Ok(())
     }

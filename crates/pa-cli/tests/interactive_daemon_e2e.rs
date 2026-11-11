@@ -10,7 +10,7 @@
 )]
 
 //! End-to-end verifier for the interactive TUI: spawn the real supervisor
-//! (`prime-agent --mode daemon`), drive the TUI headlessly against a scripted
+//! (`wv --mode daemon`), drive the TUI headlessly against a scripted
 //! daemon session, and assert on rendered frames plus daemon-side state. The
 //! `script` seam is the faux provider contract; the product never sets it.
 #![cfg(unix)]
@@ -284,7 +284,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(["--mode", "daemon", "--daemon-socket"])
         .arg(&socket)
@@ -336,7 +336,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
             Ok(())
         });
     }
-    let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    let child = command.spawn().expect("spawn wv --mode daemon");
     let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -968,7 +968,7 @@ async fn ensure_daemon_running_spawns_supervisor_and_tui_attaches() {
     let _guard = DetachedDaemon {
         socket: socket.clone(),
     };
-    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     pa_cli::ensure_daemon_running_with(&exe, &socket, dir.path())
         .await
         .expect("spawn the daemon");
@@ -4576,7 +4576,7 @@ async fn tui_idle_session_event_repaints_without_input() {
 }
 
 /// The bare-launch safety regression (the P6 continue-recent trap): a plain
-/// `prime-agent` run must open a FRESH session even when a newer saved session
+/// `wv` run must open a FRESH session even when a newer saved session
 /// exists for the cwd — resuming it blindly would resurrect whatever it holds.
 #[tokio::test]
 async fn tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for_the_cwd() {
@@ -5226,7 +5226,7 @@ async fn tui_accepted_then_killed_turn_renders_closed_error() {
 #[tokio::test]
 async fn tui_close_reason_rows_survive_late_turn_status() {
     for (reason, explanation) in [
-        ("shutdown", "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View."),
+        ("shutdown", "The Weave daemon shut down while this window was attached. The session transcript remains saved; restart Weave and reopen it from Agents View."),
         ("replaced", "The daemon replaced this agent session with another session. Reopen the current session from Agents View."),
     ] {
         assert_close_reason_survives_late_turn_status(reason, explanation).await;

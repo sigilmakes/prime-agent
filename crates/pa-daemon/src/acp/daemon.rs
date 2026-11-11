@@ -1089,7 +1089,7 @@ async fn handle_session_new(
         {
             let _ = tx.send(super::internal_error(
                 &id,
-                "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session",
+                "Weave ACP mode hosts one session per connection; start another wv process for a second session",
             ));
             return;
         }
@@ -1504,7 +1504,7 @@ async fn prompt_turn(
         eprintln!("pa-daemon: acp turn failed: {failure}");
         publish_error_boundary(&producer, turn_id).await;
         producer.finish_prompt(turn_id).await;
-        return super::internal_error(&id, &format!("prime-agent turn failed: {failure}"));
+        return super::internal_error(&id, &format!("wv turn failed: {failure}"));
     }
     // The completion waits for the session to settle before observing the
     // roster. A failed wait degrades: the envelope still settles.

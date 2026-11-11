@@ -5,7 +5,7 @@
 //! (`HERDR_ENV=1`, `HERDR_PANE_ID`, `HERDR_SOCKET_PATH` — the socket of
 //! its pane-state API) for the processes running inside them. This module
 //! reports this session's lifecycle state (`working` / `blocked` /
-//! `idle`) to that socket, so a Herdr pane shows its Prime Agent session
+//! `idle`) to that socket, so a Herdr pane shows its Weave session
 //! as live, done, or stuck — the in-tree counterpart of the TS
 //! `herdr-agent-state.ts` extension (`herdr integration install pi` also
 //! writes one; the built-in ships so the pane reports out of the box).
@@ -25,8 +25,8 @@
 //! response byte, an error, or 500 ms):
 //!
 //! ```json
-//! {"id":"herdr:pi:<ms>:<rand>","method":"pane.report_agent","params":{"pane_id":"<HERDR_PANE_ID>","source":"herdr:pi","agent":"prime-agent","state":"working","seq":1780000000000000,"agent_session_path":"/home/me/.prime/agent/sessions/<id>.jsonl"}}
-//! {"id":"herdr:pi:release:<ms>:<rand>","method":"pane.release_agent","params":{"pane_id":"…","source":"herdr:pi","agent":"prime-agent","seq":1780000000000001}}
+//! {"id":"herdr:pi:<ms>:<rand>","method":"pane.report_agent","params":{"pane_id":"<HERDR_PANE_ID>","source":"herdr:pi","agent":"wv","state":"working","seq":1780000000000000,"agent_session_path":"/home/me/.prime/agent/sessions/<id>.jsonl"}}
+//! {"id":"herdr:pi:release:<ms>:<rand>","method":"pane.release_agent","params":{"pane_id":"…","source":"herdr:pi","agent":"wv","seq":1780000000000001}}
 //! ```
 //!
 //! `message` rides only blocked reports. `seq` is per-process monotonic
@@ -66,7 +66,7 @@ const SEND_TIMEOUT_MS: u64 = 500;
 /// The reporter identity on every report (TS main `herdr:pi` source;
 /// `herdr integration install pi` reports under the same pair).
 pub(crate) const HERDR_SOURCE: &str = "herdr:pi";
-pub(crate) const HERDR_AGENT: &str = "prime-agent";
+pub(crate) const HERDR_AGENT: &str = "wv";
 
 /// The Herdr socket target (TS `herdrSocketTarget`): Herdr exports a
 /// Unix-style socket path; on Windows that dials the local named-pipe
@@ -892,7 +892,7 @@ pub(crate) fn valid_resume_argv(target: Option<&str>) -> Option<Vec<String>> {
     if target.is_empty() || target.contains('\'') || target.chars().any(char::is_control) {
         return None;
     }
-    let argv = ["prime-agent", "--resume", target]
+    let argv = ["wv", "--resume", target]
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<String>>();
@@ -1069,18 +1069,14 @@ mod tests {
         assert_eq!(
             argv,
             Some(vec![
-                "prime-agent".to_string(),
+                "wv".to_string(),
                 "--resume".to_string(),
                 "019e71ec-e08a-75a9-b573-000000000001.jsonl".to_string(),
             ])
         );
         assert_eq!(
             valid_resume_argv(Some("  trimmed-id  ")),
-            Some(vec![
-                "prime-agent".into(),
-                "--resume".into(),
-                "trimmed-id".into()
-            ])
+            Some(vec!["wv".into(), "--resume".into(), "trimmed-id".into()])
         );
         // Missing, empty, or hostile targets carry no resume command.
         assert_eq!(valid_resume_argv(None), None);
@@ -1227,7 +1223,7 @@ mod tests {
         let params = &report["params"];
         assert_eq!(params["pane_id"], "w1:p1");
         assert_eq!(params["source"], "herdr:pi");
-        assert_eq!(params["agent"], "prime-agent");
+        assert_eq!(params["agent"], "wv");
         assert_eq!(params["state"], "idle");
         assert_eq!(
             params["agent_session_path"],
@@ -1235,11 +1231,7 @@ mod tests {
         );
         assert_eq!(
             params["resume_argv"],
-            json!([
-                "prime-agent",
-                "--resume",
-                "/home/me/.prime/agent/sessions/s1.jsonl"
-            ])
+            json!(["wv", "--resume", "/home/me/.prime/agent/sessions/s1.jsonl"])
         );
         // The id carries the source prefix; the seq is a number.
         assert!(report["id"].as_str().unwrap().starts_with("herdr:pi:"));

@@ -47,11 +47,11 @@ def main() -> int:
                 command = ["bash", "-o", "pipefail", "-c", 'curl -fsSL "$PRIME_AGENT_DOWNLOAD_BASE_URL/install.sh" | sh']
                 for _ in range(2):
                     report["steps"].append(execute(command, env))
-                    probe = execute([str(prefix / "bin/prime-agent"), "--version"], env)
+                    probe = execute([str(prefix / "bin/wv"), "--version"], env)
                     report["steps"].append(probe)
                     if probe["stdout"].strip() != version:
                         raise ValueError("Installed launcher did not report channel version")
-                    report["steps"].append(execute([str(prefix / "bin/prime-agent"), "--help"], env))
+                    report["steps"].append(execute([str(prefix / "bin/wv"), "--help"], env))
                     for name, content in witnesses.items():
                         if (state / name).read_text() != content:
                             raise ValueError(f"Installer changed user state: {name}")

@@ -1,6 +1,6 @@
-# Prime Agent
+# Weave
 
-Prime Agent runs durable agent conversations and lets optional plugins customize inference, execution, context, and memory. This language distinguishes the recorded conversation from the context presented to a model.
+Weave runs durable agent conversations and lets optional plugins customize inference, execution, context, and memory. This language distinguishes the recorded conversation from the context presented to a model.
 
 ## Conversations and execution
 

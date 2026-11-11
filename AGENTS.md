@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Development rules for the downstream Prime Agent Rust fork at `sigilzero/prime-agent`.
+Development rules for Weave, the downstream Rust harness at `sigilzero/weave`.
 Every contributor (human or agent) must read this before working on this repo.
 
 ## Repository
@@ -137,17 +137,30 @@ present. Debug-build behavior alone is not privacy evidence.
 
 ## Branding
 
-The product is Prime Agent - we are not a pi fork. Scrub "pi"/"pi-mono"/"pi-ai"/
-"Prime Intellect"-style naming from all user-visible surfaces (docs, READMEs,
-CLI help text, error messages, splash/onboarding strings, keybinding hints, TUI
-labels, and code comments that quote user-facing strings); brand everything
-Prime Agent. Audit with a repo-wide grep and classify every hit (user-visible
-vs wire-internal vs comment) before scrubbing, and list the preserved wire
-identifiers in the PR body so the reviewer can verify none were wrongly scrubbed.
+The product is Weave and the CLI is `wv`; we are not a pi fork. Scrub
+"pi"/"pi-mono"/"pi-ai" and "Prime Intellect"-style naming from all user-visible
+surfaces (docs, READMEs, CLI help text, error messages, splash/onboarding
+strings, keybinding hints, TUI labels, and code comments that quote user-facing
+strings); brand everything Weave. Audit with a repo-wide grep and classify every
+hit (user-visible vs wire-internal vs comment) before scrubbing, and list the
+preserved wire identifiers in the PR body so the reviewer can verify none were
+wrongly scrubbed.
 
-EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible with the TS product (e.g. the PI_PACKAGE_DIR env var, settings keys, provider IDs like prime-inference, lockfile names) stay until/unless the TS side renames them — PARITY BEATS BRANDING ON THE WIRE.
+EXPLICIT EXCEPTION: these identifiers stay unchanged until a later phase renames
+them on both sides of the wire:
 
+- Rust crate names and paths prefixed `pa-`
+- environment variables `PRIME_AGENT_*`, `PA_*`, and `PI_*` (for example
+  `PI_PACKAGE_DIR` and `PI_SKIP_VERSION_CHECK`)
+- config and state directory `~/.prime/agent`
+- Python package `prime-agent-runtime`
+- daemon protocol identifier `prime-agent.daemon`
+- ACP `_meta` namespace `ai.primeintellect.prime-agent`
+- settings keys, provider IDs such as `prime-inference`, and lockfile names
+- detection of the legacy TypeScript `prime-agent` and `prime-agent-rust`
+  installs in migration, hold-refusal, and boot-reap code
 
+PARITY BEATS BRANDING ON THE WIRE.
 
 ## Surface contract
 
@@ -156,7 +169,7 @@ EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible wit
 - Preserve core RLM execution and messaging: `rlm.spawn/find_models/collect/list_subagents/delete_subagent/create_session/progress_note`, `agent_message.send`, `agent_observe`, `compact`, `goal`, `attach_image`, and the markdown/Python skill contract.
 - Plugin-owned `plugin.<name>.*` exports and plugin slash commands replace former hardwired interfaces. Preserve accumulated data, not obsolete function names. A disabled plugin contributes no callable namespace, commands, instructions, hooks, jobs, or context; its saved data remains intact.
 - Keep canonical history independent of the model-facing context view. A session selects one context strategy. That strategy may use an explicit ordered compaction chain; server-side compaction, Snapcompact, and standard summarization can be fallback strategies. OptChat-style summary-tree context is a separate context strategy, not a compaction fallback.
-- Keep cache-stable mandatory prompt layers followed by a dynamic tail. Plugin instructions, callable inventories, and digest contributions reflect active plugins. `prime-agent prompt` exposes the assembled prompt and its layer breakdown without requiring any optional plugin.
+- Keep cache-stable mandatory prompt layers followed by a dynamic tail. Plugin instructions, callable inventories, and digest contributions reflect active plugins. `wv prompt` exposes the assembled prompt and its layer breakdown without requiring any optional plugin.
 - Preserve existing CLI/headless behavior except for the explicitly authorized plugin changes. Negotiate optional daemon command/metadata changes; keep startup usable with older peers.
 
 ## Crates
@@ -174,7 +187,7 @@ The table summarizes each crate's current direct workspace dependencies:
 | `pa-core` | Session engine, tools, skills, kernel, settings | `pa-types`, `pa-ai`, `pa-models`, `pa-agent` |
 | `pa-daemon` | Supervisor, workers, wire protocol | `pa-types`, `pa-core`, `pa-agent`, `pa-ai`, `pa-models` |
 | `pa-tui` | Terminal UI, daemon-wire client | `pa-types` |
-| `pa-cli` | `prime-agent` binary, composition root | `pa-types`, `pa-core`, `pa-ai`, `pa-agent`, `pa-daemon`, `pa-tui` |
+| `pa-cli` | `wv` binary, composition root | `pa-types`, `pa-core`, `pa-ai`, `pa-agent`, `pa-daemon`, `pa-tui` |
 
 Layering rules:
 

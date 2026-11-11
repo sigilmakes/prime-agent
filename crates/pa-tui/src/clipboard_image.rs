@@ -160,7 +160,7 @@ fn clipboard_image_from_bytes(bytes: Vec<u8>) -> Option<ClipboardImage> {
 async fn read_via_powershell() -> Option<ClipboardImage> {
     let temp_dir = std::env::temp_dir();
     std::fs::create_dir_all(&temp_dir).ok()?;
-    let temp_path = temp_dir.join(format!("prime-agent-clip-{}.png", unique_suffix()));
+    let temp_path = temp_dir.join(format!("wv-clip-{}.png", unique_suffix()));
     let windows_path = String::from_utf8_lossy(
         &run_command(
             "wslpath",
@@ -219,7 +219,7 @@ fn unique_suffix() -> String {
 async fn read_via_osascript() -> Option<ClipboardImage> {
     let temp_dir = std::env::temp_dir();
     std::fs::create_dir_all(&temp_dir).ok()?;
-    let temp_path = temp_dir.join(format!("prime-agent-clip-{}.png", unique_suffix()));
+    let temp_path = temp_dir.join(format!("wv-clip-{}.png", unique_suffix()));
     let path_str = temp_path.to_str()?.to_string();
     let script = format!(
         r"ObjC.import('Cocoa');

@@ -7,7 +7,7 @@ splits that ONE linked image so the decoder's DWARF addresses match the
 shipped binary exactly:
 
   - decoder: ``objcopy --only-keep-debug`` of the unstripped image, gzipped
-    (~3x on DWARF), named ``prime-agent-<version>-<platform>.debug.gz`` —
+    (~3x on DWARF), named ``wv-<version>-<platform>.debug.gz`` —
     a SEPARATE release asset for offline symbolication, NEVER install
     payload (assemble_artifacts.py hard-fails if one enters a tarball).
   - shipped: ``objcopy --strip-debug`` into the separate ``--shipped`` path.
@@ -21,8 +21,8 @@ shipped binary's backtraces or ``nm``/``objdump -t``.
 
 Usage:
     python3 scripts/release/split_debug.py \
-        --binary target/x86_64-unknown-linux-gnu/release/prime-agent \
-        --shipped target/x86_64-unknown-linux-gnu/dist/prime-agent \
+        --binary target/x86_64-unknown-linux-gnu/release/wv \
+        --shipped target/x86_64-unknown-linux-gnu/dist/wv \
         --out target/x86_64-unknown-linux-gnu/dist \
         --version 0.1.0 --target x86_64-unknown-linux-gnu
 
@@ -80,7 +80,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.target not in TARGET_ALIASES:
         fail(f"unknown release target {args.target!r} (known: {', '.join(TARGET_ALIASES)})")
-    decoder_name = f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.debug.gz"
+    decoder_name = f"wv-{args.version}-{TARGET_ALIASES[args.target]}.debug.gz"
 
     binary = args.binary
     if not binary.is_file() or not os.access(binary, os.X_OK):

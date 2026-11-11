@@ -1,7 +1,7 @@
 """Transport/isolation and red-first injection tests for the installed privacy gate.
 
 The executable fixture tests the Python verifier, not the Rust product. Nix must
-also invoke privacy_lifecycle.py on the actual installed prime-agent package.
+also invoke privacy_lifecycle.py on the actual installed wv package.
 """
 
 import importlib.util
@@ -124,7 +124,7 @@ class PrivacyLifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def binary(self, mutation="clean"):
-        binary = self.root / "installed-prime-agent"
+        binary = self.root / "installed-wv"
         binary.write_text("#!" + sys.executable + "\n" + FIXTURE.replace("__MUTATION__", repr(mutation)))
         binary.chmod(0o700)
         return binary

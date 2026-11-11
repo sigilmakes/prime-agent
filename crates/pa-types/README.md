@@ -24,7 +24,7 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   CLI suggestion help) plus its pure parse/suggestion helpers — the TS
   product keeps the same single table in core and imports it from its TUI.
 - `incident`: the daemon incident classifier shared by the incident CLI
-  (pa-cli's `prime-agent incident`, TS `src/cli/incident.ts`) and the
+  (pa-cli's `wv incident`, TS `src/cli/incident.ts`) and the
   agents-view incident notice (pa-tui's `incident_notices`, TS
   `src/modes/agents-view/incident-notices.ts`) — pa-tui depends on
   pa-types alone, and the TS product keeps the same single classifier in

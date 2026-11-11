@@ -1,8 +1,7 @@
-//! The `prime-agent update` body: the TS->Rust migration path. One step —
-//! the update fetches the update channel's installer (stable: the official
-//! domain's `https://app.primeintellect.ai/prime-agent/install.sh`;
-//! nightly: the download base's `install-beta.sh`; never a GitHub raw or
-//! workflow URL) and runs it; the script uninstalls the
+//! The `wv update` body: the TS->Rust migration path. One step —
+//! the update fetches the update channel's installer (stable: the release
+//! download base's `install.sh`; nightly: its `install-beta.sh`; never a
+//! GitHub raw or workflow URL) and runs it; the script uninstalls the
 //! TypeScript version, installs the latest Rust build of the update
 //! channel, and never touches `~/.prime/agent` (the sessions and
 //! configuration). The TUI's `/update` runs the same core out-of-band
@@ -127,12 +126,10 @@ pub fn run(options: &UpdateOptions) -> i32 {
         Ok(installed) => {
             match installed.version {
                 Some(version) => {
-                    println!("updated to {version} — restart prime-agent to run the new build");
+                    println!("updated to {version} — restart wv to run the new build");
                 }
                 None => {
-                    println!(
-                        "updated to the latest build — restart prime-agent to run the new build"
-                    );
+                    println!("updated to the latest build — restart wv to run the new build");
                 }
             }
             if let Some(channel) = options.channel {
@@ -200,7 +197,7 @@ pub fn run_local(prefix: &std::path::Path, archive: Option<&std::path::Path>) ->
                 "rolled back to"
             };
             let version = installed.version.as_deref().unwrap_or("the previous build");
-            println!("{done} {version} — restart prime-agent to run it");
+            println!("{done} {version} — restart wv to run it");
             0
         }
         Err(failure) => {
@@ -293,9 +290,9 @@ fn check_verdict(
         );
     }
     let command = match flag {
-        Some(UpdateChannel::Nightly) => "prime-agent update --nightly",
-        Some(UpdateChannel::Stable) => "prime-agent update --stable",
-        None => "prime-agent update",
+        Some(UpdateChannel::Nightly) => "wv update --nightly",
+        Some(UpdateChannel::Stable) => "wv update --stable",
+        None => "wv update",
     };
     format!("An update is available — run `{command}` to install it.")
 }
@@ -313,7 +310,7 @@ mod tests {
             version: version.to_string(),
             artifacts: vec![ReleaseArtifact {
                 platform: platform.to_string(),
-                file: format!("prime-agent-{version}-{platform}.tar.gz"),
+                file: format!("wv-{version}-{platform}.tar.gz"),
                 sha256: "0".repeat(64),
             }],
         }
@@ -327,7 +324,7 @@ mod tests {
         );
         assert_eq!(
             check_verdict(&release("1.2.4"), "1.2.3", UpdateChannel::Stable, None),
-            "An update is available — run `prime-agent update` to install it."
+            "An update is available — run `wv update` to install it."
         );
         // A switch onto nightly accepts the same-base prerelease the
         // installer would install.
@@ -338,7 +335,7 @@ mod tests {
                 UpdateChannel::Nightly,
                 Some(UpdateChannel::Nightly)
             ),
-            "An update is available — run `prime-agent update --nightly` to install it."
+            "An update is available — run `wv update --nightly` to install it."
         );
         assert_eq!(
             check_verdict(

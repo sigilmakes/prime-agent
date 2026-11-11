@@ -558,7 +558,7 @@ fn splash_renders_version_model_and_cwd() {
     let lines = render_splash(&state, &theme(), 120);
     assert_eq!(lines[0], Vec::new());
     let text = |line: &Line| line.iter().map(|s| s.content.as_str()).collect::<String>();
-    assert!(lines.iter().any(|l| text(l).contains("prime agent v0.0.0")));
+    assert!(lines.iter().any(|l| text(l).contains("weave v0.0.0")));
     assert!(lines.iter().any(|l| text(l).contains("model faux-1")));
     assert!(lines.iter().any(|l| text(l).contains("cwd /tmp/project")));
 }

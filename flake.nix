@@ -1,5 +1,5 @@
 {
-    description = "Prime Agent downstream Rust source build";
+    description = "Weave downstream Rust source build";
 
     inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -11,19 +11,19 @@
             # CI has already run the full workspace gate; rebuilding the audited
             # test profile here used to duplicate the package checkPhase.
             compiled-ci = compiled.overrideAttrs (_: { doCheck = false; });
-            prime-agent = pkgs.callPackage ./nix/package.nix { inherit compiled; };
-            prime-agent-ci = pkgs.callPackage ./nix/package.nix { compiled = compiled-ci; };
+            weave = pkgs.callPackage ./nix/package.nix { inherit compiled; };
+            weave-ci = pkgs.callPackage ./nix/package.nix { compiled = compiled-ci; };
         in {
             packages.${system} = {
-                inherit prime-agent compiled prime-agent-ci;
-                default = prime-agent;
+                inherit weave compiled weave-ci;
+                default = weave;
             };
             apps.${system}.default = {
                 type = "app";
-                program = pkgs.lib.getExe prime-agent;
+                program = pkgs.lib.getExe weave;
             };
             checks.${system} = import ./nix/checks.nix {
-                inherit pkgs compiled prime-agent;
+                inherit pkgs compiled weave;
             };
             devShells.${system}.default = pkgs.mkShell {
                 packages = with pkgs; [

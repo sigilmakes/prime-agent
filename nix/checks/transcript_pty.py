@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Installed Prime Agent native-scrollback regression (Linux, stdlib only).
+"""Installed Weave native-scrollback regression (Linux, stdlib only).
 
-Usage: python3 nix/checks/transcript_pty.py /nix/store/.../bin/prime-agent
+Usage: python3 nix/checks/transcript_pty.py /nix/store/.../bin/wv
 No live daemon, provider, credentials or host session files are used. A local
 JSONL peer injects deterministic restore/reconnect/branch faults. Every assertion
 about native history inspects bytes emitted by the installed CLI on a REAL PTY,
@@ -437,7 +437,7 @@ def alarm(_signum, _frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", nargs="?", help="absolute path to installed Prime Agent executable")
+    parser.add_argument("binary", nargs="?", help="absolute path to installed wv executable")
     parser.add_argument("--timeout", type=int, default=90, help="whole-run hard deadline in seconds")
     parser.add_argument("--schema-id", default=SCHEMA, help="installed daemon schema ID (hello compatibility)")
     parser.add_argument("--self-test", action="store_true")

@@ -71,7 +71,7 @@ fn prompt_may_have_been_sent(error: &anyhow::Error) -> bool {
                 && error.chain().any(|cause| {
                     let message = cause.to_string().to_lowercase();
                     message.contains("connection closed")
-                        || message.starts_with("connection to the prime agent daemon closed")
+                        || message.starts_with("connection to the weave daemon closed")
                 })))
 }
 
@@ -721,7 +721,7 @@ impl SessionUi {
             .await
             .map_err(|_| {
                 anyhow!(
-                    "timed out after {UI_REQUEST_TIMEOUT_MS}ms waiting for the Prime Agent daemon response"
+                    "timed out after {UI_REQUEST_TIMEOUT_MS}ms waiting for the Weave daemon response"
                 )
             })
             .and_then(|result| result.map(|_| ()));
@@ -923,8 +923,8 @@ mod prompt_delivery_tests {
         for message in [
             "the daemon connection closed",
             "the session connection closed",
-            "Connection to the Prime Agent daemon closed. Socket: fixture.",
-            "Timed out after 100ms waiting for the Prime Agent daemon response",
+            "Connection to the Weave daemon closed. Socket: fixture.",
+            "Timed out after 100ms waiting for the Weave daemon response",
         ] {
             assert!(prompt_may_have_been_sent(&anyhow::anyhow!(message)));
         }

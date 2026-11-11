@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// Environment keys this box's own prime-agent worker sets; they must not
+/// Environment keys this box's own wv worker sets; they must not
 /// leak into spawned supervisors.
 const SCRUB_ENV: [&str; 8] = [
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER",
@@ -42,7 +42,7 @@ const SCRUB_ENV: [&str; 8] = [
 const LAUNCHER_CLIENT_SOCKET_ENV: &str = "PRIME_AGENT_TEST_LAUNCHER_CLIENT_SOCKET";
 
 fn cli_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"))
+    PathBuf::from(env!("CARGO_BIN_EXE_wv"))
 }
 
 /// A spawned supervisor, killed on drop so a failed test never leaks a
@@ -59,7 +59,7 @@ impl Drop for Daemon {
 }
 
 /// Spawn the real supervisor on a fixture socket the way production does
-/// (`prime-agent --mode daemon --daemon-socket`), with agent dir and TMPDIR
+/// (`wv --mode daemon --daemon-socket`), with agent dir and TMPDIR
 /// pinned inside the fixture root so every socket it ever makes stays there.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path, tmp_dir: &Path) -> Daemon {
@@ -391,7 +391,7 @@ fn shutdown_without_force_requires_confirmation_and_harms_nothing() {
     assert_eq!(tty_error.status.code(), Some(1));
     assert!(
         stderr(&tty_error).contains(
-            "Shutdown requires confirmation in an interactive terminal. Use \"prime-agent shutdown --force\"."
+            "Shutdown requires confirmation in an interactive terminal. Use \"wv shutdown --force\"."
         ),
         "router error mismatch: {}{}",
         stdout(&tty_error),
@@ -414,7 +414,7 @@ fn shutdown_without_force_requires_confirmation_and_harms_nothing() {
     );
     assert_eq!(
         failed[0].get("reason").and_then(Value::as_str),
-        Some("confirmation required; use \"prime-agent shutdown --force --json\"")
+        Some("confirmation required; use \"wv shutdown --force --json\"")
     );
     assert!(
         report
@@ -1014,7 +1014,7 @@ fn a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers() {
 
 /// A fresh top-level invocation must not inherit an ancestor worker's
 /// identity: a kernel bash hands a worker's full environment to every
-/// child, so `prime-agent --mode daemon --daemon-socket B` launched from
+/// child, so `wv --mode daemon --daemon-socket B` launched from
 /// inside a worker must come up as B's supervisor — never as a second
 /// worker of the live supervisor the inherited env points at.
 #[test]

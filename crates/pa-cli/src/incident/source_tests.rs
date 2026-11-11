@@ -71,7 +71,7 @@ fn keeps_structured_lines_around_a_torn_multibyte_tail() {
     with_agent_dir(|agent_dir| {
         let listening = supervisor_line(
             "2026-09-10T20:02:39.764Z",
-            "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
+            "Weave daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
         );
         // The stderr-forward classifier keys on a 12-hex worker id
         // (STDERR_FORWARD), so the fixture carries one.

@@ -1,4 +1,4 @@
-//! The installer-takeover update funnel: `prime-agent update` and the TUI's
+//! The installer-takeover update funnel: `wv update` and the TUI's
 //! `/update` download the update channel's installer and run it — the
 //! official domain endpoint for stable, the download base's
 //! `install-beta.sh` for nightly; never a GitHub raw or workflow URL. The
@@ -35,26 +35,23 @@ pub const ENV_DOWNLOAD_BASE_URL: &str = "PRIME_AGENT_DOWNLOAD_BASE_URL";
 /// manifests (`latest.json`, `beta.json`) are published.
 pub const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
 
-/// The official domain's install endpoint — the stable channel's installer
-/// source; never a GitHub raw or workflow URL (the override env var stays
-/// for tests and pinned installs).
-pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-agent/install.sh";
+/// The stable installer's file under the download base. The release
+/// workflow publishes this repo's `install-rust.sh` there as `install.sh`;
+/// never a GitHub raw or workflow URL (the override env var stays for
+/// tests and pinned installs).
+pub const STABLE_INSTALLER_FILE: &str = "install.sh";
 /// The nightly installer's file under the download base (the domain only
 /// forwards `install.sh`, so nightly updates fetch it from the base).
 pub const BETA_INSTALLER_FILE: &str = "install-beta.sh";
 
 /// `install-rust.sh` as this build shipped it. The local operations
-/// (`prime-agent update --rollback` and `--archive`) run this copy: they
+/// (`wv update --rollback` and `--archive`) run this copy: they
 /// need no network, and the script matches the layout this build was
 /// installed with.
 const BUNDLED_INSTALLER: &str = include_str!("../../../../install-rust.sh");
 
-/// The payload binary's file name under `<prefix>/share/prime-agent`.
-const PAYLOAD_BINARY: &str = if cfg!(windows) {
-    "prime-agent.exe"
-} else {
-    "prime-agent"
-};
+/// The payload binary's file name under `<prefix>/share/weave`.
+const PAYLOAD_BINARY: &str = if cfg!(windows) { "wv.exe" } else { "wv" };
 
 /// The small-file budget for the script download (the script is a few KB;
 /// a hung fetch must not hang the update).
@@ -75,13 +72,11 @@ pub fn installer_script_url(channel: Option<&str>) -> String {
             return url;
         }
     }
-    match channel {
-        Some("beta") => format!(
-            "{}/{BETA_INSTALLER_FILE}",
-            download_base_url().trim_end_matches('/')
-        ),
-        _ => OFFICIAL_INSTALLER_URL.to_string(),
-    }
+    let file = match channel {
+        Some("beta") => BETA_INSTALLER_FILE,
+        _ => STABLE_INSTALLER_FILE,
+    };
+    format!("{}/{file}", download_base_url().trim_end_matches('/'))
 }
 
 /// The download base `--check` reads the channel manifest from: the
@@ -267,7 +262,7 @@ pub async fn run_bundled_installer(
     #[cfg(windows)]
     if caller_owns_payload(prefix) {
         // THE HANDOFF (Windows rename rule): this process's image sits inside
-        // <prefix>/share/prime-agent and Windows refuses to rename a directory
+        // <prefix>/share/weave and Windows refuses to rename a directory
         // that contains a running image, so the script's publish step can only
         // succeed after this process exits. The child is spawned without
         // waiting and inherits the terminal, so the installer's own steps and
@@ -350,7 +345,7 @@ pub async fn run_bundled_installer(
 }
 
 /// The install prefix of an installer-owned binary: `exe` is
-/// `<prefix>/share/prime-agent/prime-agent` (`prime-agent.exe` on Windows)
+/// `<prefix>/share/weave/wv` (`wv.exe` on Windows)
 /// and that payload carries the installer's marker. `None` for any other
 /// binary (a managed release, a development build).
 #[must_use]
@@ -358,14 +353,14 @@ fn installer_prefix_of(exe: &Path) -> Option<PathBuf> {
     let payload = exe.parent()?;
     let share = payload.parent()?;
     let owned = exe.file_name()? == PAYLOAD_BINARY
-        && payload.file_name()? == "prime-agent"
+        && payload.file_name()? == "weave"
         && share.file_name()? == "share";
     let prefix = share.parent()?;
     (owned && installed_channel(prefix).is_some()).then(|| prefix.to_path_buf())
 }
 
 /// The install prefix of the running binary when the installer owns it
-/// (`<prefix>/share/prime-agent/prime-agent` in a marked payload).
+/// (`<prefix>/share/weave/wv` in a marked payload).
 #[must_use]
 pub fn running_installer_prefix() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -378,7 +373,7 @@ pub fn running_installer_prefix() -> Option<PathBuf> {
 }
 
 /// True when this process's own image is the payload binary of `prefix`
-/// (`<prefix>/share/prime-agent/prime-agent.exe` with the install marker):
+/// (`<prefix>/share/weave/wv.exe` with the install marker):
 /// the Windows rename rule — a running image locks its directory, so an
 /// installer child can only publish this payload after this process exits.
 /// On unix a rename never fights a running image, so the answer is false.
@@ -472,7 +467,7 @@ fn normalize_marker_bytes(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// [`installed_channel`]: a ps1-written marker can be UTF-16 or
 /// BOM-prefixed, and the version line of an encoded marker must read too.
 fn installed_version(prefix: &Path) -> Option<String> {
-    let bytes = std::fs::read(prefix.join("share/prime-agent/.prime-agent-install")).ok()?;
+    let bytes = std::fs::read(prefix.join("share/weave/.weave-install")).ok()?;
     let normalized = normalize_marker_bytes(&bytes).into_owned();
     let marker = String::from_utf8_lossy(&normalized);
     let version = marker.lines().nth(1)?.strip_prefix("version ")?.trim();
@@ -480,7 +475,7 @@ fn installed_version(prefix: &Path) -> Option<String> {
 }
 
 /// The installed payload's channel, read from the install marker (the
-/// installer's own `.prime-agent-install` under the prefix's share dir;
+/// installer's own `.weave-install` under the prefix's share dir;
 /// its first line is "channel <name>"). `None` when the marker is absent
 /// (a pre-marker install or a foreign tree) or carries no known channel —
 /// the update then rides the fetched script's own default.
@@ -493,7 +488,7 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
     // Flattening the NULs and stripping a leading BOM keeps the exact
     // prefix check working for this script's own ASCII writes and for the
     // ps1-written ones alike (a plain marker passes through untouched).
-    let bytes = std::fs::read(prefix.join("share/prime-agent/.prime-agent-install")).ok()?;
+    let bytes = std::fs::read(prefix.join("share/weave/.weave-install")).ok()?;
     let bytes = normalize_marker_bytes(&bytes);
     let marker = String::from_utf8_lossy(&bytes);
     // The marker's first line must be the installer's OWN write shape —
@@ -555,10 +550,8 @@ async fn fetch_script(url: &str) -> Result<(PathBuf, std::fs::File)> {
 /// the bytes written here, and the name only serves the post-run
 /// cleanup.
 fn write_script(bytes: &[u8]) -> Result<(PathBuf, std::fs::File)> {
-    let script = std::env::temp_dir().join(format!(
-        "prime-agent-update-{}.sh",
-        uuid::Uuid::now_v7().simple()
-    ));
+    let script =
+        std::env::temp_dir().join(format!("wv-update-{}.sh", uuid::Uuid::now_v7().simple()));
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).read(true).write(true);
     #[cfg(unix)]
@@ -752,7 +745,7 @@ fn output_tail(captured: &std::process::Output) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
-/// The installed launcher's `--version` answer: the takeover layout's `bin/prime-agent` first, the
+/// The installed launcher's `--version` answer: the takeover layout's `bin/wv` first, the
 /// pre-takeover `bin/prime-agent-rust` second, and only answers stamped `-continuous.<commit>`
 /// count (the TS product's launcher never matches).
 async fn launcher_version(prefix: &Path) -> Option<String> {
@@ -760,9 +753,9 @@ async fn launcher_version(prefix: &Path) -> Option<String> {
     // cannot be exec'd by CreateProcess; Rust runs .cmd through cmd.exe),
     // the sh launcher pair on unix (the pre-takeover name second).
     #[cfg(windows)]
-    const LAUNCHER_NAMES: [&str; 2] = ["prime-agent.cmd", "prime-agent"];
+    const LAUNCHER_NAMES: [&str; 2] = ["wv.cmd", "wv"];
     #[cfg(not(windows))]
-    const LAUNCHER_NAMES: [&str; 2] = ["prime-agent", "prime-agent-rust"];
+    const LAUNCHER_NAMES: [&str; 2] = ["wv", "prime-agent-rust"];
     for name in LAUNCHER_NAMES {
         let launcher = prefix.join("bin").join(name);
         if !launcher.is_file() {
@@ -793,7 +786,7 @@ async fn launcher_version(prefix: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The platform map `prime-agent update --check` names on every
+    /// The platform map `wv update --check` names on every
     /// supported platform pair (the same set install-rust.sh's uname case
     /// resolves): the Windows pair ships the MSVC target, and the refusal
     /// covers every other pair with the full matrix in the message.
@@ -832,7 +825,7 @@ mod tests {
     fn installed_channel_reads_the_ps1_encoded_marker() {
         let dir = tempfile::TempDir::new().unwrap();
         let prefix = dir.path().join("prefix");
-        let payload = prefix.join("share/prime-agent");
+        let payload = prefix.join("share/weave");
         std::fs::create_dir_all(&payload).unwrap();
         let cases: [(&str, Vec<u8>, &str); 4] = [
             (
@@ -879,7 +872,7 @@ mod tests {
             ),
         ];
         for (name, bytes, expected) in cases {
-            std::fs::write(payload.join(".prime-agent-install"), &bytes).unwrap();
+            std::fs::write(payload.join(".weave-install"), &bytes).unwrap();
             assert_eq!(
                 installed_channel(&prefix),
                 Some(expected),
@@ -902,29 +895,29 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let prefix = dir.path().join("prefix");
         assert_eq!(installed_channel(&prefix), None);
-        let share = prefix.join("share/prime-agent");
+        let share = prefix.join("share/weave");
         std::fs::create_dir_all(&share).unwrap();
         std::fs::write(
-            share.join(".prime-agent-install"),
+            share.join(".weave-install"),
             "install-rust.sh channel beta\nversion 0.10.0\n",
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), Some("beta"));
         std::fs::write(
-            share.join(".prime-agent-install"),
+            share.join(".weave-install"),
             "install-rust.sh channel stable\nversion 0.10.0\n",
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), Some("stable"));
-        std::fs::write(share.join(".prime-agent-install"), "nightly\n").unwrap();
+        std::fs::write(share.join(".weave-install"), "nightly\n").unwrap();
         assert_eq!(installed_channel(&prefix), None);
         std::fs::write(
-            share.join(".prime-agent-install"),
+            share.join(".weave-install"),
             "other installer channel beta\n",
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), None);
-        std::fs::write(share.join(".prime-agent-install"), "channel beta\n").unwrap();
+        std::fs::write(share.join(".weave-install"), "channel beta\n").unwrap();
         assert_eq!(installed_channel(&prefix), None);
     }
 
@@ -935,12 +928,12 @@ mod tests {
     fn installer_prefix_of_needs_the_payload_path_and_the_marker() {
         let dir = tempfile::TempDir::new().unwrap();
         let prefix = dir.path().join("prefix");
-        let payload = prefix.join("share/prime-agent");
+        let payload = prefix.join("share/weave");
         std::fs::create_dir_all(&payload).unwrap();
         let exe = payload.join(PAYLOAD_BINARY);
         assert_eq!(installer_prefix_of(&exe), None, "no marker: not owned");
         std::fs::write(
-            payload.join(".prime-agent-install"),
+            payload.join(".weave-install"),
             "install-rust.sh channel beta\nversion 0.9.9-beta.10\n",
         )
         .unwrap();
@@ -948,10 +941,7 @@ mod tests {
         assert_eq!(installed_version(&prefix).as_deref(), Some("0.9.9-beta.10"));
         // A binary elsewhere in the tree, or a managed release, is not.
         assert_eq!(installer_prefix_of(&payload.join("other")), None);
-        assert_eq!(
-            installer_prefix_of(&prefix.join("releases/0.9.8/prime-agent")),
-            None
-        );
+        assert_eq!(installer_prefix_of(&prefix.join("releases/0.9.8/wv")), None);
     }
 
     /// The handoff gate never opens on unix: a rename never fights a
@@ -963,10 +953,10 @@ mod tests {
     fn caller_owns_payload_stays_false_for_a_staged_prefix_on_unix() {
         let dir = tempfile::TempDir::new().unwrap();
         let prefix = dir.path().join("prefix");
-        let payload = prefix.join("share/prime-agent");
+        let payload = prefix.join("share/weave");
         std::fs::create_dir_all(&payload).unwrap();
         std::fs::write(
-            payload.join(".prime-agent-install"),
+            payload.join(".weave-install"),
             "install-rust.sh channel beta\nversion 0.9.9-beta.10\n",
         )
         .unwrap();
@@ -986,10 +976,10 @@ mod tests {
     fn caller_owns_payload_needs_the_running_image_on_windows() {
         let dir = tempfile::TempDir::new().unwrap();
         let prefix = dir.path().join("prefix");
-        let payload = prefix.join("share/prime-agent");
+        let payload = prefix.join("share/weave");
         std::fs::create_dir_all(&payload).unwrap();
         std::fs::write(
-            payload.join(".prime-agent-install"),
+            payload.join(".weave-install"),
             "install-rust.sh channel beta\nversion 0.9.9-beta.10\n",
         )
         .unwrap();
@@ -1080,8 +1070,8 @@ set -eu
 # Fails only under a controlling terminal (a developer run or `script`); headless CI has none.
 if ( : <>/dev/tty ) 2>/dev/null || [ -t 0 ]; then echo "the captured installer reached the terminal" >&2; exit 9; fi
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"
-printf '#!/bin/sh\necho "9.9.9-continuous.0123456789abcdef"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
-chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
+printf '#!/bin/sh\necho "9.9.9-continuous.0123456789abcdef"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/wv"
+chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/wv"
 printf '%s' "${PRIME_AGENT_RELEASE_CHANNEL:-}" > "${PRIME_AGENT_RUST_PREFIX}/channel"
 echo "installed: 9.9.9-continuous.0123456789abcdef"
 "#;
@@ -1120,9 +1110,12 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
         std::env::remove_var(ENV_DOWNLOAD_BASE_URL);
         assert_eq!(
             installer_script_url(Some("stable")),
-            "https://app.primeintellect.ai/prime-agent/install.sh"
+            "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install.sh"
         );
-        assert_eq!(installer_script_url(None), OFFICIAL_INSTALLER_URL);
+        assert_eq!(
+            installer_script_url(None),
+            format!("{DEFAULT_DOWNLOAD_BASE_URL}/install.sh")
+        );
         assert_eq!(
             installer_script_url(Some("beta")),
             "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install-beta.sh"
@@ -1132,7 +1125,10 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             installer_script_url(Some("beta")),
             "https://mirror.example/install-beta.sh"
         );
-        assert_eq!(installer_script_url(Some("stable")), OFFICIAL_INSTALLER_URL);
+        assert_eq!(
+            installer_script_url(Some("stable")),
+            "https://mirror.example/install.sh"
+        );
         std::env::set_var(ENV_INSTALLER_URL, "http://127.0.0.1:9/pinned.sh");
         assert_eq!(
             installer_script_url(Some("beta")),
@@ -1208,10 +1204,10 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     #[cfg(unix)]
     async fn the_requested_channel_wins_over_the_install_marker() {
         let (root, _preserve, prefix) = sandbox();
-        let share = prefix.join("share/prime-agent");
+        let share = prefix.join("share/weave");
         std::fs::create_dir_all(&share).unwrap();
         std::fs::write(
-            share.join(".prime-agent-install"),
+            share.join(".weave-install"),
             "install-rust.sh channel beta\nversion 0.10.0\n",
         )
         .unwrap();
@@ -1251,7 +1247,7 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             Some("9.9.9-continuous.0123456789abcdef"),
             "the probe reads the launcher's own --version answer"
         );
-        let launcher = prefix.join("bin/prime-agent");
+        let launcher = prefix.join("bin/wv");
         assert!(launcher.is_file(), "the launcher landed");
         let mode = std::fs::metadata(&launcher).expect("launcher metadata");
         assert!(unix_mode_is_executable(&mode), "the launcher is executable");
@@ -1284,7 +1280,7 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     async fn a_failed_installer_keeps_the_previous_install_and_reports_the_error() {
         let (root, preserve, prefix) = sandbox();
         std::fs::create_dir_all(prefix.join("bin")).expect("bin dir");
-        let previous = prefix.join("bin/prime-agent");
+        let previous = prefix.join("bin/wv");
         std::fs::write(&previous, "#!/bin/sh\necho 9.9.7-continuous.0000001\n")
             .expect("previous launcher");
         make_executable(&previous);

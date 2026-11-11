@@ -62,12 +62,12 @@ class TheMappingTestCase(unittest.TestCase):
     def test_any_non_crate_path_fails_safe_to_the_full_selection(self):
         rc, out, outputs = run_mapper([
             "crates/pa-core/src/lib.rs",
-            ".github/workflows/ci.yml",
+            ".forgejo/workflows/ci.yml",
         ])
         self.assertEqual(rc, 0, out)
         self.assertEqual(outputs["crates"], "")
         self.assertEqual(outputs["scope"], "all")
-        self.assertIn("non-crate path .github/workflows/ci.yml", out)
+        self.assertIn("non-crate path .forgejo/workflows/ci.yml", out)
 
     def test_a_renames_removed_side_counts_too(self):
         # A rename from a non-crate path INTO a crate: the PR removed the

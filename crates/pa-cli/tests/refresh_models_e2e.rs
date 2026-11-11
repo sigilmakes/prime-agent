@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn cli_command(dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(args)
         .env_clear()

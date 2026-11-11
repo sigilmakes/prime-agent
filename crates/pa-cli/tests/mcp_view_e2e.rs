@@ -182,7 +182,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         .to_string(),
     )
     .expect("write settings");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(["--mode", "daemon", "--daemon-socket"])
         .arg(&socket)
@@ -217,7 +217,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
-    let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    let child = command.spawn().expect("spawn wv --mode daemon");
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if socket.exists() {

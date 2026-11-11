@@ -60,8 +60,8 @@ def main() -> None:
     group.add_argument("--artifact", type=Path)
     group.add_argument("--source", type=Path)
     args = parser.parse_args()
-    if args.artifact and not (args.artifact / "prime-agent").is_file():
-        parser.exit(1, "Installed prime-agent executable is missing\n")
+    if args.artifact and not (args.artifact / "wv").is_file():
+        parser.exit(1, "Installed wv executable is missing\n")
     errors = artifact_errors(args.artifact) if args.artifact else source_errors(args.source)
     if errors:
         parser.exit(1, "\n".join(errors) + "\n")

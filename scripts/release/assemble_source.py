@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Assemble the prime-agent source tarball (the homebrew-core build input).
+"""Assemble the Weave source tarball (the homebrew-core build input).
 
 Homebrew-core builds formulas from source, so the homebrew-core submission
 candidate pins a release source tarball rather than a prebuilt archive:
-`prime-agent-<version>-src.tar.gz`, assembled here from the repo tree at
+`wv-<version>-src.tar.gz`, assembled here from the repo tree at
 HEAD (`git archive`) with the two validated bundled catalog assets copied
 into the tarball root. The content contract mirrors the binary tarballs
 (assemble_artifacts.py): the shipped binary payloads stage
@@ -31,7 +31,7 @@ so anything but `x.y.z` hard-fails.
 
 Also written into --out-dir:
   SHA256SUMS    the one-row checksum for the source tarball
-                ("<sha256>  prime-agent-<version>-src.tar.gz"), merging into
+                ("<sha256>  wv-<version>-src.tar.gz"), merging into
                 the promote job's combined SHA256SUMS like a build job's
                 rows;
   manifest.json EXACTLY {"version": "v<x.y.z>", "binaries": []}. The
@@ -248,12 +248,12 @@ def main() -> int:
     validate_version(args.version)
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix="prime-agent-source-"))
+    staging = Path(tempfile.mkdtemp(prefix="weave-source-"))
     try:
         export_tree(args.repo_root, staging)
         catalog_facts = stage_catalog_assets(staging, args.catalog_assets)
         check_required_tree(staging)
-        archive_name = f"prime-agent-{args.version}-src.tar.gz"
+        archive_name = f"wv-{args.version}-src.tar.gz"
         archive_path = out_dir / archive_name
         pack_source_tarball(staging, archive_path)
         archive_sha256 = sha256_file(archive_path)

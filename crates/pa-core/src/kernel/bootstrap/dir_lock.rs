@@ -70,7 +70,7 @@ pub(crate) async fn acquire_bootstrap_lock(venv: &Path) -> anyhow::Result<impl D
                 if tokio::time::Instant::now() >= deadline {
                     anyhow::bail!(
                         "Timed out after {} seconds waiting for the Python kernel bootstrap lock at {}. \
-                         Another Prime Agent process may still be setting up this runtime. \
+                         Another Weave process may still be setting up this runtime. \
                          Retry after it finishes. If setup was interrupted, verify that no process \
                          is setting up this runtime before removing this lock and retrying.",
                         BOOTSTRAP_LOCK_WAIT.as_secs(),

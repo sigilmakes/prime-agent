@@ -266,7 +266,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     );
     assert!(
         error.contains(&format!(
-            "prime-agent --daemon-socket <socket> --resume '{holder_id}'"
+            "wv --daemon-socket <socket> --resume '{holder_id}'"
         )),
         "the continue path is the exact attach command: {error}"
     );
@@ -281,7 +281,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     // The holder worker runs the refusing supervisor's executable, so it is
     // another Rust build, never the TypeScript product.
     assert!(
-        error.starts_with("This session is currently open in another Rust build of Prime Agent"),
+        error.starts_with("This session is currently open in another Rust build of Weave"),
         "the holder is classified, not guessed: {error}"
     );
     assert!(

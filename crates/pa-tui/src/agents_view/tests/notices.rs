@@ -31,12 +31,12 @@ fn mode_with_notice(notice: &str) -> AgentsViewMode {
 /// the panel: the full text stays visible, and any key dismisses it.
 #[test]
 fn a_multiline_refusal_notice_renders_as_a_dismissible_panel() {
-    let refusal = "This session is currently open in another Rust build of Prime Agent \
+    let refusal = "This session is currently open in another Rust build of Weave \
 (active in 6b558be357e3) — another daemon or window of this product holds the file's \
-runtime lease.\n\n• Continue where you left off:\n  prime-agent --daemon-socket \
+runtime lease.\n\n• Continue where you left off:\n  wv --daemon-socket \
 <socket> --resume 'sess-1'\n  (<socket> is that instance's daemon socket, from the \
 shell where you started it — that daemon owns this session)\n\n• Take over on this \
-daemon:\n  kill 4242 # the holder is prime-agent\n  Then retry — the file unlocks when \
+daemon:\n  kill 4242 # the holder is wv\n  Then retry — the file unlocks when \
 the holder exits.";
     let render = |mode: &mut AgentsViewMode| {
         let (lines, _) = mode.render_frame(120, 40);
@@ -56,7 +56,7 @@ the holder exits.";
         "Continue where you left off",
         "--daemon-socket <socket> --resume 'sess-1'",
         "Take over on this daemon",
-        "kill 4242 # the holder is prime-agent",
+        "kill 4242 # the holder is wv",
     ] {
         assert!(
             shown.contains(way_out),

@@ -59,7 +59,7 @@ fn resolve_runtime_source_dir(package: &Path, checkout: Option<&Path>) -> Option
 
 pub(in crate::kernel::bootstrap) fn require_runtime_source_dir() -> anyhow::Result<PathBuf> {
     resolve_runtime_source_dir(&package_dir(), crate::packages::source_checkout_root()).context(
-        "Prime Agent requires a local prime-agent-runtime directory containing its pyproject.toml, uv.lock and src/rlm sources; reinstall Prime Agent with the runtime beside the binary, or set PI_PACKAGE_DIR to the complete trusted package directory. The runtime will not be downloaded from a package index.",
+        "Weave requires a local prime-agent-runtime directory containing its pyproject.toml, uv.lock and src/rlm sources; reinstall Weave with the runtime beside the binary, or set PI_PACKAGE_DIR to the complete trusted package directory. The runtime will not be downloaded from a package index.",
     )
 }
 

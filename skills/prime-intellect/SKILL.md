@@ -1,30 +1,34 @@
 ---
 name: prime-intellect
-description: Work with Prime Intellect products via the prime CLI and Python SDKs - verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, code sandboxes, Prime Inference, GPU compute (pods and clusters), storage, and tunnels. Use when a task involves Prime Intellect, the prime CLI, verifiers, RL environments, evals, training, sandboxes, renting GPUs, Prime Inference models, or when the user asks what Prime Intellect is or what it offers.
+description: Operate Prime Intellect services with the prime CLI and Python SDKs - verifiers environments, evaluations, Hosted Training and prime-rl, sandboxes, Prime Inference, GPU pods and clusters, storage, and tunnels. Use when a task involves the prime CLI, environments, evals, training runs, sandboxes, GPU rental, or Prime Inference models.
 ---
 
-# Prime Intellect
+# Prime Intellect CLI
 
-Prime Intellect is an open superintelligence lab building open-source AGI infrastructure: a platform for RL environments, evaluations, post-training, inference, and globally distributed GPU compute. Prime Agent (this agent) is built by Prime Intellect, and the `prime` CLI is the default way to interface with every product below.
+Prime Intellect provides environments and evaluations, post-training, an
+OpenAI-compatible inference API, GPU pods and clusters, storage, and tunnels.
+Use the `prime` CLI for these operations.
 
-## Product Map
+Current documentation is at https://docs.primeintellect.ai. Append `.md` to a
+docs page URL to fetch it as Markdown; the index is at
+https://docs.primeintellect.ai/llms.txt.
 
-| Product | What it is | Details |
+## Products
+
+| Product | Purpose | Reference |
 |---|---|---|
-| verifiers | Python library for building LLM environments and evaluations | [environments.md](references/environments.md) |
-| Environments Hub | Platform library of community RL environments (`prime env`) | [environments.md](references/environments.md) |
-| Hosted Evaluations | Run evals on Prime-managed infra (`prime eval run --hosted`) | [environments.md](references/environments.md) |
-| Hosted Training | Post-train models against environments (`prime train`, Lab) | [environments.md](references/environments.md) |
-| prime-rl | Large-scale async RL framework for self-managed training | [environments.md](references/environments.md) |
-| Sandboxes | Secure disposable VM sandboxes for AI-generated code | [sandboxes.md](references/sandboxes.md) |
-| Tunnels | Public HTTPS URLs for local/sandboxed services | [sandboxes.md](references/sandboxes.md) |
-| Inference | OpenAI-compatible API for frontier models | [inference.md](references/inference.md) |
-| Compute | Rent single GPU pods or multi-node clusters | [compute.md](references/compute.md) |
-| Storage | Persistent disks shared between instances | [compute.md](references/compute.md) |
+| verifiers | Python library for LLM environments and evaluations | [environments.md](references/environments.md) |
+| Environments Hub | Shared environment registry (`prime env`) | [environments.md](references/environments.md) |
+| Hosted Evaluations | Evaluations on managed infrastructure (`prime eval run --hosted`) | [environments.md](references/environments.md) |
+| Hosted Training | Post-training against environments (`prime train`, Lab) | [environments.md](references/environments.md) |
+| prime-rl | Async RL framework for self-managed training | [environments.md](references/environments.md) |
+| Sandboxes | Disposable VM sandboxes for generated or untrusted code | [sandboxes.md](references/sandboxes.md) |
+| Tunnels | Public HTTPS URLs for local or sandboxed services | [sandboxes.md](references/sandboxes.md) |
+| Inference | OpenAI-compatible inference API | [inference.md](references/inference.md) |
+| Compute | Single-GPU pods and multi-node clusters | [compute.md](references/compute.md) |
+| Storage | Persistent disks attached to instances | [compute.md](references/compute.md) |
 
-## Prime CLI Setup
-
-Default to the `prime` CLI for all Prime Intellect operations. If it is not installed:
+## Install and sign in
 
 ```bash
 uv tool install prime    # or: pip install prime
@@ -32,20 +36,24 @@ prime login              # browser auth; or: prime config set-api-key
 prime config view        # verify configuration
 ```
 
-The same package provides the Python SDKs (e.g. `prime_sandboxes`, `prime_tunnel`). Source: https://github.com/PrimeIntellect-ai/prime
+The same package provides the Python SDKs, such as `prime_sandboxes` and
+`prime_tunnel`. Source: https://github.com/PrimeIntellect-ai/prime
 
-## Live Documentation
+## Fetching current details
 
-Authoritative, current docs live at https://docs.primeintellect.ai. Any docs page is fetchable as Markdown by appending `.md` to its URL, and the full index is at https://docs.primeintellect.ai/llms.txt. When you need details not covered here (exact flags, API schemas, pricing, new features), fetch the live docs instead of guessing:
+Exact flags, API schemas, and availability change. Read the live docs instead
+of guessing:
 
 ```bash
-curl -s https://docs.primeintellect.ai/llms.txt                      # discover pages
-curl -s https://docs.primeintellect.ai/sandboxes/overview.md         # fetch a page as markdown
+curl -s https://docs.primeintellect.ai/llms.txt                      # page index
+curl -s https://docs.primeintellect.ai/sandboxes/overview.md         # page as markdown
 ```
 
-The REST API is documented under `api-reference/` pages (OpenAPI spec: https://api.primeintellect.ai/openapi.json), with `https://api.primeintellect.ai` as the base URL.
+The REST API is documented under `api-reference/` pages. Base URL:
+https://api.primeintellect.ai. OpenAPI spec:
+https://api.primeintellect.ai/openapi.json.
 
-## Command Quick Reference
+## Command reference
 
 ```bash
 # Environments Hub
@@ -62,7 +70,7 @@ prime eval run owner/env --hosted --follow           # hosted eval with logs
 # Training
 prime lab setup                     # set up a Lab workspace (Hosted Training)
 prime train models                  # models, capacity, pricing
-prime train init && prime train rl.toml              # configure + launch a run
+prime train init && prime train rl.toml              # configure and launch a run
 
 # Sandboxes
 prime sandbox create python:3.11-slim --timeout-minutes 120
@@ -73,15 +81,21 @@ prime sandbox delete <sandbox-id>
 prime inference models              # list available models
 
 # Compute
-prime availability list             # GPU availability + pricing
+prime availability list             # GPU availability and pricing
 prime pods create                   # provision a pod
 prime pods ssh <pod-id>             # SSH in (needs: prime config set-ssh-key-path)
 ```
 
-## Working Conventions
+## Operating notes
 
-- Prefer ecosystem-native paths (`prime env init`, `prime eval run`, `prime lab setup`) over custom scaffolding.
-- Smoke-test small (`-n 5`) before scaling evals or training; keep default result uploads unless the user explicitly opts out.
-- For non-trivial eval/training work, ask whether the user wants instruct models (`gpt-4.1` series, `qwen3` instruct) or reasoning models (`gpt-5` series, `qwen3` thinking, `glm` series).
-- Hosted Training launches from a CPU machine; self-managed `prime-rl` requires local GPU access and is a power-user path.
-- The dashboard at https://app.primeintellect.ai covers API keys, billing, teams, and anything the CLI does not.
+- Prefer the ecosystem commands (`prime env init`, `prime eval run`,
+  `prime lab setup`) over custom scaffolding.
+- Run a small eval (`-n 5`) before scaling; keep default result uploads unless
+  the user explicitly opts out.
+- For non-trivial eval or training work, ask whether the user wants instruct
+  models (`gpt-4.1` series, `qwen3` instruct) or reasoning models (`gpt-5`
+  series, `qwen3` thinking, `glm` series).
+- Hosted Training launches from a CPU machine. Self-managed `prime-rl` needs
+  local GPU access and is a power-user path.
+- The web console at https://app.primeintellect.ai manages API keys, billing,
+  and team settings that the CLI does not expose.

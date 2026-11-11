@@ -24,7 +24,7 @@ impl UpdateReport {
             // TS #2515: the failed restart leaves the OLD daemon running (the update is
             // on disk but not live) - say what to do next.
             report.warnings.push(
-                "The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update."
+                "The daemon still runs the previous version; run `wv shutdown`, then run `wv` to restart and apply the update."
                     .to_string(),
             );
         }
@@ -146,7 +146,7 @@ mod tests {
                 "Updated, but could not restart the daemon (boot timed out).",
                 // TS #2515: the second warning names the shutdown+restart hint (the old daemon is
                 // still running).
-                "The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.",
+                "The daemon still runs the previous version; run `wv shutdown`, then run `wv` to restart and apply the update.",
             ]
         );
         let running =

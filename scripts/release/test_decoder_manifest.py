@@ -45,8 +45,8 @@ class DecoderManifest(unittest.TestCase):
                 source = root / f"{alias}.c"
                 source.write_text(f"int main(void) {{ return {len(alias)}; }}\n")
                 run("gcc", "-g", "-Wl,--build-id", "-o", str(binary), str(source))
-                shipped = root / alias / "prime-agent"
-                decoder = dist / f"prime-agent-0.1.0-{alias}.debug.gz"
+                shipped = root / alias / "wv"
+                decoder = dist / f"wv-0.1.0-{alias}.debug.gz"
                 run(sys.executable, str(SPLITTER), "--binary", str(binary),
                     "--shipped", str(shipped), "--out", str(dist),
                     "--version", "0.1.0", "--target", target)

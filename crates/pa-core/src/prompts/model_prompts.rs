@@ -184,7 +184,7 @@ fn resolve_model_prompts(
     agent_dir: &Path,
 ) -> ModelPromptResolution {
     // Both layers are validated regardless; the selector only gates which
-    // rules match, so `prime-agent prompt` with no `--model` still reports
+    // rules match, so `wv prompt` with no `--model` still reports
     // a broken map.
     let segments = selector.map(selector_segments);
     let mut errors = Vec::new();

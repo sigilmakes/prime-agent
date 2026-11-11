@@ -614,7 +614,7 @@ mod tests {
                 .find(|(key, _)| key.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.as_str())
         };
-        assert_eq!(header("User-Agent"), Some("prime-agent"));
+        assert_eq!(header("User-Agent"), Some("weave"));
         assert_eq!(header("x-opencode-session"), Some("session-1"));
         assert_eq!(header("session_id"), None);
     }

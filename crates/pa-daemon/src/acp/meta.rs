@@ -1,12 +1,12 @@
-//! Namespaced `_meta` payloads for prime-agent capabilities that ACP has
+//! Namespaced `_meta` payloads for wv capabilities that ACP has
 //! no native concept for (cwd reporting, quiescence observation,
-//! correlation). Vanilla ACP clients ignore `_meta` keys; a prime-agent-aware
+//! correlation). Vanilla ACP clients ignore `_meta` keys; a wv-aware
 //! client reads them; non-standard fields never appear at an ACP root.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// Reverse-domain namespace for every prime-agent `_meta` payload.
+/// Reverse-domain namespace for every wv `_meta` payload.
 pub const PRIME_AGENT_META_NAMESPACE: &str = "ai.primeintellect.prime-agent";
 
 /// A client-requested cwd that differs from the agent's actual startup cwd.
@@ -48,7 +48,7 @@ pub enum PrimeAgentOutcome {
     Error,
 }
 
-/// The prime-agent payload under the `_meta` namespace key.
+/// The wv payload under the `_meta` namespace key.
 ///
 /// `prompt_turn_id` is allocated when ACP accepts a prompt, never inferred
 /// from the running prompt; `0` means a session-scoped event with no prompt
@@ -159,7 +159,7 @@ pub fn acp_stop_reason(
     }
 }
 
-/// Wrap a prime-agent payload in its reverse-domain `_meta` envelope.
+/// Wrap a wv payload in its reverse-domain `_meta` envelope.
 pub fn prime_agent_meta(payload: &PrimeAgentSessionMeta) -> Value {
     json!({ PRIME_AGENT_META_NAMESPACE: payload })
 }

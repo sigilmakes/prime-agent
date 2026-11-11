@@ -39,7 +39,7 @@ impl Drop for Daemon {
 
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(["--mode", "daemon", "--daemon-socket"])
         .arg(socket)
@@ -68,7 +68,7 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
-    let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    let child = command.spawn().expect("spawn wv --mode daemon");
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -135,7 +135,7 @@ fn make_session_active(socket: &Path, session_path: &Path, cwd: &Path) -> String
 }
 
 fn run_print(args: &[&str], env: &[(String, String)]) -> (String, String, i32) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command.args(args);
     for (key, value) in env {
         command.env(key, value);
@@ -241,7 +241,7 @@ fn print_continue_refuses_an_active_daemon_session() {
     );
     assert!(
         stderr.contains(&format!(
-            "Attach to it instead: prime-agent --resume '{active_session_id}'\n"
+            "Attach to it instead: wv --resume '{active_session_id}'\n"
         )),
         "the refusal suggests attaching to the live session (the holder id rides shell-quoted): {stderr}"
     );

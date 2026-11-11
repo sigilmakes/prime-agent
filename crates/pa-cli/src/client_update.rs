@@ -2,7 +2,7 @@
 //! output captured — the TUI stays mounted while the install runs, so the
 //! installer's own progress never writes to the live frame, and the
 //! failure tail becomes the error row's message. It follows the same
-//! update channel as `prime-agent update`. Both surfaces consult the
+//! update channel as `wv update`. Both surfaces consult the
 //! same pa-core Homebrew detector before entering the installer funnel.
 
 use pa_core::update::homebrew;

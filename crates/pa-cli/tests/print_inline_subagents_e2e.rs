@@ -68,7 +68,7 @@ impl PrintLane {
         kernel_python: &Path,
         env_extra: &[(&str, &str)],
     ) -> (String, String, i32) {
-        let bin = env!("CARGO_BIN_EXE_prime-agent");
+        let bin = env!("CARGO_BIN_EXE_wv");
         // An explicitly selected kernel bypasses skill installation. Exercise
         // the checkout's messaging and goal skills even in a fresh kernel venv.
         let skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");

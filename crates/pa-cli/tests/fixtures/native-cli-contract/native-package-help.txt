@@ -1,5 +1,5 @@
 Usage:
-  prime-agent package <install|remove|list|update>
+  wv package <install|remove|list|update>
 
 Manage capability packages.
 

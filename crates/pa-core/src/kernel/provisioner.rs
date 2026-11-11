@@ -1688,7 +1688,7 @@ mod tests {
         )));
         assert!(!startup_failure_is_retryable(&anyhow!(
             "Kernel runtime speaks protocol 2, expected 3. \
-             Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent."
+             Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this wv."
         )));
     }
 

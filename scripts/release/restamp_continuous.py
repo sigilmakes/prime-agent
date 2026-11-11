@@ -191,7 +191,7 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
     validate_compatibility_archive(archive)
 
     # 3. Unpack; assert the continuous payload shape.
-    staging = Path(tempfile.mkdtemp(prefix="prime-agent-restamp-"))
+    staging = Path(tempfile.mkdtemp(prefix="weave-restamp-"))
     try:
         entries = unpack_archive(archive, staging)
         expected = sorted(EXPECTED_TOP_LEVEL | CONTINUOUS_EXTRA_TOP_LEVEL | NATIVE_COMPAT_TOP_LEVEL)
@@ -204,7 +204,7 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
             fail(f"{incoming.name}: package.json version "
                  f"{package.get('version')!r} != the continuous stamp "
                  f"{stamped!r}: not a continuous build's artifact")
-        if sha256_file(staging / "prime-agent") != binary["executableSha256"]:
+        if sha256_file(staging / "wv") != binary["executableSha256"]:
             fail(f"{incoming.name}: the staged binary does not match the "
                  "manifest's executableSha256")
         validate_bundled_catalog_dir(staging)
@@ -215,7 +215,7 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
         (staging / "package.json").write_text(json.dumps(package, indent=2) + "\n")
 
         # 5. Repack deterministically (the same packer that built the archive).
-        new_archive_name = f"prime-agent-{version}-{alias}.tar.gz"
+        new_archive_name = f"wv-{version}-{alias}.tar.gz"
         target_dir = out_dir / incoming.name
         target_dir.mkdir(parents=True, exist_ok=True)
         new_archive = target_dir / new_archive_name
@@ -226,7 +226,7 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
         # 6. The decoder rides along unchanged (bytes), renamed to the release version.
         new_lines = [f"{new_sha}  {new_archive_name}"]
         if target.endswith("-unknown-linux-gnu"):
-            new_decoder_name = f"prime-agent-{version}-{alias}.debug.gz"
+            new_decoder_name = f"wv-{version}-{alias}.debug.gz"
             shutil.copyfile(decoder_files[0], target_dir / new_decoder_name)
             new_lines.append(f"{decoders[0]['sha256']}  {new_decoder_name}")
             decoders[0]["file"] = new_decoder_name
@@ -249,7 +249,7 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
         livecheck = None
         if target == host_target():
             env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}
-            run = subprocess.run([str(staging / "prime-agent"), "--version"],
+            run = subprocess.run([str(staging / "wv"), "--version"],
                                  capture_output=True, text=True, env=env,
                                  cwd=staging, check=False)
             detail = (run.stdout or run.stderr).strip() or f"rc={run.returncode}"
@@ -257,7 +257,7 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
                 fail(f"{incoming.name}: the restamped binary reports {detail!r}, "
                      f"expected {version!r} — the runtime version manifest did not take")
             if target.endswith("-unknown-linux-gnu") \
-                    and not glibc_baseline_ok(staging / "prime-agent"):
+                    and not glibc_baseline_ok(staging / "wv"):
                 fail(f"{incoming.name}: the binary requires symbols above "
                      "GLIBC_2.35 — above the Ubuntu 22.04 release baseline")
             livecheck = version

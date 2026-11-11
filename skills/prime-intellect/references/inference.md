@@ -1,6 +1,6 @@
 # Prime Inference
 
-Prime Inference is an OpenAI-compatible API for frontier and open models, routed across providers and built for large-scale evaluations.
+Prime Inference is an OpenAI-compatible inference API. `prime eval` runs can use its models.
 
 Live docs: `inference/overview.md`, `inference/usage.md`, `inference/adapter-deployments.md`, `inference/troubleshooting.md` under https://docs.primeintellect.ai/
 
@@ -13,7 +13,7 @@ Live docs: `inference/overview.md`, `inference/usage.md`, `inference/adapter-dep
 export PRIME_API_KEY="your-api-key-here"
 ```
 
-## Via the CLI (recommended for evaluations)
+## Via the CLI
 
 ```bash
 prime inference models                                   # list available models
@@ -39,7 +39,7 @@ response = client.chat.completions.create(
 )
 ```
 
-Anything that speaks the OpenAI API works — just point it at the base URL above. Streaming and advanced parameters are covered in `inference/usage.md`.
+Any OpenAI-compatible client works with the base URL above. Streaming and advanced parameters are covered in `inference/usage.md`.
 
 ## Teams & Adapters
 

@@ -49,9 +49,9 @@ def launch_daemon(command, expected, root, env):
 
 def install_launcher(binary, root, env):
     prefix = root / 'prefix'
-    payload = prefix / 'share/prime-agent'
+    payload = prefix / 'share/weave'
     payload.mkdir(parents=True)
-    (payload / 'prime-agent').symlink_to(binary)
+    (payload / 'wv').symlink_to(binary)
     installer = Path(__file__).resolve().parents[1].joinpath('install-rust.sh').read_text()
     marker = '# --- the launcher (the takeover lives here)'
     section = marker + installer.split(marker, 1)[1]
@@ -59,7 +59,7 @@ def install_launcher(binary, root, env):
     script = '''PREFIX="$PRIME_AGENT_RUST_PREFIX"
 bin_dir="$PREFIX/bin"
 mkdir -p "$bin_dir"
-launcher="$bin_dir/prime-agent"
+launcher="$bin_dir/wv"
 WINDOWS=no
 say() { :; }; note() { :; }; die() { echo "$*" >&2; exit 1; }
 trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
@@ -69,7 +69,7 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                                cwd=root, text=True, capture_output=True, timeout=15)
     if installed.returncode:
         raise RuntimeError('launcher extraction failed: ' + installed.stderr)
-    return prefix / 'bin/prime-agent'
+    return prefix / 'bin/wv'
 
 
 def main():
@@ -95,7 +95,7 @@ def main():
                 command = binary
                 if kind == 'rust':
                     command = install_launcher(binary, owned, env)
-                    marker = owned / 'prefix/share/.prime-agent-npm-bridge/legacy-daemon-socket'
+                    marker = owned / 'prefix/share/.weave-npm-bridge/legacy-daemon-socket'
                     marker.parent.mkdir()
                     marker.write_text('fixture\n')
                 receipt['runs'][kind + '_legacy'] = launch_daemon([str(command)], legacy, owned, env)

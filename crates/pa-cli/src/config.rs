@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub const APP_NAME: &str = "prime-agent";
+pub const APP_NAME: &str = "wv";
 
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 

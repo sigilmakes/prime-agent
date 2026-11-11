@@ -108,11 +108,11 @@ echo "installer output stays on stderr"
 if [ "${FAIL_INSTALL:-0}" = 1 ]; then exit 23; fi
 test "$PRIME_AGENT_DEFER_DAEMON_STOP" = "${EXPECT_DEFER:-0}"
 test "$PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET" = 1
-mkdir -p "$PRIME_AGENT_RUST_PREFIX/share/prime-agent"
-cp "$FIXTURE_NATIVE" "$PRIME_AGENT_RUST_PREFIX/share/prime-agent/prime-agent"
-printf '%s\\n' "$PRIME_AGENT_VERSION" > "$PRIME_AGENT_RUST_PREFIX/share/prime-agent/version"
-mkdir -p "$PRIME_AGENT_RUST_PREFIX/share/.prime-agent-npm-bridge"
-touch "$PRIME_AGENT_RUST_PREFIX/share/.prime-agent-npm-bridge/legacy-daemon-socket"
+mkdir -p "$PRIME_AGENT_RUST_PREFIX/share/weave"
+cp "$FIXTURE_NATIVE" "$PRIME_AGENT_RUST_PREFIX/share/weave/wv"
+printf '%s\\n' "$PRIME_AGENT_VERSION" > "$PRIME_AGENT_RUST_PREFIX/share/weave/version"
+mkdir -p "$PRIME_AGENT_RUST_PREFIX/share/.weave-npm-bridge"
+touch "$PRIME_AGENT_RUST_PREFIX/share/.weave-npm-bridge/legacy-daemon-socket"
 ''')
         self.out = self.root / "out"
         self.metadata = assemble(self.repo, self.out, "1.0.0", "stable", self.fallback_tarball)
@@ -163,17 +163,17 @@ touch "$PRIME_AGENT_RUST_PREFIX/share/.prime-agent-npm-bridge/legacy-daemon-sock
         self.assertEqual(self.launch("first").returncode, 0)
         # A subsequent native update replaces its payload, but the npm shim
         # must keep forwarding to it without reinstalling the old pinned release.
-        payload = self.prefix / "share/prime-agent"
+        payload = self.prefix / "share/weave"
         shutil.rmtree(payload)
         payload.mkdir()
-        shutil.copy2(self.fixture, payload / "prime-agent")
+        shutil.copy2(self.fixture, payload / "wv")
         result = self.launch("after-native-update")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.installs.read_text(), "install\n")
 
     def test_completed_migration_launch_does_not_wait_for_migration_lock(self):
         self.assertEqual(self.launch("first").returncode, 0)
-        lock = self.prefix / "share/.prime-agent-npm-bridge/migration.lock"
+        lock = self.prefix / "share/.weave-npm-bridge/migration.lock"
         lock.write_text(json.dumps({"pid": os.getpid(), "token": "another-install"}))
         result = self.launch("already-installed")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -196,7 +196,7 @@ touch "$PRIME_AGENT_RUST_PREFIX/share/.prime-agent-npm-bridge/legacy-daemon-sock
         result = self.launch("update", FAIL_INSTALL="1")
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertFalse((self.prefix / "share/.prime-agent-npm-bridge/1.0.0").exists())
+        self.assertFalse((self.prefix / "share/.weave-npm-bridge/1.0.0").exists())
         self.assertEqual(self.launch("update").returncode, 0)
         self.assertEqual(self.installs.read_text(), "install\ninstall\n")
 
@@ -224,7 +224,7 @@ touch "$PRIME_AGENT_RUST_PREFIX/share/.prime-agent-npm-bridge/legacy-daemon-sock
         self.assertEqual(result.returncode, 0, result.stderr)
         package = json.loads((self.entrypoint.parents[2] / "package.json").read_text())
         self.assertEqual(package["version"], "1.1.0")
-        self.assertTrue((self.prefix / "share/.prime-agent-npm-bridge/1.1.0").exists())
+        self.assertTrue((self.prefix / "share/.weave-npm-bridge/1.1.0").exists())
         self.assertEqual(self.launch("--version").stdout.strip(), "1.1.0")
 
     def test_new_bridge_that_still_cannot_install_rust_is_not_reported_as_success(self):
@@ -302,7 +302,7 @@ child.on("exit",code=>{process.exitCode=code;});
 
     def test_missing_native_install_is_repaired(self):
         self.assertEqual(self.launch().returncode, 0)
-        (self.prefix / "share/prime-agent/prime-agent").unlink()
+        (self.prefix / "share/weave/wv").unlink()
         self.assertEqual(self.launch().returncode, 0)
         self.assertEqual(self.installs.read_text(), "install\ninstall\n")
 
@@ -340,15 +340,15 @@ child.on("exit",code=>{process.exitCode=code;});
         section = section.split("# The cmd/PowerShell launcher twin", 1)[0]
         section = "# --- the launcher (the takeover lives here)" + section
         self.env["PRIME_AGENT_RUST_PREFIX"] = str(self.npm_prefix)
-        payload = self.npm_prefix / "share/prime-agent"
+        payload = self.npm_prefix / "share/weave"
         payload.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(self.fixture, payload / "prime-agent")
-        (payload / "prime-agent").chmod(0o755)
+        shutil.copyfile(self.fixture, payload / "wv")
+        (payload / "wv").chmod(0o755)
         (payload / "version").write_text("1.0.0\n")
         return subprocess.run(["sh", "-eu"], input='''
 PREFIX="$PRIME_AGENT_RUST_PREFIX"
 bin_dir="$PREFIX/bin"
-launcher="$bin_dir/prime-agent"
+launcher="$bin_dir/wv"
 WINDOWS=no
 say() { :; }; note() { :; }; die() { echo "$*" >&2; exit 1; }
 trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
@@ -357,10 +357,10 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                     env={**self.env, **environment})
 
     def test_real_installer_preserves_node_relaunch_only_for_its_npm_bridge(self):
-        receipt_dir = self.npm_prefix / "share/.prime-agent-npm-bridge"
+        receipt_dir = self.npm_prefix / "share/.weave-npm-bridge"
         receipt_dir.mkdir(parents=True)
         (receipt_dir / "1.0.0").write_text("installed\n")
-        command = self.npm_prefix / "bin/prime-agent"
+        command = self.npm_prefix / "bin/wv"
         foreign_entry = self.root / "unrelated.js"
         foreign_entry.write_text(self.entrypoint.read_text())
         for flag, target, preserved in (("1", self.entrypoint, True),
@@ -381,13 +381,13 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                                             text=True, capture_output=True, timeout=10)
                 self.assertEqual(relaunched.returncode, 0, relaunched.stderr)
                 self.assertEqual(relaunched.stdout.strip(), "1.0.0")
-                self.assertEqual(list(command.parent.glob(".prime-agent.*")), [])
+                self.assertEqual(list(command.parent.glob(".wv.*")), [])
 
     def test_real_launcher_pin_respects_the_sun_path_limit(self):
         # A TMPDIR whose longest worker endpoint cannot fit the portable
         # 103-byte sun_path limit must pin a hashed /tmp directory, never the
         # product default. The rule no longer varies by platform.
-        command = self.npm_prefix / "bin/prime-agent"
+        command = self.npm_prefix / "bin/wv"
         result = self.install_real_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
         shim_dir = self.root / "uname-shim"
@@ -410,7 +410,7 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
     def test_utf8_socket_limit_applies_to_launcher_and_stop_probe(self):
         result = self.install_real_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
-        command = self.npm_prefix / "bin/prime-agent"
+        command = self.npm_prefix / "bin/wv"
         installer = (Path(__file__).resolve().parents[2] / "install-rust.sh").read_text()
         stop_probe = installer.split('rust_socket="${TMPDIR:-/tmp}', 1)[1]
         stop_probe = 'rust_socket="${TMPDIR:-/tmp}' + stop_probe.split('env_socket=', 1)[0]
@@ -442,11 +442,11 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                         self.assertEqual(stop.stdout, expected)
 
     def test_stale_bridge_does_not_downgrade_newer_native_without_receipt(self):
-        payload = self.prefix / "share/prime-agent"
+        payload = self.prefix / "share/weave"
         payload.mkdir(parents=True)
-        executable = payload / "prime-agent"
+        executable = payload / "wv"
         executable.write_text('''#!/usr/bin/env node
-if (process.argv[2] === "--version") console.log("prime-agent 1.2.0");
+if (process.argv[2] === "--version") console.log("wv 1.2.0");
 else if (process.argv[2] === "socket") console.log(process.env.PRIME_AGENT_DAEMON_SOCKET);
 else console.log(JSON.stringify(process.argv.slice(2)));
 ''')
@@ -567,10 +567,10 @@ class InstallerTakeoverTests(unittest.TestCase):
                 (npm_prefix / "bin").mkdir()
                 (npm_prefix / "bin/prime-agent").symlink_to("../lib/node_modules/prime-agent/cli.js")
                 (prefix / "bin").mkdir(parents=True, exist_ok=True)
-                payload = prefix / "share/prime-agent"
+                payload = prefix / "share/weave"
                 payload.mkdir(parents=True)
-                (payload / "prime-agent").write_text("#!/bin/sh\nprintf '0.10.0\\n'\n")
-                (payload / "prime-agent").chmod(0o755)
+                (payload / "wv").write_text("#!/bin/sh\nprintf '0.1.0\\n'\n")
+                (payload / "wv").chmod(0o755)
                 env = {"PATH": os.environ["PATH"], "HOME": temp, "PREFIX": str(prefix),
                        "UVPY": sys.executable, "TEST_UNINSTALL_FAIL": str(uninstall_fails),
                        "npm_config_prefix": str(npm_prefix),
@@ -579,7 +579,7 @@ class InstallerTakeoverTests(unittest.TestCase):
                        "npm_config_globalconfig": str(root / "empty-global-npmrc")}
                 result = subprocess.run(["sh", "-eu"], input='''
 bin_dir="$PREFIX/bin"
-launcher="$bin_dir/prime-agent"
+launcher="$bin_dir/wv"
 WINDOWS=no
 say() { :; }; note() { :; }; die() { echo "$*" >&2; exit 1; }
 step_start() { :; }; step_ok() { :; }; step_fail() { :; }; todo() { :; }
@@ -600,16 +600,16 @@ npm() {
                     env=env, text=True, capture_output=True, timeout=30)
                 self.assertFalse(package.exists(), result.stderr)
                 self.assertEqual(result.returncode, 143 if uninstall_fails == 2 else 0, result.stderr)
-                probe = subprocess.run([str(prefix / "bin/prime-agent"), "--version"],
+                probe = subprocess.run([str(prefix / "bin/wv"), "--version"],
                                        env=env, text=True, capture_output=True, timeout=10)
-                self.assertEqual((probe.returncode, probe.stdout.strip()), (0, "0.10.0"), probe.stderr)
-                self.assertEqual(list((prefix / "bin").glob(".prime-agent.*")), [])
+                self.assertEqual((probe.returncode, probe.stdout.strip()), (0, "0.1.0"), probe.stderr)
+                self.assertEqual(list((prefix / "bin").glob(".wv.*")), [])
 
     def test_failed_version_probe_is_install_failure(self):
         installer = (Path(__file__).resolve().parents[2] / "install-rust.sh").read_text()
         verification = installer.split("# --- verify: the launcher must answer --version", 1)[1].split("\n", 1)[1].split("# --- the summary", 1)[0]
         result = subprocess.run(["sh", "-eu"], input='''
-install_probe_launcher=/nonexistent/prime-agent
+install_probe_launcher=/nonexistent/wv
 say() { :; }; die() { echo "$*" >&2; exit 1; }
 ''' + verification, text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0, "a broken launcher must not certify installation")

@@ -9,7 +9,7 @@ use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier, Style};
 
-pub const TEAM_QUESTION_PROMPT: &str = "Which account should Prime Agent use?";
+pub const TEAM_QUESTION_PROMPT: &str = "Which account should Weave use?";
 pub const PERSONAL_ACCOUNT_LABEL: &str = "Personal account";
 
 /// The team question's rows: the personal account first, then one row per

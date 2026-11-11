@@ -1,4 +1,4 @@
-//! `prime-agent config`: the resource-configuration view — resolve session
+//! `wv config`: the resource-configuration view — resolve session
 //! resources, report settings errors, then open the interactive selector.
 
 use std::path::PathBuf;

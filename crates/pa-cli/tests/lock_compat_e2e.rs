@@ -10,7 +10,7 @@
 )]
 
 //! Lock-convention compatibility, binary level: the TS `prime-agent` and the
-//! Rust `prime-agent` must agree on the lock artifact at `<file>.lock`. The
+//! Rust `wv` must agree on the lock artifact at `<file>.lock`. The
 //! TS product locks with `proper-lockfile`: an empty DIRECTORY whose mtime is
 //! refreshed while held; its release path `rmdir`s the lock path, so a
 //! regular FILE there is fatal (ENOTDIR), and a stale directory is reclaimed
@@ -26,14 +26,14 @@ use std::process::Command;
 use pa_core::platform::LockDir;
 
 /// The TS binary ground truth, located like `differential_cli.rs`
-/// (`PA_TS_BINARY` or `prime-agent` on PATH; skipped when absent).
+/// (`PA_TS_BINARY` or `wv` on PATH; skipped when absent).
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
         let path = PathBuf::from(path);
         return path.exists().then_some(path);
     }
     let found = Command::new("which")
-        .arg("prime-agent")
+        .arg("wv")
         .output()
         .ok()
         .filter(|out| out.status.success())?;
@@ -251,7 +251,7 @@ fn ts_binary_sees_a_rust_held_lock_as_contention() {
 
 #[test]
 fn rust_binary_reclaims_stale_lock_directory_artifact() {
-    let rust = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let rust = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let sandbox = sandbox("rs-stale-dir");
     seed_stale_lock_dir(&sandbox);
     let (exit, stdout, stderr) = run(
@@ -278,7 +278,7 @@ fn rust_binary_reclaims_stale_lock_directory_artifact() {
 fn rust_binary_heals_stale_lock_file_artifact() {
     // Pre-compat Rust builds left flock FILEs at the lock path. The Rust
     // binary removes the foreign artifact and proceeds; the TS binary cannot.
-    let rust = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let rust = PathBuf::from(env!("CARGO_BIN_EXE_wv"));
     let sandbox = sandbox("rs-stale-file");
     seed_stale_lock_file(&sandbox);
     let (exit, stdout, stderr) = run(

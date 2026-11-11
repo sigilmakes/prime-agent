@@ -1,18 +1,18 @@
 //! The self-update command core: the nightly-switch confirmation, the
 //! staged-activation update, and the completed-run channel persist.
-//! `prime-agent update` and `prime-agent package update`'s self target
+//! `wv update` and `wv package update`'s self target
 //! both run this one body, so the two entry points cannot diverge.
 
 use pa_core::update::version::UpdateChannel;
 
-/// One parsed self-update invocation: `prime-agent update`'s options or the
+/// One parsed self-update invocation: `wv update`'s options or the
 /// `package update` self target's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SelfUpdateOptions {
     pub force: bool,
     pub rollback: bool,
     pub channel: Option<UpdateChannel>,
-    /// The manual/direct install payload (`prime-agent update --archive`).
+    /// The manual/direct install payload (`wv update --archive`).
     pub archive: Option<std::path::PathBuf>,
     /// The `http(s)://` origin recorded as the release's install source.
     pub source: Option<String>,
@@ -40,7 +40,7 @@ pub fn confirm_nightly_switch(
         return None;
     }
     println!(
-        "Nightly releases are unreleased Prime Agent builds. They can be broken, and a broken update can leave Prime Agent unusable until you roll back or reinstall."
+        "Nightly releases are unreleased Weave builds. They can be broken, and a broken update can leave Weave unusable until you roll back or reinstall."
     );
     let abort_code = if std::env::var(crate::public_command::SELF_UPDATE_INTERACTIVE_CHILD_ENV)
         .as_deref()

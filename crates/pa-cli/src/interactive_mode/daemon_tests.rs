@@ -91,7 +91,7 @@ async fn start_peer(socket: &Path, hello: String) -> (oneshot::Sender<()>, JoinH
 
 fn assert_refusal(error: &anyhow::Error, socket: &Path) {
     let message = error.to_string();
-    assert!(message.contains("Prime Agent Rust client"), "{message}");
+    assert!(message.contains("Weave Rust client"), "{message}");
     assert!(message.contains(&socket.display().to_string()), "{message}");
     assert!(message.contains("--daemon-socket"), "{message}");
     assert!(

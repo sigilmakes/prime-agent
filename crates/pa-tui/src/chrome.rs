@@ -30,7 +30,7 @@ fn truncate_to_width(value: &str, max_width: usize, ellipsis: &str) -> String {
 /// Where a session runs; drives labels that depend on persistence.
 #[derive(Debug, Clone, Default)]
 pub struct ChromeState {
-    /// Product version shown in the splash (`prime agent vX`).
+    /// Product version shown in the splash (`weave vX`).
     pub version: String,
     /// Session working directory (splash `cwd` line; `~`-compressed).
     pub cwd: String,
@@ -310,7 +310,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
     let text = theme.fg_style(ThemeColor::Text);
     let muted = theme.fg_style(ThemeColor::Muted);
     let dim = theme.fg_style(ThemeColor::Dim);
-    let title = "prime agent";
+    let title = "weave";
     let version = format!("v{}", state.version);
     let mut meta_lines: Vec<Line> = Vec::new();
     if str_width(&format!("{title} {version}")) <= content_width {

@@ -93,7 +93,7 @@ pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
         || error.chain().any(|cause| {
             let cause = cause.to_string().to_lowercase();
             cause.contains("daemon connection")
-                || cause.contains("prime agent daemon closed")
+                || cause.contains("weave daemon closed")
                 || cause.contains("direct session connection closed")
                 || cause.contains("the session connection closed")
         })

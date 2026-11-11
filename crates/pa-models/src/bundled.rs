@@ -131,11 +131,11 @@ mod tests {
         let bin = root.path().join("bin");
         std::fs::create_dir_all(&libexec).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(libexec.join("prime-agent"), b"binary").unwrap();
-        // The Homebrew formula layout: bin/prime-agent -> Cellar libexec.
-        let launcher = bin.join("prime-agent");
-        std::os::unix::fs::symlink(libexec.join("prime-agent"), &launcher).unwrap();
-        let real = libexec.join("prime-agent");
+        std::fs::write(libexec.join("wv"), b"binary").unwrap();
+        // The Homebrew formula layout: bin/wv -> Cellar libexec.
+        let launcher = bin.join("wv");
+        std::os::unix::fs::symlink(libexec.join("wv"), &launcher).unwrap();
+        let real = libexec.join("wv");
         assert_eq!(exe_dir_of(&launcher), Some(libexec.clone()));
         assert_eq!(exe_dir_of(&real), Some(libexec));
     }

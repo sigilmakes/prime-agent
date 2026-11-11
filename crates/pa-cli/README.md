@@ -1,15 +1,15 @@
 # pa-cli
 
-The `prime-agent` binary.
+The `wv` binary.
 
 ## Scope
-Argument parsing matching the TS CLI exactly, mode selection (interactive/headless/json/daemon subcommands), binary wiring of crates into processes, exit codes and user-facing errors. The daemon-forensics CLI (`incident.rs`, TS `src/cli/incident.ts`): the `prime-agent incident` timeline command — log-source discovery (agent.jsonl plus its `.old` rotation, falling back to the newest per-daemon log), `--since`/`--until` window and `--session` filter parsing, and the report rendering; the shared classifier lives in pa-types (`pa_types::incident`) and the agents-view notice in pa-tui. Client-side MCP auth flows (`mcp_login.rs`): the `/mcp login`/`/mcp logout` hook the TUI calls — the TS interactive client's placement — resolving a server (settings `mcpServers` + the builtin catalog), running the pa-core OAuth login on the suspended terminal, and persisting through the shared auth store. The same placement serves the TUI's client-command hooks: provider auth (`provider_login.rs` — the `/login`/`/logout` catalog, the API-key store, the MCP device flow, the Prime Inference terminal login (`prime_inference_login.rs` — the API-key flow: prime-cli credential reuse, the paste prompt with the whoami access check, the numbered team selector); the subscription OAuth and the Prime browser challenge stay unported and report it), and the `/update` runner (`client_update.rs` — the out-of-band installer funnel with the output captured, the same body `prime-agent update` runs; `installer_update.rs` is that CLI command's own driver, `--check` included), plus the TS-parity staged update flow (`update_flow/`, `self_update.rs` — the `package update` self target's body, kept for the TS-parity package corpus).
+Argument parsing matching the TS CLI exactly, mode selection (interactive/headless/json/daemon subcommands), binary wiring of crates into processes, exit codes and user-facing errors. The daemon-forensics CLI (`incident.rs`, TS `src/cli/incident.ts`): the `wv incident` timeline command — log-source discovery (agent.jsonl plus its `.old` rotation, falling back to the newest per-daemon log), `--since`/`--until` window and `--session` filter parsing, and the report rendering; the shared classifier lives in pa-types (`pa_types::incident`) and the agents-view notice in pa-tui. Client-side MCP auth flows (`mcp_login.rs`): the `/mcp login`/`/mcp logout` hook the TUI calls — the TS interactive client's placement — resolving a server (settings `mcpServers` + the builtin catalog), running the pa-core OAuth login on the suspended terminal, and persisting through the shared auth store. The same placement serves the TUI's client-command hooks: provider auth (`provider_login.rs` — the `/login`/`/logout` catalog, the API-key store, the MCP device flow, the Prime Inference terminal login (`prime_inference_login.rs` — the API-key flow: prime-cli credential reuse, the paste prompt with the whoami access check, the numbered team selector); the subscription OAuth and the Prime browser challenge stay unported and report it), and the `/update` runner (`client_update.rs` — the out-of-band installer funnel with the output captured, the same body `wv update` runs; `installer_update.rs` is that CLI command's own driver, `--check` included), plus the TS-parity staged update flow (`update_flow/`, `self_update.rs` — the `package update` self target's body, kept for the TS-parity package corpus).
 
 ## Non-goals
 No business logic; it composes pa-daemon, pa-core, pa-tui, pa-ai via their public APIs only.
 
 ## Public API
-The `prime-agent` executable surface (flags, subcommands, exit codes). Internal lib types `pub(crate)`, plus the daemon wiring (`interactive_mode::{ensure_daemon_running, ensure_daemon_running_with, resolve_socket_path}`) exported for the integration verifier.
+The `wv` executable surface (flags, subcommands, exit codes). Internal lib types `pub(crate)`, plus the daemon wiring (`interactive_mode::{ensure_daemon_running, ensure_daemon_running_with, resolve_socket_path}`) exported for the integration verifier.
 
 ## Depends on
 pa-types, pa-ai, pa-agent, pa-core, pa-daemon, pa-tui (one-way, composition root).
@@ -51,7 +51,7 @@ prompt wait (the raw error to stderr, exit 1, no later prompts). Client
 commands (`/model`, `/tree`, ...) and unknown slash input are rejected in headless
 mode instead of becoming model prompts. Active native plugin commands use the same
 core executor. `/reload` reconciles the plugin host without command history rows;
-`prime-agent prompt` includes its active contribution inventory. Dynamic
+`wv prompt` includes its active contribution inventory. Dynamic
 `context_contribution` instructions are evaluated at the model boundary;
 the prompt dump does not preview them.
 Print mode joins admitted plugin jobs before the next input or process exit,
@@ -90,7 +90,7 @@ test-created fixture directories only.
 
 ## Update flow (staged activation)
 
-`prime-agent update` (the `update_flow` module): the invoking CLI plans, downloads, and
+`wv update` (the `update_flow` module): the invoking CLI plans, downloads, and
 stages the candidate (`Acquire`..`Staged`), then spawns the detached
 coordinator - the new binary running from its release dir - which adopts the
 status file and owns the FSM to a terminal state (`Preparing..Complete`,

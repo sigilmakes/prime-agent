@@ -1,4 +1,4 @@
-//! `prime-agent incident`: reconstructs what the daemon did during a time
+//! `wv incident`: reconstructs what the daemon did during a time
 //! window from its diagnostic logs (the shared classifier lives in
 //! `pa_types::incident`). The primary source is the shared structured log
 //! (`~/.prime/agent/logs/agent.jsonl` plus its `.old` rotation); when it is
@@ -292,7 +292,7 @@ pub(crate) fn incident_report_text(
     Ok(Some(report.text))
 }
 
-/// Entry point for `prime-agent incident`; prints the timeline (or the
+/// Entry point for `wv incident`; prints the timeline (or the
 /// missing-logs message) to stdout. A passed-back window resolves relative
 /// `HH:MM` bounds exactly once.
 ///

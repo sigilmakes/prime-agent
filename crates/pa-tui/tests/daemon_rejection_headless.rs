@@ -886,7 +886,7 @@ fn an_agents_view_open_waits_through_the_update_restart_window() {
     let frames = run.frames.join("\n");
     assert!(
         frames.contains(
-            "Waited for the Prime Agent daemon update restart to finish before opening this agent"
+            "Waited for the Weave daemon update restart to finish before opening this agent"
         ),
         "the session shows the wait row: {frames}"
     );
@@ -895,9 +895,7 @@ fn an_agents_view_open_waits_through_the_update_restart_window() {
     assert!(run.return_to_agents_view);
     assert_eq!(
         run.agents_view_notice.as_deref(),
-        Some(
-            "Waited for the Prime Agent daemon update restart to finish before opening this agent"
-        )
+        Some("Waited for the Weave daemon update restart to finish before opening this agent")
     );
 }
 
@@ -929,7 +927,7 @@ fn a_permanent_create_failure_after_the_window_surfaces_unmasked() {
         "the refusal surfaces unmasked: {notice}"
     );
     assert!(
-        !notice.contains("Waited for the Prime Agent daemon update restart"),
+        !notice.contains("Waited for the Weave daemon update restart"),
         "no wait notice for an open that never completed: {notice}"
     );
 }

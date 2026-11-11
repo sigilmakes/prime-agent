@@ -316,13 +316,13 @@ fn parse_package_command(args: &[String]) -> Option<PackageCommandOptions> {
             && (extensions_flag || extension_flag_source.is_some() || positional_source_not_self)
         {
             options.conflicting_options =
-                Some("--rollback only applies to Prime Agent itself".to_string());
+                Some("--rollback only applies to Weave itself".to_string());
         }
         if channel.is_some()
             && (extensions_flag || extension_flag_source.is_some() || positional_source_not_self)
         {
             options.conflicting_options.get_or_insert_with(|| {
-                "--nightly and --stable only apply to Prime Agent itself".to_string()
+                "--nightly and --stable only apply to Weave itself".to_string()
             });
         }
     }

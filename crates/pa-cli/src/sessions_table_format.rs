@@ -1,4 +1,4 @@
-//! The `prime-agent sessions` operator table: one line per agent — name,
+//! The `wv sessions` operator table: one line per agent — name,
 //! status, activity, staleness, last error, usage — from the same daemon
 //! `list` summaries, with the activity wording from the shared roster
 //! branch table (color-free, like TS piped output).
@@ -22,7 +22,7 @@ const MAX_CELL_CHARS: usize = 60;
 /// The sessions table's columns.
 const SESSIONS_HEADERS: [&str; 6] = ["name", "status", "activity", "last heard", "error", "usage"];
 
-/// One-line-per-agent operator table for `prime-agent sessions`.
+/// One-line-per-agent operator table for `wv sessions`.
 pub(crate) fn format_sessions_table(sessions: &[&Value], now_ms: u64) -> String {
     let mut sorted = sessions.to_vec();
     sorted.sort_by_key(|summary| sessions_sort_key(summary));

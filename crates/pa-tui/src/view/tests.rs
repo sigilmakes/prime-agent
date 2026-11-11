@@ -259,7 +259,7 @@ fn frame_is_exactly_height_rows() {
     assert_eq!(frame.len(), 24);
     assert!(frame.iter().all(|l| str_width(&text_of(l)) <= 80));
     let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
-    assert!(joined.contains("prime agent v0.0.0"));
+    assert!(joined.contains("weave v0.0.0"));
     assert!(joined.contains("Collapsed mode (Ctrl+O to expand)"));
     assert!(joined.contains('>'));
 }

@@ -1,4 +1,4 @@
-//! Provider APIs and model registry for Prime Agent.
+//! Provider APIs and model registry for Weave.
 //!
 //! The wire/domain types live in `pa-types` (the only dependency, one-way) and are re-exported
 //! from [`types`]; per-provider internals are `pub(crate)`.

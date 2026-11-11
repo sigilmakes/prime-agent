@@ -1,17 +1,16 @@
 #!/bin/sh
-# install-rust.sh — one-command installer for the Rust build of Prime Agent.
+# install-rust.sh — one-command installer for the Rust build of Weave.
 #
-# THE KEYWORD TAKEOVER: the Rust port installs under the product keyword
-# PRIME-AGENT — the launcher lands at ~/.local/bin/prime-agent, the payload
-# at ~/.local/share/prime-agent/, and users type `prime-agent`. The old
-# prime-agent-rust layout (a TS-safe side-by-side name) is migrated: the
-# share tree moves to the new name with a one-generation .old rollback, and
-# this script's own launcher replaces the prime-agent-rust one it wrote in
-# past installs. The FILENAME stays install-rust.sh deliberately: the
-# curl|sh URL and the update entry points (`prime-agent update`, the TUI
-# /update — both exec this script with --update) already point at it, and
-# the filename is invisible to users; the command they type is what
-# changed.
+# THE INSTALL: the Rust port installs as WEAVE — the launcher lands at
+# ~/.local/bin/wv, the payload at ~/.local/share/weave/, and users type
+# `wv`. The old prime-agent-rust layout (a TS-safe side-by-side name) is
+# migrated: the share tree moves to the new name with a one-generation
+# .old rollback, and this script's launcher retires the prime-agent-rust
+# one it wrote in past installs. The FILENAME stays install-rust.sh
+# deliberately: the curl|sh URL and the update entry points (`wv update`,
+# the TUI /update — both exec this script with --update) already point at
+# it, and the filename is invisible to users; the command they type is
+# what changed.
 #
 # SOURCE: the R2-backed release channel (this repo file is the source the
 # release workflow uploads to the bucket as install.sh / install-beta.sh;
@@ -26,14 +25,14 @@
 #      signal one that will not stop), but only AFTER the new payload and
 #      launcher are published — the retirement steps (daemon stops, npm
 #      uninstall) never leave the machine without a
-#      working prime-agent if the install aborts mid-way. The probed
+#      working wv if the install aborts mid-way. The probed
 #      candidates: the TS daemon's default socket
 #      (${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock),
 #      PRIME_AGENT_DAEMON_SOCKET when a profile exported it (the
 #      non-default socket the first field install had), and this
 #      product's own pinned rust socket. The daemon that answers a
 #      candidate is classified by IDENTITY first — a hello whose
-#      runtime build id is this product's ("pa-daemon-rs-<version>",
+#      runtime build id is this product's ("weave-daemon-<version>",
 #      carried since the port) is OUR daemon of any build (the update
 #      flow: the running daemon holds the old binary and venv state, the
 #      update needs it down, the next invocation boots the new daemon —
@@ -121,8 +120,8 @@
 #   PRIME_AGENT_VERSION           pin an exact version instead of reading
 #                                  the channel pointer
 #   PRIME_AGENT_RUST_PREFIX       install prefix (default: ~/.local; the
-#                                  launcher lands at $PREFIX/bin/prime-agent,
-#                                  the payload at $PREFIX/share/prime-agent/)
+#                                  launcher lands at $PREFIX/bin/wv,
+#                                  the payload at $PREFIX/share/weave/)
 #   PRIME_AGENT_UV_BIN_DIR         uv install dir (default: ~/.local/bin)
 #
 # THE CHANNEL (the R2 form, the TS install.sh parity): the script reads
@@ -140,7 +139,7 @@
 # takeover steps as no-ops when there is nothing left to take over).
 # install-rust.sh --rollback republishes that kept generation, and
 # install-rust.sh --archive <path> publishes a local release archive
-# instead of a channel download (`prime-agent update --rollback` and
+# instead of a channel download (`wv update --rollback` and
 # `--archive` run the copy of this script bundled into the binary).
 #
 # PREREQUISITES: curl + sh (+ the network for the download). The installer
@@ -169,33 +168,33 @@ die() { echo "install-rust.sh: $1" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
-install-rust.sh — install the Rust build of Prime Agent under the prime-agent keyword.
+install-rust.sh — install the Rust build of Weave under the wv command.
 
-The launcher lands at $PRIME_AGENT_RUST_PREFIX/bin/prime-agent and the payload at
-$PRIME_AGENT_RUST_PREFIX/share/prime-agent/ (default prefix ~/.local). The installed
-TypeScript product is taken over: its daemon is stopped with its own shutdown request,
-its native install is preserved under share/prime-agent-legacy, and its npm package is
-uninstalled (the restore command is printed). ~/.prime/agent (the shared session store)
-is never touched. Both the default and --update install the channel's current version.
+The launcher lands at $PRIME_AGENT_RUST_PREFIX/bin/wv and the payload at
+$PRIME_AGENT_RUST_PREFIX/share/weave/ (default prefix ~/.local). The installed
+TypeScript product is retired: its daemon is stopped with its own shutdown request and
+its unbridged npm package is uninstalled (the restore command is printed). ~/.prime/agent (the
+shared session store) is never touched. Both the default and --update install
+the channel's current version.
 
 Needs curl + sh (+ the network): the installer bootstraps its own Python via
 uv — no system python3 required. It also pre-warms the Python kernel (uv +
-`prime-agent --prime-agent-bootstrap`); offline, that step degrades to a
+`wv --prime-agent-bootstrap`); offline, that step degrades to a
 warning and the first session bootstraps the kernel itself — it needs the
 network once.
 
 Options:
   --update    the documented alias the update entry points exec (identical run)
-  --force     if a Prime Agent daemon (TypeScript or Rust) is still up after the
+  --force     if a Weave daemon (TypeScript or Rust) is still up after the
               shutdown requests and the drain wait, send it SIGTERM, then SIGKILL.
               Never applies to the daemon this install runs under.
               (from a pipe: curl -fsSL <url>/install.sh | sh -s -- --force)
   --verbose   the detail also goes to stdout, not just fd 3 (no animation)
   --rollback  restore the previous version the last install kept
-              (share/prime-agent.old.*); the replaced version is kept in
+              (share/weave.old.*); the replaced version is kept in
               its place, so a second --rollback undoes the first
   --archive <path>
-              install a local prime-agent-<version>-<platform>.tar.gz
+              install a local wv-<version>-<platform>.tar.gz
               release archive instead of downloading from the channel
 Output:
   stderr      the title, one line per step, warnings with the command that
@@ -228,7 +227,7 @@ USAGE
 
 # --- arguments ---------------------------------------------------------------
 # No positional arguments. --update is the documented alias the update entry
-# points (`prime-agent update`, the TUI /update) exec — identical to the default
+# points (`wv update`, the TUI /update) exec — identical to the default
 # run because the flow is idempotent by construction. --verbose folds the fd-3
 # progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
 # --rollback and --archive pick the payload source (MODE); the default is the
@@ -256,7 +255,7 @@ elif [ -x /c/Windows/System32/tasklist.exe ]; then
 fi
 # THE HANDOFF PARENT WAIT: the Windows update command spawns THIS script
 # and exits precisely so its own payload image stops locking
-# <prefix>/share/prime-agent for the publish below — but a fast child
+# <prefix>/share/weave for the publish below — but a fast child
 # could reach that rename while the parent still lives. The handoff sets
 # the parent's pid here; the payload touch happens many steps below, and
 # this bounded wait (the parent is normally gone in milliseconds) makes
@@ -269,7 +268,7 @@ if [ -n "${PRIME_AGENT_INSTALLER_PARENT_PID:-}" ] && [ -n "$TASKLIST" ]; then
           /FI "PID eq ${PRIME_AGENT_INSTALLER_PARENT_PID}" 2>/dev/null \
         | grep -qw "${PRIME_AGENT_INSTALLER_PARENT_PID}"; do
     parent_waits=$((parent_waits + 1))
-    [ "$parent_waits" -gt 300 ] && die "the prime-agent process that started this installer (pid ${PRIME_AGENT_INSTALLER_PARENT_PID}) is still running after 30s; the payload it holds cannot be replaced while it lives — stop that process and re-run"
+    [ "$parent_waits" -gt 300 ] && die "the wv process that started this installer (pid ${PRIME_AGENT_INSTALLER_PARENT_PID}) is still running after 30s; the payload it holds cannot be replaced while it lives — stop that process and re-run"
     sleep 0.1 2>/dev/null || sleep 1
   done
 fi
@@ -496,7 +495,7 @@ BEGIN {
 # BANNER_AWK_END
 '
 
-dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
+dl="$(mktemp -d "${TMPDIR:-/tmp}/weave-download.XXXXXX")"
 # The renderer's inputs: the active step (label, detail, the file being
 # downloaded, its size), the finished lines, the title's version text, and
 # the stop flag. Warnings wait in ui_notes and print in full once the
@@ -576,7 +575,7 @@ title() {
   if [ -n "$ui_pid" ]; then
     printf '%s\n' "$1" > "$ui_brand"
   else
-    printf ' %sInstalling PRIME Agent%s  %s%s%s\n\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$1" "$C_RESET" >&2
+    printf ' %sInstalling Weave%s  %s%s%s\n\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$1" "$C_RESET" >&2
   fi
 }
 # step_start <label>: the step is running (the spinner row on a terminal;
@@ -686,7 +685,7 @@ publish_window_restore() {
     if mv "${publish_parked}" "${share_dir}" 2>/dev/null; then
       publish_parked=""
     else
-      echo "warning: could not restore the previous prime-agent payload from ${publish_parked}; restore it with: mv '${publish_parked}' '${share_dir}'" >&2
+      echo "warning: could not restore the previous Weave payload from ${publish_parked}; restore it with: mv '${publish_parked}' '${share_dir}'" >&2
     fi
   fi
 }
@@ -782,12 +781,12 @@ under Git Bash/MSYS2/Cygwin — uname MINGW*_NT*/MSYS_NT*/CYGWIN_NT* — or
 through install.ps1 in PowerShell)"
     ;;
 esac
-# The staged binary name: the MSVC build ships prime-agent.exe; the
+# The staged binary name: the MSVC build ships wv.exe; the
 # extraction check, the launcher, and the manifest row all name it.
 if [ "$WINDOWS" = "yes" ]; then
-  BINARY_NAME="prime-agent.exe"
+  BINARY_NAME="wv.exe"
 else
-  BINARY_NAME="prime-agent"
+  BINARY_NAME="wv"
 fi
 
 # --- glibc floor (Linux) ------------------------------------------------------
@@ -893,7 +892,7 @@ case "$VERSION" in
     ;;
 esac
 step_clear
-say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
+say "installing wv ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
 title "${VERSION} (${CHANNEL})"
 elif [ "$MODE" = archive ]; then
 # --- --archive: a local release archive ------------------------------------------
@@ -901,7 +900,7 @@ elif [ "$MODE" = archive ]; then
 # comes from the name. The channel download and its checksum checks are
 # skipped: the operator named the payload (the tarball must still contain an
 # executable payload binary, checked at extraction). On Windows a drive-letter
-# path (the C:\... form `prime-agent update --archive` passes) goes to the
+# path (the C:\... form `wv update --archive` passes) goes to the
 # POSIX form first: the name below splits on /, and tar reads C: as a host.
   if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
     archive_posix="$(cygpath -u "$ARCHIVE")" || die "could not resolve the archive path ${ARCHIVE}"
@@ -910,10 +909,10 @@ elif [ "$MODE" = archive ]; then
   [ -f "$ARCHIVE" ] || die "the release archive ${ARCHIVE} does not exist"
   archive_name="${ARCHIVE##*/}"
   case "$archive_name" in
-    prime-agent-?*-"${CHANNEL_PLATFORM}".tar.gz) ;;
-    *) die "${archive_name} is not a ${CHANNEL_PLATFORM} release archive (expected prime-agent-<version>-${CHANNEL_PLATFORM}.tar.gz)" ;;
+    wv-?*-"${CHANNEL_PLATFORM}".tar.gz) ;;
+    *) die "${archive_name} is not a ${CHANNEL_PLATFORM} release archive (expected wv-<version>-${CHANNEL_PLATFORM}.tar.gz)" ;;
   esac
-  VERSION="${archive_name#prime-agent-}"
+  VERSION="${archive_name#wv-}"
   VERSION="${VERSION%-"${CHANNEL_PLATFORM}".tar.gz}"
   # A leading v is the pin's accepted spelling too (`--rollback`'s marker
   # versions carry none; the exact payload match below compares the bare
@@ -923,7 +922,7 @@ elif [ "$MODE" = archive ]; then
     *[!0-9A-Za-z.-]*) die "invalid version in the archive name ${archive_name}: ${VERSION}" ;;
   esac
   asset="$ARCHIVE"
-  say "installing prime-agent ${VERSION} from the local archive ${ARCHIVE}"
+  say "installing wv ${VERSION} from the local archive ${ARCHIVE}"
   title "${VERSION} (local archive)"
   step_ok "Using the local archive" "$(tilde "$ARCHIVE")"
 fi
@@ -1326,14 +1325,14 @@ for install_root in "${PREFIX}/share" "${PREFIX}/bin"; do
   fi
 done
 
-share_dir="${PREFIX}/share/prime-agent"
+share_dir="${PREFIX}/share/weave"
 bin_dir="${PREFIX}/bin"
-launcher="${bin_dir}/prime-agent"
+launcher="${bin_dir}/wv"
 old_layout_dir="${PREFIX}/share/prime-agent-rust"
 legacy_dir="${PREFIX}/share/prime-agent-legacy"
-lock_link="${PREFIX}/share/.prime-agent-install.lock"
+lock_link="${PREFIX}/share/.weave-install.lock"
 legacy_lock="${PREFIX}/share/.prime-agent-rust-install.lock"
-generations_record="${PREFIX}/share/.prime-agent-install-generations"
+generations_record="${PREFIX}/share/.weave-install-generations"
 guard_preserved "$share_dir" "$launcher" "$old_layout_dir" "$legacy_dir" "$lock_link"
 
 # --- --rollback: the newest kept generation ------------------------------------
@@ -1363,14 +1362,14 @@ if [ "$MODE" = rollback ]; then
   if [ -f "$generations_record" ]; then
     while IFS= read -r recorded; do
       case "$recorded" in
-        "${PREFIX}/share/prime-agent.old."*) ;;
+        "${PREFIX}/share/weave.old."*) ;;
         *) continue ;;
       esac
       [ -d "$recorded" ] && [ -x "${recorded}/${BINARY_NAME}" ] || continue
       # The normalized marker read covers recorded entries too: a ps1-
       # marked live tree this script moved aside in a ROLLBACK becomes a
       # recorded generation, and its encoding rides with it.
-      case "$(marker_text "${recorded}/.prime-agent-install" \
+      case "$(marker_text "${recorded}/.weave-install" \
                  | head -n 1)" in
         "install-rust.sh channel "*) ;;
         *) continue ;;
@@ -1379,7 +1378,7 @@ if [ "$MODE" = rollback ]; then
     done < "$generations_record"
   fi
   # The Windows-native installer's slot: install.ps1 keeps ITS replaced
-  # payload at the un-suffixed `prime-agent.old` and never writes the
+  # payload at the un-suffixed `weave.old` and never writes the
   # generations record (its own one-generation bookkeeping; its recovery
   # is a printed manual Move-Item), so a ps1-updated machine has no
   # recorded entry — but the CLI still sees an installer-owned payload,
@@ -1396,10 +1395,10 @@ if [ "$MODE" = rollback ]; then
   # name — the record's entries are exactly the slots this script wrote
   # and swept, so it stays authoritative whenever it answers. The slot
   # serves the machines the record never covered.
-  ps1_slot="${PREFIX}/share/prime-agent.old"
+  ps1_slot="${PREFIX}/share/weave.old"
   if [ -z "$rollback_from" ] \
      && [ -d "$ps1_slot" ] && [ -x "${ps1_slot}/${BINARY_NAME}" ] \
-     && case "$(marker_text "${ps1_slot}/.prime-agent-install" \
+     && case "$(marker_text "${ps1_slot}/.weave-install" \
                  | head -n 1)" in
           "install-rust.sh channel "*) true ;;
           *) false ;;
@@ -1424,10 +1423,10 @@ if [ "$MODE" = rollback ]; then
   # The channel/version lines come from the normalized marker: the slot's
   # marker can be a ps1-encoded write (see marker_text); a record entry's
   # marker is this script's own ASCII, so the normalization is a no-op.
-  marker="$(marker_text "${rollback_from}/.prime-agent-install")"
+  marker="$(marker_text "${rollback_from}/.weave-install")"
   CHANNEL="$(printf '%s\n' "$marker" | sed -n '1s/^install-rust.sh channel //p')"
   VERSION="$(printf '%s\n' "$marker" | sed -n '2s/^version //p')"
-  say "rolling back to prime-agent ${VERSION} (${rollback_from})"
+  say "rolling back to wv ${VERSION} (${rollback_from})"
   title "${VERSION} (rollback)"
   step_ok "Found the previous version" "${VERSION}"
 fi
@@ -1447,7 +1446,7 @@ if [ "$MODE" = channel ]; then
 # (the probe-py pattern: macOS ships bash 3.2 as /bin/sh, and its
 # POSIX-mode parser cannot close a $( ) that spans a heredoc body).
 if [ "$VERSION_PINNED" = "yes" ]; then
-  asset_name="prime-agent-${VERSION}-${CHANNEL_PLATFORM}.tar.gz"
+  asset_name="wv-${VERSION}-${CHANNEL_PLATFORM}.tar.gz"
   manifest_sha=""
 else
 manifest_attempt=1
@@ -1463,7 +1462,7 @@ manifest_version = manifest.get("version", "")
 if manifest_version.lstrip("v") != version.lstrip("v"):
     sys.exit(f"manifest version {manifest_version} != channel version {version}")
 rows = manifest.get("binaries_v2") or manifest.get("binaries") or []
-expected = f"prime-agent-{version.lstrip('v')}-{platform}.tar.gz"
+expected = f"wv-{version.lstrip('v')}-{platform}.tar.gz"
 for row in rows:
     if row.get("platform") != platform:
         continue
@@ -1484,7 +1483,7 @@ ROW_PY
            sleep 1
            VERSION="$(read_channel_version)"
            [ -n "$VERSION" ] || die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}"
-           say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
+           say "installing wv ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
            continue
          fi
          die "the ${CHANNEL} channel manifest is not usable: ${BASE_URL}/${CHANNEL_MANIFEST} (${manifest_err})"; }
@@ -1555,7 +1554,7 @@ fi
 # even the forced request is the daemon's own shutdown request over its
 # socket. With --force, a daemon still up after the full drain wait
 # gets SIGTERM, then SIGKILL, sent to the supervisor pid its hello names,
-# and only after that pid's command line proves it is a Prime Agent
+# and only after that pid's command line proves it is a Weave
 # daemon (a stale or fake responder never gets another process killed). An
 # unreadable session count never skips the stop (the ladder runs with
 # the count unknown).
@@ -1703,7 +1702,7 @@ def progress(detail, label=None):
         progress_out.write((" %s  (%s)" % (label, detail) if label is not None else "   " + detail) + "\n")
 
 # The classification ladder, identity before schema: a hello whose
-# runtime build id is this product's ("pa-daemon-rs-<version>", carried by
+# runtime build id is this product's ("weave-daemon-<version>", carried by
 # every rust build since the port) is OUR daemon of ANY build; below that,
 # the two products share the protocol-7 schema FAMILY
 # ("protocol-7-schema-<revision>-<hash>"): the TypeScript product's id
@@ -1715,7 +1714,7 @@ def progress(detail, label=None):
 # unrecognized (the loud warning).
 TS_SCHEMA_FAMILY = "protocol-7-schema-"
 RUST_SCHEMA_ID = "protocol-7-schema-30-8e4b17c2a9f5"
-RUST_BUILD_ID_PREFIX = "pa-daemon-rs-"
+RUST_BUILD_ID_PREFIX = "weave-daemon-"
 HELLO_TIMEOUT_S = 1.5
 PROBE_TIMEOUT_S = 5.0
 STOP_CONFIRM_TIMEOUT_S = 5.0
@@ -1974,9 +1973,9 @@ if stopped_within(drain_confirm_timeout_s()):
 
 # --force only: signal the supervisor pid the daemon's own hello named.
 # The pid is re-read from a fresh hello on the same socket, and it is
-# signalled only when its command line is a Prime Agent daemon (the Rust
-# and TS shapes are both `<...prime-agent...> --mode daemon`, the npm
-# build runs `node <...prime-agent...> --mode daemon`): a stale or fake
+# signalled only when its command line is a Weave daemon (the Rust shape
+# is `<...wv...> --mode daemon`; the TS npm build runs
+# `node <...prime-agent...> --mode daemon`): a stale or fake
 # responder advertising some other pid never gets that process killed.
 # Only the supervisor is signalled. Both products start each worker in
 # its own process group, and a signal that lands mid-shutdown is a forced
@@ -1993,7 +1992,7 @@ def command_line(pid):
     except OSError:
         pass
     # Python 3.3+ spelling (the installer may run a system python3); any
-    # failure means "not a Prime Agent daemon", never a crash.
+    # failure means "not a Weave daemon", never a crash.
     try:
         import subprocess
         out = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="],
@@ -2003,8 +2002,9 @@ def command_line(pid):
         return []
     return out.split()
 
-def is_prime_agent_daemon(args):
-    named = any("prime-agent" in arg for arg in args[:2])
+def is_weave_daemon(args):
+    named = any(os.path.basename(arg) in ("wv", "wv.exe", "prime-agent", "prime-agent.exe")
+                for arg in args[:2])
     daemon_mode = "--mode=daemon" in args or any(
         args[i] == "--mode" and args[i + 1] == "daemon" for i in range(len(args) - 1))
     return named and daemon_mode
@@ -2016,7 +2016,7 @@ def is_prime_agent_daemon(args):
 #                on a fresh connection;
 #   undelivered  no signal was sent: os.kill refused (e.g. permission);
 #   no-pid       no signal was sent: the hello named no usable pid;
-#   not-daemon   no signal was sent: the named pid is not a Prime Agent daemon;
+#   not-daemon   no signal was sent: the named pid is not a Weave daemon;
 #   failed       SIGTERM and SIGKILL were sent and the daemon stayed up.
 def kill_supervisor():
     try:
@@ -2035,8 +2035,8 @@ def kill_supervisor():
     if not isinstance(pid, int) or pid <= 1 or pid in (os.getpid(), os.getppid()):
         progress("the daemon names no usable pid; not signalled")
         return "no-pid"
-    if not is_prime_agent_daemon(command_line(pid)):
-        progress("pid %d is not a Prime Agent daemon; not signalled" % pid)
+    if not is_weave_daemon(command_line(pid)):
+        progress("pid %d is not a Weave daemon; not signalled" % pid)
         return "not-daemon"
     signalled = False
     for sig, wait_s, name in ((signal.SIGTERM, FORCE_TERM_WAIT_S, "SIGTERM"),
@@ -2164,15 +2164,15 @@ stop_daemon_candidate() {
       note "! A different daemon took ${socket_path} mid-stop (${daemon_name} was"
       note "  identified there); nothing was stopped and the newcomer was never"
       note "  commanded. Stop it with:"
-      todo "prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${daemon_name} was swapped mid-stop; the replacement was never commanded; stop it by hand: prime-agent shutdown --force)
+      todo "wv shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${daemon_name} was swapped mid-stop; the replacement was never commanded; stop it by hand: wv shutdown --force)
 "
       ;;
     ts:stop-failed:*|rust:stop-failed:*|ts:kill-*:*|rust:kill-*:*)
       ts_stop_found_any="yes"
       case "$verdict" in
         *:kill-failed:*) stop_failed_reason="--force sent SIGTERM and SIGKILL and it stayed up" ;;
-        *:kill-not-daemon:*) stop_failed_reason="--force sent no signal: the pid it names is not a Prime Agent daemon" ;;
+        *:kill-not-daemon:*) stop_failed_reason="--force sent no signal: the pid it names is not a Weave daemon" ;;
         *:kill-no-pid:*) stop_failed_reason="--force sent no signal: its hello names no usable pid" ;;
         *:kill-undelivered:*) stop_failed_reason="--force could not deliver a signal to its pid" ;;
         *:kill-*) stop_failed_reason="--force sent no signal: it could not re-identify the daemon on its socket" ;;
@@ -2185,14 +2185,14 @@ stop_daemon_candidate() {
       case "$verdict" in
         *:kill-*)
           note "  Stop it with this, or kill the process on ${socket_path}:"
-          manual_stop="stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
+          manual_stop="stop it by hand: wv shutdown --force, or kill the process listening on ${socket_path}"
           ;;
         *)
           note "  Re-run the installer with --force to kill it, or stop it with:"
-          manual_stop="re-run the installer with --force to kill it, or stop it by hand: prime-agent shutdown --force"
+          manual_stop="re-run the installer with --force to kill it, or stop it by hand: wv shutdown --force"
           ;;
       esac
-      todo "prime-agent shutdown --force"
+      todo "wv shutdown --force"
       ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${daemon_name}, ${sessions_label}; the graceful and forced requests did not bring it down; ${stop_failed_reason}; ${manual_stop})
 "
       ;;
@@ -2201,16 +2201,16 @@ stop_daemon_candidate() {
       ts_stop_found_any="yes"
       note "! An unknown daemon is listening on ${socket_path} (schema ${schema_id});"
       note "  nothing was stopped. Stop it with:"
-      todo "prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING unrecognized on ${socket_path} (schema ${schema_id}; left running; stop it by hand: prime-agent shutdown --force)
+      todo "wv shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING unrecognized on ${socket_path} (schema ${schema_id}; left running; stop it by hand: wv shutdown --force)
 "
       ;;
     no-hello|no-schema)
       ts_stop_found_any="yes"
       note "! Something is listening on ${socket_path} but did not greet as a"
       note "  daemon; nothing was stopped. Stop it with:"
-      todo "prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING unidentified on ${socket_path} (no daemon hello; left running; stop it by hand: prime-agent shutdown --force)
+      todo "wv shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING unidentified on ${socket_path} (no daemon hello; left running; stop it by hand: wv shutdown --force)
 "
       ;;
     stale)
@@ -2220,8 +2220,8 @@ stop_daemon_candidate() {
       ts_stop_found_any="yes"
       note "! Could not check ${socket_path} for a running daemon; nothing was"
       note "  stopped. If one is running there, stop it with:"
-      todo "prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING unprobed on ${socket_path} (nothing was stopped; stop it by hand: prime-agent shutdown --force)
+      todo "wv shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING unprobed on ${socket_path} (nothing was stopped; stop it by hand: wv shutdown --force)
 "
       ;;
     absent)
@@ -2272,7 +2272,7 @@ fi
 # instead. The old tree is renamed ASIDE first and removed only after the
 # new stage is in place, so the live tree is never rm'd while the launcher
 # still points into it. The renamed-aside tree is KEPT as a one-generation
-# rollback (prime-agent.old.<pid>); the next successful install sweeps it.
+# rollback (weave.old.<pid>); the next successful install sweeps it.
 # A rollback publishes the kept generation itself as the stage: it already
 # carries its payload and its marker.
 if [ -n "$rollback_from" ]; then
@@ -2280,7 +2280,7 @@ if [ -n "$rollback_from" ]; then
   stage="$rollback_from"
 else
 step_start "Installing"
-stage="$(mktemp -d "${PREFIX}/share/prime-agent.stage.XXXXXX")"
+stage="$(mktemp -d "${PREFIX}/share/weave.stage.XXXXXX")"
 guard_preserved "$stage"
 # A bad tarball (a malformed --archive is the realistic one) leaves no
 # stage behind: the cleanup trap is not armed yet.
@@ -2433,11 +2433,11 @@ if [ "${PRIME_AGENT_ARCHIVE_CHECK:-}" = "1" ]; then
 fi
 # The ownership marker: the share tree this script publishes carries it, so
 # later installs recognize the tree as theirs BY MARKER, not by shape — an
-# unrelated directory that happens to contain a `prime-agent` entry is never
+# unrelated directory that happens to contain a `wv` entry is never
 # adopted, moved aside, or swept (the refusal below sends it back to the
 # user instead).
 printf 'install-rust.sh channel %s\nversion %s\n' "$CHANNEL" "$VERSION" \
-  > "${stage}/.prime-agent-install"
+  > "${stage}/.weave-install"
 fi
 
 # A lock left by the pre-takeover installer (name .prime-agent-rust-install.lock):
@@ -2467,7 +2467,7 @@ fi
 # a lock is never auto-stolen, and when the holder does not show as live
 # the message stays conditional (the manual-recovery contract of the link).
 if [ "$WINDOWS" = "yes" ]; then
-  lock_dir="${PREFIX}/share/.prime-agent-install.lock.d"
+  lock_dir="${PREFIX}/share/.weave-install.lock.d"
   pid_waits=0
   until mkdir "$lock_dir" 2>/dev/null; do
     # Digits only: install.ps1's Set-Content ends the pid line with CRLF.
@@ -2482,9 +2482,9 @@ if [ "$WINDOWS" = "yes" ]; then
     if [ -n "$held_by" ] && [ -n "$TASKLIST" ] \
        && MSYS2_ARG_CONV_EXCL='*' "$TASKLIST" /FI "PID eq ${held_by}" /NH 2>/dev/null \
           | grep -qw "$held_by"; then
-      { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
+      { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "another Weave installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"; }
     fi
-    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no prime-agent installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
+    { [ -z "${rollback_from:-}" ] && rm -rf "$stage"; die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no Weave installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
   rm -rf \"${lock_dir}\""; }
   done
   printf '%s\n' "$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)" > "$lock_dir/pid"
@@ -2502,7 +2502,7 @@ fi
 # THE WINDOWS DAEMON STOP, after the lock, before the publish (a Windows
 # process holds its own binary open, so the old-tree rename-aside below
 # fails while a daemon runs). THE TRUSTED STOP: the previous payload's OWN
-# BINARY (the marked share tree's prime-agent.exe), never the launcher - an
+# BINARY (the marked share tree's wv.exe), never the launcher - an
 # unowned regular file at ${launcher} is precisely the untrusted-execution
 # shape (the ownership check that later preserves it has not run yet), and
 # exec'ing it would hand a foreign command the installer's inherited
@@ -2510,13 +2510,13 @@ fi
 # with no marked payload yet (a fresh install) has no daemon the stop could
 # reach - that absence is the normal fresh-install path.
 if [ "$WINDOWS" = "yes" ] \
-   && [ -f "${share_dir}/.prime-agent-install" ] \
+   && [ -f "${share_dir}/.weave-install" ] \
    && [ -f "${share_dir}/${BINARY_NAME}" ]; then
   say "stopping the running Rust daemon before the publish (a Windows"
   say "  process holds its binary open - the payload swap needs it down)"
   # THE SCRIPTED FORM: the CLI's bare `shutdown` prompts for confirmation
   # in an interactive terminal and REFUSES a non-interactive one ("Shutdown
-  # requires confirmation in an interactive terminal. Use prime-agent
+  # requires confirmation in an interactive terminal. Use wv
   # shutdown --force") - the installer's context is the scripted one, so
   # --force is the documented non-interactive stop (the daemon's own forced
   # shutdown drains its workers with its internal budgets).
@@ -2524,9 +2524,9 @@ if [ "$WINDOWS" = "yes" ] \
     windows_stop_summary="daemon: stopped cleanly for this update (the forced shutdown request, the scripted non-interactive form)"
     say "the running daemon was shut down (the next invocation boots the new one)"
   else
-    windows_stop_summary="daemon: WARNING no shutdown answer (if a daemon is running, stop it by hand: prime-agent shutdown --force)"
+    windows_stop_summary="daemon: WARNING no shutdown answer (if a daemon is running, stop it by hand: wv shutdown --force)"
     note "! No daemon answered the shutdown request. If one is running, stop it and re-run:"
-    todo "prime-agent shutdown --force"
+    todo "wv shutdown --force"
   fi
 fi
 launcher_tmp=""
@@ -2580,30 +2580,30 @@ on_exit() {
   # The user's unowned command file goes home if the Rust launcher never
   # went live (the same restore discipline as the displaced TS tree): a
   # failed launcher write must not leave the machine without ANY
-  # prime-agent command.
+  # wv command.
   if [ -n "$preserved_launcher" ]; then
     if mv "$preserved_launcher" "$launcher" 2>/dev/null; then
-      echo "note: the existing prime-agent command was restored to ${launcher} — the install did not complete" >&2
+      echo "note: the existing wv command was restored to ${launcher} — the install did not complete" >&2
     fi
     preserved_launcher=""
   fi
   # The Windows .cmd twin's own preserve slot rides the same restore
   # discipline (a failed install returns the user's unowned command).
   if [ -n "${preserved_cmd_file:-}" ]; then
-    if mv "$preserved_cmd_file" "${bin_dir}/prime-agent.cmd" 2>/dev/null; then
-      echo "note: the existing prime-agent.cmd was restored to ${bin_dir}/prime-agent.cmd — the install did not complete" >&2
+    if mv "$preserved_cmd_file" "${bin_dir}/wv.cmd" 2>/dev/null; then
+      echo "note: the existing wv.cmd was restored to ${bin_dir}/wv.cmd — the install did not complete" >&2
     fi
     preserved_cmd_file=""
   fi
   # THE FAILED-INSTALL DAEMON NOTE (the Windows stop-before-publish ruling):
   # a failed install has restored every FILE it displaced, but a daemon
   # stopped for the swap stays stopped — the sessions' state is on disk and
-  # the next prime-agent invocation boots the old payload's daemon again;
+  # the next wv invocation boots the old payload's daemon again;
   # the note names that recovery so the summary never leaves the user
   # guessing (the bots' finding).
   if [ "$WINDOWS" = "yes" ] && [ -n "$windows_stop_summary" ] && [ "${windows_installed:-}" != "yes" ]; then
     echo "note: the daemon stopped for this failed install stays down until the next" >&2
-    echo "  prime-agent invocation boots it from the restored payload" >&2
+    echo "  wv invocation boots it from the restored payload" >&2
   fi
   # A migrated old-layout tree goes home the same way: the pre-takeover
   # launcher (bin/prime-agent-rust) still points at the old name until this
@@ -2620,7 +2620,7 @@ on_exit() {
   # The Windows lock arm (the mkdir lock directory): the link removal is a
   # no-op there, the directory removal is the release.
   if [ "$WINDOWS" = "yes" ]; then
-    rm -rf "${PREFIX}/share/.prime-agent-install.lock.d"
+    rm -rf "${PREFIX}/share/.weave-install.lock.d"
   fi
   rm -rf "$dl"
 }
@@ -2636,18 +2636,18 @@ fi
 # Sweep rollback generations from PREVIOUS installs (both name eras) before
 # this run creates its own — exactly one .old generation survives each install.
 # A generation is swept only when BOTH hold: it carries this installer's
-# .prime-agent-install marker AND its exact path is in the generations record
-# (${PREFIX}/share/.prime-agent-install-generations — written when the slot was
+# .weave-install marker AND its exact path is in the generations record
+# (${PREFIX}/share/.weave-install-generations — written when the slot was
 # created, OUTSIDE the payload tree). The marker alone proves the TREE is a
 # payload, not that the SLOT is a rollback generation: a user who COPIES the
 # payload into the namespace (marker and all) keeps their copy. Pre-takeover-era
 # crash leftovers (prime-agent-rust.old.*, never stamped) are left in place —
 # harmless, and the user's to remove. A rollback's source generation is the
 # payload being published, never swept.
-for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
+for sweep_dir in "${PREFIX}"/share/weave.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
   [ -d "$sweep_dir" ] || continue
   [ "$sweep_dir" != "$rollback_from" ] || continue
-  [ -f "${sweep_dir}/.prime-agent-install" ] || continue
+  [ -f "${sweep_dir}/.weave-install" ] || continue
   grep -qxF -- "$sweep_dir" "$generations_record" 2>/dev/null || continue
   # Best-effort: an un-sweepable generation (a mounted dir, a permission
   # wall) must not abort the install — the leftover is harmless.
@@ -2659,13 +2659,13 @@ done
 
 # The TypeScript takeover, inside the lock: preserve a TS managed root that
 # occupies this installer's share dir under a legacy name (Pi's legacy-pi
-# precedent), never delete it. Rollback = rename back and re-link the
-# public bin symlink. The keyword changes hands either way: the launcher
-# write below replaces the TS public symlink. While the displaced tree sits
+# precedent), never delete it. Rollback = rename back. The TS command's own
+# symlink lives inside the preserved tree, so this install's bin/wv launcher
+# never touches it. While the displaced tree sits
 # in the legacy slot, `displaced_ts_root` names it: every failure from here
 # until the Rust launcher is live puts it BACK (restore_ts_root, wired into
 # the EXIT trap), so a half-finished install never leaves the machine with
-# no working prime-agent — the TS public symlink keeps resolving the whole
+# no working wv — the TS public symlink keeps resolving the whole
 # time and the TS tree returns to its original path if this install dies.
 if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   preserved_to="$legacy_dir"
@@ -2682,39 +2682,39 @@ if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   # copy-pasteable line.
   rust_aside="$(fresh_slot "${share_dir}.rust-rollback")"
   ts_takeover_from="$preserved_to"
-  ts_takeover_undo="mv '${share_dir}' '${rust_aside}' && mv '${preserved_to}' '${share_dir}' && ln -snf '${share_dir}/bin/prime-agent' '${launcher}'"
+  ts_takeover_undo="mv '${share_dir}' '${rust_aside}' && mv '${preserved_to}' '${share_dir}'"
   say "  rollback: ${ts_takeover_undo}"
 fi
 
 # Refuse to take ownership of a share dir that is neither this installer's
 # marked payload tree nor the TS managed root (the TS installer's own rule:
 # never adopt a nonempty directory you do not own). Only a tree carrying the
-# .prime-agent-install marker is claimed — an unowned tree is never moved
+# .weave-install marker is claimed — an unowned tree is never moved
 # aside, where the next install's rollback sweep would delete it.
 if [ -d "$share_dir" ]; then
-  if [ -f "${share_dir}/.prime-agent-install" ]; then
+  if [ -f "${share_dir}/.weave-install" ]; then
     :   # this installer's own previous tree: the normal update path below
   elif [ -z "$(ls -A "$share_dir" 2>/dev/null)" ]; then
     rmdir "$share_dir"
   else
     die "refusing to take ownership of ${share_dir}: it is neither this
-installer's marked payload tree (.prime-agent-install) nor the TypeScript
+installer's marked payload tree (.weave-install) nor the TypeScript
 installer's managed root; move it aside and re-run"
   fi
 fi
 
-old="$(fresh_slot "${PREFIX}/share/prime-agent.old")"
+old="$(fresh_slot "${PREFIX}/share/weave.old")"
 guard_preserved "$old"
 had_share_dir=0
-# Migration from the pre-takeover layout: an old share/prime-agent-rust tree
-# becomes this run's rollback (the install migrates to the new name).
+# Migration from the pre-rename layout: an old share/prime-agent-rust tree
+# is moved aside (the install migrates to the new name).
 if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
-  # The pre-takeover script stamped nothing, so ownership here is a SHAPE
+  # The pre-rename script stamped nothing, so ownership here is a SHAPE
   # claim (its payload always shipped the binary beside prime-agent-runtime/),
   # never a marker: the slot is moved but deliberately NOT stamped — a
   # shape check is not proof of ownership, so nothing the sweep can
   # auto-delete ever rides on it. The migrated tree is PRESERVED in its
-  # .old slot (the user removes it when they are done with the rollback).
+  # .old slot (the user removes it when done).
   if ! ts_owned_old_layout "$old_layout_dir"; then
     # Not our tree and not the publish target: leave it in place and
     # continue — an unrecognized or partial directory at the old name must
@@ -2725,10 +2725,10 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   else
     mv "$old_layout_dir" "$old"
     migrated_old_layout="$old"
-    migrated_note="moved the old prime-agent-rust install to $(tilde "$old") (kept for rollback; remove it by hand when done)"
-    say "the old prime-agent-rust install migrated to the rollback slot ${old}"
+    migrated_note="moved the old prime-agent-rust install to $(tilde "$old") (kept; remove it by hand when done)"
+    say "the old prime-agent-rust install moved aside to ${old}"
     say "  (it is kept — the sweep only removes marker-stamped generations; remove"
-    say "   the slot by hand once you no longer need the rollback)"
+    say "   the slot by hand when you no longer need it)"
   fi
 fi
 if [ -d "$share_dir" ]; then
@@ -2745,7 +2745,7 @@ if [ -d "$share_dir" ]; then
   # The slot is a rollback generation this installer created: record its
   # exact path so the next install's sweep can tell it from a user-made
   # copy of the payload (the record rides OUTSIDE the tree).
-  printf '%s\n' "$old" >> "${PREFIX}/share/.prime-agent-install-generations"
+  printf '%s\n' "$old" >> "${PREFIX}/share/.weave-install-generations"
 fi
 if ! mv "$stage" "$share_dir"; then
   if [ "$had_share_dir" = 1 ] && [ -d "$old" ]; then
@@ -2780,7 +2780,7 @@ fi
 # rides ../share/ from wherever the prefix placed the binary), the
 # per-user socket suffix runs at launch, and a prefix containing shell
 # syntax can never end up reparsed inside this generated script.
-# The launcher REPLACES whatever occupied ~/.local/bin/prime-agent — on a
+# The launcher REPLACES whatever occupied ~/.local/bin/wv — on a
 # TS machine that path was the TS installer's public symlink; the keyword
 # is the Rust port's now (the TS tree itself was preserved above). An
 # UNOWNED regular file at the path is not silently destroyed: it is moved
@@ -2797,23 +2797,23 @@ if [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" = 1 ] \
 fi
 if [ "$preserve_npm_launcher" != yes ] && { [ -e "$launcher" ] || [ -L "$launcher" ]; }; then
   if [ -L "$launcher" ]; then
-    say "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
+    say "replacing the wv command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
     say "  the keyword is the Rust port's now"
   elif [ -f "$launcher" ] && grep -q 'launcher written by install-rust.sh' "$launcher" 2>/dev/null; then
     :   # this installer's own previous launcher (a REGULAR file — the
     :   # marker grep never opens a special file): plain replace below
   else
-    preserved_cmd_path="$(fresh_slot "${bin_dir}/prime-agent.pre-takeover")"
+    preserved_cmd_path="$(fresh_slot "${bin_dir}/wv.pre-takeover")"
     mv "$launcher" "$preserved_cmd_path" \
       || die "could not preserve the existing file at ${launcher}; resolve it and re-run"
     preserved_launcher="$preserved_cmd_path"
-    note "note: an unrelated prime-agent command existed at ${launcher};"
+    note "note: an unrelated wv command existed at ${launcher};"
     note "  it was preserved at ${preserved_cmd_path}"
   fi
 fi
-launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
+launcher_tmp="$(mktemp "${bin_dir}/.wv.XXXXXX")"
 if [ "$WINDOWS" = "yes" ]; then
-  # The Git Bash launcher: execs the payload's prime-agent.exe. NO daemon
+  # The Git Bash launcher: execs the payload's wv.exe. NO daemon
   # socket pin — this product's Windows daemon endpoint is the fixed named
   # pipe (pa-daemon platform/paths), which is rust-only by construction:
   # the TypeScript product never shipped a Windows build, so the unix
@@ -2821,14 +2821,14 @@ if [ "$WINDOWS" = "yes" ]; then
   # TS daemon) has no TS daemon to avoid here.
   cat > "$launcher_tmp" <<'EOF'
 #!/bin/sh
-# prime-agent — launcher written by install-rust.sh.
+# wv — launcher written by install-rust.sh.
 export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
-exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
+exec "$(dirname "$0")/../share/weave/wv.exe" "$@"
 EOF
 else
   cat > "$launcher_tmp" <<'EOF'
 #!/bin/sh
-# prime-agent — launcher written by install-rust.sh.
+# wv — launcher written by install-rust.sh.
 # The session store is shared with the TypeScript product BY DESIGN: both
 # read and write the same $HOME/.prime/agent (sessions and their leases),
 # so the same sessions appear in both products. The env keeps the TS
@@ -2843,7 +2843,7 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 # installer's clean TS-daemon stop the two daemons cannot fight again.
 # An npm migration restores the running TS daemon into its existing namespace.
 # The durable marker survives payload replacement and later curl updates.
-if [ -f "$(dirname "$0")/../share/.prime-agent-npm-bridge/legacy-daemon-socket" ]; then
+if [ -f "$(dirname "$0")/../share/.weave-npm-bridge/legacy-daemon-socket" ]; then
   export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/prime-agent-$(id -u)/daemon.sock}"
 else
   if [ -z "${PRIME_AGENT_DAEMON_SOCKET:-}" ]; then
@@ -2862,7 +2862,7 @@ else
     export PRIME_AGENT_DAEMON_SOCKET
   fi
 fi
-exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
+exec "$(dirname "$0")/../share/weave/wv" "$@"
 EOF
 fi
 chmod 0755 "$launcher_tmp"
@@ -2877,30 +2877,30 @@ else
   install_probe_launcher="$launcher"
 fi
 if [ "${PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET:-0}" = 1 ]; then
-  mkdir -p "${PREFIX}/share/.prime-agent-npm-bridge"
-  printf 'legacy\n' > "${PREFIX}/share/.prime-agent-npm-bridge/legacy-daemon-socket"
+  mkdir -p "${PREFIX}/share/.weave-npm-bridge"
+  printf 'legacy\n' > "${PREFIX}/share/.weave-npm-bridge/legacy-daemon-socket"
 fi
 # The cmd/PowerShell launcher twin (Windows only): the same
-# ../share/prime-agent payload, resolved from the .cmd's own location, so
-# `prime-agent` answers from cmd.exe and PowerShell too (the sh launcher
+# ../share/weave payload, resolved from the .cmd's own location, so
+# `wv` answers from cmd.exe and PowerShell too (the sh launcher
 # above serves Git Bash). The same unowned-file discipline as the sh
 # launcher: a foreign .cmd is preserved aside, never destroyed.
 if [ "$WINDOWS" = "yes" ]; then
-  cmd_launcher="${bin_dir}/prime-agent.cmd"
+  cmd_launcher="${bin_dir}/wv.cmd"
   if [ -f "$cmd_launcher" ] \
      && ! grep -q 'launcher written by install-rust.sh' "$cmd_launcher" 2>/dev/null; then
-    preserved_cmd_path="$(fresh_slot "${bin_dir}/prime-agent.cmd.pre-takeover")"
+    preserved_cmd_path="$(fresh_slot "${bin_dir}/wv.cmd.pre-takeover")"
     mv "$cmd_launcher" "$preserved_cmd_path" \
       || die "could not preserve the existing file at ${cmd_launcher}; resolve it and re-run"
     preserved_cmd_file="$preserved_cmd_path"
     note "note: an unrelated ${cmd_launcher} existed; it was preserved at ${preserved_cmd_path}"
   fi
-  cmd_tmp="$(mktemp "${bin_dir}/.prime-agent-cmd.XXXXXX")"
+  cmd_tmp="$(mktemp "${bin_dir}/.wv-cmd.XXXXXX")"
   cat > "$cmd_tmp" <<'EOF'
 @echo off
-rem prime-agent - launcher written by install-rust.sh.
+rem wv - launcher written by install-rust.sh.
 if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
-"%~dp0..\share\prime-agent\prime-agent.exe" %*
+"%~dp0..\share\weave\wv.exe" %*
 EOF
   mv -f "$cmd_tmp" "$cmd_launcher"
   # The takeover stands for the .cmd twin too: the preserved aside slot is
@@ -2921,7 +2921,7 @@ migrated_old_layout=""
 old_launcher="${bin_dir}/prime-agent-rust"
 if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old_launcher" 2>/dev/null; then
   rm -f "$old_launcher"
-  say "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
+  say "removed the old ${old_launcher} launcher (the wv command is the live one now)"
 fi
 if [ -n "$rollback_from" ]; then
   step_ok "Restored the previous version" "${VERSION}"
@@ -2933,7 +2933,7 @@ fi
 # The TS-side steps that RETIRE the old command — the always-stop daemon
 # pass and the npm uninstall — run only once this install has published its
 # payload and launcher: a failed install (a refused share dir, a live lock,
-# a failed swap) must never leave the machine without a working prime-agent.
+# a failed swap) must never leave the machine without a working wv.
 # The TS native tree's move to the legacy name cannot be deferred (it
 # occupies this installer's publish path); it runs inside the lock with its
 # own restore-on-failure and printed rollback instead.
@@ -2988,8 +2988,8 @@ verify_stopped_socket() {
       rust_leftover="yes"
     fi
     note "! The daemon on $1 came back after it was stopped. Stop it with:"
-    todo "prime-agent shutdown --force"
-    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on $1 (it answered the post-stop verification — the earlier stop line for this socket is superseded; stop it by hand: prime-agent shutdown --force)
+    todo "wv shutdown --force"
+    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on $1 (it answered the post-stop verification — the earlier stop line for this socket is superseded; stop it by hand: wv shutdown --force)
 "
   fi
 }
@@ -3005,8 +3005,8 @@ if [ "$WINDOWS" != "yes" ]; then
   fi
 fi
 
-# The TS npm package: uninstalled (operator directive — the Rust port owns the
-# keyword), with the restore command printed. Exact package `prime-agent`
+# The TS npm package: uninstalled as part of the legacy-product retirement,
+# with the restore command printed. Exact package `prime-agent`
 # only; best-effort — an npm failure warns and moves on. Windows never had
 # a TS npm install (the TS product shipped darwin/linux only), so the whole
 # step is darwin/linux. The npm migration bridge remains the package manager's
@@ -3026,7 +3026,7 @@ except Exception:
       # npm unlinks its old bin entry even when our regular launcher has
       # replaced that symlink. Keep a sibling copy and publish it again after
       # uninstall (including a partial failure), without guessing npm's prefix.
-      launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
+      launcher_tmp="$(mktemp "${bin_dir}/.wv.XXXXXX")"
       cp -p "$launcher" "$launcher_tmp"
       npm_launcher_backup="$launcher_tmp"
       launcher_tmp=""
@@ -3149,7 +3149,7 @@ fi
 if version_out="$("$install_probe_launcher" --version 2>&1)"; then
   say "installed: ${version_out}"
 else
-  die "The installed prime-agent --version check failed: ${version_out}"
+  die "The installed wv --version check failed: ${version_out}"
 fi
 
 # --- the summary ---------------------------------------------------------------------
@@ -3161,16 +3161,16 @@ say "launcher:  ${launcher}"
 say "payload:   ${share_dir}"
 if [ -d "$old" ] && grep -qxF -- "$old" "$generations_record" 2>/dev/null; then
   say "rollback:  ${old} (the previous payload, one generation; swept on the next install)"
-  say "           restore it with: prime-agent update --rollback (the live"
+  say "           restore it with: wv update --rollback (the live"
   say "            build must carry the update rollback; an older payload may not)"
 elif [ -d "$old" ]; then
   say "rollback:  ${old} (the migrated pre-takeover tree; kept — remove it by hand"
   say "            once you no longer need the rollback)"
 fi
 case "$MODE" in
-  rollback) say "source:    the kept previous version (prime-agent ${VERSION}, the ${CHANNEL} channel)" ;;
-  archive) say "source:    the local archive ${ARCHIVE} (prime-agent ${VERSION})" ;;
-  *) say "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})" ;;
+  rollback) say "source:    the kept previous version (wv ${VERSION}, the ${CHANNEL} channel)" ;;
+  archive) say "source:    the local archive ${ARCHIVE} (wv ${VERSION})" ;;
+  *) say "source:    the ${CHANNEL} channel at ${BASE_URL} (wv ${VERSION})" ;;
 esac
 if [ "$WINDOWS" = "yes" ]; then
   # The Windows stop ran before the publish (a Windows process holds its
@@ -3195,11 +3195,11 @@ if [ "$ts_stop_rust_stopped" = "yes" ] && [ "$rust_leftover" != "yes" ]; then
   # for the update": the warning line says so, and this line stays silent
   # (the bots' finding — the summary must never claim both).
   say "  the previous Rust daemon was stopped for this update — the next"
-  say "  prime-agent invocation boots the new daemon"
+  say "  wv invocation boots the new daemon"
 fi
 
 printf '\n' >&2
-printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
+printf ' %sDone.%s Run %swv%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
 dim "installed to $(tilde "$share_dir") · launcher $(tilde "$launcher")"
 if [ -n "$ts_takeover_from" ]; then
   dim "moved the TypeScript install to $(tilde "$ts_takeover_from") · undo:"

@@ -105,7 +105,7 @@ jobs:
               if: needs.lint.outputs.docs_only != 'true'
               timeout-minutes: 20
               run: |
-                  nix build .#prime-agent-ci --no-update-lock-file --print-build-logs --out-link "$RUNNER_TEMP/pa-package"
+                  nix build .#weave-ci --no-update-lock-file --print-build-logs --out-link "$RUNNER_TEMP/pa-package"
                   nix build .#checks.x86_64-linux.static --no-update-lock-file --print-build-logs --out-link "$RUNNER_TEMP/pa-static"
             - name: Documentation-only change
               if: needs.lint.outputs.docs_only == 'true'

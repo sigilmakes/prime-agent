@@ -12,14 +12,14 @@ import re
 import subprocess
 import sys
 
-ORIGIN_URL = "ssh://git@mnemosyne.sigilzero.dev/sigilzero/prime-agent.git"
+ORIGIN_URL = "ssh://git@mnemosyne.sigilzero.dev/sigilzero/weave.git"
 # Exact supported spellings, not substring/hostname guesses. Never rewrite config.
 ALLOWED_URLS = frozenset(
     prefix + suffix
     for prefix in (
-        "ssh://git@mnemosyne.sigilzero.dev/sigilzero/prime-agent",
-        "git@mnemosyne.sigilzero.dev:sigilzero/prime-agent",
-        "https://mnemosyne.sigilzero.dev/sigilzero/prime-agent",
+        "ssh://git@mnemosyne.sigilzero.dev/sigilzero/weave",
+        "git@mnemosyne.sigilzero.dev:sigilzero/weave",
+        "https://mnemosyne.sigilzero.dev/sigilzero/weave",
     )
     for suffix in ("", ".git")
 )

@@ -40,8 +40,8 @@ def exercise(args, root: Path) -> dict:
         candidate = root / args.archive.name
         with tarfile.open(args.archive) as source_archive, tarfile.open(candidate, "w:gz") as rejected:
             for member in source_archive.getmembers():
-                if member.name == "prime-agent":
-                    payload = b"#!/nonexistent-prime-agent-test-interpreter\n"
+                if member.name == "wv":
+                    payload = b"#!/nonexistent-wv-test-interpreter\n"
                     member.size = len(payload)
                     member.mode = 0o755
                     rejected.addfile(member, io.BytesIO(payload))
@@ -102,9 +102,9 @@ def exercise(args, root: Path) -> dict:
         evidence["steps"].append(probe)
         assert npm_bridge.FALLBACK_VERSION in (probe["stdout"] + probe["stderr"]).splitlines(), probe
         assert "TypeScript" in probe["stderr"], probe
-        assert not (native_prefix / "share/prime-agent/prime-agent").exists(), "Unusable native payload was published"
+        assert not (native_prefix / "share/weave/wv").exists(), "Unusable native payload was published"
         assert public.is_symlink() and public.resolve() == cli.resolve(), "Installer overwrote the public npm recovery launcher"
-        receipts = native_prefix / "share/.prime-agent-npm-bridge"
+        receipts = native_prefix / "share/.weave-npm-bridge"
         assert not (receipts / version).exists(), "Failed migration recorded success"
         assert (receipts / f"{version}.failed").exists(), "Failed migration was not recorded"
         expected_runtime = npm_bridge.FALLBACK_VERSION
@@ -130,7 +130,7 @@ def exercise(args, root: Path) -> dict:
         if args.recovery_archive:
             assert retry.returncode == 0, evidence["explicit_retry"]
             assert (receipts / expected_runtime).is_file(), "Newer release did not record successful migration"
-            assert (native_prefix / "share/prime-agent/prime-agent").is_file()
+            assert (native_prefix / "share/weave/wv").is_file()
             recovered = execute([str(public), "--version"], env)
             evidence["steps"].append(recovered)
             assert recovered["stdout"].strip() == expected_runtime, recovered

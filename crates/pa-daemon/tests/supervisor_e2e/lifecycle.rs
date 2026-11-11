@@ -16,7 +16,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     // Differential goldens captured from the TS supervisor
-    // (`prime-agent --mode daemon`, protocol 7, schema 29).
+    // (`wv --mode daemon`, protocol 7, schema 29).
     assert_eq!(
         hello["protocol"],
         serde_json::json!({

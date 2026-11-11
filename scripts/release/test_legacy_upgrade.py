@@ -3,12 +3,12 @@
 
 This is an opt-in integration gate, not a mocked-binary unit test. Example:
   python3 scripts/release/test_legacy_upgrade.py \
-    --archive /tmp/prime-agent-1.0.0-darwin-arm64.tar.gz \
+    --archive /tmp/wv-1.0.0-darwin-arm64.tar.gz \
     --installer-ref v0.9.8 --previous-archive /tmp/prime-agent-0.9.8-darwin-arm64.tar.gz
 
-Supply one --installer-ref per verified Prime release, or --installer-file to
+Supply one --installer-ref per verified Weave release, or --installer-file to
 use exact bytes extracted from a published artifact. Do not assume every old
-Git tag belongs to Prime Agent: the repository includes upstream project tags.
+Git tag belongs to Weave: the repository includes upstream project tags.
 The JSON report distinguishes installer execution from CLI/TUI update coverage.
 All download requests use a local HTTP server, and all installation/user paths
 live in a temporary directory. Kernel bootstrap is deliberately disabled; that
@@ -32,7 +32,7 @@ import threading
 import tarfile
 
 REPO = Path(__file__).resolve().parents[2]
-ARCHIVE_NAME = re.compile(r"prime-agent-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-(darwin|linux)-(arm64|x64)([^/]*)\.tar\.gz$")
+ARCHIVE_NAME = re.compile(r"(?:wv|prime-agent)-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-(darwin|linux)-(arm64|x64)([^/]*)\.tar\.gz$")
 
 
 def digest(path: Path) -> str:
@@ -183,11 +183,15 @@ def exercise(installer: Path, archive: Path, previous: Path | None, root: Path, 
             env["PRIME_AGENT_EXPECTED_SHA256"] = digest(archive)
         update_command = [str(public), "update"] if entrypoint == "cli" else ["sh", str(installer), version]
         steps.append(execute(update_command, env))
+        # The update installs the native build under the default prefix: the
+        # legacy command above drove the update, but `wv` is the new entry point.
+        public = Path(env["HOME"]) / ".local/bin/wv"
+        installed = Path(env["HOME"]) / ".local/share/weave/wv"
         probe = execute([str(public), "--version"], env)
         assert probe["stdout"].strip() == version, probe
         steps.append(probe)
         steps.append(execute([str(public), "--help"], env))
-        assert digest(active.resolve()) == digest(public.resolve()), "Public command does not resolve to activated executable"
+        assert installed.is_file() and os.access(installed, os.X_OK), "Native payload not installed"
         for relative, contents in witnesses.items():
             assert (state / relative).read_text() == contents, f"User state changed: {relative}"
         if previous:

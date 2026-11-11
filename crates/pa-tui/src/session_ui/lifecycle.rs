@@ -271,7 +271,7 @@ impl SessionUi {
                 }),
                 _ => view.push_entry(crate::chat::ChatEntry::Status {
                     text: format!(
-                        "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
+                        "Reconnected to Weave (update {update_id}) — your session and queued work resumed."
                     ),
                     kind: crate::chat::StatusKind::Info,
                 }),

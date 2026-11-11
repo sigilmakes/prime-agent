@@ -73,7 +73,7 @@ mod tests {
             let path = std::path::PathBuf::from(path);
             return path.is_dir().then_some(path);
         }
-        let path = pa_types::platform::home_dir()?.join("prime-agent");
+        let path = pa_types::platform::home_dir()?.join("wv");
         path.is_dir().then_some(path)
     }
 

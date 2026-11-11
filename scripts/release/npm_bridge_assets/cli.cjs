@@ -14,7 +14,7 @@ const metadata = require(path.join(packageRoot, "package.json"));
 const prefix = path.resolve(process.env.PRIME_AGENT_RUST_PREFIX || path.join(os.homedir(), ".local"));
 // npm may recreate prefix/bin/prime-agent as this package's symlink on every
 // reinstall. Invoke the payload directly, never that mutually managed path.
-const executable = path.join(prefix, "share", "prime-agent", "prime-agent");
+const executable = path.join(prefix, "share", "weave", "wv");
 const args = process.argv.slice(2);
 const coordinator = args.includes("--internal-update-restart-coordinator");
 const delegatedUpdate = process.env.PRIME_AGENT_INTERNAL_TS_UPDATE === "1";
@@ -40,7 +40,7 @@ for (let index = 0; !coordinator && index < args.length; index++) {
            !args[index + 1].startsWith("-") && !args[index + 1].startsWith("@")) index++;
 }
 // Keep migration state outside the payload replaced by native updates.
-const receiptDir = path.join(prefix, "share", ".prime-agent-npm-bridge");
+const receiptDir = path.join(prefix, "share", ".weave-npm-bridge");
 const receipt = path.join(receiptDir, metadata.version);
 const failedReceipt = `${receipt}.failed`;
 const legacySocketMarker = path.join(receiptDir, "legacy-daemon-socket");

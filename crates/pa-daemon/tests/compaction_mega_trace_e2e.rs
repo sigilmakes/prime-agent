@@ -143,7 +143,7 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
                 .first()
                 .and_then(|message| message.get("content"))
                 .and_then(Value::as_str)
-                .is_some_and(|content| content.starts_with("# prime-agent harness"))
+                .is_some_and(|content| content.starts_with("# wv harness"))
         });
     let index = requests.lock().expect("mock lock").len();
     requests.lock().expect("mock lock").push(body);
@@ -165,7 +165,7 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
                             .first()
                             .and_then(|message| message.get("content"))
                             .and_then(Value::as_str)
-                            .is_some_and(|content| content.starts_with("# prime-agent harness"))
+                            .is_some_and(|content| content.starts_with("# wv harness"))
                     })
             })
             .count()

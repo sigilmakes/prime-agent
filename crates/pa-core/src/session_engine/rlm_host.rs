@@ -311,7 +311,7 @@ pub fn rlm_child_session_dir(
             .join("session-artifacts")
             .join(session_id)
             .join(child_id),
-        None => std::env::temp_dir().join(format!("prime-agent-rlm-{child_id}")),
+        None => std::env::temp_dir().join(format!("wv-rlm-{child_id}")),
     };
     std::fs::create_dir_all(&base).map_err(|error| {
         anyhow::anyhow!("create RLM child session dir {}: {error}", base.display())

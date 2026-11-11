@@ -9,7 +9,7 @@
     clippy::cast_precision_loss
 )]
 
-//! The `prime-agent update` e2e (the TS->Rust migration path): the real
+//! The `wv update` e2e (the TS->Rust migration path): the real
 //! binary, a mocked installer-script download (a local one-shot HTTP server),
 //! and a sandboxed HOME — the launcher lands under the sandbox prefix, the
 //! success line names the new build, and the sandbox session file is
@@ -30,8 +30,8 @@ const ENV_PREFIX: &str = "PRIME_AGENT_RUST_PREFIX";
 const MOCK_INSTALLER: &str = r#"#!/bin/sh
 set -eu
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"
-printf '#!/bin/sh\necho "9.9.9-continuous.0123456789abcdef"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
-chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
+printf '#!/bin/sh\necho "9.9.9-continuous.0123456789abcdef"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/wv"
+chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/wv"
 echo "installed: 9.9.9-continuous.0123456789abcdef"
 "#;
 
@@ -140,11 +140,11 @@ fn uuid_probe() -> String {
 fn run_prime_agent(args: &[&str], sandbox: &Sandbox, url: &str) -> std::process::Output {
     let mut command = prime_agent(args, sandbox);
     command.env(ENV_INSTALLER_URL, url);
-    command.output().expect("run the prime-agent binary")
+    command.output().expect("run the wv binary")
 }
 
 fn prime_agent(args: &[&str], sandbox: &Sandbox) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(args)
         .env("HOME", sandbox.root.join("home"))
@@ -174,10 +174,10 @@ fn update_runs_the_downloaded_installer_and_preserves_the_session_store() {
         "the success line names the new build:\n{stdout}"
     );
     assert!(
-        stdout.contains("restart prime-agent to run the new build"),
+        stdout.contains("restart wv to run the new build"),
         "the success line carries the restart hint:\n{stdout}"
     );
-    let launcher = sandbox.prefix.join("bin/prime-agent");
+    let launcher = sandbox.prefix.join("bin/wv");
     assert!(launcher.is_file(), "the launcher landed");
     let version = Command::new(&launcher)
         .arg("--version")
@@ -190,16 +190,16 @@ fn update_runs_the_downloaded_installer_and_preserves_the_session_store() {
     sandbox.assert_session_preserved();
 }
 
-/// A nightly install's `prime-agent update` fetches `install-beta.sh` from
+/// A nightly install's `wv update` fetches `install-beta.sh` from
 /// the download base (no installer override): the domain only forwards
 /// the stable `install.sh`, so nightly updates go to the bucket directly.
 #[test]
 fn a_nightly_update_fetches_install_beta_from_the_download_base() {
     let sandbox = Sandbox::new();
-    let share = sandbox.prefix.join("share/prime-agent");
+    let share = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&share).expect("share dir");
     std::fs::write(
-        share.join(".prime-agent-install"),
+        share.join(".weave-install"),
         "install-rust.sh channel beta\nversion 0.9.9-beta.11\n",
     )
     .expect("install marker");
@@ -207,7 +207,7 @@ fn a_nightly_update_fetches_install_beta_from_the_download_base() {
     let output = prime_agent(&["update"], &sandbox)
         .env("PRIME_AGENT_DOWNLOAD_BASE_URL", &base)
         .output()
-        .expect("run the prime-agent binary");
+        .expect("run the wv binary");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
@@ -233,7 +233,7 @@ fn a_failing_installer_keeps_the_previous_install() {
     let sandbox = Sandbox::new();
     // A previous install exists; the funnel must leave it in place.
     std::fs::create_dir_all(sandbox.prefix.join("bin")).expect("bin dir");
-    let previous = sandbox.prefix.join("bin/prime-agent");
+    let previous = sandbox.prefix.join("bin/wv");
     std::fs::write(&previous, "#!/bin/sh\necho 9.9.7-continuous.0000001\n").expect("launcher");
     make_executable(&previous);
     let url = serve(FAILING_INSTALLER);
@@ -321,19 +321,17 @@ fn installer_env(command: &mut Command, sandbox: &Sandbox) {
 fn fake_release(sandbox: &Sandbox, version: &str) -> PathBuf {
     let payload = sandbox.root.join(format!("payload-{version}"));
     std::fs::create_dir_all(&payload).expect("payload dir");
-    let binary = payload.join("prime-agent");
+    let binary = payload.join("wv");
     std::fs::write(&binary, format!("#!/bin/sh\necho {version}\n")).expect("payload binary");
     make_executable(&binary);
     let platform = pa_core::update::install::current_platform_alias();
-    let archive = sandbox
-        .root
-        .join(format!("prime-agent-{version}-{platform}.tar.gz"));
+    let archive = sandbox.root.join(format!("wv-{version}-{platform}.tar.gz"));
     let status = Command::new("tar")
         .arg("-czf")
         .arg(&archive)
         .arg("-C")
         .arg(&payload)
-        .arg("prime-agent")
+        .arg("wv")
         .status()
         .expect("run tar");
     assert!(status.success(), "tar the fake release");
@@ -352,12 +350,8 @@ fn assert_ran(output: &std::process::Output, what: &str) -> String {
 
 /// The version the live payload's install marker records.
 fn live_version(sandbox: &Sandbox) -> String {
-    let marker = std::fs::read_to_string(
-        sandbox
-            .prefix
-            .join("share/prime-agent/.prime-agent-install"),
-    )
-    .expect("the live payload's marker");
+    let marker = std::fs::read_to_string(sandbox.prefix.join("share/weave/.weave-install"))
+        .expect("the live payload's marker");
     marker
         .lines()
         .nth(1)
@@ -375,12 +369,12 @@ fn live_version(sandbox: &Sandbox) -> String {
 fn update_archive_and_rollback_swap_installer_payloads() {
     let sandbox = Sandbox::new();
     // This build, published as an installer payload.
-    let live = sandbox.prefix.join("share/prime-agent");
+    let live = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&live).expect("payload dir");
-    let binary = live.join("prime-agent");
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    let binary = live.join("wv");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy this build");
     std::fs::write(
-        live.join(".prime-agent-install"),
+        live.join(".weave-install"),
         "install-rust.sh channel beta\nversion 9.9.9\n",
     )
     .expect("install marker");
@@ -434,12 +428,12 @@ fn update_archive_and_rollback_swap_installer_payloads() {
 #[test]
 fn rollback_check_answers_synchronously_without_touching_the_payload() {
     let sandbox = Sandbox::new();
-    let live = sandbox.prefix.join("share/prime-agent");
+    let live = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&live).expect("payload dir");
-    let binary = live.join("prime-agent");
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    let binary = live.join("wv");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy this build");
     std::fs::write(
-        live.join(".prime-agent-install"),
+        live.join(".weave-install"),
         "install-rust.sh channel beta\nversion 9.9.9\n",
     )
     .expect("install marker");
@@ -479,7 +473,7 @@ fn rollback_check_answers_synchronously_without_touching_the_payload() {
     let source = stdout.lines().last().unwrap_or_default().to_string();
     let kept = source.strip_prefix(sandbox.prefix.display().to_string().as_str());
     assert!(
-        kept.is_some_and(|rest| rest.starts_with("/share/prime-agent.old.")),
+        kept.is_some_and(|rest| rest.starts_with("/share/weave.old.")),
         "the source names the kept generation: {source}"
     );
     assert_eq!(live_version(&sandbox), "1.0.0", "the check touched nothing");
@@ -487,7 +481,7 @@ fn rollback_check_answers_synchronously_without_touching_the_payload() {
         .expect("tmp dir")
         .filter_map(std::result::Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.contains("prime-agent-download"))
+        .filter(|name| name.contains("wv-download"))
         .collect();
     assert!(
         leftovers.is_empty(),
@@ -503,30 +497,28 @@ fn rollback_check_answers_synchronously_without_touching_the_payload() {
 #[test]
 fn update_archive_refuses_a_misnamed_payload_version() {
     let sandbox = Sandbox::new();
-    let live = sandbox.prefix.join("share/prime-agent");
+    let live = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&live).expect("payload dir");
-    let binary = live.join("prime-agent");
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    let binary = live.join("wv");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy this build");
     std::fs::write(
-        live.join(".prime-agent-install"),
+        live.join(".weave-install"),
         "install-rust.sh channel beta\nversion 9.9.9\n",
     )
     .expect("install marker");
     let platform = pa_core::update::install::current_platform_alias();
     let payload_dir = sandbox.root.join("payload-misnamed");
     std::fs::create_dir_all(&payload_dir).expect("payload dir");
-    let payload = payload_dir.join("prime-agent");
+    let payload = payload_dir.join("wv");
     std::fs::write(&payload, "#!/bin/sh\necho 0.9.7\n").expect("payload binary");
     make_executable(&payload);
-    let archive = sandbox
-        .root
-        .join(format!("prime-agent-9.9.9-{platform}.tar.gz"));
+    let archive = sandbox.root.join(format!("wv-9.9.9-{platform}.tar.gz"));
     let status = Command::new("tar")
         .arg("-czf")
         .arg(&archive)
         .arg("-C")
         .arg(&payload_dir)
-        .arg("prime-agent")
+        .arg("wv")
         .status()
         .expect("run tar");
     assert!(status.success(), "tar the misnamed release");
@@ -549,32 +541,32 @@ fn update_archive_refuses_a_misnamed_payload_version() {
 }
 
 /// The install.ps1 slot: the Windows-native installer keeps its replaced
-/// payload at the un-suffixed `prime-agent.old` and never writes the
+/// payload at the un-suffixed `wv.old` and never writes the
 /// generations record, so the CLI's rollback must fall back to that
 /// slot — a ps1-updated machine's only automated rollback path.
 #[test]
 fn update_rollback_reads_the_unsuffixed_installer_slot() {
     let sandbox = Sandbox::new();
-    let live = sandbox.prefix.join("share/prime-agent");
+    let live = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&live).expect("payload dir");
-    let binary = live.join("prime-agent");
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    let binary = live.join("wv");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy this build");
     std::fs::write(
-        live.join(".prime-agent-install"),
+        live.join(".weave-install"),
         "install-rust.sh channel beta\nversion 9.9.9\n",
     )
     .expect("install marker");
     // The install.ps1 era: the replaced payload sits at the un-suffixed
     // name, and no generations record exists.
-    let slot = sandbox.prefix.join("share/prime-agent.old");
+    let slot = sandbox.prefix.join("share/weave.old");
     std::fs::create_dir_all(&slot).expect("slot dir");
     std::fs::write(
-        slot.join(".prime-agent-install"),
+        slot.join(".weave-install"),
         "install-rust.sh channel beta\nversion 1.0.0\n",
     )
     .expect("slot marker");
-    std::fs::write(slot.join("prime-agent"), b"#!/bin/sh\necho 1.0.0\n").expect("slot payload");
-    make_executable(&slot.join("prime-agent"));
+    std::fs::write(slot.join("wv"), b"#!/bin/sh\necho 1.0.0\n").expect("slot payload");
+    make_executable(&slot.join("wv"));
 
     let mut command = Command::new(&binary);
     command.args(["update", "--rollback"]);
@@ -590,9 +582,7 @@ fn update_rollback_reads_the_unsuffixed_installer_slot() {
     );
     // The displaced live tree becomes a recorded generation: the machine
     // converts to the sh bookkeeping, so the toggle keeps working.
-    let record = sandbox
-        .prefix
-        .join("share/.prime-agent-install-generations");
+    let record = sandbox.prefix.join("share/.weave-install-generations");
     assert!(
         record.exists(),
         "the publish recorded the displaced payload"
@@ -605,12 +595,12 @@ fn update_rollback_reads_the_unsuffixed_installer_slot() {
 #[test]
 fn update_rollback_without_a_kept_version_changes_nothing() {
     let sandbox = Sandbox::new();
-    let live = sandbox.prefix.join("share/prime-agent");
+    let live = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&live).expect("payload dir");
-    let binary = live.join("prime-agent");
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    let binary = live.join("wv");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy this build");
     std::fs::write(
-        live.join(".prime-agent-install"),
+        live.join(".weave-install"),
         "install-rust.sh channel beta\nversion 9.9.9\n",
     )
     .expect("install marker");
@@ -656,12 +646,12 @@ fn update_rollback_without_a_kept_version_changes_nothing() {
 #[test]
 fn archive_check_answers_synchronously_without_publishing() {
     let sandbox = Sandbox::new();
-    let live = sandbox.prefix.join("share/prime-agent");
+    let live = sandbox.prefix.join("share/weave");
     std::fs::create_dir_all(&live).expect("payload dir");
-    let binary = live.join("prime-agent");
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy this build");
+    let binary = live.join("wv");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy this build");
     std::fs::write(
-        live.join(".prime-agent-install"),
+        live.join(".weave-install"),
         "install-rust.sh channel beta\nversion 9.9.9\n",
     )
     .expect("install marker");
@@ -690,7 +680,7 @@ fn archive_check_answers_synchronously_without_publishing() {
         .expect("share dir")
         .filter_map(std::result::Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.contains("prime-agent.stage"))
+        .filter(|name| name.contains("wv.stage"))
         .collect();
     assert!(leftovers.is_empty(), "no stage dir survives: {leftovers:?}");
 
@@ -714,19 +704,17 @@ fn archive_check_answers_synchronously_without_publishing() {
 fn fake_release_payload(sandbox: &Sandbox, named: &str, reported: &str) -> PathBuf {
     let payload = sandbox.root.join(format!("payload-mismatch-{named}"));
     std::fs::create_dir_all(&payload).expect("payload dir");
-    let binary = payload.join("prime-agent");
+    let binary = payload.join("wv");
     std::fs::write(&binary, format!("#!/bin/sh\necho {reported}\n")).expect("payload binary");
     make_executable(&binary);
     let platform = pa_core::update::install::current_platform_alias();
-    let archive = sandbox
-        .root
-        .join(format!("prime-agent-{named}-{platform}.tar.gz"));
+    let archive = sandbox.root.join(format!("wv-{named}-{platform}.tar.gz"));
     let status = Command::new("tar")
         .arg("-czf")
         .arg(&archive)
         .arg("-C")
         .arg(&payload)
-        .arg("prime-agent")
+        .arg("wv")
         .status()
         .expect("run tar");
     assert!(status.success(), "tar the mismatched release");

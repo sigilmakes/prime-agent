@@ -2,7 +2,7 @@
 
 /// Add the `OpenCode` routing identity to a request's merged headers.
 ///
-/// TS contract: start with `User-Agent: prime-agent`, add
+/// TS contract: start with `User-Agent: weave`, add
 /// `x-opencode-session` only when a session id is present, then let model and
 /// caller headers override either value case-insensitively. This helper runs
 /// after those merges, so it only fills values the caller did not supply.
@@ -18,7 +18,7 @@ pub(crate) fn with_opencode_headers(
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("User-Agent"))
     {
-        headers.push(("User-Agent".to_string(), "prime-agent".to_string()));
+        headers.push(("User-Agent".to_string(), "weave".to_string()));
     }
     if let Some(session_id) = session_id.filter(|session_id| !session_id.is_empty()) {
         if !headers
@@ -59,7 +59,7 @@ mod tests {
     fn adds_both_identity_headers_for_opencode() {
         let mut headers = Vec::new();
         with_opencode_headers("opencode", Some("session-1"), &mut headers);
-        assert_eq!(header(&headers, "User-Agent"), Some("prime-agent"));
+        assert_eq!(header(&headers, "User-Agent"), Some("weave"));
         assert_eq!(header(&headers, "x-opencode-session"), Some("session-1"));
     }
 
@@ -67,7 +67,7 @@ mod tests {
     fn adds_user_agent_without_a_session_id() {
         let mut headers = Vec::new();
         with_opencode_headers("opencode-go", None, &mut headers);
-        assert_eq!(header(&headers, "User-Agent"), Some("prime-agent"));
+        assert_eq!(header(&headers, "User-Agent"), Some("weave"));
         assert_eq!(header(&headers, "x-opencode-session"), None);
     }
 
@@ -89,7 +89,7 @@ mod tests {
     fn empty_session_id_is_not_an_identity() {
         let mut headers = Vec::new();
         with_opencode_headers("opencode", Some(""), &mut headers);
-        assert_eq!(header(&headers, "User-Agent"), Some("prime-agent"));
+        assert_eq!(header(&headers, "User-Agent"), Some("weave"));
         assert_eq!(header(&headers, "x-opencode-session"), None);
     }
 }

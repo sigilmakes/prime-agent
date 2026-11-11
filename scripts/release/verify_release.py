@@ -42,12 +42,12 @@ from assemble_artifacts import (
 )
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
-# POSIX archives preserve the native TS updater contract. Every archive
-# carries version metadata; Windows never had a native TS installation.
-# The binary entry is the target's name (`prime-agent.exe` on the MSVC
+# Every archive carries version metadata; Windows never had a native TS
+# installation.
+# The binary entry is the target's name (`wv.exe` on the MSVC
 # Windows target), resolved in `main` via `binary_name_for_target`.
 EXPECTED_TOP_LEVEL = {
-    "prime-agent",
+    "wv",
     "prime-agent-runtime",
     "skills",
     "LICENSE",
@@ -104,8 +104,8 @@ def main() -> int:
              "(the restamped release shape) are mutually exclusive")
 
     binary_name = binary_name_for_target(args.target)
-    expected_top_level = (EXPECTED_TOP_LEVEL - {"prime-agent"}) | {binary_name}
-    if binary_name != "prime-agent.exe":
+    expected_top_level = (EXPECTED_TOP_LEVEL - {"wv"}) | {binary_name}
+    if binary_name != "wv.exe":
         expected_top_level |= NATIVE_COMPAT_TOP_LEVEL
     expected_top_level |= (
         CONTINUOUS_EXTRA_TOP_LEVEL if (args.sha or args.expect_package_json)
@@ -113,7 +113,7 @@ def main() -> int:
     )
 
     archive_name = (
-        f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.tar.gz"
+        f"wv-{args.version}-{TARGET_ALIASES[args.target]}.tar.gz"
     )
     archive = args.dist_dir / archive_name
     if not archive.is_file():
@@ -162,7 +162,7 @@ def main() -> int:
 
     # 3. The staged binary reports the release version from a scratch cwd with
     #    PI_PACKAGE_DIR unset: shipped artifacts never depend on it.
-    scratch = Path(tempfile.mkdtemp(prefix="prime-agent-verify-"))
+    scratch = Path(tempfile.mkdtemp(prefix="weave-verify-"))
     try:
         # Manual extraction: the deterministic-shape checks above already
         # rejected link entries, and staying on explicit member writes keeps
@@ -201,7 +201,7 @@ def main() -> int:
             capture_output=True, text=True, env=env, cwd=scratch, check=False,
         )
         if run.returncode != 0:
-            fail(f"staged prime-agent --version failed: {run.stderr.strip()}")
+            fail(f"staged wv --version failed: {run.stderr.strip()}")
         version_out = run.stdout.strip()
         expected_version = (
             f"{args.version}-{CONTINUOUS_SUFFIX}.{args.sha}" if args.sha else args.version
@@ -210,7 +210,7 @@ def main() -> int:
             expected_version = args.expect_package_json
         if version_out != expected_version:
             fail(
-                f"staged prime-agent reports {version_out!r}, "
+                f"staged wv reports {version_out!r}, "
                 f"expected {expected_version!r}"
             )
     finally:

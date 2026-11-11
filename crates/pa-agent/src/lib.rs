@@ -1,4 +1,4 @@
-//! Agent loop for Prime Agent: the loop works with [`types::AgentMessage`]
+//! Agent loop for Weave: the loop works with [`types::AgentMessage`]
 //! throughout and converts to LLM-bound [`types::Message`] values only at
 //! the model call boundary.
 

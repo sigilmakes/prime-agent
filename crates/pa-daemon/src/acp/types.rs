@@ -168,7 +168,7 @@ pub enum AcpSessionUpdate {
         #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
         meta: Option<Value>,
     },
-    /// Namespaced prime-agent state (compaction, quiescence, ...).
+    /// Namespaced wv state (compaction, quiescence, ...).
     #[serde(rename = "session_info_update")]
     SessionInfoUpdate {
         #[serde(rename = "_meta")]
@@ -397,8 +397,8 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
             },
         },
         agent_info: AgentInfo {
-            name: "prime-agent".to_string(),
-            title: "Prime Agent".to_string(),
+            name: "wv".to_string(),
+            title: "Weave".to_string(),
             version: product_version.to_string(),
         },
         meta: super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta::default()),
@@ -423,7 +423,7 @@ mod tests {
                     "mcpCapabilities": { "http": true },
                     "sessionCapabilities": { "close": {} },
                 },
-                "agentInfo": { "name": "prime-agent", "title": "Prime Agent", "version": "9.9.9" },
+                "agentInfo": { "name": "wv", "title": "Weave", "version": "9.9.9" },
                 "_meta": { "ai.primeintellect.prime-agent": {} },
             })
         );

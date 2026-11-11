@@ -1,6 +1,6 @@
 //! The staged activation (spec §4 `Activating`): the `.activation-state`
 //! rollback pointer, the `bin/previous` symlink, and the atomic
-//! `bin/prime-agent` repoint.
+//! `bin/wv` repoint.
 
 use std::path::Path;
 use std::time::Duration;
@@ -30,7 +30,7 @@ impl ActivationState {
 
 /// Repoint the launcher symlinks for one activation (spec §4): record the
 /// recovery state, move the old target to `bin/previous`, then atomically
-/// point `bin/prime-agent` at the candidate. Every symlink write is
+/// point `bin/wv` at the candidate. Every symlink write is
 /// create-tmp + rename (a reader never observes a missing launcher).
 ///
 /// # Errors
@@ -179,10 +179,10 @@ mod tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::create_dir_all(root.join("releases").join("0.1.0-linux-x64-0")).unwrap();
         std::fs::create_dir_all(root.join("releases").join("0.2.0-linux-x64-0")).unwrap();
-        std::fs::write(root.join(".managed"), "prime-agent-native-v1").unwrap();
+        std::fs::write(root.join(".managed"), "weave-native-v1").unwrap();
         std::os::unix::fs::symlink(
-            "../releases/0.1.0-linux-x64-0/prime-agent",
-            root.join("bin").join("prime-agent"),
+            "../releases/0.1.0-linux-x64-0/wv",
+            root.join("bin").join("wv"),
         )
         .unwrap();
         root
@@ -194,26 +194,26 @@ mod tests {
         let root = managed_root(dir.path());
         activate(
             &root,
-            "../releases/0.1.0-linux-x64-0/prime-agent",
-            "../releases/0.2.0-linux-x64-0/prime-agent",
+            "../releases/0.1.0-linux-x64-0/wv",
+            "../releases/0.2.0-linux-x64-0/wv",
             "u1",
         )
         .unwrap();
         assert_eq!(
-            launcher_target(&root, "prime-agent").unwrap(),
-            "../releases/0.2.0-linux-x64-0/prime-agent"
+            launcher_target(&root, "wv").unwrap(),
+            "../releases/0.2.0-linux-x64-0/wv"
         );
         assert_eq!(
             launcher_target(&root, "previous").unwrap(),
-            "../releases/0.1.0-linux-x64-0/prime-agent"
+            "../releases/0.1.0-linux-x64-0/wv"
         );
         let state = std::fs::read_to_string(root.join(".activation-state")).unwrap();
-        assert!(state.starts_with("../releases/0.1.0-linux-x64-0/prime-agent\n"));
+        assert!(state.starts_with("../releases/0.1.0-linux-x64-0/wv\n"));
         assert!(state.ends_with("u1\n"));
-        restore_previous(&root, "../releases/0.1.0-linux-x64-0/prime-agent").unwrap();
+        restore_previous(&root, "../releases/0.1.0-linux-x64-0/wv").unwrap();
         assert_eq!(
-            launcher_target(&root, "prime-agent").unwrap(),
-            "../releases/0.1.0-linux-x64-0/prime-agent"
+            launcher_target(&root, "wv").unwrap(),
+            "../releases/0.1.0-linux-x64-0/wv"
         );
         clear_activation_state(&root).unwrap();
         assert!(!root.join(".activation-state").exists());

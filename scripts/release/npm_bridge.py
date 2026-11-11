@@ -36,7 +36,7 @@ def assemble(repo_root: Path, out_dir: Path, version: str, channel: str,
         raise ValueError("TypeScript fallback package identity does not match published v0.9.8")
     metadata = {
         "name": "prime-agent", "version": version,
-        "description": "Prime Agent Rust migration launcher",
+        "description": "Weave Rust migration launcher",
         "bin": {"prime-agent": "dist/bundle/cli.js"},
         "engines": {"node": ">=18"}, "os": ["darwin", "linux"],
         "primeAgentReleaseChannel": channel,

@@ -207,7 +207,7 @@ fn supervisor_start_line() -> String {
         "ts": iso_ago(600_000),
         "level": "warn",
         "component": "coding-agent.daemon-supervisor",
-        "msg": "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
+        "msg": "Weave daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
         "socketPath": "/tmp/prime-agent-501/daemon.sock",
         "pid": 15026,
     })
@@ -292,7 +292,7 @@ async fn renders_the_collapsed_worker_crash_notice_line() {
         "{frames_text}"
     );
     assert!(
-        frames_text.contains("run prime-agent incident for the timeline"),
+        frames_text.contains("run wv incident for the timeline"),
         "{frames_text}"
     );
     assert!(frames_text.contains("⚠"), "{frames_text}");
@@ -352,12 +352,12 @@ async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
         "{last_frame}"
     );
     assert!(
-        !last_frame.contains("prime-agent incident for the timeline"),
+        !last_frame.contains("wv incident for the timeline"),
         "{last_frame}"
     );
     assert!(outcome.frames.iter().any(|frame| {
         frame.contains("worker 5b1d3aeb91ee crashed at")
-            && frame.contains("prime-agent incident for the timeline")
+            && frame.contains("wv incident for the timeline")
     }));
 
     // Re-entry with the carried state: the dismissal horizon hides the same incident; no poll
@@ -382,7 +382,7 @@ async fn dismisses_with_esc_and_the_dismissal_survives_reentry() {
 
     let frames_text = second.frames.join("\n");
     assert!(
-        !frames_text.contains("prime-agent incident for the timeline"),
+        !frames_text.contains("wv incident for the timeline"),
         "{frames_text}"
     );
     assert!(

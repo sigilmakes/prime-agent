@@ -14,7 +14,7 @@ pub type UpdateOutcome = std::result::Result<String, String>;
 pub type UpdateRunFuture = Pin<Box<dyn std::future::Future<Output = UpdateOutcome> + Send>>;
 
 /// The update funnel the composition root owns: the same body
-/// `prime-agent update` runs, so the two surfaces cannot diverge.
+/// `wv update` runs, so the two surfaces cannot diverge.
 pub trait UpdateCommands: Send + Sync {
     /// Run the download+install and report the new build's version (or
     /// the failure message); the caller spawns this, and the run may

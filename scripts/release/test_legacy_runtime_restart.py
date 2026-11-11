@@ -2,7 +2,7 @@
 """Exercise a shipped TS daemon's post-install coordinator against a Rust candidate.
 
 This launches no model inference. All homes, sockets, and daemon ownership
-registries are temporary. Run in a disposable Prime sandbox.
+registries are temporary. Run in a disposable Weave sandbox.
 """
 import argparse
 import json
@@ -126,7 +126,7 @@ def main():
             candidate_dir.mkdir()
             with tarfile.open(options.candidate_archive) as archive:
                 archive.extractall(candidate_dir, filter="data")
-            candidate = candidate_dir / "prime-agent"
+            candidate = candidate_dir / "wv"
         else:
             candidate = options.candidate_binary.resolve()
         home, agent, temporary = root / "home", root / "agent", root / "tmp"

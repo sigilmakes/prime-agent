@@ -199,7 +199,7 @@ pub(crate) fn build_incident_report(
         sections.push(vec![title.to_string()].into_iter().chain(lines).collect());
     }
 
-    let mut header = vec!["Prime Agent incident timeline".to_string()];
+    let mut header = vec!["Weave incident timeline".to_string()];
     header.push(format!(
         "Window: {} → {} UTC ({})",
         format_incident_time(options.since_ms),

@@ -53,15 +53,15 @@ fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// The staged binary name: Cargo's MSVC linker emits `prime-agent.exe` on
+/// The staged binary name: Cargo's MSVC linker emits `wv.exe` on
 /// Windows (`std::env::consts::EXE_SUFFIX`), and the packaged layout - the
 /// installer's extract target and the binary's own exe-adjacent resolution
 /// - names the platform's spelling.
 fn packaged_binary_name() -> &'static str {
     if cfg!(windows) {
-        "prime-agent.exe"
+        "wv.exe"
     } else {
-        "prime-agent"
+        "wv"
     }
 }
 
@@ -70,12 +70,12 @@ fn packaged_binary_name() -> &'static str {
 fn stage_packaged_layout(dir: &Path, with_runtime: bool) {
     std::fs::create_dir_all(dir).expect("stage dir");
     let binary = dir.join(packaged_binary_name());
-    std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy binary");
+    std::fs::copy(env!("CARGO_BIN_EXE_wv"), &binary).expect("copy binary");
     set_executable(&binary);
     std::fs::write(
         dir.join("package.json"),
         format!(
-            r#"{{"name":"prime-agent","version":"{}","piConfig":{{"name":"prime-agent","configDir":".prime/agent"}}}}"#,
+            r#"{{"name":"wv","version":"{}","piConfig":{{"name":"wv","configDir":".prime/agent"}}}}"#,
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -311,7 +311,7 @@ fn packaged_binary_reports_manifest_version() {
     stage_packaged_layout(staged, false);
     std::fs::write(
         staged.join("package.json"),
-        r#"{"name":"prime-agent","version":"9.8.7-test"}"#,
+        r#"{"name":"wv","version":"9.8.7-test"}"#,
     )
     .expect("version manifest");
     let box_ = sandbox();
@@ -456,7 +456,7 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     stage_packaged_layout(staged, false);
     std::fs::write(
         staged.join("package.json"),
-        format!(r#"{{"name":"prime-agent","version":"{HOSTILE_STAGED_VERSION}"}}"#),
+        format!(r#"{{"name":"wv","version":"{HOSTILE_STAGED_VERSION}"}}"#),
     )
     .expect("version manifest");
 
@@ -466,7 +466,7 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     std::fs::create_dir_all(&package_decoy).expect("package decoy dir");
     std::fs::write(
         package_decoy.join("package.json"),
-        r#"{"name":"prime-agent","version":"0.0.0-decoy"}"#,
+        r#"{"name":"wv","version":"0.0.0-decoy"}"#,
     )
     .expect("decoy manifest");
     let venv_decoy = decoys.path().join("kernel-venv");
@@ -507,13 +507,13 @@ struct PairedFixture {
 
 fn split_paired_fixture(python: &str, version: &str, target: &str, alias: &str) -> PairedFixture {
     let dir = tempfile::TempDir::new().expect("split fixture dir");
-    let source = dir.path().join("prime-agent.c");
+    let source = dir.path().join("wv.c");
     // The packer's version pin runs `--version`: the fixture answers the pinned version.
     let program = format!(
         "#include <stdio.h>\nint main(int argc, char **argv) {{ (void)argc; (void)argv; puts(\"{version}\"); return 0; }}\n"
     );
     std::fs::write(&source, program).expect("fixture source");
-    let raw = dir.path().join("cargo-prime-agent");
+    let raw = dir.path().join("cargo-wv");
     let compiled = Command::new("gcc")
         .arg("-g")
         .arg("-Wl,--build-id")
@@ -528,7 +528,7 @@ fn split_paired_fixture(python: &str, version: &str, target: &str, alias: &str) 
         "fixture gcc failed: {}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let shipped = dir.path().join("prime-agent");
+    let shipped = dir.path().join("wv");
     let split = Command::new(python)
         .arg(
             repo_root()
@@ -554,9 +554,7 @@ fn split_paired_fixture(python: &str, version: &str, target: &str, alias: &str) 
         "fixture split failed: {}",
         String::from_utf8_lossy(&split.stderr)
     );
-    let decoder = dir
-        .path()
-        .join(format!("prime-agent-{version}-{alias}.debug.gz"));
+    let decoder = dir.path().join(format!("wv-{version}-{alias}.debug.gz"));
     assert!(shipped.is_file(), "shipped fixture missing");
     assert!(decoder.is_file(), "decoder fixture missing");
     PairedFixture {
@@ -668,7 +666,7 @@ fn packaging_dry_run_produces_artifact() {
             Some(fixture.dir),
         )
     } else {
-        (env!("CARGO_BIN_EXE_prime-agent").into(), None, None)
+        (env!("CARGO_BIN_EXE_wv").into(), None, None)
     };
     // The platform tag the packer derives on this host: linux-x64 on the
     // linux CI host, win32-x64 on the windows-latest battery (the channel
@@ -679,11 +677,7 @@ fn packaging_dry_run_produces_artifact() {
     } else {
         "linux-x64"
     };
-    let staged_binary_name = if cfg!(windows) {
-        "prime-agent.exe"
-    } else {
-        "prime-agent"
-    };
+    let staged_binary_name = if cfg!(windows) { "wv.exe" } else { "wv" };
     let mut command = Command::new(python);
     command
         .arg(repo_root().join("scripts").join("package_release.py"))
@@ -707,9 +701,7 @@ fn packaging_dry_run_produces_artifact() {
     );
 
     let version = env!("CARGO_PKG_VERSION");
-    let stage = out
-        .path()
-        .join(format!("prime-agent-{version}-{host_platform}"));
+    let stage = out.path().join(format!("wv-{version}-{host_platform}"));
     assert!(
         stage.join(staged_binary_name).is_file(),
         "staged binary missing"
@@ -719,7 +711,7 @@ fn packaging_dry_run_produces_artifact() {
     )
     .expect("manifest json");
     assert_eq!(manifest["version"], version, "version pin: {manifest}");
-    assert_eq!(manifest["piConfig"]["name"], "prime-agent");
+    assert_eq!(manifest["piConfig"]["name"], "wv");
     assert!(
         stage
             .join("prime-agent-runtime")
@@ -778,7 +770,7 @@ fn packaging_dry_run_produces_artifact() {
 
     let archive = out
         .path()
-        .join(format!("prime-agent-{version}-{host_platform}.tar.gz"));
+        .join(format!("wv-{version}-{host_platform}.tar.gz"));
     assert!(archive.is_file(), "tarball missing");
     let sums = std::fs::read_to_string(out.path().join("SHA256SUMS")).expect("SHA256SUMS");
     let sha256 = sha256_file(&archive);

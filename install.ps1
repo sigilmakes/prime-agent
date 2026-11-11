@@ -1,8 +1,8 @@
-# install.ps1 — the Windows-native installer for Prime Agent (Rust build).
+# install.ps1 — the Windows-native installer for Weave (Rust build).
 #
 # THE ONE-LINER (the production endpoint serves the stable installer):
 #
-#   irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+#   irm https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install.ps1 | iex
 #
 # The release pipeline's publish step renders this file to <base>/install.ps1
 # (the stable channel) and <base>/install-beta.ps1 (the beta channel), the
@@ -11,7 +11,7 @@
 # The Git Bash route is the same channel through install-rust.sh (the sh
 # one-liner `curl -fsSL .../install.sh | sh` under Git Bash/MSYS2/Cygwin);
 # this script is the PowerShell-native form. Both routes publish the SAME
-# layout — $PREFIX\share\prime-agent\ (the payload) and $PREFIX\bin\
+# layout — $PREFIX\share\weave\ (the payload) and $PREFIX\bin\
 # (the launcher pair) — so either route can update the other's install.
 #
 # THE CHANNEL (install-rust.sh parity): the channel pointer (<base>/stable
@@ -69,9 +69,9 @@ $ReleaseChannelDefault = 'stable'
 # (under `irm | iex` the script scope is the caller's session: ambient
 # variables must never be read as this installer's state, so the names are
 # unique to this script and all start cleared - the bots' finding).
-$script:primeAgentInstallScratch = $null
-$script:primeAgentInstallStage = $null
-$script:primeAgentInstallLock = $null
+$script:weaveInstallScratch = $null
+$script:weaveInstallStage = $null
+$script:weaveInstallLock = $null
 
 # Fail only throws: the catch at the bottom sweeps the installer's own
 # state on every failure path (a Fail and any other terminating error alike).
@@ -247,7 +247,7 @@ if ($effectiveArchitecture -ne 'AMD64') {
 # the channel manifest must carry for this platform (the reader's own rule,
 # pa-core::update::release::parse_channel_manifest).
 function ExpectedFileName($version, $platform) {
-    return "prime-agent-$version-$platform.tar.gz"
+    return "wv-$version-$platform.tar.gz"
 }
 
 # --- resolve the version (the channel pointer, or the pinned version) --------
@@ -321,7 +321,7 @@ $manifest = $null
 $row = $null
 if ($versionPin) {
     $version = $versionPin.Trim().TrimStart('v')
-    Write-Host "installing prime-agent $version (pinned) from the $channel channel ($platform)"
+    Write-Host "installing wv $version (pinned) from the $channel channel ($platform)"
 } else {
     $pair = Read-ChannelPair $channel
     $version = $pair.Version
@@ -331,7 +331,7 @@ if ($versionPin) {
         Fail "no artifact row for platform $platform in the $channel manifest; the installer will not switch release channels automatically"
     }
     if ($row.sha256 -notmatch '^[0-9a-f]{64}$') { Fail "the channel manifest's sha256 for $(ExpectedFileName $version $platform) is malformed" }
-    Write-Host "installing prime-agent $version from the $channel channel ($platform)"
+    Write-Host "installing wv $version from the $channel channel ($platform)"
 }
 
 # --- the channel manifest row (unpinned) / the naming contract (pinned) ------
@@ -342,9 +342,9 @@ if ($versionPin) {
 
 # --- the tarball + SHA256SUMS from the versioned release prefix ----------------
 $releasePrefix = "releases/v$version"
-$download = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-download-{0}" -f [Guid]::NewGuid().ToString('N'))
+$download = Join-Path ([IO.Path]::GetTempPath()) ("weave-download-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $download | Out-Null
-$script:primeAgentInstallScratch = $download
+$script:weaveInstallScratch = $download
 # THE DOWNLOAD SWEEP: the scratch (the tarball + the sums) is removed when
 # this script exits - success below, a Fail or a terminating error in the
 # catch at the bottom (install-rust.sh's `rm -rf "$dl"` discipline; the
@@ -390,20 +390,20 @@ Step-Ok 'checksum verified' "$expectedFile ($version, the $channel channel)"
 
 # --- extract to a staging dir inside the prefix (same volume: the final swap
 # --- is a rename, not a copy) -----------------------------------------------------
-$share = Join-Path $prefix 'share\prime-agent'
+$share = Join-Path $prefix 'share\weave'
 $bin = Join-Path $prefix 'bin'
 New-Item -ItemType Directory -Path (Join-Path $prefix 'share') -Force | Out-Null
 New-Item -ItemType Directory -Path $bin -Force | Out-Null
-$stage = Join-Path (Join-Path $prefix 'share') ("prime-agent.stage-{0}" -f [Guid]::NewGuid().ToString('N'))
+$stage = Join-Path (Join-Path $prefix 'share') ("weave.stage-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
 # The stage rides every exit path once created (the failure sweep at the bottom:
 # a failed extraction/validation must not leave the extracted payload
 # behind - the bots' finding).
-$script:primeAgentInstallStage = $stage
+$script:weaveInstallStage = $stage
 & tar -xzf $tarball -C $stage
 if ($LASTEXITCODE -ne 0) { Fail "could not extract $expectedFile (tar exited $LASTEXITCODE)" }
-$payloadExe = Join-Path $stage 'prime-agent.exe'
-if (-not (Test-Path $payloadExe -PathType Leaf)) { Fail "the tarball did not contain a prime-agent.exe payload" }
+$payloadExe = Join-Path $stage 'wv.exe'
+if (-not (Test-Path $payloadExe -PathType Leaf)) { Fail "the tarball did not contain a wv.exe payload" }
 Step-Ok 'extracted' $expectedFile
 
 # The ownership marker (install-rust.sh's exact write shape — the update
@@ -414,18 +414,18 @@ $marker = "$channelLine`nversion $version"
 # encoding follows $PSDefaultParameterValues['*:Encoding'] (UTF-16 or a
 # BOM), and the update funnel's channel-stickiness read + the rollback's
 # marker validation grep the raw ASCII line.
-Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -Encoding Ascii -NoNewline
+Set-Content -LiteralPath (Join-Path $stage '.weave-install') -Value $marker -Encoding Ascii -NoNewline
 
 # The launcher paths (the section below the publish writes both).
-$launcher = Join-Path $bin 'prime-agent.cmd'
-$shLauncher = Join-Path $bin 'prime-agent'
+$launcher = Join-Path $bin 'wv.cmd'
+$shLauncher = Join-Path $bin 'wv'
 
 # --- the publication lock (one writer): a lock DIRECTORY is the atomic
 # --- claim on Windows (mkdir wins exactly once); the holder's pid rides a
 # --- file inside, and a stale lock is never auto-stolen. THE LOCK COMES
 # --- FIRST: a failed lock claim must never have stopped a daemon (the
 # --- bots' finding - the stop-for-nothing downtime).
-$lockDir = Join-Path (Join-Path $prefix 'share') '.prime-agent-install.lock.d'
+$lockDir = Join-Path (Join-Path $prefix 'share') '.weave-install.lock.d'
 try {
     New-Item -ItemType Directory -Path $lockDir -ErrorAction Stop | Out-Null
 } catch {
@@ -444,7 +444,7 @@ try {
 }
 # The lock rides every exit path from here: Fail releases it, and the
 # publish's finally releases + clears it.
-$script:primeAgentInstallLock = $lockDir
+$script:weaveInstallLock = $lockDir
 
 $published = $false
 $rollback = $null
@@ -453,14 +453,14 @@ $script:daemonStopped = $false
 # THE PREFLIGHT: every ownership refusal that can happen runs BEFORE the
 # daemon stop (a refused install must never have stopped a daemon - the
 # bots' finding: the stop-then-refuse order was the avoidable downtime).
-$rollback = Join-Path (Join-Path $prefix 'share') 'prime-agent.old'
+$rollback = Join-Path (Join-Path $prefix 'share') 'weave.old'
 if (Test-Path $share -PathType Container) {
-    $markerPath = Join-Path $share '.prime-agent-install'
+    $markerPath = Join-Path $share '.weave-install'
     if (-not (Test-Path $markerPath -PathType Leaf)) {
-        Fail "refusing to take ownership of ${share}: it is not a marked prime-agent payload tree (.prime-agent-install); move it aside and re-run"
+        Fail "refusing to take ownership of ${share}: it is not a marked Weave payload tree (.weave-install); move it aside and re-run"
     }
     if (Test-Path $rollback) {
-        $rollbackMarker = Join-Path $rollback '.prime-agent-install'
+        $rollbackMarker = Join-Path $rollback '.weave-install'
         if (-not (Test-Path $rollbackMarker -PathType Leaf)) {
             Fail "refusing to delete the unmarked rollback directory: $rollback (move it aside and re-run)"
         }
@@ -471,20 +471,20 @@ try {
     # THE DAEMON STOP, inside the lock's try (a terminating error in the
     # stop must still release the lock - the bots' finding: the stale lock
     # otherwise left behind). THE TRUSTED STOP: the previous payload's own
-    # binary (the marked share tree's prime-agent.exe), never the launcher -
+    # binary (the marked share tree's wv.exe), never the launcher -
     # a launcher this installer has not verified is the unowned-execution
-    # shape (an attacker-placed bin\prime-agent.cmd would otherwise run
+    # shape (an attacker-placed bin\wv.cmd would otherwise run
     # with the installer's inherited environment); the share's ownership
     # marker gates the stop, and a fresh install (no marked payload yet)
     # has no daemon the stop could reach.
-    $payloadStopExe = Join-Path $share 'prime-agent.exe'
-    $shareMarker = Join-Path $share '.prime-agent-install'
+    $payloadStopExe = Join-Path $share 'wv.exe'
+    $shareMarker = Join-Path $share '.weave-install'
     if ((Test-Path $shareMarker -PathType Leaf) -and (Test-Path $payloadStopExe -PathType Leaf)) {
         Write-Host 'stopping the running Rust daemon before the publish (a Windows process holds its binary open)'
         # THE SCRIPTED FORM: the CLI's bare `shutdown` prompts for
         # confirmation in an interactive terminal and REFUSES a
         # non-interactive one ("Shutdown requires confirmation in an
-        # interactive terminal. Use prime-agent shutdown --force") - the
+        # interactive terminal. Use wv shutdown --force") - the
         # installer's context is the scripted one, so `--force` is the
         # documented non-interactive stop (the daemon's own forced
         # shutdown drains its workers with its internal budgets).
@@ -492,7 +492,7 @@ try {
         if ($LASTEXITCODE -eq 0) {
             $script:daemonStopped = $true
         } else {
-            Write-Warning "no daemon answered the shutdown request; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
+            Write-Warning "no daemon answered the shutdown request; if a daemon is running, stop it by hand (wv shutdown --force) and re-run"
         }
     }
 
@@ -507,12 +507,12 @@ try {
         Write-Host "rollback: $rollback (the previous payload, one generation)"
     }
     [IO.Directory]::Move($stage, $share)
-    $script:primeAgentInstallStage = $null
+    $script:weaveInstallStage = $null
     # The payload is live: no later launcher failure rolls it back (the new
-    # tree is valid; the restored launchers point at ../share/prime-agent/
-    # prime-agent.exe - the new payload - and keep working).
+    # tree is valid; the restored launchers point at ../share/weave/
+    # wv.exe - the new payload - and keep working).
     $published = $true
-    Step-Ok 'published' "prime-agent $version to $prefix"
+    Step-Ok 'published' "wv $version to $prefix"
 
     # --- the launcher pair: the cmd shim (cmd.exe + PowerShell) and the sh
     # --- launcher (Git Bash) - the same payload, both shells, the same
@@ -558,17 +558,17 @@ try {
     try {
         $cmdShim = @'
 @echo off
-rem prime-agent - launcher written by install-rust.sh.
+rem wv - launcher written by install-rust.sh.
 if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
-"%~dp0..\share\prime-agent\prime-agent.exe" %*
+"%~dp0..\share\weave\wv.exe" %*
 '@
         Set-Content -LiteralPath $launcher -Value $cmdShim
 
         $shBody = @'
 #!/bin/sh
-# prime-agent — launcher written by install-rust.sh.
+# wv — launcher written by install-rust.sh.
 export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
-exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
+exec "$(dirname "$0")/../share/weave/wv.exe" "$@"
 '@
         # LF endings + no BOM: the sh launcher must stay a POSIX file.
         [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
@@ -616,7 +616,7 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
             }
         }
         # A failed install sweeps its stage tree (the bots' finding: the
-        # accumulated prime-agent.stage-* directories).
+        # accumulated weave.stage-* directories).
         if ($stage -and (Test-Path $stage -PathType Container)) {
             Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
         }
@@ -625,11 +625,11 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
         # the user never guesses - the next invocation boots the old
         # payload's daemon again.
         if ($script:daemonStopped) {
-            Write-Warning "the daemon stopped for this failed install stays down until the next prime-agent invocation boots it from the restored payload"
+            Write-Warning "the daemon stopped for this failed install stays down until the next wv invocation boots it from the restored payload"
         }
     }
     Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
-    $script:primeAgentInstallLock = $null
+    $script:weaveInstallLock = $null
 }
 
 # --- the kernel pre-warm: uv + the Python venv (install-rust.sh
@@ -786,7 +786,7 @@ if ($uvKnown) {
 # Windows has a canonical user-PATH setting (the registry's User scope —
 # no admin needed), so the installer ADDS the launcher's bin dir there
 # itself: idempotent (appended only when the entry is absent, never
-# duplicated), mirrored into the CURRENT session so prime-agent works in
+# duplicated), mirrored into the CURRENT session so wv works in
 # this console immediately, and a new terminal picks it up (the
 # WM_SETTINGCHANGE broadcast tells the running shells the environment
 # changed, the same way setx does — best-effort; the registry write is
@@ -819,7 +819,7 @@ $pathAdded = $false
 foreach ($binDir in $pathDirs) {
     if (-not (Test-PathEntry $env:PATH $binDir)) {
         $env:PATH = "$env:PATH;$binDir"
-        Write-Host "PATH: added $binDir to this session - prime-agent works in this console now"
+        Write-Host "PATH: added $binDir to this session - wv works in this console now"
     }
     $envKey = $null
     try {
@@ -892,11 +892,11 @@ try {
 }
 Write-Host "launcher:  $launcher"
 Write-Host "payload:   $share"
-Write-Host "source:    the $channel channel at $baseUrl (prime-agent $version)"
+Write-Host "source:    the $channel channel at $baseUrl (wv $version)"
 Write-Host 'next steps: the README''s Install section ships inside the payload:'
 Write-Host "  $share\README.md"
 
-$script:primeAgentInstallScratch = $null
+$script:weaveInstallScratch = $null
 $script:preservedLaunchers = @()
 $script:ownedLauncherBackups = @()
 if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue }
@@ -908,18 +908,18 @@ if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyCont
     # lock; the publish's finally has already released it when the failure
     # came from there). The names were cleared at the top, so an ambient
     # caller's variables never enter the cleanup.
-    if ($script:primeAgentInstallScratch) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
+    if ($script:weaveInstallScratch) {
+        Remove-Item -Recurse -Force $script:weaveInstallScratch -ErrorAction SilentlyContinue
     }
-    if ($script:primeAgentInstallStage) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
+    if ($script:weaveInstallStage) {
+        Remove-Item -Recurse -Force $script:weaveInstallStage -ErrorAction SilentlyContinue
     }
-    if ($script:primeAgentInstallLock) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallLock -ErrorAction SilentlyContinue
+    if ($script:weaveInstallLock) {
+        Remove-Item -Recurse -Force $script:weaveInstallLock -ErrorAction SilentlyContinue
     }
-    $script:primeAgentInstallScratch = $null
-    $script:primeAgentInstallStage = $null
-    $script:primeAgentInstallLock = $null
+    $script:weaveInstallScratch = $null
+    $script:weaveInstallStage = $null
+    $script:weaveInstallLock = $null
     if ($PSCommandPath) {
         $Host.UI.WriteErrorLine($_.Exception.Message)
         exit 1

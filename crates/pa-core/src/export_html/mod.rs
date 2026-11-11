@@ -25,7 +25,7 @@ pub use self::tool_render::{
 };
 
 /// The app name in generated export file names.
-pub const EXPORT_APP_NAME: &str = "prime-agent";
+pub const EXPORT_APP_NAME: &str = "wv";
 
 const TEMPLATE_HTML: &str = include_str!("../../assets/export-html/template.html");
 const TEMPLATE_CSS: &str = include_str!("../../assets/export-html/template.css");
@@ -265,7 +265,7 @@ mod tests {
         std::env::set_current_dir(cwd.path()).expect("chdir");
         let returned = export_from_file(&session, None, &agent_dir).expect("export");
         std::env::set_current_dir(previous).expect("restore cwd");
-        assert_eq!(returned, "prime-agent-session-fixture-session.html");
+        assert_eq!(returned, "wv-session-fixture-session.html");
         assert!(cwd.path().join(&returned).exists());
     }
 

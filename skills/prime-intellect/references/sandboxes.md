@@ -1,6 +1,6 @@
 # Sandboxes & Tunnels
 
-Prime Sandboxes are disposable VM environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (CPU $0.05/core/hr, memory $0.01/GB/hr, disk $0.001/GB/hr).
+Prime Sandboxes are disposable, isolated VM environments for running generated or untrusted code. Sandboxes are billed only while running.
 
 Live docs: `sandboxes/overview.md`, `sandboxes/cli.md`, `sandboxes/sdk.md`, `sandboxes/images.md`, `sandboxes/tunnel.md` under https://docs.primeintellect.ai/
 
@@ -61,7 +61,7 @@ Async variant: `async with AsyncSandboxClient() as sandboxes: await sandboxes.cr
 
 ## Tunnels
 
-Prime Tunnel exposes a local (or in-sandbox) service through a secure public HTTPS URL — for dev servers, webhooks, and sharing work in progress:
+Prime Tunnel exposes a local or in-sandbox service on a public HTTPS URL, for example a dev server or webhook receiver:
 
 ```python
 from prime_tunnel import Tunnel

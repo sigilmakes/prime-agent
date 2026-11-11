@@ -79,40 +79,32 @@ fn map_row(output: &Output) -> String {
 #[test]
 fn the_uname_map_resolves_the_published_platforms() {
     let cases = [
-        (
-            "Darwin",
-            "arm64",
-            "aarch64-apple-darwin|darwin-arm64|no|prime-agent",
-        ),
-        (
-            "Darwin",
-            "x86_64",
-            "x86_64-apple-darwin|darwin-x64|no|prime-agent",
-        ),
+        ("Darwin", "arm64", "aarch64-apple-darwin|darwin-arm64|no|wv"),
+        ("Darwin", "x86_64", "x86_64-apple-darwin|darwin-x64|no|wv"),
         (
             "Linux",
             "x86_64",
-            "x86_64-unknown-linux-gnu|linux-x64|no|prime-agent",
+            "x86_64-unknown-linux-gnu|linux-x64|no|wv",
         ),
         (
             "Linux",
             "aarch64",
-            "aarch64-unknown-linux-gnu|linux-arm64|no|prime-agent",
+            "aarch64-unknown-linux-gnu|linux-arm64|no|wv",
         ),
         (
             "MINGW64_NT-10.0-19045",
             "x86_64",
-            "x86_64-pc-windows-msvc|win32-x64|yes|prime-agent.exe",
+            "x86_64-pc-windows-msvc|win32-x64|yes|wv.exe",
         ),
         (
             "MSYS_NT-10.0-19045",
             "x86_64",
-            "x86_64-pc-windows-msvc|win32-x64|yes|prime-agent.exe",
+            "x86_64-pc-windows-msvc|win32-x64|yes|wv.exe",
         ),
         (
             "CYGWIN_NT-10.0-19045",
             "x86_64",
-            "x86_64-pc-windows-msvc|win32-x64|yes|prime-agent.exe",
+            "x86_64-pc-windows-msvc|win32-x64|yes|wv.exe",
         ),
     ];
     for (os, arch, expected) in cases {
@@ -167,7 +159,7 @@ fn install_ps1_carries_the_windows_contract() {
         "the ps1 serves win32-x64"
     );
     assert!(
-        text.contains("prime-agent-$version-$platform.tar.gz"),
+        text.contains("wv-$version-$platform.tar.gz"),
         "the ps1 validates the channel-named artifact row"
     );
     // The arch refusal: an ARM64 Windows machine fails loudly.
@@ -185,10 +177,10 @@ fn install_ps1_carries_the_windows_contract() {
         text.contains("$ReleaseChannelDefault = '"),
         "the channel-default line the publish stamps must exist"
     );
-    // The same layout as install-rust.sh (share\prime-agent + bin):
+    // The same layout as install-rust.sh (share\weave + bin):
     // the two routes must interoperate on one install.
     assert!(
-        text.contains("share\\prime-agent") && text.contains("prime-agent.exe"),
+        text.contains("share\\weave") && text.contains("wv.exe"),
         "the ps1 publishes the same payload layout with the .exe name"
     );
     // The marker write: the same ownership proof the sh installer writes
@@ -358,7 +350,7 @@ fn install_ps1_names_the_dll_not_found_failure_honestly() {
 /// Windows HAS a canonical user-PATH setting (the registry's User scope,
 /// no admin needed), so the installer ADDS the launcher's bin dir there
 /// itself: idempotent (appended only when the entry is absent, never
-/// duplicated), mirrored into the CURRENT session so `prime-agent` works
+/// duplicated), mirrored into the CURRENT session so `wv` works
 /// in the same console immediately, and the printed hint says a NEW
 /// terminal gets it automatically instead of telling the user to go edit
 /// the registry by hand.
@@ -434,7 +426,7 @@ fn install_ps1_adds_bin_to_the_user_path_and_the_session_path() {
     // The printed note never tells the user to edit their own PATH by hand
     // anymore: the installer did it.
     assert!(
-        !section.contains("add it for the prime-agent command"),
+        !section.contains("add it for the wv command"),
         "the PATH note must not tell the user to edit their own PATH by hand"
     );
     // The flattened write route is gone: SetEnvironmentVariable turns a
@@ -672,7 +664,7 @@ fn install_ps1_runs_a_step_ledger_and_its_own_download_progress() {
 /// uv when it is missing (the astral one-liner with the destination
 /// passed explicitly via `UV_INSTALL_DIR`, the fetch and the script run
 /// checked SEPARATELY so a dead network cannot masquerade as success) and
-/// then pre-warms the kernel (`prime-agent --prime-agent-bootstrap`); the
+/// then pre-warms the kernel (`wv --prime-agent-bootstrap`); the
 /// ps1 only printed a note. The ps1 mirrors the whole flow: the astral
 /// installer is FETCHED (into a file, checked non-empty), RUN with
 /// `UV_INSTALL_DIR` set explicitly, and its verdict is never trusted - the

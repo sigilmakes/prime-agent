@@ -22,7 +22,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = (Get-Location).Path
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-install-e2e-{0}" -f [Guid]::NewGuid().ToString('N'))
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("weave-install-e2e-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 
 # The Python interpreter (the assembler + the local http server).
@@ -81,7 +81,7 @@ function Get-PeImportDlls {
 # walk below proves the built binary really dropped the redist runtime DLL.
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 try {
-    & cargo build --release --locked -p pa-cli --bin prime-agent
+    & cargo build --release --locked -p pa-cli --bin wv
 } finally {
     $env:RUSTFLAGS = $null
 }
@@ -93,7 +93,7 @@ if ($LASTEXITCODE -ne 0) { throw 'the catalog fixture generation failed' }
 # 2. The channel artifact + its checksums (the assembler names the archive
 #    by the platform alias the channel contract requires).
 $dist = Join-Path $scratch 'dist'
-$binary = Join-Path $repo 'target\release\prime-agent.exe'
+$binary = Join-Path $repo 'target\release\wv.exe'
 if (-not (Test-Path $binary)) { throw "the release binary is missing: $binary" }
 # The stock-box regression guard: the shipped binary must not import the
 # redist VC runtime (the runner has it, a stock machine does not).
@@ -107,7 +107,7 @@ $version = & $binary --version
 if (-not $version) { throw 'the release binary did not answer --version' }
 & $py scripts/release/assemble_artifacts.py --repo-root $repo --version $version --target x86_64-pc-windows-msvc --binary $binary --catalog-assets $assets --out-dir $dist
 if ($LASTEXITCODE -ne 0) { throw 'assemble_artifacts.py failed for the msvc target' }
-$artifact = "prime-agent-$version-win32-x64.tar.gz"
+$artifact = "wv-$version-win32-x64.tar.gz"
 if (-not (Test-Path (Join-Path $dist $artifact))) { throw "the assembled artifact is missing: $artifact" }
 
 # 3. The local channel: the stable pointer, the manifest with the win32-x64
@@ -168,11 +168,11 @@ try {
     $ps1Lines = @(& pwsh -File (Join-Path $repo 'install.ps1') 2>&1 | ForEach-Object { "$_" })
     if ($LASTEXITCODE -ne 0) { $ps1Lines | Write-Host; throw 'install.ps1 failed' }
     $ps1Transcript = $ps1Lines -join [Environment]::NewLine
-    $cmdLauncher = Join-Path $prefixA 'bin\prime-agent.cmd'
+    $cmdLauncher = Join-Path $prefixA 'bin\wv.cmd'
     if (-not (Test-Path $cmdLauncher)) { throw "the cmd launcher is missing: $cmdLauncher" }
     $versionA = (& $cmdLauncher --version) | Select-Object -First 1
     if ($versionA -ne $version) { throw "the cmd launcher answered '$versionA' instead of '$version'" }
-    foreach ($entry in @('share\prime-agent\prime-agent.exe', 'share\prime-agent\prime-agent-runtime\pyproject.toml', 'share\prime-agent\LICENSE', 'share\prime-agent\skills')) {
+    foreach ($entry in @('share\weave\wv.exe', 'share\weave\prime-agent-runtime\pyproject.toml', 'share\weave\LICENSE', 'share\weave\skills')) {
         if (-not (Test-Path (Join-Path $prefixA $entry))) { throw "the ps1 route's payload is missing $entry" }
     }
     # The uv parity gate asserts the CONTRACT, never astral.sh availability
@@ -199,16 +199,16 @@ try {
     $env:PRIME_AGENT_ALLOW_HTTP = '1'
     & $bash (Join-Path $repo 'install-rust.sh')
     if ($LASTEXITCODE -ne 0) { throw 'install-rust.sh failed under Git Bash' }
-    $shLauncher = Join-Path $prefixB 'bin\prime-agent'
+    $shLauncher = Join-Path $prefixB 'bin\wv'
     if (-not (Test-Path $shLauncher)) { throw "the sh launcher is missing: $shLauncher" }
-    $cmdLauncherB = Join-Path $prefixB 'bin\prime-agent.cmd'
+    $cmdLauncherB = Join-Path $prefixB 'bin\wv.cmd'
     if (-not (Test-Path $cmdLauncherB)) { throw "the sh route must also write the cmd twin: $cmdLauncherB" }
     # The MSYS form of the prefix (bash cannot parse the drive-letter spelling
     # inside its own quoting).
     $prefixBMsys = (& $bash -c ("cygpath -u '" + $prefixB + "'")).Trim()
-    $versionB = (& $bash -c ('"' + $prefixBMsys + '/bin/prime-agent" --version') | Select-Object -First 1)
+    $versionB = (& $bash -c ('"' + $prefixBMsys + '/bin/wv" --version') | Select-Object -First 1)
     if ($versionB -ne $version) { throw "the sh launcher answered '$versionB' instead of '$version'" }
-    foreach ($entry in @('share\prime-agent\prime-agent.exe', 'share\prime-agent\prime-agent-runtime\pyproject.toml')) {
+    foreach ($entry in @('share\weave\wv.exe', 'share\weave\prime-agent-runtime\pyproject.toml')) {
         if (-not (Test-Path (Join-Path $prefixB $entry))) { throw "the sh route's payload is missing $entry" }
     }
 

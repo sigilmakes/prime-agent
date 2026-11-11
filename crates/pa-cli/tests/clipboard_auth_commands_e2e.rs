@@ -136,7 +136,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let stderr_path = dir.join("supervisor.stderr");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wv"));
     command
         .args(["--mode", "daemon", "--daemon-socket"])
         .arg(&socket)
@@ -168,7 +168,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
-    let mut child = command.spawn().expect("spawn prime-agent --mode daemon");
+    let mut child = command.spawn().expect("spawn wv --mode daemon");
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().expect("check supervisor exit") {
@@ -1250,9 +1250,7 @@ async fn tui_update_runs_out_of_band_during_a_turn() {
         "the confirm carries the preserve invariant:\n{rendered}"
     );
     assert!(
-        rendered.contains(
-            "updated to 9.9.9-continuous.0123456789abcdef — restart prime-agent to run it"
-        ),
+        rendered.contains("updated to 9.9.9-continuous.0123456789abcdef — restart wv to run it"),
         "the outcome note renders:\n{rendered}"
     );
     assert_eq!(

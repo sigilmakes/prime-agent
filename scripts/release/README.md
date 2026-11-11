@@ -5,13 +5,12 @@ Downstream releases are **manual, source-only** Forgejo Releases with tags in
 this form:
 
 ```text
-fork-YYYY.MM.DD.N
+v0.1.0
 ```
 
-`N` distinguishes releases on the same date. The tag identifies one exact,
-reviewed commit. Record its full SHA and the package version in the release
-notes. The Rust package version remains `0.10.0`; the source-release tag does
-not restamp `Cargo.toml`, `Cargo.lock`, or packaged version metadata.
+The tag identifies one exact, reviewed commit. Record its full SHA and the
+package version in the release notes. The source-release tag does not restamp
+`Cargo.toml`, `Cargo.lock`, or packaged version metadata.
 
 ## Release gate
 
@@ -90,8 +89,8 @@ A real kernel cell must also pass before cutover. The installed-wrapper probe
 boots a fresh kernel and imports the bundled `edit` skill without provider keys:
 
 ```bash
-python3 nix/runtime_kernel.py /nix/store/<package>/bin/prime-agent \
-    --state-root /tmp/prime-installed-<unique-id> \
+python3 nix/runtime_kernel.py /nix/store/<package>/bin/wv \
+    --state-root /tmp/weave-installed-<unique-id> \
     --skill-root /path/to/approved/ollama-web
 ```
 
@@ -102,7 +101,7 @@ Python venv or daemon.
 ## Fleet installation is separate
 
 `/config` owns the fleet source pin and installation. Its guarded updater accepts
-a published stable `fork-YYYY.MM.DD.N` release, or an explicit reviewed full SHA:
+a published stable `v0.1.0` release, or an explicit reviewed full SHA:
 
 ```text
 cd /config
@@ -117,9 +116,9 @@ through the upstream installer.
 
 ## Reference material, not publication authority
 
-`.github/upstream-workflows/`, the portable tools in `scripts/release/`,
-`scripts/package_release.py`, `install-rust.sh`, `install.ps1`, and the Homebrew
-drafts in `packaging/` preserve upstream implementation and test references.
+The portable tools in `scripts/release/`, `scripts/package_release.py`,
+`install-rust.sh`, `install.ps1`, and the Homebrew drafts in `packaging/`
+preserve upstream implementation and test references.
 They are not a usable downstream release or installation procedure. Some retain
 upstream URLs, placeholder hashes, and unrelated version/tag conventions.
 Do not activate or run their publication/install paths for this fork.

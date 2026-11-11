@@ -1,4 +1,4 @@
-//! Shared domain and wire types for Prime Agent: the serde port of the TypeScript wire and domain
+//! Shared domain and wire types for Weave: the serde port of the TypeScript wire and domain
 //! contracts ([`ai`] holds the model-facing message surface from TS `packages/ai/src/types.ts`).
 //!
 //! # Lossless round-trips

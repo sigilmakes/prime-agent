@@ -428,8 +428,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_and_ss_parsers_agree_on_one_listener() {
-        let ss_line = "u_str LISTEN 0      4096   /tmp/agent/daemon.sock 21049121            * 0    users:((\"prime-agent\",pid=123,fd=14))\n";
-        let ss = parse_ss_listeners(ss_line, "prime-agent");
+        let ss_line = "u_str LISTEN 0      4096   /tmp/agent/daemon.sock 21049121            * 0    users:((\"wv\",pid=123,fd=14))\n";
+        let ss = parse_ss_listeners(ss_line, "wv");
         let proc_rows = parse_proc_net_unix(
             b"Num RefCount Protocol Flags Type St Inode Path\n0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent/daemon.sock\n",
         );
@@ -445,6 +445,6 @@ mod tests {
     #[test]
     fn ss_parse_skips_foreign_process_names() {
         let sample = "u_str LISTEN 0      4096   /tmp/bus.sock 1 * 0    users:((\"dbus-daemon\",pid=7,fd=3))\n";
-        assert!(parse_ss_listeners(sample, "prime-agent").is_empty());
+        assert!(parse_ss_listeners(sample, "wv").is_empty());
     }
 }

@@ -29,7 +29,7 @@ mmdflux = { path = "vendor/mmdflux" }
 mlua = { path = "vendor/mlua" }
 
 [workspace.package]
-version = "0.10.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
@@ -46,9 +46,9 @@ anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 tracing = { version = "0.1", features = ["attributes"] }
-pa-types = { path = "crates/pa-types", version = "0.10.0" }
-pa-ai = { path = "crates/pa-ai", version = "0.10.0" }
-pa-agent = { path = "crates/pa-agent", version = "0.10.0" }
+pa-types = { path = "crates/pa-types", version = "0.1.0" }
+pa-ai = { path = "crates/pa-ai", version = "0.1.0" }
+pa-agent = { path = "crates/pa-agent", version = "0.1.0" }
 thiserror = "2"
 futures = "0.3"
 toml = "0.9"

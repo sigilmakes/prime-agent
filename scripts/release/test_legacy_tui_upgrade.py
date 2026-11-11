@@ -171,7 +171,7 @@ def exercise(root: Path, previous: Path, installer: Path | None, candidate: Path
             tmux_run("send-keys", "-t", "migration", "Enter").check_returncode()
             wait_for("Rust daemon after /update", lambda: daemon_request(daemon_socket)[0].get("appVersion") == version, timeout=180)
             wait_for("restarted Rust TUI", lambda: (
-                f"prime agent v{version}" in screen() or f"Prime Agent updated to v{version}" in screen()
+                f"weave v{version}" in screen() or f"Weave updated to v{version}" in screen()
             ) and "durable migration sentinel" in screen())
             wait_for("original session reattached", lambda: any(
                 session.get("sessionFile") == str(transcript) and session.get("attachedClients", 0) > 0

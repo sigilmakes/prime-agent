@@ -136,7 +136,7 @@ pub(super) fn arm_shutdown_recovery(
         return false;
     }
     session.note_as(
-        "the Prime Agent daemon shut down; waiting for it to come back…",
+        "the Weave daemon shut down; waiting for it to come back…",
         crate::chat::StatusKind::Warning,
         view,
     );

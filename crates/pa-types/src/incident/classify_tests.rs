@@ -43,7 +43,7 @@ fn worker_start_line(ts: &str, socket_path: &str, pid: i64) -> IncidentLogEntry 
         ("pid", serde_json::json!(pid)),
         (
             "msg",
-            serde_json::json!(format!("Prime Agent daemon listening on {socket_path}")),
+            serde_json::json!(format!("Weave daemon listening on {socket_path}")),
         ),
     ])
 }
@@ -131,9 +131,7 @@ fn worker_ids_parse_from_unix_and_named_pipe_socket_paths() {
         Some("5b1d3aeb91ee")
     );
     assert_eq!(
-        worker_id_from_socket_path(Some(
-            r"\\.\pipe\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee"
-        )),
+        worker_id_from_socket_path(Some(r"\\.\pipe\wv-worker-98ed5cb228d2-5b1d3aeb91ee")),
         Some("5b1d3aeb91ee")
     );
     assert_eq!(
@@ -145,7 +143,7 @@ fn worker_ids_parse_from_unix_and_named_pipe_socket_paths() {
 
 #[test]
 fn classifies_worker_events_for_windows_named_pipe_sockets() {
-    let socket_path = r"\\.\pipe\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee";
+    let socket_path = r"\\.\pipe\wv-worker-98ed5cb228d2-5b1d3aeb91ee";
     let entries = vec![
         worker_start_line("2026-09-10T20:00:00.000Z", socket_path, 53615),
         // The worker's own crash line: the daemon component with the named-pipe path.

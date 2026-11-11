@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "pa-agent"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "pa-test-scratch",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "pa-ai"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "pa-cli"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "pa-core"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "pa-daemon"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "filetime",
@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "pa-models"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
@@ -1726,14 +1726,14 @@ dependencies = [
 
 [[package]]
 name = "pa-test-scratch"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "pa-tui"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "pa-types"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",

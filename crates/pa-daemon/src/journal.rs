@@ -127,7 +127,7 @@ impl Drop for JournalWriteOwner {
             // Drop has no error channel; report without panicking if stderr is unavailable.
             let _ = writeln!(
                 std::io::stderr(),
-                "Prime Agent: failed to release journal ownership: {error}"
+                "Weave: failed to release journal ownership: {error}"
             );
         }
     }

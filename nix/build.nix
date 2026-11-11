@@ -5,7 +5,7 @@ let
     catalog = callPackage ./catalog.nix { };
 in
 rustPlatform.buildRustPackage {
-    pname = "prime-agent-compiled";
+    pname = "weave-compiled";
     version = manifest.workspace.package.version;
     src = lib.cleanSourceWith {
         src = ../.;
@@ -18,7 +18,7 @@ rustPlatform.buildRustPackage {
     cargoLock.lockFile = ../Cargo.lock;
     nativeBuildInputs = [ pkg-config python3 ];
     strictDeps = true;
-    cargoBuildFlags = [ "-p" "pa-cli" "--bin" "prime-agent" ];
+    cargoBuildFlags = [ "-p" "pa-cli" "--bin" "wv" ];
     # Build once for the package and audited check. Never inherit the full
     # upstream test suite: some batteries require live credentials/toolchains.
     doCheck = true;
@@ -33,14 +33,14 @@ rustPlatform.buildRustPackage {
     CARGO_BUILD_JOBS = "8";
     CARGO_PROFILE_RELEASE_DEBUG = "0";
     postInstall = ''
-        mkdir -p "$out/lib/prime-agent"
-        python3 ${./stage_payload.py} "$PWD" "$out/lib/prime-agent"
-        cp ${catalog}/*.bundled.json "$out/lib/prime-agent/"
-        ln -s "$out/bin/prime-agent" "$out/lib/prime-agent/prime-agent"
+        mkdir -p "$out/lib/weave"
+        python3 ${./stage_payload.py} "$PWD" "$out/lib/weave"
+        cp ${catalog}/*.bundled.json "$out/lib/weave/"
+        ln -s "$out/bin/wv" "$out/lib/weave/wv"
     '';
     passthru = { inherit catalog; };
     meta = {
-        description = "Shared downstream Prime Agent Rust source build";
+        description = "Shared Weave Rust source build";
         license = with lib.licenses; [ mit cc-by-40 ];
         platforms = [ "x86_64-linux" ];
     };

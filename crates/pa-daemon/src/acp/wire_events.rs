@@ -363,7 +363,7 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
 fn bash_tool_call_id(run_id: Option<String>) -> String {
     match run_id {
         Some(run_id) => format!("prime-agent-bash-{run_id}"),
-        None => "prime-agent-bash".to_string(),
+        None => "wv-bash".to_string(),
     }
 }
 

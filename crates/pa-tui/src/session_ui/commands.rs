@@ -27,7 +27,7 @@ impl SessionUi {
             // become the request.
             view.editor.set_text(&format!("{text} "));
             self.note(
-                "add your request after the skill, e.g. /skill:prime-agent-release make a release of PR #2731",
+                "add your request after the skill, e.g. /skill:wv-release make a release of PR #2731",
                 view,
             );
             return Ok(());
@@ -411,7 +411,7 @@ impl SessionUi {
             // `/nightly [on|off|status]` (TS `interactive-mode.ts`
             // 5455-5484): status resolves the effective channel; on (or
             // bare) and off/stable save the `updateChannel` setting that
-            // `/update` and `prime-agent update` follow.
+            // `/update` and `wv update` follow.
             "nightly" => {
                 let arg = resolved.args.trim().to_lowercase();
                 if arg == "status" {
@@ -499,8 +499,8 @@ impl SessionUi {
                 // The message is hand-wrapped to fit the panel rows (the
                 // confirm renders each line truncated, never wrapped).
                 view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
-                    "Update Prime Agent",
-                    "Update uninstalls the TypeScript version and installs the latest Rust build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
+                    "Update Weave",
+                    "Update uninstalls the TypeScript version and installs the latest Rust build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart wv after it\nfinishes to run the new build.",
                 ));
                 self.pending_confirm = Some(PendingConfirm::Update);
                 self.dirty = true;
@@ -783,7 +783,7 @@ impl SessionUi {
                                 .to_string()
                         }),
                         Ok(Err(error)) if error.to_string().contains("cannot refresh models") => Err(
-                            "The running Prime Agent daemon cannot refresh models; restart or update it and try again.".to_string(),
+                            "The running Weave daemon cannot refresh models; restart or update it and try again.".to_string(),
                         ),
                         Ok(Err(_)) | Err(_) => Err(
                             "Model catalog refresh failed. Check the agent log for details."

@@ -963,7 +963,7 @@ fn an_update_restart_settles_the_held_bang_card_on_reattach() {
     });
     let all = run.frames.join("\n");
     assert!(
-        all.contains("Reconnected to Prime Agent"),
+        all.contains("Reconnected to Weave"),
         "the reattach banner landed:\n{all}"
     );
     let settled = run

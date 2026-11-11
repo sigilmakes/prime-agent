@@ -54,7 +54,7 @@ fn worker_start_line(ts: &str, socket_path: &str, pid: i64) -> String {
         "component": "coding-agent.daemon",
         "socketPath": socket_path,
         "pid": pid,
-        "msg": format!("Prime Agent daemon listening on {socket_path}"),
+        "msg": format!("Weave daemon listening on {socket_path}"),
     })
     .to_string()
 }
@@ -196,12 +196,12 @@ fn a_clean_run_shows_no_anomalies() {
     let text = report_for(&[
         supervisor_line(
             "2026-09-10T20:00:05.000Z",
-            "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
+            "Weave daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
             &json!({}),
         ),
         supervisor_line(
             "2026-09-10T20:01:00.000Z",
-            "Session worker 477fef4e85a8 stderr: Prime Agent daemon listening on /tmp/prime-agent-501/worker-a-477fef4e85a8.sock",
+            "Session worker 477fef4e85a8 stderr: Weave daemon listening on /tmp/prime-agent-501/worker-a-477fef4e85a8.sock",
             &json!({}),
         ),
         supervisor_line("2026-09-10T20:02:00.000Z", "Migrated 2 scheduled jobs into session artifacts", &json!({})),
@@ -415,13 +415,13 @@ fn the_report_layout_matches_the_ts_shape() {
     let options = default_options();
     let lines = vec![supervisor_line(
         "2026-09-10T20:00:05.000Z",
-        "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
+        "Weave daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
         &json!({}),
     )];
     let text = build_incident_report(&entries(&lines), &options).text;
     let severity = format!("{:<8}", "info");
     let expected = [
-        "Prime Agent incident timeline",
+        "Weave incident timeline",
         "Window: 09-10 20:00:00 → 09-10 20:30:00 UTC (30m)",
         "",
         "Supervisor events",

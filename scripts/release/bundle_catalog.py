@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and validate the bundled catalog assets for prime-agent releases.
+"""Generate and validate the bundled catalog assets for Weave releases.
 
 Port of the TS catalog asset tool (packages/coding-agent/scripts/catalog-assets.mjs
 on the TS client's `feat/catalog-client` line) for the Rust release pipeline.

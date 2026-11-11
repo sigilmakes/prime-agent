@@ -6,7 +6,7 @@
 /// The bundled theme names, in builtin resolution order.
 pub const BUILTIN_THEME_NAMES: [&str; 3] = ["prime", "dark", "light"];
 
-/// The `prime` theme file (Prime Agent's default, dark-first).
+/// The `prime` theme file (Weave's default, dark-first).
 pub const PRIME_THEME_JSON: &str = include_str!("../themes/prime.json");
 pub const DARK_THEME_JSON: &str = include_str!("../themes/dark.json");
 pub const LIGHT_THEME_JSON: &str = include_str!("../themes/light.json");

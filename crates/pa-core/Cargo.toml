@@ -17,7 +17,7 @@ thiserror.workspace = true
 tracing.workspace = true
 pa-types.workspace = true
 pa-ai.workspace = true
-pa-models = { path = "../pa-models", version = "0.10.0" }
+pa-models = { path = "../pa-models", version = "0.1.0" }
 pa-agent.workspace = true
 base64 = "0.22"
 fancy-regex = "0.14"
