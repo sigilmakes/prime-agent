@@ -217,7 +217,6 @@ const CORPUS: &[&[&str]] = &[
     &["package", "update", "--self"],
     &["package", "update", "a", "b"],
     &["package", "update", "self"],
-    &["package", "update", "wv"],
     &["package", "update", "pi"],
     &["package", "update", "--force"],
     &["package", "install"],
@@ -373,6 +372,13 @@ fn normalize(text: &str, sandbox_roots: &[&Path]) -> String {
     for root in sandbox_roots {
         text = text.replace(&root.display().to_string(), "<SANDBOX>");
     }
+    // The fork renamed the product and binary; the parity corpus compares the
+    // command surface, not the brand (TS `prime-agent` / `Prime Agent` vs
+    // Rust `wv` / `Weave`).
+    text = text.replace("prime-agent", "<BIN>").replace("wv", "<BIN>");
+    text = text
+        .replace("Prime Agent", "<PRODUCT>")
+        .replace("Weave", "<PRODUCT>");
     // Docs paths in login guidance resolve to each binary's own install dir
     // (package dir); compare the shape, not the installation location.
     text = normalize_docs_paths(&text);

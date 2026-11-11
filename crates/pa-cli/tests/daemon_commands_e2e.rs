@@ -980,7 +980,7 @@ fn ts_daemon_differential_cli_output() {
     // SCRUB_ENV removes the gate's inherited Rust override before either CLI.
     // Do not mutate the test process's TMPDIR or alias either live endpoint.
     let uid = pa_core::platform::process::current_user_id();
-    let ts_socket = dir.path().join(format!("wv-{uid}/daemon.sock"));
+    let ts_socket = dir.path().join(format!("prime-agent-{uid}/daemon.sock"));
     let rust_socket = dir
         .path()
         .join(format!("prime-agent-rust-{uid}/daemon.sock"));

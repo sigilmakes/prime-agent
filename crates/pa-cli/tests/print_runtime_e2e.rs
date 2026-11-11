@@ -467,7 +467,7 @@ fn print_mode_resume_unknown_selector_fails_with_browse_hint() {
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("Open wv and press left-arrow to browse sessions."),
+        stderr.contains("Open Weave and press left-arrow to browse sessions."),
         "stderr: {stderr}"
     );
 }
